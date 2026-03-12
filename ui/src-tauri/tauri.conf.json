@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicbarker/tauri/next/packages/tauri-schema-gen/schemas/config.schema.json",
+  "productName": "SocketGuard",
+  "version": "0.1.0",
+  "identifier": "com.socketguard.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173"
+  },
+  "app": {
+    "title": "SocketGuard",
+    "windows": [
+      {
+        "title": "SocketGuard",
+        "width": 900,
+        "height": 700
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}
