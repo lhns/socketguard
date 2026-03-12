@@ -93,7 +93,11 @@ sudo ./target/release/socketguard-daemon
 
 The daemon starts a REST API on `127.0.0.1:9476` and begins polling for listening sockets every 5 seconds.
 
+On startup, the daemon cleans up any stale firewall rules left by a previous crash and re-applies rules from the database. On shutdown (Ctrl+C or SIGTERM), it removes all managed firewall rules and IPv6 addresses.
+
 ### CLI
+
+All commands support `--json` for machine-readable output and `--api <url>` to connect to a non-default daemon address.
 
 ```bash
 # List all detected sockets
@@ -122,6 +126,9 @@ socketguard-cli config
 
 # List available IPv6 backends
 socketguard-cli backends
+
+# Generate shell completions
+socketguard-cli completions bash   # also: zsh, fish, powershell
 ```
 
 ### Policies
@@ -140,7 +147,7 @@ Launch the Tauri app to get a graphical interface for:
 - Viewing all detected sockets with their assigned IPv6 addresses
 - Toggling policies per socket
 - Adding/removing ACL entries
-- Viewing daemon configuration
+- Viewing and editing daemon configuration
 
 ## Configuration
 

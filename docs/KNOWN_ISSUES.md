@@ -42,6 +42,3 @@ Tracked issues that are documented for later resolution. Organized by severity.
 - **Issue**: No systemd unit, launchd plist, or Windows service registration.
 - **Fix**: Add install/service management to the CLI (`socketguard-cli install`).
 
-### No log level configuration
-- **Issue**: Tracing is set up but log level is only configurable via `RUST_LOG` env var.
-- **Fix**: Add `log_level` to config file and/or `--verbose`/`--quiet` CLI flags.

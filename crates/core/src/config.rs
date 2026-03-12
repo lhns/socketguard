@@ -31,9 +31,6 @@ pub struct DaemonConfig {
     /// Log level: trace, debug, info, warn, error
     #[serde(default = "default_log_level")]
     pub log_level: String,
-
-    /// Yggdrasil admin API address (if using Yggdrasil backend)
-    pub yggdrasil_admin_addr: Option<String>,
 }
 
 impl Default for BackendType {
@@ -52,7 +49,6 @@ impl Default for DaemonConfig {
             poll_interval_secs: default_poll_interval(),
             db_path: default_db_path(),
             log_level: default_log_level(),
-            yggdrasil_admin_addr: None,
         }
     }
 }
