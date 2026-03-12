@@ -4,9 +4,10 @@ use crate::monitor::{self, SocketMonitor};
 use crate::network::{self, NetworkInterface};
 use crate::AppState;
 use socketguard_core::config::DaemonConfig;
-use socketguard_core::{socket_id, ManagedSocket, Policy};
+use socketguard_core::{socket_id, BackendType, ManagedSocket, Policy};
 use std::net::Ipv6Addr;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 pub struct Engine {
@@ -14,6 +15,9 @@ pub struct Engine {
     backend: Box<dyn Ipv6Backend>,
     firewall: Box<dyn Firewall>,
     network: Box<dyn NetworkInterface>,
+    /// Track which backend/interface the engine was built with
+    current_backend: BackendType,
+    current_interface: String,
 }
 
 impl Engine {
@@ -23,14 +27,129 @@ impl Engine {
             backend: backend::create_backend(config.backend),
             firewall: firewall::create_firewall(),
             network: network::create_network_interface(),
+            current_backend: config.backend,
+            current_interface: config.interface.clone(),
         }
     }
 
-    /// Reconcile: detect sockets, assign IPs, apply firewall rules
-    pub async fn reconcile(&self, state: &AppState) -> anyhow::Result<()> {
+    /// Clean up all SocketGuard-managed firewall rules.
+    /// Called on startup (to clear stale rules from a previous crash) and on shutdown.
+    pub fn cleanup_all_firewall_rules(&self) {
+        info!("Cleaning up all SocketGuard firewall rules");
+        if let Err(e) = self.firewall.cleanup_all_rules() {
+            warn!("Failed to clean up firewall rules: {e}");
+        }
+    }
+
+    /// Startup reconciliation: clean stale OS state, then re-apply desired state from DB.
+    pub async fn startup_reconcile(&self, state: &AppState) {
+        // 1. Clean all firewall rules (they may be stale from a crash)
+        self.cleanup_all_firewall_rules();
+
+        // 2. Re-apply firewall rules for all sockets in the DB
+        let sockets = match state.db.list_sockets().await {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to list sockets for startup reconciliation: {e}");
+                return;
+            }
+        };
+
         let config = state.config.read().await;
         let iface = config.interface.clone();
         drop(config);
+
+        for socket in &sockets {
+            // Ensure IPv6 address is bound to the interface
+            if let Err(e) = self.network.add_address(&iface, socket.assigned_ipv6, 128) {
+                warn!(
+                    "Failed to re-add IPv6 {} for socket {}: {e}",
+                    socket.assigned_ipv6, socket.id
+                );
+            }
+
+            // Re-apply firewall rules based on policy
+            if let Err(e) = self.apply_firewall_for_socket(state, socket).await {
+                warn!("Failed to re-apply firewall for socket {}: {e}", socket.id);
+            }
+        }
+
+        info!(
+            "Startup reconciliation complete: {} sockets restored",
+            sockets.len()
+        );
+    }
+
+    /// Graceful shutdown: remove all firewall rules and IPv6 addresses.
+    pub async fn shutdown_cleanup(&self, state: &AppState) {
+        info!("Shutting down: cleaning up firewall rules and IPv6 addresses");
+
+        self.cleanup_all_firewall_rules();
+
+        let sockets = match state.db.list_sockets().await {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to list sockets for shutdown cleanup: {e}");
+                return;
+            }
+        };
+
+        let config = state.config.read().await;
+        let iface = config.interface.clone();
+        drop(config);
+
+        for socket in &sockets {
+            if let Err(e) = self.network.remove_address(&iface, socket.assigned_ipv6) {
+                warn!(
+                    "Failed to remove IPv6 {} during shutdown: {e}",
+                    socket.assigned_ipv6
+                );
+            }
+        }
+
+        info!("Shutdown cleanup complete");
+    }
+
+    /// Check if config has changed and rebuild subsystems if needed.
+    /// Returns the old interface name if it changed (addresses need migration).
+    fn check_config_change(&mut self, config: &DaemonConfig) -> Option<String> {
+        let mut old_interface = None;
+
+        if config.backend != self.current_backend {
+            info!(
+                "Backend changed from {} to {}, new sockets will use new backend",
+                self.current_backend, config.backend
+            );
+            self.backend = backend::create_backend(config.backend);
+            self.current_backend = config.backend;
+        }
+
+        if config.interface != self.current_interface {
+            info!(
+                "Interface changed from {} to {}, migrating addresses",
+                self.current_interface, config.interface
+            );
+            old_interface = Some(self.current_interface.clone());
+            self.current_interface = config.interface.clone();
+        }
+
+        old_interface
+    }
+
+    /// Reconcile: detect sockets, assign IPs, apply firewall rules.
+    /// This is the main declarative reconciliation loop body.
+    pub async fn reconcile(&mut self, state: &AppState) -> anyhow::Result<()> {
+        // Check for config changes and migrate if needed
+        let config = state.config.read().await;
+        let config_snapshot = config.clone();
+        drop(config);
+
+        if let Some(old_iface) = self.check_config_change(&config_snapshot) {
+            self.migrate_addresses(state, &old_iface, &config_snapshot.interface)
+                .await;
+        }
+
+        let iface = config_snapshot.interface.clone();
 
         // 1. Detect current listening sockets
         let current_sockets = match self.monitor.list_listening_sockets() {
@@ -45,8 +164,6 @@ impl Engine {
 
         // 2. For each detected socket, ensure it has an assigned IPv6
         for ls in &current_sockets {
-            // Identity is based on process name + port + protocol (not PID).
-            // This means a process restart keeps its IPv6 and ACLs.
             let sid = socket_id(&ls.process_name, ls.port, ls.protocol);
 
             if let Ok(Some(mut existing)) = state.db.get_socket(&sid).await {
@@ -59,6 +176,14 @@ impl Engine {
                 if let Err(e) = state.db.upsert_socket(&existing).await {
                     error!("Failed to update socket {sid}: {e}");
                 }
+
+                // Declarative: ensure firewall rules match desired state
+                let _lock = state.firewall_lock.lock().await;
+                if let Err(e) = self.apply_firewall_for_socket(state, &existing).await {
+                    warn!("Failed to reconcile firewall for {sid}: {e}");
+                }
+                drop(_lock);
+
                 continue;
             }
 
@@ -70,20 +195,25 @@ impl Engine {
 
             match self.backend.allocate_address() {
                 Ok(alloc) => {
-                    // Add address to interface
-                    if let Err(e) = self.network.add_address(&iface, alloc.address, alloc.prefix_len) {
+                    if let Err(e) =
+                        self.network
+                            .add_address(&iface, alloc.address, alloc.prefix_len)
+                    {
                         error!("Failed to add IPv6 {} to {}: {e}", alloc.address, iface);
                         continue;
                     }
 
-                    // Save keypair if present
                     let keypair_id = if let Some(ref kp) = alloc.keypair {
-                        if let Err(e) = state.db.save_keypair(
-                            &kp.id,
-                            &kp.public_key,
-                            &kp.private_key,
-                            &kp.derived_ipv6.to_string(),
-                        ).await {
+                        if let Err(e) = state
+                            .db
+                            .save_keypair(
+                                &kp.id,
+                                &kp.public_key,
+                                &kp.private_key,
+                                &kp.derived_ipv6.to_string(),
+                            )
+                            .await
+                        {
                             error!("Failed to save keypair: {e}");
                         }
                         Some(kp.id.clone())
@@ -107,7 +237,6 @@ impl Engine {
                         last_seen: now,
                     };
 
-                    // Apply default closed policy (acquire lock for firewall ops)
                     let _lock = state.firewall_lock.lock().await;
                     if let Err(e) = self.firewall.block_all(alloc.address, ls.port, ls.protocol) {
                         warn!("Failed to apply firewall rule: {e}");
@@ -130,13 +259,15 @@ impl Engine {
         }
 
         // 3. Clean up stale sockets (not seen for 3 poll cycles)
-        let config = state.config.read().await;
-        let stale_threshold = now - chrono::Duration::seconds(config.poll_interval_secs as i64 * 3);
-        drop(config);
+        let stale_threshold =
+            now - chrono::Duration::seconds(config_snapshot.poll_interval_secs as i64 * 3);
 
         if let Ok(stale) = state.db.stale_sockets(stale_threshold).await {
             for s in stale {
-                info!("Cleaning up stale socket: {}:{} ({})", s.process_name, s.port, s.id);
+                info!(
+                    "Cleaning up stale socket: {}:{} ({})",
+                    s.process_name, s.port, s.id
+                );
 
                 let _lock = state.firewall_lock.lock().await;
                 if let Err(e) = self.firewall.remove_acl(s.assigned_ipv6, s.port, s.protocol) {
@@ -144,11 +275,9 @@ impl Engine {
                 }
                 drop(_lock);
 
-                let config = state.config.read().await;
-                if let Err(e) = self.network.remove_address(&config.interface, s.assigned_ipv6) {
+                if let Err(e) = self.network.remove_address(&iface, s.assigned_ipv6) {
                     warn!("Failed to remove IPv6 {}: {e}", s.assigned_ipv6);
                 }
-                drop(config);
 
                 if let Err(e) = state.db.delete_socket(&s.id).await {
                     error!("Failed to delete socket {}: {e}", s.id);
@@ -159,8 +288,8 @@ impl Engine {
         Ok(())
     }
 
-    /// Apply ACL for a socket based on its current policy and ACL entries.
-    /// Acquires the firewall lock to prevent concurrent rule modifications.
+    /// Apply firewall rules for a socket based on its current policy and ACL entries.
+    /// Acquires the firewall lock.
     pub async fn apply_socket_acl(&self, state: &AppState, socket_id: &str) -> anyhow::Result<()> {
         let socket = state
             .db
@@ -169,42 +298,99 @@ impl Engine {
             .ok_or_else(|| anyhow::anyhow!("socket not found"))?;
 
         let _lock = state.firewall_lock.lock().await;
+        self.apply_firewall_for_socket(state, &socket).await
+    }
 
+    /// Apply firewall rules for a socket (does not acquire firewall_lock — caller's responsibility).
+    async fn apply_firewall_for_socket(
+        &self,
+        state: &AppState,
+        socket: &ManagedSocket,
+    ) -> anyhow::Result<()> {
         match socket.policy {
             Policy::Closed => {
-                self.firewall.block_all(socket.assigned_ipv6, socket.port, socket.protocol)?;
+                self.firewall
+                    .block_all(socket.assigned_ipv6, socket.port, socket.protocol)?;
             }
             Policy::Open => {
-                self.firewall.allow_all(socket.assigned_ipv6, socket.port, socket.protocol)?;
+                self.firewall
+                    .allow_all(socket.assigned_ipv6, socket.port, socket.protocol)?;
             }
             Policy::Managed => {
-                let acl = state.db.get_acl(socket_id).await?;
+                let acl = state.db.get_acl(&socket.id).await?;
                 let allowed: Vec<Ipv6Addr> = acl
                     .iter()
                     .filter_map(|e| e.allowed_ip.parse().ok())
                     .collect();
-                self.firewall
-                    .apply_acl(socket.assigned_ipv6, socket.port, socket.protocol, &allowed)?;
+                self.firewall.apply_acl(
+                    socket.assigned_ipv6,
+                    socket.port,
+                    socket.protocol,
+                    &allowed,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Migrate all managed IPv6 addresses from one interface to another.
+    async fn migrate_addresses(&self, state: &AppState, old_iface: &str, new_iface: &str) {
+        let sockets = match state.db.list_sockets().await {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to list sockets for migration: {e}");
+                return;
+            }
+        };
+
+        for socket in &sockets {
+            if let Err(e) = self
+                .network
+                .add_address(new_iface, socket.assigned_ipv6, 128)
+            {
+                warn!(
+                    "Failed to add {} to {}: {e}",
+                    socket.assigned_ipv6, new_iface
+                );
+            }
+            if let Err(e) = self.network.remove_address(old_iface, socket.assigned_ipv6) {
+                warn!(
+                    "Failed to remove {} from {}: {e}",
+                    socket.assigned_ipv6, old_iface
+                );
             }
         }
 
-        Ok(())
+        info!(
+            "Migrated {} addresses from {} to {}",
+            sockets.len(),
+            old_iface,
+            new_iface
+        );
     }
 }
 
-/// Run the reconciliation loop with panic recovery.
-/// If the loop panics, it logs the error and restarts after a delay.
-pub async fn run_loop(state: Arc<AppState>) {
+/// Run the reconciliation loop with shutdown support.
+pub async fn run_loop(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) {
     loop {
         let interval = {
             let config = state.config.read().await;
             config.poll_interval_secs
         };
 
-        if let Err(e) = state.engine.reconcile(&state).await {
-            error!("Reconciliation error: {e}");
+        {
+            let mut engine = state.engine.write().await;
+            if let Err(e) = engine.reconcile(&state).await {
+                error!("Reconciliation error: {e}");
+            }
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(interval)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval)) => {}
+            _ = shutdown.changed() => {
+                info!("Reconciliation loop received shutdown signal");
+                break;
+            }
+        }
     }
 }

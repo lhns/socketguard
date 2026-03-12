@@ -153,7 +153,8 @@ The daemon reads `socketguard.json` (or the path in `$SOCKETGUARD_CONFIG`) on st
   "backend": "ula",
   "interface": "lo",
   "poll_interval_secs": 5,
-  "db_path": "socketguard.db"
+  "db_path": "socketguard.db",
+  "log_level": "info"
 }
 ```
 
@@ -165,6 +166,7 @@ The daemon reads `socketguard.json` (or the path in `$SOCKETGUARD_CONFIG`) on st
 | `interface` | Network interface for IPv6 addresses | `lo` (Linux), `lo0` (macOS), `Loopback Pseudo-Interface 1` (Windows) |
 | `poll_interval_secs` | Socket polling interval | `5` |
 | `db_path` | SQLite database path | `socketguard.db` |
+| `log_level` | Log level: `trace`, `debug`, `info`, `warn`, `error` | `info` |
 
 ## IPv6 Backends
 

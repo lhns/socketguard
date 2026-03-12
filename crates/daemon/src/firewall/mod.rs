@@ -33,6 +33,9 @@ pub trait Firewall: Send + Sync {
     fn allow_all(&self, dest_ip: Ipv6Addr, dest_port: u16, protocol: Protocol) -> Result<()> {
         self.remove_acl(dest_ip, dest_port, protocol)
     }
+
+    /// Remove all SocketGuard-managed firewall rules (for startup cleanup / shutdown)
+    fn cleanup_all_rules(&self) -> Result<()>;
 }
 
 /// Create the platform-appropriate firewall

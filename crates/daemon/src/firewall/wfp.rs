@@ -120,4 +120,28 @@ impl Firewall for WfpFirewall {
 
         Ok(())
     }
+
+    fn cleanup_all_rules(&self) -> Result<()> {
+        // List all firewall rules and delete any matching SocketGuard_*
+        let output = Command::new("netsh")
+            .args(["advfirewall", "firewall", "show", "rule", "name=all", "dir=in"])
+            .output()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some(name) = line.strip_prefix("Rule Name:") {
+                let name = name.trim();
+                if name.starts_with("SocketGuard_") {
+                    let _ = Command::new("netsh")
+                        .args([
+                            "advfirewall", "firewall", "delete", "rule",
+                            &format!("name={name}"),
+                        ])
+                        .output();
+                }
+            }
+        }
+
+        Ok(())
+    }
 }

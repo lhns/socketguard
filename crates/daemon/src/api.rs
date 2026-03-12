@@ -106,7 +106,7 @@ async fn update_acl(
 
     match state.db.replace_acl(&id, &entries).await {
         Ok(_) => {
-            if let Err(e) = state.engine.apply_socket_acl(&state, &id).await {
+            if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
                 return internal_error(format!("ACL saved but firewall update failed: {e}"))
                     .into_response();
             }
@@ -139,7 +139,7 @@ async fn allow_ip(
         .await
     {
         Ok(entry) => {
-            if let Err(e) = state.engine.apply_socket_acl(&state, &id).await {
+            if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
                 tracing::warn!("Firewall update failed after adding ACL entry: {e}");
             }
             (StatusCode::CREATED, Json(entry)).into_response()
@@ -161,7 +161,7 @@ async fn remove_acl_entry(
 
     match state.db.delete_acl_entry(entry_id).await {
         Ok(_) => {
-            if let Err(e) = state.engine.apply_socket_acl(&state, &id).await {
+            if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
                 tracing::warn!("Firewall update failed after removing ACL entry: {e}");
             }
             StatusCode::NO_CONTENT.into_response()
@@ -184,7 +184,7 @@ async fn update_policy(
 
     match state.db.update_policy(&id, req.policy).await {
         Ok(_) => {
-            if let Err(e) = state.engine.apply_socket_acl(&state, &id).await {
+            if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
                 return internal_error(format!("Policy saved but firewall update failed: {e}"))
                     .into_response();
             }

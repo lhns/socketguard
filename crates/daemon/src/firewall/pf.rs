@@ -71,4 +71,16 @@ impl Firewall for PfFirewall {
 
         Ok(())
     }
+
+    fn cleanup_all_rules(&self) -> Result<()> {
+        // Flush all rules under the socketguard anchor
+        Command::new("pfctl")
+            .args(["-a", ANCHOR_NAME, "-F", "rules"])
+            .output()?;
+        // Also flush sub-anchors
+        Command::new("pfctl")
+            .args(["-a", &format!("{ANCHOR_NAME}/*"), "-F", "rules"])
+            .output()?;
+        Ok(())
+    }
 }

@@ -39,6 +39,12 @@ export interface ConfigResponse {
   poll_interval_secs: number;
 }
 
+export interface UpdateConfigRequest {
+  backend?: string;
+  interface?: string;
+  poll_interval_secs?: number;
+}
+
 export async function listSockets(): Promise<SocketListResponse> {
   return invoke("list_sockets");
 }
@@ -71,4 +77,8 @@ export async function setPolicy(
 
 export async function getConfig(): Promise<ConfigResponse> {
   return invoke("get_config");
+}
+
+export async function updateConfig(config: UpdateConfigRequest): Promise<void> {
+  return invoke("update_config", { config });
 }

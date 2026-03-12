@@ -19,6 +19,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0009](0009-socket-identity-scheme.md) | Socket Identity Scheme | Accepted |
 | [0010](0010-tauri-desktop-app.md) | Tauri Desktop App with React Frontend | Accepted |
 | [0011](0011-network-interface-management.md) | Network Interface IPv6 Management | Accepted |
+| [0012](0012-declarative-reconciliation-and-lifecycle.md) | Declarative Reconciliation and Lifecycle Management | Accepted |
 
 ## Format
 

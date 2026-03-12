@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { getSocket, allowIp, removeAclEntry, setPolicy, ManagedSocket, AclEntry } from "../api";
+import { useToast } from "./Toast";
+import ConfirmDialog from "./ConfirmDialog";
 
 interface Props {
   socketId: string;
@@ -12,6 +14,8 @@ export default function SocketDetail({ socketId, onBack }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [newIp, setNewIp] = useState("");
   const [newLabel, setNewLabel] = useState("");
+  const [confirm, setConfirm] = useState<{ message: string; action: () => void } | null>(null);
+  const toast = useToast();
 
   const refresh = async () => {
     try {
@@ -32,27 +36,46 @@ export default function SocketDetail({ socketId, onBack }: Props) {
       await allowIp(socketId, newIp.trim(), newLabel.trim() || undefined);
       setNewIp("");
       setNewLabel("");
+      toast.success(`Allowed ${newIp.trim()}`);
       refresh();
     } catch (e) {
-      setError(String(e));
+      toast.error(String(e));
     }
   };
 
-  const handleRemove = async (entryId: number) => {
-    try {
-      await removeAclEntry(socketId, entryId);
-      refresh();
-    } catch (e) {
-      setError(String(e));
+  const handleRemove = (entry: AclEntry) => {
+    setConfirm({
+      message: `Remove access for ${entry.allowed_ip}${entry.label ? ` (${entry.label})` : ""}?`,
+      action: async () => {
+        try {
+          await removeAclEntry(socketId, entry.id);
+          toast.success(`Removed ${entry.allowed_ip}`);
+          refresh();
+        } catch (e) {
+          toast.error(String(e));
+        }
+      },
+    });
+  };
+
+  const handlePolicy = (p: string) => {
+    if (p === "open") {
+      setConfirm({
+        message: "Setting policy to \"open\" will allow all incoming connections to this socket. Continue?",
+        action: () => doSetPolicy(p),
+      });
+    } else {
+      doSetPolicy(p);
     }
   };
 
-  const handlePolicy = async (p: string) => {
+  const doSetPolicy = async (p: string) => {
     try {
       await setPolicy(socketId, p);
+      toast.success(`Policy set to ${p}`);
       refresh();
     } catch (e) {
-      setError(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -60,6 +83,14 @@ export default function SocketDetail({ socketId, onBack }: Props) {
 
   return (
     <div>
+      {confirm && (
+        <ConfirmDialog
+          message={confirm.message}
+          onConfirm={() => { confirm.action(); setConfirm(null); }}
+          onCancel={() => setConfirm(null)}
+        />
+      )}
+
       <button onClick={onBack} style={{ marginBottom: "1rem", cursor: "pointer" }}>Back</button>
 
       {error && <p style={{ color: "red" }}>{error}</p>}
@@ -138,7 +169,7 @@ export default function SocketDetail({ socketId, onBack }: Props) {
                   <td style={{ padding: "0.4rem" }}>{entry.label || "-"}</td>
                   <td style={{ padding: "0.4rem", fontSize: "0.85em" }}>{new Date(entry.created_at).toLocaleString()}</td>
                   <td style={{ padding: "0.4rem" }}>
-                    <button onClick={() => handleRemove(entry.id)} style={{ cursor: "pointer", color: "red", background: "none", border: "none" }}>
+                    <button onClick={() => handleRemove(entry)} style={{ cursor: "pointer", color: "red", background: "none", border: "none" }}>
                       Remove
                     </button>
                   </td>

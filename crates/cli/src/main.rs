@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use socketguard_core::api_types::*;
 use socketguard_core::Policy;
 use std::net::Ipv6Addr;
@@ -11,6 +12,10 @@ struct Cli {
     /// Daemon API address
     #[arg(long, default_value = "http://127.0.0.1:9476", global = true)]
     api: String,
+
+    /// Output raw JSON instead of tables
+    #[arg(long, global = true)]
+    json: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -50,6 +55,12 @@ enum Commands {
 
     /// List available backends
     Backends,
+
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -115,6 +126,7 @@ async fn main() -> Result<()> {
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
     let base = &cli.api;
+    let json_mode = cli.json;
 
     match cli.command {
         Commands::List => {
@@ -125,6 +137,11 @@ async fn main() -> Result<()> {
                 .context("failed to connect to daemon — is it running?")?
                 .json()
                 .await?;
+
+            if json_mode {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+                return Ok(());
+            }
 
             if resp.sockets.is_empty() {
                 println!("No sockets detected.");
@@ -160,6 +177,11 @@ async fn main() -> Result<()> {
             }
 
             let resp: SocketDetailResponse = resp.json().await?;
+
+            if json_mode {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+                return Ok(());
+            }
 
             let s = &resp.socket;
             println!("Socket: {}", s.id);
@@ -217,7 +239,12 @@ async fn main() -> Result<()> {
                     .context("failed to connect to daemon")?;
 
                 if resp.status().is_success() {
-                    println!("Allowed {ip} for socket {socket_id}");
+                    if json_mode {
+                        let body: serde_json::Value = resp.json().await?;
+                        println!("{}", serde_json::to_string_pretty(&body)?);
+                    } else {
+                        println!("Allowed {ip} for socket {socket_id}");
+                    }
                 } else {
                     let err: ApiError = resp.json().await?;
                     bail!("{}", err.error);
@@ -235,7 +262,9 @@ async fn main() -> Result<()> {
                     .context("failed to connect to daemon")?;
 
                 if resp.status().is_success() {
-                    println!("Removed ACL entry {entry_id}");
+                    if !json_mode {
+                        println!("Removed ACL entry {entry_id}");
+                    }
                 } else {
                     let err: ApiError = resp.json().await?;
                     bail!("{}", err.error);
@@ -250,6 +279,11 @@ async fn main() -> Result<()> {
                     .context("failed to connect to daemon")?
                     .json()
                     .await?;
+
+                if json_mode {
+                    println!("{}", serde_json::to_string_pretty(&resp.acl)?);
+                    return Ok(());
+                }
 
                 if resp.acl.is_empty() {
                     println!("No ACL entries for socket {socket_id}.");
@@ -279,7 +313,9 @@ async fn main() -> Result<()> {
                 .context("failed to connect to daemon")?;
 
             if resp.status().is_success() {
-                println!("Policy set to {policy} for socket {id}");
+                if !json_mode {
+                    println!("Policy set to {policy} for socket {id}");
+                }
             } else {
                 let err: ApiError = resp.json().await?;
                 bail!("{}", err.error);
@@ -290,11 +326,32 @@ async fn main() -> Result<()> {
             match client.get(format!("{base}/api/sockets")).send().await {
                 Ok(resp) => {
                     let list: SocketListResponse = resp.json().await?;
-                    println!("Daemon is running on {base}");
-                    println!("  {} sockets managed", list.sockets.len());
+                    if json_mode {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "status": "running",
+                                "api": base,
+                                "sockets": list.sockets.len()
+                            }))?
+                        );
+                    } else {
+                        println!("Daemon is running on {base}");
+                        println!("  {} sockets managed", list.sockets.len());
+                    }
                 }
                 Err(_) => {
-                    bail!("Daemon is not reachable at {base}");
+                    if json_mode {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "status": "unreachable",
+                                "api": base
+                            }))?
+                        );
+                    } else {
+                        bail!("Daemon is not reachable at {base}");
+                    }
                 }
             }
         }
@@ -308,11 +365,15 @@ async fn main() -> Result<()> {
                 .json()
                 .await?;
 
-            println!("Daemon Configuration:");
-            println!("  Listen:    {}:{}", resp.listen_addr, resp.listen_port);
-            println!("  Backend:   {}", resp.backend);
-            println!("  Interface: {}", resp.interface);
-            println!("  Poll interval: {}s", resp.poll_interval_secs);
+            if json_mode {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+            } else {
+                println!("Daemon Configuration:");
+                println!("  Listen:    {}:{}", resp.listen_addr, resp.listen_port);
+                println!("  Backend:   {}", resp.backend);
+                println!("  Interface: {}", resp.interface);
+                println!("  Poll interval: {}s", resp.poll_interval_secs);
+            }
         }
 
         Commands::Backends => {
@@ -324,10 +385,23 @@ async fn main() -> Result<()> {
                 .json()
                 .await?;
 
-            for b in resp.backends {
-                let status = if b.available { "available" } else { "unavailable" };
-                println!("  {} - {} [{}]", b.name, b.description, status);
+            if json_mode {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+            } else {
+                for b in resp.backends {
+                    let status = if b.available { "available" } else { "unavailable" };
+                    println!("  {} - {} [{}]", b.name, b.description, status);
+                }
             }
+        }
+
+        Commands::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "socketguard-cli",
+                &mut std::io::stdout(),
+            );
         }
     }
 

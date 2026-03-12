@@ -110,6 +110,24 @@ async fn get_config() -> Result<ConfigResponse, String> {
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn update_config(config: UpdateConfigRequest) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(format!("{}/api/config", api_base()))
+        .json(&config)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
+        Err(err.error)
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -120,6 +138,7 @@ fn main() {
             remove_acl_entry,
             set_policy,
             get_config,
+            update_config,
         ])
         .run(tauri::generate_context!())
         .expect("error running SocketGuard UI");

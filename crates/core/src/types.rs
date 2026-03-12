@@ -173,3 +173,107 @@ pub fn socket_id(process_name: &str, port: u16, protocol: Protocol) -> String {
     protocol.to_string().hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn socket_id_is_deterministic() {
+        let id1 = socket_id("nginx", 80, Protocol::Tcp);
+        let id2 = socket_id("nginx", 80, Protocol::Tcp);
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn socket_id_differs_by_process_name() {
+        let id1 = socket_id("nginx", 80, Protocol::Tcp);
+        let id2 = socket_id("apache", 80, Protocol::Tcp);
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn socket_id_differs_by_port() {
+        let id1 = socket_id("nginx", 80, Protocol::Tcp);
+        let id2 = socket_id("nginx", 443, Protocol::Tcp);
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn socket_id_differs_by_protocol() {
+        let id1 = socket_id("dns", 53, Protocol::Tcp);
+        let id2 = socket_id("dns", 53, Protocol::Udp);
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn socket_id_is_16_hex_chars() {
+        let id = socket_id("test", 1234, Protocol::Tcp);
+        assert_eq!(id.len(), 16);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn protocol_display_roundtrip() {
+        assert_eq!(Protocol::Tcp.to_string(), "tcp");
+        assert_eq!(Protocol::Udp.to_string(), "udp");
+        assert_eq!("tcp".parse::<Protocol>().unwrap(), Protocol::Tcp);
+        assert_eq!("udp".parse::<Protocol>().unwrap(), Protocol::Udp);
+        assert!("invalid".parse::<Protocol>().is_err());
+    }
+
+    #[test]
+    fn policy_display_roundtrip() {
+        assert_eq!(Policy::Closed.to_string(), "closed");
+        assert_eq!(Policy::Open.to_string(), "open");
+        assert_eq!(Policy::Managed.to_string(), "managed");
+        assert_eq!("closed".parse::<Policy>().unwrap(), Policy::Closed);
+        assert_eq!("open".parse::<Policy>().unwrap(), Policy::Open);
+        assert_eq!("managed".parse::<Policy>().unwrap(), Policy::Managed);
+        assert!("invalid".parse::<Policy>().is_err());
+    }
+
+    #[test]
+    fn backend_type_display_roundtrip() {
+        assert_eq!(BackendType::Ula.to_string(), "ula");
+        assert_eq!(BackendType::Yggdrasil.to_string(), "yggdrasil");
+        assert_eq!("ula".parse::<BackendType>().unwrap(), BackendType::Ula);
+        assert_eq!(
+            "yggdrasil".parse::<BackendType>().unwrap(),
+            BackendType::Yggdrasil
+        );
+        assert!("invalid".parse::<BackendType>().is_err());
+    }
+
+    #[test]
+    fn policy_default_is_closed() {
+        assert_eq!(Policy::default(), Policy::Closed);
+    }
+
+    #[test]
+    fn protocol_serde_roundtrip() {
+        let tcp = Protocol::Tcp;
+        let json = serde_json::to_string(&tcp).unwrap();
+        assert_eq!(json, "\"tcp\"");
+        let parsed: Protocol = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, tcp);
+    }
+
+    #[test]
+    fn policy_serde_roundtrip() {
+        for policy in [Policy::Closed, Policy::Open, Policy::Managed] {
+            let json = serde_json::to_string(&policy).unwrap();
+            let parsed: Policy = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, policy);
+        }
+    }
+
+    #[test]
+    fn backend_type_serde_roundtrip() {
+        for backend in [BackendType::Ula, BackendType::Yggdrasil] {
+            let json = serde_json::to_string(&backend).unwrap();
+            let parsed: BackendType = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, backend);
+        }
+    }
+}

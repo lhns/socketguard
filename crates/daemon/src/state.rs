@@ -18,6 +18,11 @@ impl Database {
     }
 
     pub async fn migrate(&self) -> Result<()> {
+        // Enable foreign key enforcement (required for ON DELETE CASCADE)
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&self.pool)
+            .await?;
+
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS sockets (
@@ -303,5 +308,220 @@ impl TryFrom<AclRow> for AclEntry {
             label: row.label,
             created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?.with_timezone(&chrono::Utc),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use socketguard_core::{BackendType, Protocol};
+
+    async fn test_db() -> Database {
+        let db = Database::new(":memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        db
+    }
+
+    fn test_socket(id: &str, name: &str, port: u16) -> ManagedSocket {
+        ManagedSocket {
+            id: id.to_string(),
+            pid: 1234,
+            process_name: name.to_string(),
+            port,
+            protocol: Protocol::Tcp,
+            assigned_ipv6: "fd00::1".parse().unwrap(),
+            backend: BackendType::Ula,
+            policy: Policy::Closed,
+            keypair_id: None,
+            exe_path: None,
+            cmdline: None,
+            first_seen: chrono::Utc::now(),
+            last_seen: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_and_get_socket() {
+        let db = test_db().await;
+        let socket = test_socket("abc123", "nginx", 80);
+
+        db.upsert_socket(&socket).await.unwrap();
+        let retrieved = db.get_socket("abc123").await.unwrap().unwrap();
+
+        assert_eq!(retrieved.id, "abc123");
+        assert_eq!(retrieved.process_name, "nginx");
+        assert_eq!(retrieved.port, 80);
+        assert_eq!(retrieved.protocol, Protocol::Tcp);
+        assert_eq!(retrieved.policy, Policy::Closed);
+    }
+
+    #[tokio::test]
+    async fn get_nonexistent_socket_returns_none() {
+        let db = test_db().await;
+        let result = db.get_socket("nonexistent").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_updates_pid_on_conflict() {
+        let db = test_db().await;
+        let mut socket = test_socket("abc123", "nginx", 80);
+        db.upsert_socket(&socket).await.unwrap();
+
+        // Simulate process restart: new PID, same socket ID
+        socket.pid = 5678;
+        socket.last_seen = chrono::Utc::now();
+        db.upsert_socket(&socket).await.unwrap();
+
+        let retrieved = db.get_socket("abc123").await.unwrap().unwrap();
+        assert_eq!(retrieved.pid, 5678);
+        // Policy should be preserved
+        assert_eq!(retrieved.policy, Policy::Closed);
+    }
+
+    #[tokio::test]
+    async fn list_sockets_returns_all() {
+        let db = test_db().await;
+        db.upsert_socket(&test_socket("id1", "nginx", 80)).await.unwrap();
+        db.upsert_socket(&test_socket("id2", "sshd", 22)).await.unwrap();
+
+        let sockets = db.list_sockets().await.unwrap();
+        assert_eq!(sockets.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn delete_socket() {
+        let db = test_db().await;
+        db.upsert_socket(&test_socket("abc123", "nginx", 80)).await.unwrap();
+        db.delete_socket("abc123").await.unwrap();
+
+        let result = db.get_socket("abc123").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_policy() {
+        let db = test_db().await;
+        db.upsert_socket(&test_socket("abc123", "nginx", 80)).await.unwrap();
+
+        db.update_policy("abc123", Policy::Managed).await.unwrap();
+        let socket = db.get_socket("abc123").await.unwrap().unwrap();
+        assert_eq!(socket.policy, Policy::Managed);
+
+        db.update_policy("abc123", Policy::Open).await.unwrap();
+        let socket = db.get_socket("abc123").await.unwrap().unwrap();
+        assert_eq!(socket.policy, Policy::Open);
+    }
+
+    #[tokio::test]
+    async fn acl_crud() {
+        let db = test_db().await;
+        db.upsert_socket(&test_socket("abc123", "nginx", 80)).await.unwrap();
+
+        // Add ACL entry
+        let entry = db
+            .add_acl_entry("abc123", "fd00::100", Some("laptop"))
+            .await
+            .unwrap();
+        assert_eq!(entry.allowed_ip, "fd00::100");
+        assert_eq!(entry.label, Some("laptop".to_string()));
+
+        // List ACL entries
+        let acl = db.get_acl("abc123").await.unwrap();
+        assert_eq!(acl.len(), 1);
+        assert_eq!(acl[0].allowed_ip, "fd00::100");
+
+        // Delete ACL entry
+        db.delete_acl_entry(entry.id).await.unwrap();
+        let acl = db.get_acl("abc123").await.unwrap();
+        assert_eq!(acl.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn acl_rejects_invalid_ipv6() {
+        let db = test_db().await;
+        db.upsert_socket(&test_socket("abc123", "nginx", 80)).await.unwrap();
+
+        let result = db.add_acl_entry("abc123", "not-an-ip", None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn replace_acl() {
+        let db = test_db().await;
+        db.upsert_socket(&test_socket("abc123", "nginx", 80)).await.unwrap();
+
+        // Add initial entries
+        db.add_acl_entry("abc123", "fd00::1", Some("host1")).await.unwrap();
+        db.add_acl_entry("abc123", "fd00::2", Some("host2")).await.unwrap();
+
+        // Replace with new set
+        let entries = vec![
+            ("fd00::10".to_string(), Some("new1".to_string())),
+            ("fd00::20".to_string(), None),
+        ];
+        let result = db.replace_acl("abc123", &entries).await.unwrap();
+        assert_eq!(result.len(), 2);
+
+        let acl = db.get_acl("abc123").await.unwrap();
+        assert_eq!(acl.len(), 2);
+        assert_eq!(acl[0].allowed_ip, "fd00::10");
+        assert_eq!(acl[1].allowed_ip, "fd00::20");
+    }
+
+    #[tokio::test]
+    async fn stale_sockets() {
+        let db = test_db().await;
+        let mut socket = test_socket("old_one", "old", 9999);
+        socket.last_seen = chrono::Utc::now() - chrono::Duration::seconds(60);
+        db.upsert_socket(&socket).await.unwrap();
+
+        let mut fresh = test_socket("new_one", "fresh", 8888);
+        fresh.last_seen = chrono::Utc::now();
+        db.upsert_socket(&fresh).await.unwrap();
+
+        let threshold = chrono::Utc::now() - chrono::Duration::seconds(30);
+        let stale = db.stale_sockets(threshold).await.unwrap();
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].id, "old_one");
+    }
+
+    #[tokio::test]
+    async fn cascade_delete_removes_acl() {
+        let db = test_db().await;
+        db.upsert_socket(&test_socket("abc123", "nginx", 80)).await.unwrap();
+        db.add_acl_entry("abc123", "fd00::1", None).await.unwrap();
+        db.add_acl_entry("abc123", "fd00::2", None).await.unwrap();
+
+        // Deleting the socket should cascade-delete ACL entries
+        db.delete_socket("abc123").await.unwrap();
+        let acl = db.get_acl("abc123").await.unwrap();
+        assert_eq!(acl.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn save_and_query_keypair() {
+        let db = test_db().await;
+        let pub_key = vec![1u8; 32];
+        let priv_key = vec![2u8; 32];
+        db.save_keypair("kp1", &pub_key, &priv_key, "fd00::1")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn socket_preserves_exe_path_and_cmdline() {
+        let db = test_db().await;
+        let mut socket = test_socket("abc123", "nginx", 80);
+        socket.exe_path = Some("/usr/sbin/nginx".to_string());
+        socket.cmdline = Some("nginx -g daemon off;".to_string());
+        db.upsert_socket(&socket).await.unwrap();
+
+        let retrieved = db.get_socket("abc123").await.unwrap().unwrap();
+        assert_eq!(retrieved.exe_path, Some("/usr/sbin/nginx".to_string()));
+        assert_eq!(
+            retrieved.cmdline,
+            Some("nginx -g daemon off;".to_string())
+        );
     }
 }

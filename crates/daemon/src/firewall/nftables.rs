@@ -97,4 +97,15 @@ impl Firewall for NftablesFirewall {
 
         Ok(())
     }
+
+    fn cleanup_all_rules(&self) -> Result<()> {
+        // Flush the entire socketguard table — removes all rules in one shot
+        let _ = Command::new("nft")
+            .args(["flush", "table", "ip6", TABLE_NAME])
+            .output();
+        let _ = Command::new("nft")
+            .args(["delete", "table", "ip6", TABLE_NAME])
+            .output();
+        Ok(())
+    }
 }
