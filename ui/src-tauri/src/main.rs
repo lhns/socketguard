@@ -2,6 +2,7 @@
 
 use futures_util::StreamExt;
 use socketguard_core::api_types::*;
+use socketguard_core::config::BackendInstanceConfig;
 use socketguard_core::Policy;
 use std::path::Path;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -173,17 +174,66 @@ async fn update_config(config: UpdateConfigRequest) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn list_interfaces() -> Result<InterfacesResponse, String> {
+    let resp = authed_request(|token| {
+        client()
+            .get(format!("{}/api/interfaces", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_backend_instances() -> Result<BackendsResponse, String> {
+    let resp = authed_request(|token| {
+        client()
+            .get(format!("{}/api/backends", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn add_backend(req: AddBackendRequest) -> Result<BackendInstanceConfig, String> {
+    let resp = authed_request(|token| {
+        client()
+            .post(format!("{}/api/backends", api_base()))
+            .bearer_auth(token)
+            .json(&req)
+    })
+    .await?;
+    if resp.status().is_success() {
+        resp.json().await.map_err(|e| e.to_string())
+    } else {
+        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
+        Err(err.error)
+    }
+}
+
+#[tauri::command]
+async fn remove_backend(id: String) -> Result<(), String> {
+    let resp = authed_request(|token| {
+        client()
+            .delete(format!("{}/api/backends/{id}", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+#[tauri::command]
 async fn subscribe_events(app: tauri::AppHandle) -> Result<(), String> {
     tokio::spawn(async move {
         loop {
             match connect_sse(&app).await {
-                Ok(()) => {} // stream ended normally
+                Ok(()) => {}
                 Err(e) => {
                     eprintln!("SSE connection error: {e}");
                 }
             }
             let _ = app.emit("daemon_disconnected", ());
-            // Reconnect after 3s backoff
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
     });
@@ -199,7 +249,6 @@ async fn connect_sse(app: &tauri::AppHandle) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    // On 401, refresh token and retry once
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         let token = refresh_token()?;
         let resp = reqwest::Client::new()
@@ -228,7 +277,6 @@ async fn process_sse_stream(
         let chunk = chunk.map_err(|e| e.to_string())?;
         buf.push_str(&String::from_utf8_lossy(&chunk));
 
-        // Process complete SSE messages (double newline delimited)
         while let Some(pos) = buf.find("\n\n") {
             let message = buf[..pos].to_string();
             buf = buf[pos + 2..].to_string();
@@ -278,7 +326,6 @@ fn spawn_elevated(path: &Path) -> anyhow::Result<()> {
         )
     };
 
-    // ShellExecuteW returns HINSTANCE; values > 32 indicate success
     let code = result.0 as isize;
     if code > 32 {
         Ok(())
@@ -298,6 +345,10 @@ fn main() {
             set_policy,
             get_config,
             update_config,
+            list_interfaces,
+            list_backend_instances,
+            add_backend,
+            remove_backend,
             subscribe_events,
             start_daemon,
         ])

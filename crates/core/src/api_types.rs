@@ -1,4 +1,4 @@
-use crate::config::BackendConfig;
+use crate::config::{BackendConfig, BackendInstanceConfig};
 use crate::types::{AclEntry, BackendType, ManagedSocket, Policy};
 use serde::{Deserialize, Serialize};
 
@@ -46,21 +46,22 @@ pub struct UpdatePolicyRequest {
 pub struct ConfigResponse {
     pub listen_addr: String,
     pub listen_port: u16,
-    pub backend: BackendConfig,
+    pub backends: Vec<BackendInstanceConfig>,
     pub poll_interval_secs: u64,
 }
 
 /// Request to update config
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateConfigRequest {
-    pub backend: Option<BackendConfig>,
+    pub backends: Option<Vec<BackendInstanceConfig>>,
     pub poll_interval_secs: Option<u64>,
 }
 
 /// Available backends response
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BackendsResponse {
-    pub backends: Vec<BackendInfo>,
+    pub available_types: Vec<BackendInfo>,
+    pub active_instances: Vec<BackendInstanceConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,6 +69,22 @@ pub struct BackendInfo {
     pub name: BackendType,
     pub description: String,
     pub available: bool,
+    pub singleton: bool,
+}
+
+/// Request to add a new backend instance
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AddBackendRequest {
+    /// Optional custom ID. If omitted, auto-generated.
+    pub id: Option<String>,
+    #[serde(flatten)]
+    pub backend: BackendConfig,
+}
+
+/// Response for listing available network interfaces
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InterfacesResponse {
+    pub interfaces: Vec<String>,
 }
 
 /// Generic API error

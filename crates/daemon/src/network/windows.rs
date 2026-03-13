@@ -64,6 +64,42 @@ fn check_win32(err: WIN32_ERROR, ignore: &[WIN32_ERROR]) -> Result<()> {
     }
 }
 
+/// List all network interface friendly names.
+fn enumerate_interface_names() -> Result<Vec<String>> {
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, IP_ADAPTER_ADDRESSES_LH,
+    };
+    let family = AF_INET6.0 as u32;
+    let flags = GAA_FLAG_SKIP_ANYCAST;
+
+    let mut size = 0u32;
+    unsafe {
+        let _ = GetAdaptersAddresses(family, flags, None, None, &mut size);
+    }
+
+    let mut buf = vec![0u8; size as usize];
+    let adapter_ptr = buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+
+    let ret = unsafe { GetAdaptersAddresses(family, flags, None, Some(adapter_ptr), &mut size) };
+    if ret != 0 {
+        anyhow::bail!("GetAdaptersAddresses failed with error {ret}");
+    }
+
+    let mut names = Vec::new();
+    let mut current = adapter_ptr;
+    while !current.is_null() {
+        let adapter = unsafe { &*current };
+        let friendly_name = unsafe { adapter.FriendlyName.to_string() }.unwrap_or_default();
+        if !friendly_name.is_empty() {
+            names.push(friendly_name);
+        }
+        current = adapter.Next;
+    }
+
+    names.sort();
+    Ok(names)
+}
+
 impl NetworkInterface for WindowsNetworkInterface {
     fn add_address(&self, iface: &str, addr: Ipv6Addr, prefix: u8) -> Result<()> {
         let luid = get_interface_luid(iface)?;
@@ -111,5 +147,9 @@ impl NetworkInterface for WindowsNetworkInterface {
 
         // Address not found — not an error (may have been removed already)
         Ok(())
+    }
+
+    fn list_interfaces(&self) -> Result<Vec<String>> {
+        enumerate_interface_names()
     }
 }

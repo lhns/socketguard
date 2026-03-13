@@ -41,7 +41,9 @@ async fn main() -> Result<()> {
         )
         .init();
     info!("Starting SocketGuard daemon");
-    info!("Backend: {} on interface {}", config.backend.backend_type(), config.backend.interface());
+    for inst in &config.backends {
+        info!("Backend '{}': {} on interface {}", inst.id, inst.backend.backend_type(), inst.backend.interface());
+    }
 
     let api_token = auth::generate_and_store_token()?;
 

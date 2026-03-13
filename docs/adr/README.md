@@ -23,6 +23,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0013](0013-slaac-backend-and-per-backend-config.md) | SLAAC Backend and Per-Backend Configuration | Accepted |
 | [0014](0014-sse-push-and-native-socket-detection.md) | SSE Push Notifications and Native Socket Detection | Accepted |
 | [0015](0015-api-authentication.md) | API Authentication via Bearer Token | Accepted |
+| [0016](0016-multi-backend-architecture.md) | Multi-Backend Architecture | Accepted |
 
 ## Format
 

@@ -12,6 +12,8 @@ use std::net::Ipv6Addr;
 pub trait NetworkInterface: Send + Sync {
     fn add_address(&self, iface: &str, addr: Ipv6Addr, prefix: u8) -> Result<()>;
     fn remove_address(&self, iface: &str, addr: Ipv6Addr) -> Result<()>;
+    /// List all available network interface names on this system.
+    fn list_interfaces(&self) -> Result<Vec<String>>;
 }
 
 /// Create the platform-appropriate network interface manager

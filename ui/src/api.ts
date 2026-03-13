@@ -1,16 +1,23 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 
+export interface SocketAddress {
+  backend_id: string;
+  backend_type: string;
+  address: string;
+  interface: string;
+  prefix_len: number;
+  keypair_id: string | null;
+}
+
 export interface ManagedSocket {
   id: string;
   pid: number;
   process_name: string;
   port: number;
   protocol: string;
-  assigned_ipv6: string;
-  backend: string;
+  addresses: SocketAddress[];
   policy: string;
-  keypair_id: string | null;
   exe_path: string | null;
   cmdline: string | null;
   first_seen: string;
@@ -40,14 +47,42 @@ export type BackendConfig =
   | { type: "slaac"; interface: string; prefix?: string }
   | { type: "dhcpv6"; interface: string };
 
+export interface BackendInstanceConfig {
+  id: string;
+  type: string;
+  interface: string;
+  prefix?: string;
+}
+
+export interface BackendInfo {
+  name: string;
+  description: string;
+  available: boolean;
+  singleton: boolean;
+}
+
+export interface BackendsResponse {
+  available_types: BackendInfo[];
+  active_instances: BackendInstanceConfig[];
+}
+
 export interface ConfigResponse {
   listen_addr: string;
   listen_port: number;
-  backend: BackendConfig;
+  backends: BackendInstanceConfig[];
+  poll_interval_secs: number;
 }
 
 export interface UpdateConfigRequest {
-  backend?: BackendConfig;
+  backends?: BackendInstanceConfig[];
+  poll_interval_secs?: number;
+}
+
+export interface AddBackendRequest {
+  id?: string;
+  type: string;
+  interface: string;
+  prefix?: string;
 }
 
 export async function listSockets(): Promise<SocketListResponse> {
@@ -86,6 +121,26 @@ export async function getConfig(): Promise<ConfigResponse> {
 
 export async function updateConfig(config: UpdateConfigRequest): Promise<void> {
   return invoke("update_config", { config });
+}
+
+export interface InterfacesResponse {
+  interfaces: string[];
+}
+
+export async function listInterfaces(): Promise<InterfacesResponse> {
+  return invoke("list_interfaces");
+}
+
+export async function listBackendInstances(): Promise<BackendsResponse> {
+  return invoke("list_backend_instances");
+}
+
+export async function addBackend(req: AddBackendRequest): Promise<BackendInstanceConfig> {
+  return invoke("add_backend", { req });
+}
+
+export async function removeBackend(id: string): Promise<void> {
+  return invoke("remove_backend", { id });
 }
 
 export function onSocketsChanged(callback: () => void): Promise<UnlistenFn> {

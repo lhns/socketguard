@@ -38,4 +38,33 @@ impl NetworkInterface for LinuxNetworkInterface {
 
         Ok(())
     }
+
+    fn list_interfaces(&self) -> Result<Vec<String>> {
+        let output = Command::new("ip")
+            .args(["-o", "link", "show"])
+            .output()
+            .context("failed to run ip link show")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "ip link show failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut names: Vec<String> = stdout
+            .lines()
+            .filter_map(|line| {
+                // Format: "2: eth0: <FLAGS> ..."
+                let after_num = line.split_once(": ")?.1;
+                let name = after_num.split_once(": ")?.0;
+                // Strip @... suffix (e.g. "veth0@if3")
+                let name = name.split('@').next().unwrap_or(name);
+                Some(name.to_string())
+            })
+            .collect();
+        names.sort();
+        Ok(names)
+    }
 }

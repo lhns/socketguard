@@ -120,14 +120,54 @@ export default function SocketDetail({ socketId, onBack }: Props) {
         </span>
       </div>
 
-      {/* Info */}
+      {/* Addresses */}
+      <div className="card">
+        <div className="section-title">
+          Addresses
+          {socket.addresses.length > 0 && (
+            <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400, marginLeft: 6 }}>
+              ({socket.addresses.length})
+            </span>
+          )}
+        </div>
+        {socket.addresses.length === 0 ? (
+          <div style={{ padding: "8px 0", color: "var(--text-muted)", fontSize: 13 }}>
+            No addresses assigned.
+          </div>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>IPv6 Address</th>
+                  <th>Backend</th>
+                  <th>Interface</th>
+                  <th>Prefix</th>
+                </tr>
+              </thead>
+              <tbody>
+                {socket.addresses.map((addr, i) => (
+                  <tr key={`${addr.backend_id}-${i}`}>
+                    <td className="mono">{addr.address}</td>
+                    <td>
+                      <span className="badge" style={{ fontSize: 11, padding: "1px 6px" }}>
+                        {addr.backend_id}
+                      </span>
+                    </td>
+                    <td>{addr.interface}</td>
+                    <td className="mono">/{addr.prefix_len}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Details */}
       <div className="card">
         <div className="section-title">Details</div>
         <div className="info-grid">
-          <span className="info-label">IPv6 Address</span>
-          <span className="info-value mono">{socket.assigned_ipv6}</span>
-          <span className="info-label">Backend</span>
-          <span className="info-value">{socket.backend}</span>
           {socket.exe_path && (
             <>
               <span className="info-label">Executable</span>

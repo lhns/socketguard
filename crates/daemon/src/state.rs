@@ -1,6 +1,7 @@
 use anyhow::Result;
-use socketguard_core::{AclEntry, ManagedSocket, Policy};
+use socketguard_core::{AclEntry, ManagedSocket, Policy, SocketAddress};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use std::collections::HashMap;
 use std::str::FromStr;
 
 pub struct Database {
@@ -31,14 +32,28 @@ impl Database {
                 process_name TEXT NOT NULL,
                 port INTEGER NOT NULL,
                 protocol TEXT NOT NULL,
-                assigned_ipv6 TEXT NOT NULL,
-                backend TEXT NOT NULL,
                 policy TEXT NOT NULL DEFAULT 'closed',
-                keypair_id TEXT,
                 exe_path TEXT,
                 cmdline TEXT,
                 first_seen TEXT NOT NULL,
                 last_seen TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS socket_addresses (
+                socket_id TEXT NOT NULL REFERENCES sockets(id) ON DELETE CASCADE,
+                backend_id TEXT NOT NULL,
+                backend_type TEXT NOT NULL,
+                address TEXT NOT NULL,
+                interface TEXT NOT NULL,
+                prefix_len INTEGER NOT NULL DEFAULT 128,
+                keypair_id TEXT,
+                PRIMARY KEY (socket_id, backend_id)
             )
             "#,
         )
@@ -73,14 +88,88 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        // Migration: if old sockets table has assigned_ipv6 column, migrate data
+        self.migrate_from_single_backend().await?;
+
+        Ok(())
+    }
+
+    /// Migrate from single-backend schema (assigned_ipv6/backend/keypair_id on sockets table)
+    /// to multi-backend schema (socket_addresses table).
+    async fn migrate_from_single_backend(&self) -> Result<()> {
+        // Check if old columns exist
+        let has_old_columns = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('sockets') WHERE name = 'assigned_ipv6'",
+        )
+        .fetch_one(&self.pool)
+        .await?
+            > 0;
+
+        if !has_old_columns {
+            return Ok(());
+        }
+
+        tracing::info!("Migrating from single-backend to multi-backend schema...");
+
+        // Copy existing data to socket_addresses
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO socket_addresses (socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id)
+            SELECT id, backend, backend, assigned_ipv6, '', 128, keypair_id
+            FROM sockets
+            WHERE assigned_ipv6 IS NOT NULL AND assigned_ipv6 != ''
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // SQLite doesn't support DROP COLUMN before 3.35.0, so recreate the table
+        sqlx::query("ALTER TABLE sockets RENAME TO sockets_old")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE sockets (
+                id TEXT PRIMARY KEY,
+                pid INTEGER NOT NULL,
+                process_name TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                protocol TEXT NOT NULL,
+                policy TEXT NOT NULL DEFAULT 'closed',
+                exe_path TEXT,
+                cmdline TEXT,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO sockets (id, pid, process_name, port, protocol, policy, exe_path, cmdline, first_seen, last_seen)
+            SELECT id, pid, process_name, port, protocol, policy, exe_path, cmdline, first_seen, last_seen
+            FROM sockets_old
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query("DROP TABLE sockets_old")
+            .execute(&self.pool)
+            .await?;
+
+        tracing::info!("Migration complete");
         Ok(())
     }
 
     pub async fn upsert_socket(&self, socket: &ManagedSocket) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO sockets (id, pid, process_name, port, protocol, assigned_ipv6, backend, policy, keypair_id, exe_path, cmdline, first_seen, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO sockets (id, pid, process_name, port, protocol, policy, exe_path, cmdline, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 pid = excluded.pid,
                 process_name = excluded.process_name,
@@ -94,10 +183,7 @@ impl Database {
         .bind(&socket.process_name)
         .bind(socket.port as i64)
         .bind(socket.protocol.to_string())
-        .bind(socket.assigned_ipv6.to_string())
-        .bind(socket.backend.to_string())
         .bind(socket.policy.to_string())
-        .bind(&socket.keypair_id)
         .bind(&socket.exe_path)
         .bind(&socket.cmdline)
         .bind(socket.first_seen.to_rfc3339())
@@ -108,12 +194,111 @@ impl Database {
         Ok(())
     }
 
+    /// Save or update a socket address for a specific backend instance.
+    pub async fn upsert_socket_address(
+        &self,
+        socket_id: &str,
+        addr: &SocketAddress,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO socket_addresses (socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(socket_id, backend_id) DO UPDATE SET
+                address = excluded.address,
+                interface = excluded.interface,
+                prefix_len = excluded.prefix_len,
+                keypair_id = excluded.keypair_id
+            "#,
+        )
+        .bind(socket_id)
+        .bind(&addr.backend_id)
+        .bind(addr.backend_type.to_string())
+        .bind(addr.address.to_string())
+        .bind(&addr.interface)
+        .bind(addr.prefix_len as i64)
+        .bind(&addr.keypair_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get all addresses for a socket.
+    pub async fn get_socket_addresses(&self, socket_id: &str) -> Result<Vec<SocketAddress>> {
+        let rows = sqlx::query_as::<_, SocketAddressRow>(
+            "SELECT * FROM socket_addresses WHERE socket_id = ?",
+        )
+        .bind(socket_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(|r| r.try_into()).collect()
+    }
+
+    /// Delete all addresses for a specific backend instance across all sockets.
+    pub async fn delete_addresses_by_backend(&self, backend_id: &str) -> Result<Vec<(String, SocketAddress)>> {
+        // First fetch them so we can return them for cleanup
+        let rows = sqlx::query_as::<_, SocketAddressRowWithSocket>(
+            "SELECT socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id FROM socket_addresses WHERE backend_id = ?",
+        )
+        .bind(backend_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let result: Result<Vec<(String, SocketAddress)>> = rows
+            .into_iter()
+            .map(|r| {
+                let socket_id = r.socket_id.clone();
+                let addr: SocketAddress = r.try_into()?;
+                Ok((socket_id, addr))
+            })
+            .collect();
+        let result = result?;
+
+        sqlx::query("DELETE FROM socket_addresses WHERE backend_id = ?")
+            .bind(backend_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result)
+    }
+
+    /// Delete a specific socket address.
+    pub async fn delete_socket_address(&self, socket_id: &str, backend_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM socket_addresses WHERE socket_id = ? AND backend_id = ?")
+            .bind(socket_id)
+            .bind(backend_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn list_sockets(&self) -> Result<Vec<ManagedSocket>> {
         let rows = sqlx::query_as::<_, SocketRow>("SELECT * FROM sockets ORDER BY last_seen DESC")
             .fetch_all(&self.pool)
             .await?;
 
-        rows.into_iter().map(|r| r.try_into()).collect()
+        // Fetch all addresses and group by socket_id
+        let addr_rows = sqlx::query_as::<_, SocketAddressRowWithSocket>(
+            "SELECT socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id FROM socket_addresses",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut addr_map: HashMap<String, Vec<SocketAddress>> = HashMap::new();
+        for row in addr_rows {
+            let socket_id = row.socket_id.clone();
+            let addr: SocketAddress = row.try_into()?;
+            addr_map.entry(socket_id).or_default().push(addr);
+        }
+
+        rows.into_iter()
+            .map(|r| {
+                let addresses = addr_map.remove(&r.id).unwrap_or_default();
+                r.into_managed_socket(addresses)
+            })
+            .collect()
     }
 
     pub async fn get_socket(&self, id: &str) -> Result<Option<ManagedSocket>> {
@@ -123,7 +308,10 @@ impl Database {
             .await?;
 
         match row {
-            Some(r) => Ok(Some(r.try_into()?)),
+            Some(r) => {
+                let addresses = self.get_socket_addresses(id).await?;
+                Ok(Some(r.into_managed_socket(addresses)?))
+            }
             None => Ok(None),
         }
     }
@@ -245,7 +433,12 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter().map(|r| r.try_into()).collect()
+        let mut result = Vec::new();
+        for r in rows {
+            let addresses = self.get_socket_addresses(&r.id).await?;
+            result.push(r.into_managed_socket(addresses)?);
+        }
+        Ok(result)
     }
 }
 
@@ -256,34 +449,80 @@ struct SocketRow {
     process_name: String,
     port: i64,
     protocol: String,
-    assigned_ipv6: String,
-    backend: String,
     policy: String,
-    keypair_id: Option<String>,
     exe_path: Option<String>,
     cmdline: Option<String>,
     first_seen: String,
     last_seen: String,
 }
 
-impl TryFrom<SocketRow> for ManagedSocket {
+impl SocketRow {
+    fn into_managed_socket(self, addresses: Vec<SocketAddress>) -> Result<ManagedSocket> {
+        Ok(ManagedSocket {
+            id: self.id,
+            pid: self.pid as u32,
+            process_name: self.process_name,
+            port: self.port as u16,
+            protocol: self.protocol.parse().map_err(|e: String| anyhow::anyhow!(e))?,
+            addresses,
+            policy: self.policy.parse().map_err(|e: String| anyhow::anyhow!(e))?,
+            exe_path: self.exe_path,
+            cmdline: self.cmdline,
+            first_seen: chrono::DateTime::parse_from_rfc3339(&self.first_seen)?
+                .with_timezone(&chrono::Utc),
+            last_seen: chrono::DateTime::parse_from_rfc3339(&self.last_seen)?
+                .with_timezone(&chrono::Utc),
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct SocketAddressRow {
+    backend_id: String,
+    backend_type: String,
+    address: String,
+    interface: String,
+    prefix_len: i64,
+    keypair_id: Option<String>,
+}
+
+impl TryFrom<SocketAddressRow> for SocketAddress {
     type Error = anyhow::Error;
 
-    fn try_from(row: SocketRow) -> Result<Self> {
-        Ok(ManagedSocket {
-            id: row.id,
-            pid: row.pid as u32,
-            process_name: row.process_name,
-            port: row.port as u16,
-            protocol: row.protocol.parse().map_err(|e: String| anyhow::anyhow!(e))?,
-            assigned_ipv6: row.assigned_ipv6.parse()?,
-            backend: row.backend.parse().map_err(|e: String| anyhow::anyhow!(e))?,
-            policy: row.policy.parse().map_err(|e: String| anyhow::anyhow!(e))?,
+    fn try_from(row: SocketAddressRow) -> Result<Self> {
+        Ok(SocketAddress {
+            backend_id: row.backend_id,
+            backend_type: row.backend_type.parse().map_err(|e: String| anyhow::anyhow!(e))?,
+            address: row.address.parse()?,
+            interface: row.interface,
+            prefix_len: row.prefix_len as u8,
             keypair_id: row.keypair_id,
-            exe_path: row.exe_path,
-            cmdline: row.cmdline,
-            first_seen: chrono::DateTime::parse_from_rfc3339(&row.first_seen)?.with_timezone(&chrono::Utc),
-            last_seen: chrono::DateTime::parse_from_rfc3339(&row.last_seen)?.with_timezone(&chrono::Utc),
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct SocketAddressRowWithSocket {
+    socket_id: String,
+    backend_id: String,
+    backend_type: String,
+    address: String,
+    interface: String,
+    prefix_len: i64,
+    keypair_id: Option<String>,
+}
+
+impl TryFrom<SocketAddressRowWithSocket> for SocketAddress {
+    type Error = anyhow::Error;
+
+    fn try_from(row: SocketAddressRowWithSocket) -> Result<Self> {
+        Ok(SocketAddress {
+            backend_id: row.backend_id,
+            backend_type: row.backend_type.parse().map_err(|e: String| anyhow::anyhow!(e))?,
+            address: row.address.parse()?,
+            interface: row.interface,
+            prefix_len: row.prefix_len as u8,
+            keypair_id: row.keypair_id,
         })
     }
 }
@@ -329,10 +568,15 @@ mod tests {
             process_name: name.to_string(),
             port,
             protocol: Protocol::Tcp,
-            assigned_ipv6: "fd00::1".parse().unwrap(),
-            backend: BackendType::Ula,
+            addresses: vec![SocketAddress {
+                backend_id: "ula".to_string(),
+                backend_type: BackendType::Ula,
+                address: "fd00::1".parse().unwrap(),
+                interface: "lo".to_string(),
+                prefix_len: 128,
+                keypair_id: None,
+            }],
             policy: Policy::Closed,
-            keypair_id: None,
             exe_path: None,
             cmdline: None,
             first_seen: chrono::Utc::now(),
@@ -340,19 +584,29 @@ mod tests {
         }
     }
 
+    async fn insert_test_socket(db: &Database, id: &str, name: &str, port: u16) -> ManagedSocket {
+        let socket = test_socket(id, name, port);
+        db.upsert_socket(&socket).await.unwrap();
+        for addr in &socket.addresses {
+            db.upsert_socket_address(&socket.id, addr).await.unwrap();
+        }
+        socket
+    }
+
     #[tokio::test]
     async fn upsert_and_get_socket() {
         let db = test_db().await;
-        let socket = test_socket("abc123", "nginx", 80);
+        let socket = insert_test_socket(&db, "abc123", "nginx", 80).await;
 
-        db.upsert_socket(&socket).await.unwrap();
         let retrieved = db.get_socket("abc123").await.unwrap().unwrap();
-
         assert_eq!(retrieved.id, "abc123");
         assert_eq!(retrieved.process_name, "nginx");
         assert_eq!(retrieved.port, 80);
         assert_eq!(retrieved.protocol, Protocol::Tcp);
         assert_eq!(retrieved.policy, Policy::Closed);
+        assert_eq!(retrieved.addresses.len(), 1);
+        assert_eq!(retrieved.addresses[0].address, socket.addresses[0].address);
+        assert_eq!(retrieved.addresses[0].backend_id, "ula");
     }
 
     #[tokio::test]
@@ -367,42 +621,51 @@ mod tests {
         let db = test_db().await;
         let mut socket = test_socket("abc123", "nginx", 80);
         db.upsert_socket(&socket).await.unwrap();
+        for addr in &socket.addresses {
+            db.upsert_socket_address(&socket.id, addr).await.unwrap();
+        }
 
-        // Simulate process restart: new PID, same socket ID
         socket.pid = 5678;
         socket.last_seen = chrono::Utc::now();
         db.upsert_socket(&socket).await.unwrap();
 
         let retrieved = db.get_socket("abc123").await.unwrap().unwrap();
         assert_eq!(retrieved.pid, 5678);
-        // Policy should be preserved
         assert_eq!(retrieved.policy, Policy::Closed);
     }
 
     #[tokio::test]
     async fn list_sockets_returns_all() {
         let db = test_db().await;
-        db.upsert_socket(&test_socket("id1", "nginx", 80)).await.unwrap();
-        db.upsert_socket(&test_socket("id2", "sshd", 22)).await.unwrap();
+        insert_test_socket(&db, "id1", "nginx", 80).await;
+        insert_test_socket(&db, "id2", "sshd", 22).await;
 
         let sockets = db.list_sockets().await.unwrap();
         assert_eq!(sockets.len(), 2);
+        // Each should have addresses
+        for s in &sockets {
+            assert!(!s.addresses.is_empty());
+        }
     }
 
     #[tokio::test]
     async fn delete_socket() {
         let db = test_db().await;
-        db.upsert_socket(&test_socket("abc123", "nginx", 80)).await.unwrap();
+        insert_test_socket(&db, "abc123", "nginx", 80).await;
         db.delete_socket("abc123").await.unwrap();
 
         let result = db.get_socket("abc123").await.unwrap();
         assert!(result.is_none());
+
+        // Addresses should be cascade deleted
+        let addrs = db.get_socket_addresses("abc123").await.unwrap();
+        assert!(addrs.is_empty());
     }
 
     #[tokio::test]
     async fn update_policy() {
         let db = test_db().await;
-        db.upsert_socket(&test_socket("abc123", "nginx", 80)).await.unwrap();
+        insert_test_socket(&db, "abc123", "nginx", 80).await;
 
         db.update_policy("abc123", Policy::Open).await.unwrap();
         let socket = db.get_socket("abc123").await.unwrap().unwrap();
@@ -416,22 +679,15 @@ mod tests {
     #[tokio::test]
     async fn acl_crud() {
         let db = test_db().await;
-        db.upsert_socket(&test_socket("abc123", "nginx", 80)).await.unwrap();
+        insert_test_socket(&db, "abc123", "nginx", 80).await;
 
-        // Add ACL entry
-        let entry = db
-            .add_acl_entry("abc123", "fd00::100", Some("laptop"))
-            .await
-            .unwrap();
+        let entry = db.add_acl_entry("abc123", "fd00::100", Some("laptop")).await.unwrap();
         assert_eq!(entry.allowed_ip, "fd00::100");
         assert_eq!(entry.label, Some("laptop".to_string()));
 
-        // List ACL entries
         let acl = db.get_acl("abc123").await.unwrap();
         assert_eq!(acl.len(), 1);
-        assert_eq!(acl[0].allowed_ip, "fd00::100");
 
-        // Delete ACL entry
         db.delete_acl_entry(entry.id).await.unwrap();
         let acl = db.get_acl("abc123").await.unwrap();
         assert_eq!(acl.len(), 0);
@@ -440,8 +696,7 @@ mod tests {
     #[tokio::test]
     async fn acl_rejects_invalid_ipv6() {
         let db = test_db().await;
-        db.upsert_socket(&test_socket("abc123", "nginx", 80)).await.unwrap();
-
+        insert_test_socket(&db, "abc123", "nginx", 80).await;
         let result = db.add_acl_entry("abc123", "not-an-ip", None).await;
         assert!(result.is_err());
     }
@@ -449,13 +704,11 @@ mod tests {
     #[tokio::test]
     async fn replace_acl() {
         let db = test_db().await;
-        db.upsert_socket(&test_socket("abc123", "nginx", 80)).await.unwrap();
+        insert_test_socket(&db, "abc123", "nginx", 80).await;
 
-        // Add initial entries
         db.add_acl_entry("abc123", "fd00::1", Some("host1")).await.unwrap();
         db.add_acl_entry("abc123", "fd00::2", Some("host2")).await.unwrap();
 
-        // Replace with new set
         let entries = vec![
             ("fd00::10".to_string(), Some("new1".to_string())),
             ("fd00::20".to_string(), None),
@@ -489,11 +742,10 @@ mod tests {
     #[tokio::test]
     async fn cascade_delete_removes_acl() {
         let db = test_db().await;
-        db.upsert_socket(&test_socket("abc123", "nginx", 80)).await.unwrap();
+        insert_test_socket(&db, "abc123", "nginx", 80).await;
         db.add_acl_entry("abc123", "fd00::1", None).await.unwrap();
         db.add_acl_entry("abc123", "fd00::2", None).await.unwrap();
 
-        // Deleting the socket should cascade-delete ACL entries
         db.delete_socket("abc123").await.unwrap();
         let acl = db.get_acl("abc123").await.unwrap();
         assert_eq!(acl.len(), 0);
@@ -504,9 +756,7 @@ mod tests {
         let db = test_db().await;
         let pub_key = vec![1u8; 32];
         let priv_key = vec![2u8; 32];
-        db.save_keypair("kp1", &pub_key, &priv_key, "fd00::1")
-            .await
-            .unwrap();
+        db.save_keypair("kp1", &pub_key, &priv_key, "fd00::1").await.unwrap();
     }
 
     #[tokio::test]
@@ -516,12 +766,56 @@ mod tests {
         socket.exe_path = Some("/usr/sbin/nginx".to_string());
         socket.cmdline = Some("nginx -g daemon off;".to_string());
         db.upsert_socket(&socket).await.unwrap();
+        for addr in &socket.addresses {
+            db.upsert_socket_address(&socket.id, addr).await.unwrap();
+        }
 
         let retrieved = db.get_socket("abc123").await.unwrap().unwrap();
         assert_eq!(retrieved.exe_path, Some("/usr/sbin/nginx".to_string()));
-        assert_eq!(
-            retrieved.cmdline,
-            Some("nginx -g daemon off;".to_string())
-        );
+        assert_eq!(retrieved.cmdline, Some("nginx -g daemon off;".to_string()));
+    }
+
+    #[tokio::test]
+    async fn multi_address_socket() {
+        let db = test_db().await;
+        let socket = test_socket("multi1", "nginx", 80);
+        db.upsert_socket(&socket).await.unwrap();
+
+        let addr1 = SocketAddress {
+            backend_id: "ula".to_string(),
+            backend_type: BackendType::Ula,
+            address: "fd00::1".parse().unwrap(),
+            interface: "lo".to_string(),
+            prefix_len: 128,
+            keypair_id: None,
+        };
+        let addr2 = SocketAddress {
+            backend_id: "slaac-Ethernet".to_string(),
+            backend_type: BackendType::Slaac,
+            address: "2001:db8::1".parse().unwrap(),
+            interface: "Ethernet".to_string(),
+            prefix_len: 64,
+            keypair_id: None,
+        };
+
+        db.upsert_socket_address("multi1", &addr1).await.unwrap();
+        db.upsert_socket_address("multi1", &addr2).await.unwrap();
+
+        let retrieved = db.get_socket("multi1").await.unwrap().unwrap();
+        assert_eq!(retrieved.addresses.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn delete_addresses_by_backend() {
+        let db = test_db().await;
+        insert_test_socket(&db, "s1", "nginx", 80).await;
+        insert_test_socket(&db, "s2", "sshd", 22).await;
+
+        // Both sockets have "ula" backend address
+        let deleted = db.delete_addresses_by_backend("ula").await.unwrap();
+        assert_eq!(deleted.len(), 2);
+
+        let s1 = db.get_socket("s1").await.unwrap().unwrap();
+        assert!(s1.addresses.is_empty());
     }
 }

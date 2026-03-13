@@ -105,25 +105,40 @@ export default function SocketList({ onSelect }: Props) {
               </tr>
             </thead>
             <tbody>
-              {sockets.map((s) => (
-                <tr key={s.id} className="clickable" onClick={() => onSelect(s.id)}>
-                  <td>
-                    <span style={{ fontWeight: 500 }}>{s.process_name}</span>
-                    <span style={{ color: "var(--text-muted)", fontSize: 12, marginLeft: 6 }}>PID {s.pid}</span>
-                  </td>
-                  <td>
-                    <span className="mono">{s.port}</span>
-                    <span style={{ color: "var(--text-muted)", marginLeft: 2 }}>/{s.protocol}</span>
-                  </td>
-                  <td className="mono">{s.assigned_ipv6}</td>
-                  <td>
-                    <span className={`badge badge-${s.policy}`}>
-                      <span className="badge-dot" />
-                      {s.policy}
-                    </span>
-                  </td>
-                </tr>
-              ))}
+              {sockets.map((s) => {
+                const primary = s.addresses[0];
+                const extraCount = s.addresses.length - 1;
+                return (
+                  <tr key={s.id} className="clickable" onClick={() => onSelect(s.id)}>
+                    <td>
+                      <span style={{ fontWeight: 500 }}>{s.process_name}</span>
+                      <span style={{ color: "var(--text-muted)", fontSize: 12, marginLeft: 6 }}>PID {s.pid}</span>
+                    </td>
+                    <td>
+                      <span className="mono">{s.port}</span>
+                      <span style={{ color: "var(--text-muted)", marginLeft: 2 }}>/{s.protocol}</span>
+                    </td>
+                    <td className="mono">
+                      {primary ? primary.address : "(none)"}
+                      {extraCount > 0 && (
+                        <span
+                          className="badge"
+                          style={{ marginLeft: 6, fontSize: 11, padding: "1px 5px" }}
+                          title={s.addresses.map((a) => `${a.address} [${a.backend_id}]`).join("\n")}
+                        >
+                          +{extraCount} more
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      <span className={`badge badge-${s.policy}`}>
+                        <span className="badge-dot" />
+                        {s.policy}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

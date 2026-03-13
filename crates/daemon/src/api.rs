@@ -11,6 +11,7 @@ use axum::{
 use futures_util::stream::Stream;
 use futures_util::StreamExt;
 use socketguard_core::api_types::*;
+use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
 use std::convert::Infallible;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
@@ -34,6 +35,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/config", get(get_config))
         .route("/api/config", put(update_config))
         .route("/api/backends", get(list_backends))
+        .route("/api/backends", post(add_backend))
+        .route("/api/backends/{id}", delete(remove_backend))
+        .route("/api/interfaces", get(list_interfaces))
         .route("/api/events", get(sse_events))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -91,7 +95,7 @@ async fn sse_events(
                 };
                 Some(Ok(Event::default().event(event_name).data("")))
             }
-            Err(_) => None, // lagged — skip
+            Err(_) => None,
         })
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
@@ -118,6 +122,15 @@ fn not_found(msg: impl Into<String>) -> impl IntoResponse {
 fn internal_error(msg: impl Into<String>) -> impl IntoResponse {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiError {
+            error: msg.into(),
+        }),
+    )
+}
+
+fn conflict(msg: impl Into<String>) -> impl IntoResponse {
+    (
+        StatusCode::CONFLICT,
         Json(ApiError {
             error: msg.into(),
         }),
@@ -154,14 +167,12 @@ async fn update_acl(
     Path(id): Path<String>,
     Json(req): Json<UpdateAclRequest>,
 ) -> impl IntoResponse {
-    // Validate socket exists
     match state.db.get_socket(&id).await {
         Ok(Some(_)) => {}
         Ok(None) => return not_found("socket not found").into_response(),
         Err(e) => return internal_error(e.to_string()).into_response(),
     }
 
-    // Validate all IPs before making any changes
     for entry in &req.entries {
         if entry.allowed_ip.parse::<Ipv6Addr>().is_err() {
             return bad_request(format!("invalid IPv6 address: '{}'", entry.allowed_ip))
@@ -193,12 +204,10 @@ async fn allow_ip(
     Path(id): Path<String>,
     Json(req): Json<AllowIpRequest>,
 ) -> impl IntoResponse {
-    // Validate IPv6 address
     if req.allowed_ip.parse::<Ipv6Addr>().is_err() {
         return bad_request(format!("invalid IPv6 address: '{}'", req.allowed_ip)).into_response();
     }
 
-    // Validate socket exists
     match state.db.get_socket(&id).await {
         Ok(Some(_)) => {}
         Ok(None) => return not_found("socket not found").into_response(),
@@ -225,7 +234,6 @@ async fn remove_acl_entry(
     State(state): State<Arc<AppState>>,
     Path((id, entry_id)): Path<(String, i64)>,
 ) -> impl IntoResponse {
-    // Validate socket exists
     match state.db.get_socket(&id).await {
         Ok(Some(_)) => {}
         Ok(None) => return not_found("socket not found").into_response(),
@@ -249,7 +257,6 @@ async fn update_policy(
     Path(id): Path<String>,
     Json(req): Json<UpdatePolicyRequest>,
 ) -> impl IntoResponse {
-    // Validate socket exists
     match state.db.get_socket(&id).await {
         Ok(Some(_)) => {}
         Ok(None) => return not_found("socket not found").into_response(),
@@ -274,7 +281,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(ConfigResponse {
         listen_addr: config.listen_addr.clone(),
         listen_port: config.listen_port,
-        backend: config.backend.clone(),
+        backends: config.backends.clone(),
         poll_interval_secs: config.poll_interval_secs,
     })
 }
@@ -283,21 +290,20 @@ async fn update_config(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateConfigRequest>,
 ) -> impl IntoResponse {
-    // Validate config values
     if let Some(interval) = req.poll_interval_secs {
         if interval == 0 || interval > 3600 {
             return bad_request("poll_interval_secs must be between 1 and 3600").into_response();
         }
     }
-    if let Some(ref backend) = req.backend {
-        if backend.interface().is_empty() {
-            return bad_request("interface must not be empty").into_response();
+    if let Some(ref backends) = req.backends {
+        if let Err(e) = DaemonConfig::validate_backends(backends) {
+            return bad_request(e).into_response();
         }
     }
 
     let mut config = state.config.write().await;
-    if let Some(backend) = req.backend {
-        config.backend = backend;
+    if let Some(backends) = req.backends {
+        config.backends = backends;
     }
     if let Some(interval) = req.poll_interval_secs {
         config.poll_interval_secs = interval;
@@ -306,29 +312,117 @@ async fn update_config(
     StatusCode::OK.into_response()
 }
 
-async fn list_backends() -> impl IntoResponse {
+async fn list_backends(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let config = state.config.read().await;
     Json(BackendsResponse {
-        backends: vec![
+        available_types: vec![
             BackendInfo {
                 name: socketguard_core::BackendType::Ula,
                 description: "Random ULA addresses (fd00::/8) - local only, no external dependencies".to_string(),
                 available: true,
+                singleton: true,
             },
             BackendInfo {
                 name: socketguard_core::BackendType::Yggdrasil,
                 description: "Yggdrasil-derived addresses (200::/7) - routable on Yggdrasil overlay".to_string(),
                 available: true,
+                singleton: true,
             },
             BackendInfo {
                 name: socketguard_core::BackendType::Slaac,
                 description: "SLAAC addresses from existing /64 prefix - routable on LAN".to_string(),
                 available: true,
+                singleton: false,
             },
             BackendInfo {
                 name: socketguard_core::BackendType::Dhcpv6,
                 description: "DHCPv6 addresses from a DHCPv6 server - server-managed, routable".to_string(),
                 available: true,
+                singleton: false,
             },
         ],
+        active_instances: config.backends.clone(),
     })
+}
+
+async fn add_backend(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddBackendRequest>,
+) -> impl IntoResponse {
+    let id = req.id.unwrap_or_else(|| req.backend.default_id());
+
+    if id.is_empty() {
+        return bad_request("backend instance ID must not be empty").into_response();
+    }
+    if req.backend.interface().is_empty() {
+        return bad_request("interface must not be empty").into_response();
+    }
+
+    let inst = BackendInstanceConfig {
+        id: id.clone(),
+        backend: req.backend,
+    };
+
+    // Check constraints
+    {
+        let config = state.config.read().await;
+        let mut proposed = config.backends.clone();
+        proposed.push(inst.clone());
+        if let Err(e) = DaemonConfig::validate_backends(&proposed) {
+            return conflict(e).into_response();
+        }
+    }
+
+    // Add to engine (allocates addresses for all sockets)
+    {
+        let mut engine = state.engine.write().await;
+        engine.add_backend_instance(&state, &inst).await;
+    }
+
+    // Update config
+    {
+        let mut config = state.config.write().await;
+        config.backends.push(inst.clone());
+    }
+
+    let _ = state.events.send(DaemonEvent::ConfigChanged);
+    let _ = state.events.send(DaemonEvent::SocketsChanged);
+    (StatusCode::CREATED, Json(inst)).into_response()
+}
+
+async fn remove_backend(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // Check that the backend exists
+    {
+        let config = state.config.read().await;
+        if !config.backends.iter().any(|b| b.id == id) {
+            return not_found(format!("backend instance '{}' not found", id)).into_response();
+        }
+    }
+
+    // Remove from engine (cleans up addresses)
+    {
+        let mut engine = state.engine.write().await;
+        engine.remove_backend_instance(&state, &id).await;
+    }
+
+    // Update config
+    {
+        let mut config = state.config.write().await;
+        config.backends.retain(|b| b.id != id);
+    }
+
+    let _ = state.events.send(DaemonEvent::ConfigChanged);
+    let _ = state.events.send(DaemonEvent::SocketsChanged);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn list_interfaces() -> impl IntoResponse {
+    let network = crate::network::create_network_interface();
+    match network.list_interfaces() {
+        Ok(interfaces) => Json(InterfacesResponse { interfaces }).into_response(),
+        Err(e) => internal_error(e.to_string()).into_response(),
+    }
 }

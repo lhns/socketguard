@@ -37,4 +37,23 @@ impl NetworkInterface for MacosNetworkInterface {
 
         Ok(())
     }
+
+    fn list_interfaces(&self) -> Result<Vec<String>> {
+        let output = Command::new("ifconfig")
+            .args(["-l"])
+            .output()
+            .context("failed to run ifconfig -l")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "ifconfig -l failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut names: Vec<String> = stdout.split_whitespace().map(|s| s.to_string()).collect();
+        names.sort();
+        Ok(names)
+    }
 }

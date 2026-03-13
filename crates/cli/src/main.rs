@@ -30,7 +30,11 @@ struct Cli {
 enum Commands {
     /// List all detected sockets
     #[command(alias = "ls")]
-    List,
+    List {
+        /// Show all addresses (not just primary)
+        #[arg(long, short)]
+        verbose: bool,
+    },
 
     /// Show details for a socket
     Show {
@@ -58,13 +62,44 @@ enum Commands {
     /// Show daemon configuration
     Config,
 
-    /// List available backends
-    Backends,
+    /// Manage backend instances
+    Backends {
+        #[command(subcommand)]
+        command: Option<BackendsCommands>,
+    },
 
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
         shell: Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackendsCommands {
+    /// List active backend instances
+    List,
+
+    /// Add a new backend instance
+    Add {
+        /// Backend type: ula, yggdrasil, slaac, dhcpv6
+        #[arg(long, short = 't')]
+        backend_type: String,
+        /// Network interface
+        #[arg(long, short)]
+        interface: String,
+        /// Custom instance ID (auto-generated if omitted)
+        #[arg(long)]
+        id: Option<String>,
+        /// IPv6 prefix (SLAAC only)
+        #[arg(long)]
+        prefix: Option<String>,
+    },
+
+    /// Remove a backend instance
+    Remove {
+        /// Backend instance ID
+        id: String,
     },
 }
 
@@ -124,6 +159,16 @@ struct AclRow {
     label: String,
 }
 
+#[derive(Tabled)]
+struct BackendInstanceRow {
+    #[tabled(rename = "ID")]
+    id: String,
+    #[tabled(rename = "Type")]
+    backend_type: String,
+    #[tabled(rename = "Interface")]
+    interface: String,
+}
+
 fn read_token_file() -> Result<String> {
     let path = socketguard_core::api_token_path();
     std::fs::read_to_string(&path)
@@ -155,7 +200,7 @@ async fn main() -> Result<()> {
     let json_mode = cli.json;
 
     match cli.command {
-        Commands::List => {
+        Commands::List { verbose } => {
             let resp: SocketListResponse = client
                 .get(format!("{base}/api/sockets"))
                 .send()
@@ -177,14 +222,38 @@ async fn main() -> Result<()> {
             let rows: Vec<SocketRow> = resp
                 .sockets
                 .into_iter()
-                .map(|s| SocketRow {
-                    id: s.id[..8].to_string(),
-                    process: format!("{} ({})", s.process_name, s.pid),
-                    port: s.port,
-                    protocol: s.protocol.to_string(),
-                    ipv6: s.assigned_ipv6.to_string(),
-                    policy: s.policy.to_string(),
-                    backend: s.backend.to_string(),
+                .map(|s| {
+                    let (ipv6, backend) = if verbose && s.addresses.len() > 1 {
+                        let addrs: Vec<String> = s.addresses.iter()
+                            .map(|a| a.address.to_string())
+                            .collect();
+                        let backends: Vec<String> = s.addresses.iter()
+                            .map(|a| a.backend_id.clone())
+                            .collect();
+                        (addrs.join(", "), backends.join(", "))
+                    } else if let Some(primary) = s.primary_address() {
+                        let extra = if s.addresses.len() > 1 {
+                            format!(" +{}", s.addresses.len() - 1)
+                        } else {
+                            String::new()
+                        };
+                        (
+                            format!("{}{}", primary.address, extra),
+                            primary.backend_id.clone(),
+                        )
+                    } else {
+                        ("(none)".to_string(), "(none)".to_string())
+                    };
+
+                    SocketRow {
+                        id: s.id[..8].to_string(),
+                        process: format!("{} ({})", s.process_name, s.pid),
+                        port: s.port,
+                        protocol: s.protocol.to_string(),
+                        ipv6,
+                        policy: s.policy.to_string(),
+                        backend,
+                    }
                 })
                 .collect();
 
@@ -219,11 +288,26 @@ async fn main() -> Result<()> {
                 println!("  Cmdline:  {cmd}");
             }
             println!("  Port:     {}/{}", s.port, s.protocol);
-            println!("  IPv6:     {}", s.assigned_ipv6);
-            println!("  Backend:  {}", s.backend);
             println!("  Policy:   {}", s.policy);
             println!("  First seen: {}", s.first_seen);
             println!("  Last seen:  {}", s.last_seen);
+
+            // Show addresses grouped by backend
+            if s.addresses.is_empty() {
+                println!("\n  Addresses: (none)");
+            } else {
+                println!("\n  Addresses:");
+                for addr in &s.addresses {
+                    println!(
+                        "    {} [{}] on {} (/{}){}",
+                        addr.address,
+                        addr.backend_id,
+                        addr.interface,
+                        addr.prefix_len,
+                        addr.keypair_id.as_ref().map(|k| format!(" keypair:{}", k)).unwrap_or_default()
+                    );
+                }
+            }
 
             if resp.acl.is_empty() {
                 println!("\n  ACL: (empty)");
@@ -248,7 +332,6 @@ async fn main() -> Result<()> {
                 ip,
                 label,
             } => {
-                // Validate IP client-side before sending
                 if ip.parse::<Ipv6Addr>().is_err() {
                     bail!("'{ip}' is not a valid IPv6 address");
                 }
@@ -394,36 +477,119 @@ async fn main() -> Result<()> {
             if json_mode {
                 println!("{}", serde_json::to_string_pretty(&resp)?);
             } else {
-                use socketguard_core::config::BackendConfig;
                 println!("Daemon Configuration:");
                 println!("  Listen:    {}:{}", resp.listen_addr, resp.listen_port);
-                println!("  Backend:   {}", resp.backend.backend_type());
-                println!("  Interface: {}", resp.backend.interface());
-                match &resp.backend {
-                    BackendConfig::Slaac { prefix, .. } => {
-                        println!("  Prefix:    {}", prefix.as_deref().unwrap_or("auto"));
-                    }
-                    _ => {}
-                }
                 println!("  Poll interval: {}s", resp.poll_interval_secs);
+                println!("  Backends:  {} active", resp.backends.len());
+                for inst in &resp.backends {
+                    println!(
+                        "    {} [{}] on {}",
+                        inst.id,
+                        inst.backend.backend_type(),
+                        inst.backend.interface()
+                    );
+                }
             }
         }
 
-        Commands::Backends => {
-            let resp: BackendsResponse = client
-                .get(format!("{base}/api/backends"))
-                .send()
-                .await
-                .context("failed to connect to daemon")?
-                .json()
-                .await?;
+        Commands::Backends { command } => {
+            match command {
+                None | Some(BackendsCommands::List) => {
+                    let resp: BackendsResponse = client
+                        .get(format!("{base}/api/backends"))
+                        .send()
+                        .await
+                        .context("failed to connect to daemon")?
+                        .json()
+                        .await?;
 
-            if json_mode {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
-            } else {
-                for b in resp.backends {
-                    let status = if b.available { "available" } else { "unavailable" };
-                    println!("  {} - {} [{}]", b.name, b.description, status);
+                    if json_mode {
+                        println!("{}", serde_json::to_string_pretty(&resp)?);
+                        return Ok(());
+                    }
+
+                    println!("Active backend instances:");
+                    if resp.active_instances.is_empty() {
+                        println!("  (none)");
+                    } else {
+                        let rows: Vec<BackendInstanceRow> = resp
+                            .active_instances
+                            .into_iter()
+                            .map(|inst| BackendInstanceRow {
+                                id: inst.id,
+                                backend_type: inst.backend.backend_type().to_string(),
+                                interface: inst.backend.interface().to_string(),
+                            })
+                            .collect();
+                        println!("{}", Table::new(rows));
+                    }
+
+                    println!("\nAvailable backend types:");
+                    for b in resp.available_types {
+                        let status = if b.available { "available" } else { "unavailable" };
+                        let kind = if b.singleton { "singleton" } else { "multi-instance" };
+                        println!("  {} - {} [{}, {}]", b.name, b.description, status, kind);
+                    }
+                }
+
+                Some(BackendsCommands::Add {
+                    backend_type,
+                    interface,
+                    id,
+                    prefix,
+                }) => {
+                    use socketguard_core::config::BackendConfig;
+                    let backend = match backend_type.as_str() {
+                        "ula" => BackendConfig::Ula { interface },
+                        "yggdrasil" => BackendConfig::Yggdrasil { interface },
+                        "slaac" => BackendConfig::Slaac { interface, prefix },
+                        "dhcpv6" => BackendConfig::Dhcpv6 { interface },
+                        other => bail!("unknown backend type: {other}"),
+                    };
+
+                    let req = AddBackendRequest { id, backend };
+                    let resp = client
+                        .post(format!("{base}/api/backends"))
+                        .json(&req)
+                        .send()
+                        .await
+                        .context("failed to connect to daemon")?;
+
+                    if resp.status().is_success() {
+                        if json_mode {
+                            let body: serde_json::Value = resp.json().await?;
+                            println!("{}", serde_json::to_string_pretty(&body)?);
+                        } else {
+                            let inst: socketguard_core::config::BackendInstanceConfig =
+                                resp.json().await?;
+                            println!(
+                                "Added backend '{}' ({} on {})",
+                                inst.id,
+                                inst.backend.backend_type(),
+                                inst.backend.interface()
+                            );
+                        }
+                    } else {
+                        let err: ApiError = resp.json().await?;
+                        bail!("{}", err.error);
+                    }
+                }
+
+                Some(BackendsCommands::Remove { id }) => {
+                    let resp = client
+                        .delete(format!("{base}/api/backends/{id}"))
+                        .send()
+                        .await
+                        .context("failed to connect to daemon")?;
+
+                    if resp.status().is_success() {
+                        if !json_mode {
+                            println!("Removed backend '{id}'");
+                        }
+                    } else {
+                        let err: ApiError = resp.json().await?;
+                        bail!("{}", err.error);
+                    }
                 }
             }
         }

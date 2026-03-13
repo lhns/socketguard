@@ -2,34 +2,52 @@ use crate::backend::{self, Ipv6Backend};
 use crate::firewall::{self, Firewall};
 use crate::monitor::{self, SocketMonitor};
 use crate::AppState;
-use socketguard_core::config::{BackendConfig, DaemonConfig};
-use socketguard_core::{socket_id, ManagedSocket, Policy};
+use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
+use socketguard_core::{socket_id, ManagedSocket, Policy, SocketAddress};
+use std::collections::HashMap;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 
+struct ActiveBackend {
+    config: BackendInstanceConfig,
+    backend: Box<dyn Ipv6Backend>,
+}
+
 pub struct Engine {
     monitor: Box<dyn SocketMonitor>,
-    backend: Box<dyn Ipv6Backend>,
+    backends: HashMap<String, ActiveBackend>,
     firewall: Box<dyn Firewall>,
-    /// Track which backend config the engine was built with
-    current_backend_config: BackendConfig,
+    /// Track which backend configs the engine was built with (by ID)
+    current_backend_ids: Vec<String>,
 }
 
 impl Engine {
     pub fn new(config: &DaemonConfig) -> anyhow::Result<Self> {
+        let mut backends = HashMap::new();
+        for inst in &config.backends {
+            let b = backend::create_backend(&inst.backend)?;
+            backends.insert(
+                inst.id.clone(),
+                ActiveBackend {
+                    config: inst.clone(),
+                    backend: b,
+                },
+            );
+        }
+        let current_backend_ids: Vec<String> = config.backends.iter().map(|b| b.id.clone()).collect();
+
         Ok(Self {
             monitor: monitor::create_monitor(),
-            backend: backend::create_backend(&config.backend)?,
+            backends,
             firewall: firewall::create_firewall(),
-            current_backend_config: config.backend.clone(),
+            current_backend_ids,
         })
     }
 
     /// Clean up all SocketGuard-managed firewall rules.
-    /// Called on startup (to clear stale rules from a previous crash) and on shutdown.
     pub fn cleanup_all_firewall_rules(&self) {
         info!("Cleaning up all SocketGuard firewall rules");
         if let Err(e) = self.firewall.cleanup_all_rules() {
@@ -38,12 +56,9 @@ impl Engine {
     }
 
     /// Startup reconciliation: clean stale OS state, then re-apply desired state from DB.
-    /// Network and firewall operations run in parallel via spawn_blocking.
     pub async fn startup_reconcile(&self, state: &AppState) {
-        // 1. Clean all firewall rules (they may be stale from a crash)
         self.cleanup_all_firewall_rules();
 
-        // 2. Re-apply firewall rules for all sockets in the DB
         let sockets = match state.db.list_sockets().await {
             Ok(s) => s,
             Err(e) => {
@@ -52,11 +67,7 @@ impl Engine {
             }
         };
 
-        let config = state.config.read().await;
-        let iface = config.backend.interface().to_string();
-        drop(config);
-
-        // Pre-fetch ACL data for closed sockets (async DB calls)
+        // Pre-fetch ACL data for closed sockets
         let mut socket_acls: Vec<(ManagedSocket, Vec<Ipv6Addr>)> = Vec::new();
         for socket in &sockets {
             let allowed = if socket.policy == Policy::Closed {
@@ -73,24 +84,23 @@ impl Engine {
             socket_acls.push((socket.clone(), allowed));
         }
 
-        // Run address + firewall setup in parallel via spawn_blocking
+        // Run address + firewall setup in parallel
         let mut join_set = JoinSet::new();
         for (socket, allowed) in socket_acls {
-            let iface = iface.clone();
             join_set.spawn_blocking(move || {
                 let network = crate::network::create_network_interface();
                 let firewall = crate::firewall::create_firewall();
 
-                if let Err(e) = network.add_address(&iface, socket.assigned_ipv6, 128) {
-                    warn!(
-                        "Failed to re-add IPv6 {} for socket {}: {e}",
-                        socket.assigned_ipv6, socket.id
-                    );
+                for addr in &socket.addresses {
+                    if let Err(e) = network.add_address(&addr.interface, addr.address, addr.prefix_len) {
+                        warn!(
+                            "Failed to re-add IPv6 {} for socket {}: {e}",
+                            addr.address, socket.id
+                        );
+                    }
                 }
 
-                if let Err(e) =
-                    apply_firewall_sync(&*firewall, &socket, &allowed)
-                {
+                if let Err(e) = apply_firewall_sync(&*firewall, &socket, &allowed) {
                     warn!("Failed to re-apply firewall for socket {}: {e}", socket.id);
                 }
             });
@@ -122,21 +132,17 @@ impl Engine {
             }
         };
 
-        let config = state.config.read().await;
-        let iface = config.backend.interface().to_string();
-        drop(config);
-
-        // Remove addresses in parallel
         let mut join_set = JoinSet::new();
         for socket in sockets {
-            let iface = iface.clone();
             join_set.spawn_blocking(move || {
                 let network = crate::network::create_network_interface();
-                if let Err(e) = network.remove_address(&iface, socket.assigned_ipv6) {
-                    warn!(
-                        "Failed to remove IPv6 {} during shutdown: {e}",
-                        socket.assigned_ipv6
-                    );
+                for addr in &socket.addresses {
+                    if let Err(e) = network.remove_address(&addr.interface, addr.address) {
+                        warn!(
+                            "Failed to remove IPv6 {} during shutdown: {e}",
+                            addr.address
+                        );
+                    }
                 }
             });
         }
@@ -150,53 +156,180 @@ impl Engine {
         info!("Shutdown cleanup complete");
     }
 
-    /// Check if config has changed and rebuild subsystems if needed.
-    /// Returns the old interface name if it changed (addresses need migration).
-    fn check_config_change(&mut self, config: &DaemonConfig) -> Option<String> {
-        if config.backend == self.current_backend_config {
-            return None;
+    /// Check if backends config has changed and apply additions/removals.
+    /// Returns true if changes were detected.
+    async fn check_config_change(&mut self, config: &DaemonConfig, state: &AppState) -> bool {
+        let new_ids: Vec<String> = config.backends.iter().map(|b| b.id.clone()).collect();
+        if new_ids == self.current_backend_ids {
+            return false;
         }
 
-        let old_interface = self.current_backend_config.interface().to_string();
-        let new_interface = config.backend.interface().to_string();
+        let old_ids: std::collections::HashSet<String> =
+            self.current_backend_ids.iter().cloned().collect();
+        let new_id_set: std::collections::HashSet<String> =
+            new_ids.iter().cloned().collect();
 
-        info!(
-            "Backend config changed from {:?} to {:?}",
-            self.current_backend_config, config.backend
+        // Removed backends: clean up addresses
+        let removed: Vec<String> = old_ids.difference(&new_id_set).cloned().collect();
+        for old_id in &removed {
+            info!("Backend '{}' removed from config", old_id);
+            self.remove_backend_instance(state, old_id).await;
+        }
+
+        // Added backends: allocate addresses for all existing sockets
+        let added: Vec<String> = new_id_set.difference(&old_ids).cloned().collect();
+        for new_id in &added {
+            if let Some(inst) = config.backends.iter().find(|b| b.id == *new_id) {
+                info!("Backend '{}' added to config", new_id);
+                self.add_backend_instance(state, inst).await;
+            }
+        }
+
+        self.current_backend_ids = new_ids;
+        true
+    }
+
+    /// Add a new backend instance and allocate addresses for all existing sockets.
+    pub async fn add_backend_instance(&mut self, state: &AppState, inst: &BackendInstanceConfig) {
+        let b = match backend::create_backend(&inst.backend) {
+            Ok(b) => b,
+            Err(e) => {
+                error!("Failed to create backend '{}': {e}", inst.id);
+                return;
+            }
+        };
+
+        let sockets = match state.db.list_sockets().await {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to list sockets for new backend: {e}");
+                return;
+            }
+        };
+
+        let iface = inst.backend.interface().to_string();
+        let backend_id = inst.id.clone();
+        let backend_type = inst.backend.backend_type();
+
+        let mut new_addresses: Vec<(String, SocketAddress, u16, socketguard_core::Protocol)> = Vec::new();
+
+        for socket in &sockets {
+            // Skip if socket already has an address from this backend
+            if socket.addresses.iter().any(|a| a.backend_id == backend_id) {
+                continue;
+            }
+
+            match b.allocate_address() {
+                Ok(alloc) => {
+                    let keypair_id = if let Some(ref kp) = alloc.keypair {
+                        if let Err(e) = state.db.save_keypair(
+                            &kp.id,
+                            &kp.public_key,
+                            &kp.private_key,
+                            &kp.derived_ipv6.to_string(),
+                        ).await {
+                            error!("Failed to save keypair: {e}");
+                        }
+                        Some(kp.id.clone())
+                    } else {
+                        None
+                    };
+
+                    let addr = SocketAddress {
+                        backend_id: backend_id.clone(),
+                        backend_type,
+                        address: alloc.address,
+                        interface: iface.clone(),
+                        prefix_len: alloc.prefix_len,
+                        keypair_id,
+                    };
+
+                    if let Err(e) = state.db.upsert_socket_address(&socket.id, &addr).await {
+                        error!("Failed to save socket address: {e}");
+                        continue;
+                    }
+
+                    new_addresses.push((socket.id.clone(), addr, socket.port, socket.protocol));
+                }
+                Err(e) => {
+                    error!("Failed to allocate address from '{}': {e}", backend_id);
+                }
+            }
+        }
+
+        // Add addresses to interfaces
+        let mut join_set = JoinSet::new();
+        for (_sid, addr, _port, _proto) in &new_addresses {
+            let iface = addr.interface.clone();
+            let ip = addr.address;
+            let prefix = addr.prefix_len;
+            join_set.spawn_blocking(move || {
+                let network = crate::network::create_network_interface();
+                if let Err(e) = network.add_address(&iface, ip, prefix) {
+                    warn!("Failed to add address {} to {}: {e}", ip, iface);
+                }
+            });
+        }
+        while let Some(result) = join_set.join_next().await {
+            if let Err(e) = result {
+                warn!("Add address task failed: {e}");
+            }
+        }
+
+        self.backends.insert(
+            inst.id.clone(),
+            ActiveBackend {
+                config: inst.clone(),
+                backend: b,
+            },
         );
 
-        match backend::create_backend(&config.backend) {
-            Ok(new_backend) => {
-                self.backend = new_backend;
-                self.current_backend_config = config.backend.clone();
-            }
+        info!(
+            "Backend '{}' initialized, allocated {} addresses",
+            inst.id,
+            new_addresses.len()
+        );
+    }
+
+    /// Remove a backend instance: clean up all its addresses from interfaces, firewall, and DB.
+    pub async fn remove_backend_instance(&mut self, state: &AppState, backend_id: &str) {
+        // Remove from DB and get the addresses to clean up
+        let deleted = match state.db.delete_addresses_by_backend(backend_id).await {
+            Ok(d) => d,
             Err(e) => {
-                error!("Failed to create new backend: {e}, keeping current");
-                return None;
+                error!("Failed to delete addresses for backend '{}': {e}", backend_id);
+                Vec::new()
+            }
+        };
+
+        // Remove addresses from interfaces
+        let mut join_set = JoinSet::new();
+        for (_socket_id, addr) in deleted {
+            join_set.spawn_blocking(move || {
+                let network = crate::network::create_network_interface();
+                if let Err(e) = network.remove_address(&addr.interface, addr.address) {
+                    warn!("Failed to remove address {} from {}: {e}", addr.address, addr.interface);
+                }
+            });
+        }
+        while let Some(result) = join_set.join_next().await {
+            if let Err(e) = result {
+                warn!("Remove address task failed: {e}");
             }
         }
 
-        if old_interface != new_interface {
-            Some(old_interface)
-        } else {
-            None
-        }
+        self.backends.remove(backend_id);
+        info!("Backend '{}' removed", backend_id);
     }
 
     /// Reconcile: detect sockets, assign IPs, apply firewall rules.
-    /// Network/firewall operations are parallelized via spawn_blocking.
     pub async fn reconcile(&mut self, state: &AppState) -> anyhow::Result<()> {
-        // Check for config changes and migrate if needed
+        // Check for config changes
         let config = state.config.read().await;
         let config_snapshot = config.clone();
         drop(config);
 
-        if let Some(old_iface) = self.check_config_change(&config_snapshot) {
-            self.migrate_addresses(state, &old_iface, config_snapshot.backend.interface())
-                .await;
-        }
-
-        let iface = config_snapshot.backend.interface().to_string();
+        self.check_config_change(&config_snapshot, state).await;
 
         // 1. Detect current listening sockets
         let current_sockets = match self.monitor.list_listening_sockets() {
@@ -212,15 +345,13 @@ impl Engine {
 
         let now = chrono::Utc::now();
 
-        // 2. Categorize sockets: existing (update) vs new (provision)
-        //    Collect data first, then run OS operations in parallel.
+        // 2. Categorize sockets
         struct ExistingUpdate {
             socket: ManagedSocket,
             allowed: Vec<Ipv6Addr>,
         }
         struct NewProvision {
             socket: ManagedSocket,
-            prefix_len: u8,
         }
 
         let mut existing_updates: Vec<ExistingUpdate> = Vec::new();
@@ -230,7 +361,7 @@ impl Engine {
             let sid = socket_id(&ls.process_name, ls.port, ls.protocol);
 
             if let Ok(Some(mut existing)) = state.db.get_socket(&sid).await {
-                // Update metadata (PID may have changed after restart)
+                // Update metadata
                 existing.pid = ls.pid;
                 existing.process_name = ls.process_name.clone();
                 existing.exe_path = ls.exe_path.clone();
@@ -240,9 +371,11 @@ impl Engine {
                     error!("Failed to update socket {sid}: {e}");
                 }
 
-                // Pre-fetch ACL for closed sockets (ACL-based access)
                 let allowed = if existing.policy == Policy::Closed {
-                    state.db.get_acl(&existing.id).await
+                    state
+                        .db
+                        .get_acl(&existing.id)
+                        .await
                         .unwrap_or_default()
                         .iter()
                         .filter_map(|e| e.allowed_ip.parse().ok())
@@ -251,66 +384,89 @@ impl Engine {
                     Vec::new()
                 };
 
-                existing_updates.push(ExistingUpdate { socket: existing, allowed });
+                existing_updates.push(ExistingUpdate {
+                    socket: existing,
+                    allowed,
+                });
                 continue;
             }
 
-            // New socket - allocate IPv6
+            // New socket — allocate IPv6 from all active backends
             info!(
                 "New socket detected: {}:{} (PID {} - {})",
                 ls.protocol, ls.port, ls.pid, ls.process_name
             );
 
-            match self.backend.allocate_address() {
-                Ok(alloc) => {
-                    let keypair_id = if let Some(ref kp) = alloc.keypair {
-                        if let Err(e) = state
-                            .db
-                            .save_keypair(
-                                &kp.id,
-                                &kp.public_key,
-                                &kp.private_key,
-                                &kp.derived_ipv6.to_string(),
-                            )
-                            .await
-                        {
-                            error!("Failed to save keypair: {e}");
-                        }
-                        Some(kp.id.clone())
-                    } else {
-                        None
-                    };
+            let mut addresses = Vec::new();
+            for (backend_id, active) in &self.backends {
+                match active.backend.allocate_address() {
+                    Ok(alloc) => {
+                        let keypair_id = if let Some(ref kp) = alloc.keypair {
+                            if let Err(e) = state
+                                .db
+                                .save_keypair(
+                                    &kp.id,
+                                    &kp.public_key,
+                                    &kp.private_key,
+                                    &kp.derived_ipv6.to_string(),
+                                )
+                                .await
+                            {
+                                error!("Failed to save keypair: {e}");
+                            }
+                            Some(kp.id.clone())
+                        } else {
+                            None
+                        };
 
-                    let managed = ManagedSocket {
-                        id: sid.clone(),
-                        pid: ls.pid,
-                        process_name: ls.process_name.clone(),
-                        port: ls.port,
-                        protocol: ls.protocol,
-                        assigned_ipv6: alloc.address,
-                        backend: alloc.backend,
-                        policy: Policy::Closed,
-                        keypair_id,
-                        exe_path: ls.exe_path.clone(),
-                        cmdline: ls.cmdline.clone(),
-                        first_seen: now,
-                        last_seen: now,
-                    };
-
-                    if let Err(e) = state.db.upsert_socket(&managed).await {
-                        error!("Failed to save socket: {e}");
-                        continue;
+                        let addr = SocketAddress {
+                            backend_id: backend_id.clone(),
+                            backend_type: alloc.backend,
+                            address: alloc.address,
+                            interface: active.config.backend.interface().to_string(),
+                            prefix_len: alloc.prefix_len,
+                            keypair_id,
+                        };
+                        addresses.push(addr);
                     }
-
-                    new_provisions.push(NewProvision {
-                        socket: managed,
-                        prefix_len: alloc.prefix_len,
-                    });
-                }
-                Err(e) => {
-                    error!("Failed to allocate IPv6: {e}");
+                    Err(e) => {
+                        error!("Failed to allocate IPv6 from backend '{}': {e}", backend_id);
+                    }
                 }
             }
+
+            if addresses.is_empty() && !self.backends.is_empty() {
+                error!("Failed to allocate any addresses for socket {sid}");
+                continue;
+            }
+
+            let managed = ManagedSocket {
+                id: sid.clone(),
+                pid: ls.pid,
+                process_name: ls.process_name.clone(),
+                port: ls.port,
+                protocol: ls.protocol,
+                addresses: addresses.clone(),
+                policy: Policy::Closed,
+                exe_path: ls.exe_path.clone(),
+                cmdline: ls.cmdline.clone(),
+                first_seen: now,
+                last_seen: now,
+            };
+
+            if let Err(e) = state.db.upsert_socket(&managed).await {
+                error!("Failed to save socket: {e}");
+                continue;
+            }
+
+            // Save each address to DB
+            for addr in &addresses {
+                if let Err(e) = state.db.upsert_socket_address(&sid, addr).await {
+                    error!("Failed to save socket address: {e}");
+                }
+            }
+
+            new_provisions.push(NewProvision { socket: managed });
         }
 
         let had_new_sockets = !new_provisions.is_empty();
@@ -328,25 +484,33 @@ impl Engine {
         }
 
         for prov in new_provisions {
-            let iface = iface.clone();
-            let addr = prov.socket.assigned_ipv6;
-            let port = prov.socket.port;
-            let proto = prov.socket.protocol;
-            let name = prov.socket.process_name.clone();
             join_set.spawn_blocking(move || {
                 let network = crate::network::create_network_interface();
                 let firewall = crate::firewall::create_firewall();
 
-                if let Err(e) = network.add_address(&iface, addr, prov.prefix_len) {
-                    error!("Failed to add IPv6 {} to {}: {e}", addr, iface);
-                    return;
-                }
+                for addr in &prov.socket.addresses {
+                    if let Err(e) = network.add_address(&addr.interface, addr.address, addr.prefix_len) {
+                        error!(
+                            "Failed to add IPv6 {} to {}: {e}",
+                            addr.address, addr.interface
+                        );
+                        continue;
+                    }
 
-                if let Err(e) = firewall.block_all(addr, port, proto) {
-                    warn!("Failed to apply firewall rule: {e}");
-                }
+                    if let Err(e) = firewall.block_all(addr.address, prov.socket.port, prov.socket.protocol)
+                    {
+                        warn!("Failed to apply firewall rule: {e}");
+                    }
 
-                info!("Assigned {} to {}:{} ({})", addr, name, port, proto);
+                    info!(
+                        "Assigned {} ({}) to {}:{} ({})",
+                        addr.address,
+                        addr.backend_id,
+                        prov.socket.process_name,
+                        prov.socket.port,
+                        prov.socket.protocol
+                    );
+                }
             });
         }
 
@@ -356,7 +520,7 @@ impl Engine {
             }
         }
 
-        // 3. Clean up stale sockets (not seen for 3 poll cycles)
+        // 3. Clean up stale sockets
         let stale_threshold =
             now - chrono::Duration::seconds(config_snapshot.poll_interval_secs as i64 * 3);
 
@@ -369,16 +533,18 @@ impl Engine {
                     "Cleaning up stale socket: {}:{} ({})",
                     s.process_name, s.port, s.id
                 );
-                let iface = iface.clone();
                 let sid = s.id.clone();
                 stale_join_set.spawn_blocking(move || {
                     let firewall = crate::firewall::create_firewall();
                     let network = crate::network::create_network_interface();
-                    if let Err(e) = firewall.remove_acl(s.assigned_ipv6, s.port, s.protocol) {
-                        warn!("Failed to remove firewall rules for {}: {e}", sid);
-                    }
-                    if let Err(e) = network.remove_address(&iface, s.assigned_ipv6) {
-                        warn!("Failed to remove IPv6 {}: {e}", s.assigned_ipv6);
+
+                    for addr in &s.addresses {
+                        if let Err(e) = firewall.remove_acl(addr.address, s.port, s.protocol) {
+                            warn!("Failed to remove firewall rules for {}: {e}", sid);
+                        }
+                        if let Err(e) = network.remove_address(&addr.interface, addr.address) {
+                            warn!("Failed to remove IPv6 {}: {e}", addr.address);
+                        }
                     }
                 });
 
@@ -402,7 +568,6 @@ impl Engine {
     }
 
     /// Apply firewall rules for a socket based on its current policy and ACL entries.
-    /// Acquires the firewall lock.
     pub async fn apply_socket_acl(&self, state: &AppState, socket_id: &str) -> anyhow::Result<()> {
         let socket = state
             .db
@@ -414,7 +579,7 @@ impl Engine {
         self.apply_firewall_for_socket(state, &socket).await
     }
 
-    /// Apply firewall rules for a socket (does not acquire firewall_lock — caller's responsibility).
+    /// Apply firewall rules for a socket.
     async fn apply_firewall_for_socket(
         &self,
         state: &AppState,
@@ -422,60 +587,28 @@ impl Engine {
     ) -> anyhow::Result<()> {
         match socket.policy {
             Policy::Closed => {
-                // Closed = ACL-based: block all unless ACL entries exist
                 let acl = state.db.get_acl(&socket.id).await?;
                 let allowed: Vec<Ipv6Addr> = acl
                     .iter()
                     .filter_map(|e| e.allowed_ip.parse().ok())
                     .collect();
-                self.firewall.apply_acl(
-                    socket.assigned_ipv6,
-                    socket.port,
-                    socket.protocol,
-                    &allowed,
-                )?;
+                for addr in &socket.addresses {
+                    self.firewall.apply_acl(
+                        addr.address,
+                        socket.port,
+                        socket.protocol,
+                        &allowed,
+                    )?;
+                }
             }
             Policy::Open => {
-                self.firewall
-                    .allow_all(socket.assigned_ipv6, socket.port, socket.protocol)?;
+                for addr in &socket.addresses {
+                    self.firewall
+                        .allow_all(addr.address, socket.port, socket.protocol)?;
+                }
             }
         }
         Ok(())
-    }
-
-    /// Migrate all managed IPv6 addresses from one interface to another.
-    async fn migrate_addresses(&self, state: &AppState, old_iface: &str, new_iface: &str) {
-        let sockets = match state.db.list_sockets().await {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to list sockets for migration: {e}");
-                return;
-            }
-        };
-
-        let count = sockets.len();
-        let mut join_set = JoinSet::new();
-        for socket in sockets {
-            let old = old_iface.to_string();
-            let new = new_iface.to_string();
-            join_set.spawn_blocking(move || {
-                let network = crate::network::create_network_interface();
-                if let Err(e) = network.add_address(&new, socket.assigned_ipv6, 128) {
-                    warn!("Failed to add {} to {}: {e}", socket.assigned_ipv6, new);
-                }
-                if let Err(e) = network.remove_address(&old, socket.assigned_ipv6) {
-                    warn!("Failed to remove {} from {}: {e}", socket.assigned_ipv6, old);
-                }
-            });
-        }
-
-        while let Some(result) = join_set.join_next().await {
-            if let Err(e) = result {
-                warn!("Migration task failed: {e}");
-            }
-        }
-
-        info!("Migrated {count} addresses from {old_iface} to {new_iface}");
     }
 }
 
@@ -485,12 +618,14 @@ fn apply_firewall_sync(
     socket: &ManagedSocket,
     allowed: &[Ipv6Addr],
 ) -> anyhow::Result<()> {
-    match socket.policy {
-        Policy::Open => {
-            firewall.allow_all(socket.assigned_ipv6, socket.port, socket.protocol)?;
-        }
-        Policy::Closed => {
-            firewall.apply_acl(socket.assigned_ipv6, socket.port, socket.protocol, allowed)?;
+    for addr in &socket.addresses {
+        match socket.policy {
+            Policy::Open => {
+                firewall.allow_all(addr.address, socket.port, socket.protocol)?;
+            }
+            Policy::Closed => {
+                firewall.apply_acl(addr.address, socket.port, socket.protocol, allowed)?;
+            }
         }
     }
     Ok(())
@@ -526,7 +661,7 @@ mod tests {
     use super::*;
     use crate::firewall::Firewall;
     use anyhow::Result;
-    use socketguard_core::{BackendType, ManagedSocket, Policy, Protocol};
+    use socketguard_core::{BackendType, ManagedSocket, Policy, Protocol, SocketAddress};
     use std::net::Ipv6Addr;
     use std::sync::{Arc as StdArc, Mutex as StdMutex};
 
@@ -601,10 +736,48 @@ mod tests {
             process_name: "test".to_string(),
             port: 8080,
             protocol: Protocol::Tcp,
-            assigned_ipv6: "fd00::1".parse().unwrap(),
-            backend: BackendType::Ula,
+            addresses: vec![SocketAddress {
+                backend_id: "ula".to_string(),
+                backend_type: BackendType::Ula,
+                address: "fd00::1".parse().unwrap(),
+                interface: "lo".to_string(),
+                prefix_len: 128,
+                keypair_id: None,
+            }],
             policy,
-            keypair_id: None,
+            exe_path: None,
+            cmdline: None,
+            first_seen: chrono::Utc::now(),
+            last_seen: chrono::Utc::now(),
+        }
+    }
+
+    fn test_socket_multi_addr(policy: Policy) -> ManagedSocket {
+        ManagedSocket {
+            id: "test123".to_string(),
+            pid: 1000,
+            process_name: "test".to_string(),
+            port: 8080,
+            protocol: Protocol::Tcp,
+            addresses: vec![
+                SocketAddress {
+                    backend_id: "ula".to_string(),
+                    backend_type: BackendType::Ula,
+                    address: "fd00::1".parse().unwrap(),
+                    interface: "lo".to_string(),
+                    prefix_len: 128,
+                    keypair_id: None,
+                },
+                SocketAddress {
+                    backend_id: "slaac-Ethernet".to_string(),
+                    backend_type: BackendType::Slaac,
+                    address: "2001:db8::1".parse().unwrap(),
+                    interface: "Ethernet".to_string(),
+                    prefix_len: 64,
+                    keypair_id: None,
+                },
+            ],
+            policy,
             exe_path: None,
             cmdline: None,
             first_seen: chrono::Utc::now(),
@@ -638,7 +811,8 @@ mod tests {
         let calls = StdArc::new(StdMutex::new(Vec::new()));
         let fw = MockFirewall::new(calls.clone());
         let socket = test_socket(Policy::Closed);
-        let allowed: Vec<Ipv6Addr> = vec!["fd00::10".parse().unwrap(), "fd00::20".parse().unwrap()];
+        let allowed: Vec<Ipv6Addr> =
+            vec!["fd00::10".parse().unwrap(), "fd00::20".parse().unwrap()];
 
         apply_firewall_sync(&fw, &socket, &allowed).unwrap();
 
@@ -661,7 +835,6 @@ mod tests {
         let fw = MockFirewall::new(calls.clone());
         let socket = test_socket(Policy::Open);
 
-        // allowed list is ignored for open policy
         apply_firewall_sync(&fw, &socket, &["fd00::99".parse().unwrap()]).unwrap();
 
         let recorded = calls.lock().unwrap();
@@ -677,6 +850,32 @@ mod tests {
     }
 
     #[test]
+    fn apply_firewall_sync_multi_address_closed() {
+        let calls = StdArc::new(StdMutex::new(Vec::new()));
+        let fw = MockFirewall::new(calls.clone());
+        let socket = test_socket_multi_addr(Policy::Closed);
+        let allowed: Vec<Ipv6Addr> = vec!["fd00::10".parse().unwrap()];
+
+        apply_firewall_sync(&fw, &socket, &allowed).unwrap();
+
+        let recorded = calls.lock().unwrap();
+        // Should have one call per address
+        assert_eq!(recorded.len(), 2);
+    }
+
+    #[test]
+    fn apply_firewall_sync_multi_address_open() {
+        let calls = StdArc::new(StdMutex::new(Vec::new()));
+        let fw = MockFirewall::new(calls.clone());
+        let socket = test_socket_multi_addr(Policy::Open);
+
+        apply_firewall_sync(&fw, &socket, &[]).unwrap();
+
+        let recorded = calls.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+    }
+
+    #[test]
     fn closed_policy_is_default() {
         let socket = test_socket(Policy::default());
         assert_eq!(socket.policy, Policy::Closed);
@@ -684,7 +883,6 @@ mod tests {
 
     #[test]
     fn managed_string_parses_as_closed() {
-        // Backwards compat: "managed" in DB should be treated as Closed
         let policy: Policy = "managed".parse().unwrap();
         assert_eq!(policy, Policy::Closed);
     }
@@ -694,7 +892,6 @@ mod tests {
         let db = crate::state::Database::new(":memory:").await.unwrap();
         db.migrate().await.unwrap();
 
-        // Insert a socket with a very old last_seen timestamp
         let mut stale = test_socket(Policy::Closed);
         stale.last_seen = chrono::Utc::now() - chrono::Duration::seconds(3600);
         db.upsert_socket(&stale).await.unwrap();
@@ -725,15 +922,14 @@ mod tests {
 
         let socket = test_socket(Policy::Closed);
         db.upsert_socket(&socket).await.unwrap();
-
-        // Add an ACL entry
-        db.add_acl_entry(&socket.id, "fd00::10", Some("peer1")).await.unwrap();
+        db.add_acl_entry(&socket.id, "fd00::10", Some("peer1"))
+            .await
+            .unwrap();
 
         let acl = db.get_acl(&socket.id).await.unwrap();
         assert_eq!(acl.len(), 1);
         assert_eq!(acl[0].allowed_ip, "fd00::10");
 
-        // Verify the ACL translates to allowed IPs
         let allowed: Vec<Ipv6Addr> = acl
             .iter()
             .filter_map(|e| e.allowed_ip.parse().ok())

@@ -121,7 +121,18 @@ impl std::str::FromStr for BackendType {
     }
 }
 
-/// A managed socket with its assigned IPv6 and metadata
+/// An address assigned to a socket from a specific backend instance
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketAddress {
+    pub backend_id: String,
+    pub backend_type: BackendType,
+    pub address: Ipv6Addr,
+    pub interface: String,
+    pub prefix_len: u8,
+    pub keypair_id: Option<String>,
+}
+
+/// A managed socket with its assigned IPv6 addresses and metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedSocket {
     pub id: String,
@@ -129,14 +140,29 @@ pub struct ManagedSocket {
     pub process_name: String,
     pub port: u16,
     pub protocol: Protocol,
-    pub assigned_ipv6: Ipv6Addr,
-    pub backend: BackendType,
+    pub addresses: Vec<SocketAddress>,
     pub policy: Policy,
-    pub keypair_id: Option<String>,
     pub exe_path: Option<String>,
     pub cmdline: Option<String>,
     pub first_seen: chrono::DateTime<chrono::Utc>,
     pub last_seen: chrono::DateTime<chrono::Utc>,
+}
+
+impl ManagedSocket {
+    /// Returns the primary (first) address, if any.
+    pub fn primary_address(&self) -> Option<&SocketAddress> {
+        self.addresses.first()
+    }
+
+    /// Convenience: returns the primary assigned IPv6, for backwards compat.
+    pub fn assigned_ipv6(&self) -> Option<Ipv6Addr> {
+        self.primary_address().map(|a| a.address)
+    }
+
+    /// Convenience: returns the primary backend type, for backwards compat.
+    pub fn backend(&self) -> Option<BackendType> {
+        self.primary_address().map(|a| a.backend_type)
+    }
 }
 
 /// An ACL entry allowing a specific source IP to connect
