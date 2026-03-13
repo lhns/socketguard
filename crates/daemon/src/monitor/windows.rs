@@ -10,43 +10,36 @@ impl SocketMonitor for WindowsSocketMonitor {
     fn list_listening_sockets(&self) -> Result<Vec<ListeningSocket>> {
         let mut sockets = Vec::new();
 
-        // TCP + TCPv6 listeners
-        for proto_flag in ["TCPv6", "TCP"] {
-            let output = std::process::Command::new("netstat")
-                .args(["-ano", "-p", proto_flag])
-                .output()?;
+        // Single netstat call for all protocols — much faster than 4 separate calls
+        let output = std::process::Command::new("netstat")
+            .args(["-ano"])
+            .output()?;
 
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let line = line.trim();
-                if !line.contains("LISTENING") {
-                    continue;
-                }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.contains("LISTENING") {
+                // TCP/TCPv6
                 if let Some(socket) = parse_netstat_line(line, Protocol::Tcp) {
+                    sockets.push(socket);
+                }
+            } else if line.starts_with("UDP") && line.contains("*:*") {
+                // UDP/UDPv6 (no "LISTENING" state for UDP in netstat)
+                if let Some(socket) = parse_netstat_line(line, Protocol::Udp) {
                     sockets.push(socket);
                 }
             }
         }
 
-        // UDP + UDPv6 listeners
-        for proto_flag in ["UDPv6", "UDP"] {
-            let output = std::process::Command::new("netstat")
-                .args(["-ano", "-p", proto_flag])
-                .output()?;
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let line = line.trim();
-                if line.contains("*:*") {
-                    if let Some(socket) = parse_netstat_line(line, Protocol::Udp) {
-                        sockets.push(socket);
-                    }
-                }
-            }
-        }
+        tracing::debug!("netstat detected {} raw sockets", sockets.len());
 
         // Collect unique PIDs and resolve process info in batch
-        let unique_pids: Vec<u32> = sockets.iter().map(|s| s.pid).collect::<std::collections::HashSet<_>>().into_iter().collect();
+        let unique_pids: Vec<u32> = sockets
+            .iter()
+            .map(|s| s.pid)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
         let process_map = resolve_processes(&unique_pids);
 
         // Fill in process info

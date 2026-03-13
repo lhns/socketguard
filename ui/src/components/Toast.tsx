@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, createContext, useContext } from "react";
+import { useState, useCallback, createContext, useContext } from "react";
 
 interface ToastMessage {
   id: number;
@@ -39,28 +39,9 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={{ success, error }}>
       {children}
-      <div style={{
-        position: "fixed",
-        bottom: 16,
-        right: 16,
-        display: "flex",
-        flexDirection: "column",
-        gap: 8,
-        zIndex: 1000,
-      }}>
+      <div className="toast-container">
         {toasts.map((t) => (
-          <div
-            key={t.id}
-            style={{
-              padding: "0.6rem 1.2rem",
-              borderRadius: 6,
-              background: t.type === "success" ? "#2e7d32" : "#c62828",
-              color: "#fff",
-              fontSize: "0.9rem",
-              boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
-              animation: "fadeIn 0.2s ease-in",
-            }}
-          >
+          <div key={t.id} className={`toast toast-${t.type}`}>
             {t.text}
           </div>
         ))}

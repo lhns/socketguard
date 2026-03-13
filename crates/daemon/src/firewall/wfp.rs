@@ -4,6 +4,8 @@ use socketguard_core::Protocol;
 use std::net::Ipv6Addr;
 use std::process::Command;
 
+const RULE_GROUP: &str = "SocketGuard";
+
 pub struct WfpFirewall;
 
 impl WfpFirewall {
@@ -46,6 +48,7 @@ impl Firewall for WfpFirewall {
                     &format!("name={block_name}"),
                     "dir=in",
                     "action=block",
+                    &format!("group={RULE_GROUP}"),
                     &format!("protocol={proto}"),
                     &format!("localip={dest_ip}"),
                     &format!("localport={dest_port}"),
@@ -61,6 +64,7 @@ impl Firewall for WfpFirewall {
                         &format!("name={allow_name}"),
                         "dir=in",
                         "action=allow",
+                        &format!("group={RULE_GROUP}"),
                         &format!("protocol={proto}"),
                         &format!("remoteip={src_ip}"),
                         &format!("localip={dest_ip}"),
@@ -76,6 +80,7 @@ impl Firewall for WfpFirewall {
                     &format!("name={block_name}"),
                     "dir=in",
                     "action=block",
+                    &format!("group={RULE_GROUP}"),
                     &format!("protocol={proto}"),
                     &format!("localip={dest_ip}"),
                     &format!("localport={dest_port}"),
@@ -90,6 +95,7 @@ impl Firewall for WfpFirewall {
     fn remove_acl(&self, dest_ip: Ipv6Addr, dest_port: u16, protocol: Protocol) -> Result<()> {
         let block_name = Self::rule_name(&dest_ip, dest_port, &protocol);
 
+        // Delete the block rule by exact name
         let _ = Command::new("netsh")
             .args([
                 "advfirewall", "firewall", "delete", "rule",
@@ -97,50 +103,30 @@ impl Firewall for WfpFirewall {
             ])
             .output();
 
-        let output = Command::new("netsh")
-            .args(["advfirewall", "firewall", "show", "rule", "name=all", "dir=in"])
-            .output()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let prefix = format!("SocketGuard_Allow_{protocol}_{dest_ip}_{dest_port}_");
-
-        for line in stdout.lines() {
-            if let Some(name) = line.strip_prefix("Rule Name:") {
-                let name = name.trim();
-                if name.starts_with(&prefix) {
-                    let _ = Command::new("netsh")
-                        .args([
-                            "advfirewall", "firewall", "delete", "rule",
-                            &format!("name={name}"),
-                        ])
-                        .output();
-                }
-            }
-        }
+        // Delete all allow rules matching this socket's localip+localport+protocol
+        // Much faster than dumping all rules and scanning for matches
+        let proto = protocol.to_string();
+        let _ = Command::new("netsh")
+            .args([
+                "advfirewall", "firewall", "delete", "rule",
+                "dir=in",
+                &format!("protocol={proto}"),
+                &format!("localip={dest_ip}"),
+                &format!("localport={dest_port}"),
+            ])
+            .output();
 
         Ok(())
     }
 
     fn cleanup_all_rules(&self) -> Result<()> {
-        // List all firewall rules and delete any matching SocketGuard_*
-        let output = Command::new("netsh")
-            .args(["advfirewall", "firewall", "show", "rule", "name=all", "dir=in"])
-            .output()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            if let Some(name) = line.strip_prefix("Rule Name:") {
-                let name = name.trim();
-                if name.starts_with("SocketGuard_") {
-                    let _ = Command::new("netsh")
-                        .args([
-                            "advfirewall", "firewall", "delete", "rule",
-                            &format!("name={name}"),
-                        ])
-                        .output();
-                }
-            }
-        }
+        // Delete all rules in the SocketGuard group in one call
+        let _ = Command::new("netsh")
+            .args([
+                "advfirewall", "firewall", "delete", "rule",
+                &format!("group={RULE_GROUP}"),
+            ])
+            .output();
 
         Ok(())
     }

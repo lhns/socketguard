@@ -43,7 +43,7 @@ enum Commands {
     Policy {
         /// Socket ID
         id: String,
-        /// Policy: open, closed, or managed
+        /// Policy: open or closed
         policy: String,
     },
 

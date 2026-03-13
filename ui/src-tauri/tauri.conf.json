@@ -8,7 +8,6 @@
     "devUrl": "http://localhost:5173"
   },
   "app": {
-    "title": "SocketGuard",
     "windows": [
       {
         "title": "SocketGuard",

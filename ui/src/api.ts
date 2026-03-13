@@ -10,6 +10,8 @@ export interface ManagedSocket {
   backend: string;
   policy: string;
   keypair_id: string | null;
+  exe_path: string | null;
+  cmdline: string | null;
   first_seen: string;
   last_seen: string;
 }

@@ -47,87 +47,87 @@ export default function Settings() {
     }
   };
 
-  if (error) return <p style={{ color: "red" }}>Error connecting to daemon: {error}</p>;
-  if (!config) return <p>Loading...</p>;
-
-  if (!editing) {
-    return (
-      <div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-          <h2 style={{ margin: 0 }}>Daemon Configuration</h2>
-          <button onClick={() => setEditing(true)} style={{ padding: "0.3rem 0.8rem", cursor: "pointer" }}>
-            Edit
-          </button>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "0.5rem 1.5rem", maxWidth: 500 }}>
-          <strong>API Address:</strong>
-          <span>{config.listen_addr}:{config.listen_port}</span>
-          <strong>Backend:</strong>
-          <span>{config.backend}</span>
-          <strong>Network Interface:</strong>
-          <span>{config.interface}</span>
-          <strong>Poll Interval:</strong>
-          <span>{config.poll_interval_secs}s</span>
-        </div>
-      </div>
-    );
-  }
+  if (error) return <div className="error-banner">Cannot connect to daemon: {error}</div>;
+  if (!config) return <div className="loading">Loading configuration...</div>;
 
   return (
     <div>
-      <h2>Edit Configuration</h2>
-      <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "0.6rem 1.5rem", maxWidth: 500, alignItems: "center" }}>
-        <strong>API Address:</strong>
-        <span style={{ color: "#999" }}>{config.listen_addr}:{config.listen_port} (restart required)</span>
-
-        <strong>Backend:</strong>
-        <select
-          value={form.backend}
-          onChange={(e) => setForm({ ...form, backend: e.target.value })}
-          style={{ padding: "0.3rem" }}
-        >
-          <option value="ula">ula</option>
-          <option value="yggdrasil">yggdrasil</option>
-        </select>
-
-        <strong>Network Interface:</strong>
-        <input
-          value={form.interface}
-          onChange={(e) => setForm({ ...form, interface: e.target.value })}
-          style={{ padding: "0.3rem" }}
-        />
-
-        <strong>Poll Interval:</strong>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
-          <input
-            type="number"
-            min={1}
-            max={3600}
-            value={form.poll_interval_secs}
-            onChange={(e) => setForm({ ...form, poll_interval_secs: parseInt(e.target.value) || 5 })}
-            style={{ padding: "0.3rem", width: 80 }}
-          />
-          <span>seconds</span>
-        </div>
+      <div className="card-header">
+        <span className="card-title">Daemon Configuration</span>
+        {!editing && (
+          <button className="btn btn-sm" onClick={() => setEditing(true)}>Edit</button>
+        )}
       </div>
 
-      <div style={{ marginTop: "1.2rem", display: "flex", gap: "0.5rem" }}>
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          style={{ padding: "0.4rem 1rem", cursor: "pointer", background: "#333", color: "#fff", border: "1px solid #333", borderRadius: 4 }}
-        >
-          {saving ? "Saving..." : "Save"}
-        </button>
-        <button
-          onClick={() => {
-            setEditing(false);
-            setForm({ backend: config.backend, interface: config.interface, poll_interval_secs: config.poll_interval_secs });
-          }}
-          style={{ padding: "0.4rem 1rem", cursor: "pointer", border: "1px solid #999", borderRadius: 4, background: "#fff" }}
-        >
-          Cancel
-        </button>
+      <div className="card">
+        {!editing ? (
+          <div className="info-grid">
+            <span className="info-label">API Address</span>
+            <span className="info-value mono">{config.listen_addr}:{config.listen_port}</span>
+            <span className="info-label">Backend</span>
+            <span className="info-value">{config.backend}</span>
+            <span className="info-label">Network Interface</span>
+            <span className="info-value">{config.interface}</span>
+            <span className="info-label">Poll Interval</span>
+            <span className="info-value">{config.poll_interval_secs}s</span>
+          </div>
+        ) : (
+          <>
+            <div className="info-grid" style={{ alignItems: "center" }}>
+              <span className="info-label">API Address</span>
+              <span className="info-value mono" style={{ color: "var(--text-muted)" }}>
+                {config.listen_addr}:{config.listen_port}
+                <span style={{ fontSize: 11, marginLeft: 8, opacity: 0.6 }}>(restart required)</span>
+              </span>
+
+              <span className="info-label">Backend</span>
+              <select
+                className="input"
+                value={form.backend}
+                onChange={(e) => setForm({ ...form, backend: e.target.value })}
+              >
+                <option value="ula">ula</option>
+                <option value="yggdrasil">yggdrasil</option>
+              </select>
+
+              <span className="info-label">Network Interface</span>
+              <input
+                className="input"
+                value={form.interface}
+                onChange={(e) => setForm({ ...form, interface: e.target.value })}
+              />
+
+              <span className="info-label">Poll Interval</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  max={3600}
+                  value={form.poll_interval_secs}
+                  onChange={(e) => setForm({ ...form, poll_interval_secs: parseInt(e.target.value) || 5 })}
+                  style={{ width: 80 }}
+                />
+                <span className="info-label">seconds</span>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 20, display: "flex", gap: 8 }}>
+              <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+                {saving ? "Saving..." : "Save"}
+              </button>
+              <button
+                className="btn"
+                onClick={() => {
+                  setEditing(false);
+                  setForm({ backend: config.backend, interface: config.interface, poll_interval_secs: config.poll_interval_secs });
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

@@ -47,12 +47,12 @@ pub struct ListeningSocket {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Policy {
-    /// Deny all incoming connections (default)
+    /// ACL-based access control (default).
+    /// With no ACL entries: blocks all incoming connections.
+    /// With ACL entries: allows only whitelisted IPs.
     Closed,
-    /// Allow all incoming connections
+    /// Allow all incoming connections (no restrictions)
     Open,
-    /// Allow only whitelisted IPs
-    Managed,
 }
 
 impl Default for Policy {
@@ -66,7 +66,6 @@ impl std::fmt::Display for Policy {
         match self {
             Policy::Closed => write!(f, "closed"),
             Policy::Open => write!(f, "open"),
-            Policy::Managed => write!(f, "managed"),
         }
     }
 }
@@ -77,7 +76,8 @@ impl std::str::FromStr for Policy {
         match s {
             "closed" => Ok(Policy::Closed),
             "open" => Ok(Policy::Open),
-            "managed" => Ok(Policy::Managed),
+            // Accept "managed" as alias for backwards compatibility with existing DBs
+            "managed" => Ok(Policy::Closed),
             _ => Err(format!("invalid policy: {s}")),
         }
     }
@@ -226,10 +226,10 @@ mod tests {
     fn policy_display_roundtrip() {
         assert_eq!(Policy::Closed.to_string(), "closed");
         assert_eq!(Policy::Open.to_string(), "open");
-        assert_eq!(Policy::Managed.to_string(), "managed");
         assert_eq!("closed".parse::<Policy>().unwrap(), Policy::Closed);
         assert_eq!("open".parse::<Policy>().unwrap(), Policy::Open);
-        assert_eq!("managed".parse::<Policy>().unwrap(), Policy::Managed);
+        // "managed" accepted as backwards-compat alias for closed
+        assert_eq!("managed".parse::<Policy>().unwrap(), Policy::Closed);
         assert!("invalid".parse::<Policy>().is_err());
     }
 
@@ -261,7 +261,7 @@ mod tests {
 
     #[test]
     fn policy_serde_roundtrip() {
-        for policy in [Policy::Closed, Policy::Open, Policy::Managed] {
+        for policy in [Policy::Closed, Policy::Open] {
             let json = serde_json::to_string(&policy).unwrap();
             let parsed: Policy = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, policy);

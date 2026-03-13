@@ -61,7 +61,7 @@ export default function SocketDetail({ socketId, onBack }: Props) {
   const handlePolicy = (p: string) => {
     if (p === "open") {
       setConfirm({
-        message: "Setting policy to \"open\" will allow all incoming connections to this socket. Continue?",
+        message: "Setting policy to open will allow ALL incoming connections to this socket. Are you sure?",
         action: () => doSetPolicy(p),
       });
     } else {
@@ -79,7 +79,7 @@ export default function SocketDetail({ socketId, onBack }: Props) {
     }
   };
 
-  if (!socket) return <p>Loading...</p>;
+  if (!socket) return <div className="loading">Loading...</div>;
 
   return (
     <div>
@@ -91,92 +91,141 @@ export default function SocketDetail({ socketId, onBack }: Props) {
         />
       )}
 
-      <button onClick={onBack} style={{ marginBottom: "1rem", cursor: "pointer" }}>Back</button>
+      <button className="back-link" onClick={onBack}>
+        &larr; Back to sockets
+      </button>
 
-      {error && <p style={{ color: "red" }}>{error}</p>}
+      {error && <div className="error-banner">{error}</div>}
 
-      <h2>{socket.process_name} :{socket.port}/{socket.protocol}</h2>
-
-      <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "0.3rem 1rem", marginBottom: "1.5rem" }}>
-        <strong>PID:</strong> <span>{socket.pid}</span>
-        <strong>IPv6:</strong> <span style={{ fontFamily: "monospace" }}>{socket.assigned_ipv6}</span>
-        <strong>Backend:</strong> <span>{socket.backend}</span>
-        <strong>First seen:</strong> <span>{new Date(socket.first_seen).toLocaleString()}</span>
-        <strong>Last seen:</strong> <span>{new Date(socket.last_seen).toLocaleString()}</span>
+      {/* Header */}
+      <div className="detail-header">
+        <div>
+          <div className="detail-title">{socket.process_name}</div>
+          <div className="detail-subtitle">
+            Port {socket.port}/{socket.protocol}
+            <span style={{ margin: "0 6px", opacity: 0.3 }}>|</span>
+            PID {socket.pid}
+          </div>
+        </div>
+        <span className={`badge badge-${socket.policy}`}>
+          <span className="badge-dot" />
+          {socket.policy}
+        </span>
       </div>
 
-      <div style={{ marginBottom: "1.5rem" }}>
-        <h3>Policy</h3>
-        <div style={{ display: "flex", gap: "0.5rem" }}>
-          {(["closed", "managed", "open"] as const).map((p) => (
-            <button
-              key={p}
-              onClick={() => handlePolicy(p)}
-              style={{
-                padding: "0.4rem 1rem",
-                background: socket.policy === p ? "#333" : "#eee",
-                color: socket.policy === p ? "#fff" : "#333",
-                border: "1px solid #333",
-                borderRadius: 4,
-                cursor: "pointer",
-              }}
-            >
-              {p}
-            </button>
-          ))}
+      {/* Info */}
+      <div className="card">
+        <div className="section-title">Details</div>
+        <div className="info-grid">
+          <span className="info-label">IPv6 Address</span>
+          <span className="info-value mono">{socket.assigned_ipv6}</span>
+          <span className="info-label">Backend</span>
+          <span className="info-value">{socket.backend}</span>
+          {socket.exe_path && (
+            <>
+              <span className="info-label">Executable</span>
+              <span className="info-value mono" style={{ wordBreak: "break-all" }}>{socket.exe_path}</span>
+            </>
+          )}
+          <span className="info-label">First seen</span>
+          <span className="info-value">{new Date(socket.first_seen).toLocaleString()}</span>
+          <span className="info-label">Last seen</span>
+          <span className="info-value">{new Date(socket.last_seen).toLocaleString()}</span>
         </div>
       </div>
 
-      <div>
-        <h3>Access Control List</h3>
+      {/* Policy */}
+      <div className="card">
+        <div className="section-title">Policy</div>
+        <div className="policy-toggle">
+          <button
+            className={`policy-btn ${socket.policy === "closed" ? "active-closed" : ""}`}
+            onClick={() => handlePolicy("closed")}
+          >
+            Closed
+          </button>
+          <button
+            className={`policy-btn ${socket.policy === "open" ? "active-open" : ""}`}
+            onClick={() => handlePolicy("open")}
+          >
+            Open
+          </button>
+        </div>
+        <p style={{ marginTop: 10, fontSize: 12, color: "var(--text-muted)" }}>
+          {socket.policy === "closed"
+            ? "Only allowed IPs can connect. Add entries below to grant access."
+            : "All incoming connections are allowed without restriction."}
+        </p>
+      </div>
 
-        {socket.policy === "managed" && (
-          <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}>
+      {/* ACL */}
+      <div className="card">
+        <div className="section-title">
+          Access Control List
+          {acl.length > 0 && (
+            <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400, marginLeft: 6 }}>
+              ({acl.length} {acl.length === 1 ? "entry" : "entries"})
+            </span>
+          )}
+        </div>
+
+        {socket.policy === "closed" && (
+          <div className="acl-form">
             <input
+              className="input"
               value={newIp}
               onChange={(e) => setNewIp(e.target.value)}
-              placeholder="IPv6 address"
-              style={{ flex: 2, padding: "0.4rem" }}
+              placeholder="IPv6 address to allow"
+              onKeyDown={(e) => e.key === "Enter" && handleAllow()}
+              style={{ flex: 2 }}
             />
             <input
+              className="input"
               value={newLabel}
               onChange={(e) => setNewLabel(e.target.value)}
               placeholder="Label (optional)"
-              style={{ flex: 1, padding: "0.4rem" }}
+              onKeyDown={(e) => e.key === "Enter" && handleAllow()}
+              style={{ flex: 1 }}
             />
-            <button onClick={handleAllow} style={{ padding: "0.4rem 1rem", cursor: "pointer" }}>
-              Allow
-            </button>
+            <button className="btn btn-primary" onClick={handleAllow}>Allow</button>
           </div>
         )}
 
         {acl.length === 0 ? (
-          <p style={{ color: "#999" }}>No ACL entries. {socket.policy === "managed" ? "Add IPs above to grant access." : ""}</p>
+          <div style={{ padding: "16px 0", color: "var(--text-muted)", fontSize: 13 }}>
+            {socket.policy === "closed"
+              ? "No allowed IPs. All incoming traffic to this socket is blocked."
+              : "ACL is not active when policy is open."}
+          </div>
         ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ borderBottom: "2px solid #ccc", textAlign: "left" }}>
-                <th style={{ padding: "0.4rem" }}>Allowed IP</th>
-                <th style={{ padding: "0.4rem" }}>Label</th>
-                <th style={{ padding: "0.4rem" }}>Added</th>
-                <th style={{ padding: "0.4rem" }}></th>
-              </tr>
-            </thead>
-            <tbody>
-              {acl.map((entry) => (
-                <tr key={entry.id} style={{ borderBottom: "1px solid #eee" }}>
-                  <td style={{ padding: "0.4rem", fontFamily: "monospace" }}>{entry.allowed_ip}</td>
-                  <td style={{ padding: "0.4rem" }}>{entry.label || "-"}</td>
-                  <td style={{ padding: "0.4rem", fontSize: "0.85em" }}>{new Date(entry.created_at).toLocaleString()}</td>
-                  <td style={{ padding: "0.4rem" }}>
-                    <button onClick={() => handleRemove(entry)} style={{ cursor: "pointer", color: "red", background: "none", border: "none" }}>
-                      Remove
-                    </button>
-                  </td>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Allowed IP</th>
+                  <th>Label</th>
+                  <th>Added</th>
+                  <th style={{ width: 60 }}></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {acl.map((entry) => (
+                  <tr key={entry.id}>
+                    <td className="mono">{entry.allowed_ip}</td>
+                    <td>{entry.label || <span style={{ color: "var(--text-muted)" }}>&mdash;</span>}</td>
+                    <td style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                      {new Date(entry.created_at).toLocaleString()}
+                    </td>
+                    <td>
+                      <button className="btn-danger btn-sm" onClick={() => handleRemove(entry)}>
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>

@@ -404,13 +404,13 @@ mod tests {
         let db = test_db().await;
         db.upsert_socket(&test_socket("abc123", "nginx", 80)).await.unwrap();
 
-        db.update_policy("abc123", Policy::Managed).await.unwrap();
-        let socket = db.get_socket("abc123").await.unwrap().unwrap();
-        assert_eq!(socket.policy, Policy::Managed);
-
         db.update_policy("abc123", Policy::Open).await.unwrap();
         let socket = db.get_socket("abc123").await.unwrap().unwrap();
         assert_eq!(socket.policy, Policy::Open);
+
+        db.update_policy("abc123", Policy::Closed).await.unwrap();
+        let socket = db.get_socket("abc123").await.unwrap().unwrap();
+        assert_eq!(socket.policy, Policy::Closed);
     }
 
     #[tokio::test]

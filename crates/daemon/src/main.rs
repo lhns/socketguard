@@ -52,14 +52,27 @@ async fn main() -> Result<()> {
         firewall_lock: Mutex::new(()),
     });
 
-    // Startup reconciliation: clean stale rules from previous crash, re-apply desired state
+    // Shutdown signal channel
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // Start the API server FIRST so the UI can connect immediately
+    let listen_addr = format!("{}:{}", config.listen_addr, config.listen_port);
+    info!("API listening on {listen_addr}");
+    let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
+    let app = api::router(state.clone());
+
+    // Start serving in a background task
+    let api_handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+    });
+
+    // Startup reconciliation runs AFTER the API is available
     {
         let engine = state.engine.read().await;
         engine.startup_reconcile(&state).await;
     }
-
-    // Shutdown signal channel
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Start the reconciliation loop with panic recovery
     let engine_state = state.clone();
@@ -82,15 +95,10 @@ async fn main() -> Result<()> {
         }
     });
 
-    let listen_addr = format!("{}:{}", config.listen_addr, config.listen_port);
-    info!("API listening on {listen_addr}");
-    let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
-    let app = api::router(state.clone());
-
-    // Serve with graceful shutdown on Ctrl+C / SIGTERM
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // Wait for the API server to finish (shutdown signal received)
+    if let Err(e) = api_handle.await? {
+        error!("API server error: {e}");
+    }
 
     // Signal the reconciliation loop to stop
     info!("Shutdown signal received, cleaning up...");

@@ -18,9 +18,11 @@ impl NetworkInterface for WindowsNetworkInterface {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let msg = if stderr.trim().is_empty() { &stdout } else { &stderr };
             // Ignore if address already exists
-            if !stderr.contains("already") {
-                anyhow::bail!("netsh add address failed: {stderr}");
+            if !msg.contains("already") && !msg.contains("Object already exists") {
+                anyhow::bail!("netsh add address failed: {}", msg.trim());
             }
         }
 
@@ -39,8 +41,10 @@ impl NetworkInterface for WindowsNetworkInterface {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.contains("not found") && !stderr.contains("Element not found") {
-                anyhow::bail!("netsh delete address failed: {stderr}");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let msg = if stderr.trim().is_empty() { &stdout } else { &stderr };
+            if !msg.contains("not found") && !msg.contains("Element not found") {
+                anyhow::bail!("netsh delete address failed: {}", msg.trim());
             }
         }
 
