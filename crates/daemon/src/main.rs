@@ -1,4 +1,5 @@
 mod api;
+mod auth;
 mod backend;
 mod engine;
 mod firewall;
@@ -21,6 +22,8 @@ pub struct AppState {
     pub firewall_lock: Mutex<()>,
     /// Broadcast channel for SSE push notifications to GUI
     pub events: broadcast::Sender<api::DaemonEvent>,
+    /// Bearer token for API authentication
+    pub api_token: String,
 }
 
 #[tokio::main]
@@ -40,6 +43,8 @@ async fn main() -> Result<()> {
     info!("Starting SocketGuard daemon");
     info!("Backend: {} on interface {}", config.backend.backend_type(), config.backend.interface());
 
+    let api_token = auth::generate_and_store_token()?;
+
     let db = state::Database::new(&config.db_path).await?;
     db.migrate().await?;
     info!("Database initialized at {}", config.db_path);
@@ -54,6 +59,7 @@ async fn main() -> Result<()> {
         engine: RwLock::new(engine),
         firewall_lock: Mutex::new(()),
         events: events_tx,
+        api_token,
     });
 
     // Shutdown signal channel
@@ -120,6 +126,8 @@ async fn main() -> Result<()> {
         let engine = state.engine.read().await;
         engine.shutdown_cleanup(&state).await;
     }
+
+    auth::cleanup_token_file();
 
     info!("SocketGuard daemon stopped");
     Ok(())

@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use socketguard_core::api_types::*;
 use socketguard_core::Policy;
 use std::net::Ipv6Addr;
@@ -12,6 +13,10 @@ struct Cli {
     /// Daemon API address
     #[arg(long, default_value = "http://127.0.0.1:9476", global = true)]
     api: String,
+
+    /// Override the API bearer token (default: read from token file)
+    #[arg(long, global = true)]
+    token: Option<String>,
 
     /// Output raw JSON instead of tables
     #[arg(long, global = true)]
@@ -119,11 +124,32 @@ struct AclRow {
     label: String,
 }
 
+fn read_token_file() -> Result<String> {
+    let path = socketguard_core::api_token_path();
+    std::fs::read_to_string(&path)
+        .map(|s| s.trim().to_string())
+        .with_context(|| format!(
+            "failed to read API token from {} — is the daemon running?",
+            path.display()
+        ))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let token = match &cli.token {
+        Some(t) => t.clone(),
+        None => read_token_file()?,
+    };
+    let mut default_headers = HeaderMap::new();
+    default_headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}"))
+            .context("invalid token value")?,
+    );
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .default_headers(default_headers)
         .build()?;
     let base = &cli.api;
     let json_mode = cli.json;

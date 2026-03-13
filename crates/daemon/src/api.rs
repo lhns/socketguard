@@ -1,7 +1,8 @@
 use crate::AppState;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::StatusCode,
+    middleware::Next,
     response::sse::{Event, KeepAlive, Sse},
     response::IntoResponse,
     routing::{delete, get, post, put},
@@ -34,8 +35,47 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/config", put(update_config))
         .route("/api/backends", get(list_backends))
         .route("/api/events", get(sse_events))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ))
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+async fn require_auth(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> impl IntoResponse {
+    let auth_header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
+
+    match auth_header {
+        Some(value) if value.starts_with("Bearer ") => {
+            let token = &value[7..];
+            if token == state.api_token {
+                next.run(req).await.into_response()
+            } else {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ApiError {
+                        error: "invalid bearer token".into(),
+                    }),
+                )
+                    .into_response()
+            }
+        }
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "missing or malformed Authorization header".into(),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn sse_events(

@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use socketguard_core::api_types::*;
 use socketguard_core::Policy;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 use tauri::Emitter;
 
@@ -28,28 +28,81 @@ fn client() -> &'static reqwest::Client {
     })
 }
 
+/// Shared, re-readable API token.
+fn token_store() -> &'static Arc<RwLock<Option<String>>> {
+    static STORE: OnceLock<Arc<RwLock<Option<String>>>> = OnceLock::new();
+    STORE.get_or_init(|| Arc::new(RwLock::new(read_api_token())))
+}
+
+fn read_api_token() -> Option<String> {
+    std::fs::read_to_string(socketguard_core::api_token_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+fn get_token() -> Result<String, String> {
+    let store = token_store();
+    let guard = store.read().unwrap();
+    guard
+        .clone()
+        .ok_or_else(|| "API token not available — is the daemon running?".into())
+}
+
+/// Re-read token from disk (after a 401 / daemon restart).
+fn refresh_token() -> Result<String, String> {
+    let store = token_store();
+    let mut guard = store.write().unwrap();
+    *guard = read_api_token();
+    guard
+        .clone()
+        .ok_or_else(|| "API token not available after refresh".into())
+}
+
+/// Send a request with Bearer auth, retry once on 401 after refreshing the token.
+async fn authed_request(
+    build: impl Fn(&str) -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, String> {
+    let token = get_token()?;
+    let resp = build(&token).send().await.map_err(|e| e.to_string())?;
+
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let token = refresh_token()?;
+        return build(&token).send().await.map_err(|e| e.to_string());
+    }
+
+    Ok(resp)
+}
+
+/// Check response status; on non-success parse ApiError body.
+async fn check_response(resp: reqwest::Response) -> Result<(), String> {
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
+        Err(err.error)
+    }
+}
+
 #[tauri::command]
 async fn list_sockets() -> Result<SocketListResponse, String> {
-    client()
-        .get(format!("{}/api/sockets", api_base()))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())
+    let resp = authed_request(|token| {
+        client()
+            .get(format!("{}/api/sockets", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    resp.json().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn get_socket(id: String) -> Result<SocketDetailResponse, String> {
-    client()
-        .get(format!("{}/api/sockets/{id}", api_base()))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())
+    let resp = authed_request(|token| {
+        client()
+            .get(format!("{}/api/sockets/{id}", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    resp.json().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -58,86 +111,65 @@ async fn allow_ip(socket_id: String, ip: String, label: Option<String>) -> Resul
         allowed_ip: ip,
         label,
     };
-    let resp = client()
-        .post(format!("{}/api/sockets/{socket_id}/acl/allow", api_base()))
-        .json(&req)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
-        Err(err.error)
-    }
+    let resp = authed_request(|token| {
+        client()
+            .post(format!("{}/api/sockets/{socket_id}/acl/allow", api_base()))
+            .bearer_auth(token)
+            .json(&req)
+    })
+    .await?;
+    check_response(resp).await
 }
 
 #[tauri::command]
 async fn remove_acl_entry(socket_id: String, entry_id: i64) -> Result<(), String> {
-    let resp = client()
-        .delete(format!(
-            "{}/api/sockets/{socket_id}/acl/{entry_id}",
-            api_base()
-        ))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
-        Err(err.error)
-    }
+    let resp = authed_request(|token| {
+        client()
+            .delete(format!(
+                "{}/api/sockets/{socket_id}/acl/{entry_id}",
+                api_base()
+            ))
+            .bearer_auth(token)
+    })
+    .await?;
+    check_response(resp).await
 }
 
 #[tauri::command]
 async fn set_policy(socket_id: String, policy: String) -> Result<(), String> {
     let policy: Policy = policy.parse().map_err(|e: String| e)?;
     let req = UpdatePolicyRequest { policy };
-    let resp = client()
-        .put(format!("{}/api/sockets/{socket_id}/policy", api_base()))
-        .json(&req)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
-        Err(err.error)
-    }
+    let resp = authed_request(|token| {
+        client()
+            .put(format!("{}/api/sockets/{socket_id}/policy", api_base()))
+            .bearer_auth(token)
+            .json(&req)
+    })
+    .await?;
+    check_response(resp).await
 }
 
 #[tauri::command]
 async fn get_config() -> Result<ConfigResponse, String> {
-    client()
-        .get(format!("{}/api/config", api_base()))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())
+    let resp = authed_request(|token| {
+        client()
+            .get(format!("{}/api/config", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    resp.json().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn update_config(config: UpdateConfigRequest) -> Result<(), String> {
-    let resp = client()
-        .put(format!("{}/api/config", api_base()))
-        .json(&config)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
-        Err(err.error)
-    }
+    let resp = authed_request(|token| {
+        client()
+            .put(format!("{}/api/config", api_base()))
+            .bearer_auth(token)
+            .json(&config)
+    })
+    .await?;
+    check_response(resp).await
 }
 
 #[tauri::command]
@@ -159,12 +191,34 @@ async fn subscribe_events(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 async fn connect_sse(app: &tauri::AppHandle) -> Result<(), String> {
+    let token = get_token().unwrap_or_default();
     let resp = reqwest::Client::new()
         .get(format!("{}/api/events", api_base()))
+        .bearer_auth(&token)
         .send()
         .await
         .map_err(|e| e.to_string())?;
 
+    // On 401, refresh token and retry once
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let token = refresh_token()?;
+        let resp = reqwest::Client::new()
+            .get(format!("{}/api/events", api_base()))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        return process_sse_stream(app, resp).await;
+    }
+
+    let _ = app.emit("daemon_connected", ());
+    process_sse_stream(app, resp).await
+}
+
+async fn process_sse_stream(
+    app: &tauri::AppHandle,
+    resp: reqwest::Response,
+) -> Result<(), String> {
     let _ = app.emit("daemon_connected", ());
 
     let mut stream = resp.bytes_stream();
