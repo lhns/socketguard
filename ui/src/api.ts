@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
 
 export interface ManagedSocket {
   id: string;
@@ -33,18 +34,20 @@ export interface SocketDetailResponse {
   acl: AclEntry[];
 }
 
+export type BackendConfig =
+  | { type: "ula"; interface: string }
+  | { type: "yggdrasil"; interface: string }
+  | { type: "slaac"; interface: string; prefix?: string }
+  | { type: "dhcpv6"; interface: string };
+
 export interface ConfigResponse {
   listen_addr: string;
   listen_port: number;
-  backend: string;
-  interface: string;
-  poll_interval_secs: number;
+  backend: BackendConfig;
 }
 
 export interface UpdateConfigRequest {
-  backend?: string;
-  interface?: string;
-  poll_interval_secs?: number;
+  backend?: BackendConfig;
 }
 
 export async function listSockets(): Promise<SocketListResponse> {
@@ -83,4 +86,28 @@ export async function getConfig(): Promise<ConfigResponse> {
 
 export async function updateConfig(config: UpdateConfigRequest): Promise<void> {
   return invoke("update_config", { config });
+}
+
+export function onSocketsChanged(callback: () => void): Promise<UnlistenFn> {
+  return listen("sockets_changed", callback);
+}
+
+export function onConfigChanged(callback: () => void): Promise<UnlistenFn> {
+  return listen("config_changed", callback);
+}
+
+export function onDaemonConnected(callback: () => void): Promise<UnlistenFn> {
+  return listen("daemon_connected", callback);
+}
+
+export function onDaemonDisconnected(callback: () => void): Promise<UnlistenFn> {
+  return listen("daemon_disconnected", callback);
+}
+
+export async function initSSE(): Promise<void> {
+  return invoke("subscribe_events");
+}
+
+export async function startDaemon(): Promise<void> {
+  return invoke("start_daemon");
 }

@@ -2,14 +2,25 @@ use crate::AppState;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    response::sse::{Event, KeepAlive, Sse},
     response::IntoResponse,
     routing::{delete, get, post, put},
     Json, Router,
 };
+use futures_util::stream::Stream;
+use futures_util::StreamExt;
 use socketguard_core::api_types::*;
+use std::convert::Infallible;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
+use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::CorsLayer;
+
+#[derive(Debug, Clone)]
+pub enum DaemonEvent {
+    SocketsChanged,
+    ConfigChanged,
+}
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -22,8 +33,28 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/config", get(get_config))
         .route("/api/config", put(update_config))
         .route("/api/backends", get(list_backends))
+        .route("/api/events", get(sse_events))
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+async fn sse_events(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.events.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        futures_util::future::ready(match result {
+            Ok(event) => {
+                let event_name = match event {
+                    DaemonEvent::SocketsChanged => "sockets_changed",
+                    DaemonEvent::ConfigChanged => "config_changed",
+                };
+                Some(Ok(Event::default().event(event_name).data("")))
+            }
+            Err(_) => None, // lagged — skip
+        })
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 fn bad_request(msg: impl Into<String>) -> impl IntoResponse {
@@ -110,6 +141,7 @@ async fn update_acl(
                 return internal_error(format!("ACL saved but firewall update failed: {e}"))
                     .into_response();
             }
+            let _ = state.events.send(DaemonEvent::SocketsChanged);
             StatusCode::OK.into_response()
         }
         Err(e) => internal_error(e.to_string()).into_response(),
@@ -142,6 +174,7 @@ async fn allow_ip(
             if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
                 tracing::warn!("Firewall update failed after adding ACL entry: {e}");
             }
+            let _ = state.events.send(DaemonEvent::SocketsChanged);
             (StatusCode::CREATED, Json(entry)).into_response()
         }
         Err(e) => internal_error(e.to_string()).into_response(),
@@ -164,6 +197,7 @@ async fn remove_acl_entry(
             if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
                 tracing::warn!("Firewall update failed after removing ACL entry: {e}");
             }
+            let _ = state.events.send(DaemonEvent::SocketsChanged);
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => internal_error(e.to_string()).into_response(),
@@ -188,6 +222,7 @@ async fn update_policy(
                 return internal_error(format!("Policy saved but firewall update failed: {e}"))
                     .into_response();
             }
+            let _ = state.events.send(DaemonEvent::SocketsChanged);
             StatusCode::OK.into_response()
         }
         Err(e) => internal_error(e.to_string()).into_response(),
@@ -199,8 +234,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(ConfigResponse {
         listen_addr: config.listen_addr.clone(),
         listen_port: config.listen_port,
-        backend: config.backend,
-        interface: config.interface.clone(),
+        backend: config.backend.clone(),
         poll_interval_secs: config.poll_interval_secs,
     })
 }
@@ -215,8 +249,8 @@ async fn update_config(
             return bad_request("poll_interval_secs must be between 1 and 3600").into_response();
         }
     }
-    if let Some(ref iface) = req.interface {
-        if iface.is_empty() {
+    if let Some(ref backend) = req.backend {
+        if backend.interface().is_empty() {
             return bad_request("interface must not be empty").into_response();
         }
     }
@@ -225,12 +259,10 @@ async fn update_config(
     if let Some(backend) = req.backend {
         config.backend = backend;
     }
-    if let Some(iface) = req.interface {
-        config.interface = iface;
-    }
     if let Some(interval) = req.poll_interval_secs {
         config.poll_interval_secs = interval;
     }
+    let _ = state.events.send(DaemonEvent::ConfigChanged);
     StatusCode::OK.into_response()
 }
 
@@ -239,12 +271,22 @@ async fn list_backends() -> impl IntoResponse {
         backends: vec![
             BackendInfo {
                 name: socketguard_core::BackendType::Ula,
-                description: "Random ULA addresses (fd00::/8) - no external dependencies".to_string(),
+                description: "Random ULA addresses (fd00::/8) - local only, no external dependencies".to_string(),
                 available: true,
             },
             BackendInfo {
                 name: socketguard_core::BackendType::Yggdrasil,
-                description: "Yggdrasil-derived addresses (200::/7) - requires ed25519 keypair generation".to_string(),
+                description: "Yggdrasil-derived addresses (200::/7) - routable on Yggdrasil overlay".to_string(),
+                available: true,
+            },
+            BackendInfo {
+                name: socketguard_core::BackendType::Slaac,
+                description: "SLAAC addresses from existing /64 prefix - routable on LAN".to_string(),
+                available: true,
+            },
+            BackendInfo {
+                name: socketguard_core::BackendType::Dhcpv6,
+                description: "DHCPv6 addresses from a DHCPv6 server - server-managed, routable".to_string(),
                 available: true,
             },
         ],

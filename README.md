@@ -59,7 +59,7 @@ The project is a Cargo workspace with three crates plus a Tauri desktop app:
 ### Build
 
 ```bash
-# Build all crates
+# Build all crates (daemon + CLI)
 cargo build --release
 
 # The daemon binary
@@ -71,11 +71,26 @@ cargo build --release
 
 ### Tauri Desktop App
 
+The `custom-protocol` feature (enabled by default) embeds frontend assets into the exe.
+The build.rs automatically rebuilds the frontend (`npm run build`) when source files
+change, using content hashing to detect changes. On a fresh clone, install dependencies
+first:
+
 ```bash
 cd ui
 npm install
+
+# Then build via cargo (frontend rebuild is automatic)
+cd ..
+cargo build --release -p socketguard-ui
+
+# Or use the Tauri CLI directly
+cd ui
 npm run tauri build
 ```
+
+> **Note:** `cargo build --release` works because `custom-protocol` is a default feature.
+> For dev mode with hot reload, use `npm run tauri dev` (which disables it automatically).
 
 ## Usage
 
@@ -91,7 +106,7 @@ sudo ./target/release/socketguard-daemon
 .\target\release\socketguard-daemon.exe
 ```
 
-The daemon starts a REST API on `127.0.0.1:9476` and begins polling for listening sockets every 5 seconds.
+The daemon starts a REST API on `127.0.0.1:9476` and begins polling for listening sockets every 2 seconds (configurable via `poll_interval_secs`).
 
 On startup, the daemon cleans up any stale firewall rules left by a previous crash and re-applies rules from the database. On shutdown (Ctrl+C or SIGTERM), it removes all managed firewall rules and IPv6 addresses.
 
@@ -159,7 +174,7 @@ The daemon reads `socketguard.json` (or the path in `$SOCKETGUARD_CONFIG`) on st
   "listen_port": 9476,
   "backend": "ula",
   "interface": "lo",
-  "poll_interval_secs": 5,
+  "poll_interval_secs": 2,
   "db_path": "socketguard.db",
   "log_level": "info"
 }
@@ -171,7 +186,7 @@ The daemon reads `socketguard.json` (or the path in `$SOCKETGUARD_CONFIG`) on st
 | `listen_port` | REST API port | `9476` |
 | `backend` | IPv6 backend: `ula` or `yggdrasil` | `ula` |
 | `interface` | Network interface for IPv6 addresses | `lo` (Linux), `lo0` (macOS), `Loopback Pseudo-Interface 1` (Windows) |
-| `poll_interval_secs` | Socket polling interval | `5` |
+| `poll_interval_secs` | Socket polling interval | `2` |
 | `db_path` | SQLite database path | `socketguard.db` |
 | `log_level` | Log level: `trace`, `debug`, `info`, `warn`, `error` | `info` |
 
@@ -200,12 +215,13 @@ The daemon exposes a REST API on `127.0.0.1:9476`:
 | `GET` | `/api/config` | Get config |
 | `PUT` | `/api/config` | Update config |
 | `GET` | `/api/backends` | List backends |
+| `GET` | `/api/events` | SSE stream (push notifications) |
 
 ## Platform Support
 
 | Component | Linux | Windows | macOS |
 |-----------|-------|---------|-------|
-| Socket Monitor | `/proc/net/tcp6` | `netstat` | `lsof` |
+| Socket Monitor | `/proc/net/tcp6` | `GetExtendedTcpTable` | `lsof` |
 | Firewall | nftables (`nft`) | `netsh advfirewall` | `pfctl` |
 | Network Interface | `ip addr` | `netsh interface ipv6` | `ifconfig` |
 

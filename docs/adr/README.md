@@ -20,6 +20,8 @@ ADRs document significant architectural decisions made during the project's deve
 | [0010](0010-tauri-desktop-app.md) | Tauri Desktop App with React Frontend | Accepted |
 | [0011](0011-network-interface-management.md) | Network Interface IPv6 Management | Accepted |
 | [0012](0012-declarative-reconciliation-and-lifecycle.md) | Declarative Reconciliation and Lifecycle Management | Accepted |
+| [0013](0013-slaac-backend-and-per-backend-config.md) | SLAAC Backend and Per-Backend Configuration | Accepted |
+| [0014](0014-sse-push-and-native-socket-detection.md) | SSE Push Notifications and Native Socket Detection | Accepted |
 
 ## Format
 

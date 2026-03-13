@@ -1,13 +1,18 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import SocketList from "./components/SocketList";
 import SocketDetail from "./components/SocketDetail";
 import Settings from "./components/Settings";
+import { initSSE } from "./api";
 
 type View = "list" | "detail" | "settings";
 
 function App() {
   const [view, setView] = useState<View>("list");
   const [selectedSocket, setSelectedSocket] = useState<string | null>(null);
+
+  useEffect(() => {
+    initSSE().catch(console.error);
+  }, []);
 
   return (
     <>

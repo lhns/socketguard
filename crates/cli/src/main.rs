@@ -368,10 +368,17 @@ async fn main() -> Result<()> {
             if json_mode {
                 println!("{}", serde_json::to_string_pretty(&resp)?);
             } else {
+                use socketguard_core::config::BackendConfig;
                 println!("Daemon Configuration:");
                 println!("  Listen:    {}:{}", resp.listen_addr, resp.listen_port);
-                println!("  Backend:   {}", resp.backend);
-                println!("  Interface: {}", resp.interface);
+                println!("  Backend:   {}", resp.backend.backend_type());
+                println!("  Interface: {}", resp.backend.interface());
+                match &resp.backend {
+                    BackendConfig::Slaac { prefix, .. } => {
+                        println!("  Prefix:    {}", prefix.as_deref().unwrap_or("auto"));
+                    }
+                    _ => {}
+                }
                 println!("  Poll interval: {}s", resp.poll_interval_secs);
             }
         }

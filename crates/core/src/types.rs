@@ -91,6 +91,10 @@ pub enum BackendType {
     Ula,
     /// Yggdrasil-derived addresses (200::/7)
     Yggdrasil,
+    /// SLAAC addresses from an existing /64 prefix on a physical interface
+    Slaac,
+    /// DHCPv6 addresses requested from a DHCPv6 server
+    Dhcpv6,
 }
 
 impl std::fmt::Display for BackendType {
@@ -98,6 +102,8 @@ impl std::fmt::Display for BackendType {
         match self {
             BackendType::Ula => write!(f, "ula"),
             BackendType::Yggdrasil => write!(f, "yggdrasil"),
+            BackendType::Slaac => write!(f, "slaac"),
+            BackendType::Dhcpv6 => write!(f, "dhcpv6"),
         }
     }
 }
@@ -108,6 +114,8 @@ impl std::str::FromStr for BackendType {
         match s {
             "ula" => Ok(BackendType::Ula),
             "yggdrasil" => Ok(BackendType::Yggdrasil),
+            "slaac" => Ok(BackendType::Slaac),
+            "dhcpv6" => Ok(BackendType::Dhcpv6),
             _ => Err(format!("invalid backend: {s}")),
         }
     }
@@ -237,11 +245,15 @@ mod tests {
     fn backend_type_display_roundtrip() {
         assert_eq!(BackendType::Ula.to_string(), "ula");
         assert_eq!(BackendType::Yggdrasil.to_string(), "yggdrasil");
+        assert_eq!(BackendType::Slaac.to_string(), "slaac");
+        assert_eq!(BackendType::Dhcpv6.to_string(), "dhcpv6");
         assert_eq!("ula".parse::<BackendType>().unwrap(), BackendType::Ula);
         assert_eq!(
             "yggdrasil".parse::<BackendType>().unwrap(),
             BackendType::Yggdrasil
         );
+        assert_eq!("slaac".parse::<BackendType>().unwrap(), BackendType::Slaac);
+        assert_eq!("dhcpv6".parse::<BackendType>().unwrap(), BackendType::Dhcpv6);
         assert!("invalid".parse::<BackendType>().is_err());
     }
 
@@ -270,7 +282,7 @@ mod tests {
 
     #[test]
     fn backend_type_serde_roundtrip() {
-        for backend in [BackendType::Ula, BackendType::Yggdrasil] {
+        for backend in [BackendType::Ula, BackendType::Yggdrasil, BackendType::Slaac, BackendType::Dhcpv6] {
             let json = serde_json::to_string(&backend).unwrap();
             let parsed: BackendType = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, backend);

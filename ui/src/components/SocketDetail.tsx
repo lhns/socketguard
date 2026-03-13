@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getSocket, allowIp, removeAclEntry, setPolicy, ManagedSocket, AclEntry } from "../api";
+import { getSocket, allowIp, removeAclEntry, setPolicy, onSocketsChanged, onDaemonConnected, ManagedSocket, AclEntry } from "../api";
 import { useToast } from "./Toast";
 import ConfirmDialog from "./ConfirmDialog";
 
@@ -29,6 +29,13 @@ export default function SocketDetail({ socketId, onBack }: Props) {
   };
 
   useEffect(() => { refresh(); }, [socketId]);
+
+  useEffect(() => {
+    const unlistens: (() => void)[] = [];
+    onSocketsChanged(() => refresh()).then((fn) => unlistens.push(fn));
+    onDaemonConnected(() => refresh()).then((fn) => unlistens.push(fn));
+    return () => unlistens.forEach((fn) => fn());
+  }, [socketId]);
 
   const handleAllow = async () => {
     if (!newIp.trim()) return;

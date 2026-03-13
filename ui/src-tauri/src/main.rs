@@ -1,9 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use futures_util::StreamExt;
 use socketguard_core::api_types::*;
 use socketguard_core::Policy;
+use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
+use tauri::Emitter;
 
 const DEFAULT_API: &str = "http://127.0.0.1:9476";
 
@@ -137,6 +140,99 @@ async fn update_config(config: UpdateConfigRequest) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+async fn subscribe_events(app: tauri::AppHandle) -> Result<(), String> {
+    tokio::spawn(async move {
+        loop {
+            match connect_sse(&app).await {
+                Ok(()) => {} // stream ended normally
+                Err(e) => {
+                    eprintln!("SSE connection error: {e}");
+                }
+            }
+            let _ = app.emit("daemon_disconnected", ());
+            // Reconnect after 3s backoff
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    });
+    Ok(())
+}
+
+async fn connect_sse(app: &tauri::AppHandle) -> Result<(), String> {
+    let resp = reqwest::Client::new()
+        .get(format!("{}/api/events", api_base()))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let _ = app.emit("daemon_connected", ());
+
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+
+        // Process complete SSE messages (double newline delimited)
+        while let Some(pos) = buf.find("\n\n") {
+            let message = buf[..pos].to_string();
+            buf = buf[pos + 2..].to_string();
+
+            for line in message.lines() {
+                if let Some(event_name) = line.strip_prefix("event: ") {
+                    let event_name = event_name.trim();
+                    let _ = app.emit(event_name, ());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn start_daemon() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let daemon = exe.parent().unwrap().join("socketguard-daemon.exe");
+    if !daemon.exists() {
+        return Err("socketguard-daemon.exe not found next to UI executable".into());
+    }
+    spawn_elevated(&daemon).map_err(|e| e.to_string())
+}
+
+fn spawn_elevated(path: &Path) -> anyhow::Result<()> {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    let file: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_HIDE,
+        )
+    };
+
+    // ShellExecuteW returns HINSTANCE; values > 32 indicate success
+    let code = result.0 as isize;
+    if code > 32 {
+        Ok(())
+    } else {
+        anyhow::bail!("ShellExecuteW failed with code {code}")
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -148,6 +244,8 @@ fn main() {
             set_policy,
             get_config,
             update_config,
+            subscribe_events,
+            start_daemon,
         ])
         .run(tauri::generate_context!())
         .expect("error running SocketGuard UI");

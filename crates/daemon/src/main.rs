@@ -9,7 +9,7 @@ mod state;
 use anyhow::Result;
 use socketguard_core::config::DaemonConfig;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{error, info};
 
 pub struct AppState {
@@ -19,6 +19,8 @@ pub struct AppState {
     /// Mutex to synchronize firewall rule modifications between the
     /// reconciliation loop and API-triggered ACL changes.
     pub firewall_lock: Mutex<()>,
+    /// Broadcast channel for SSE push notifications to GUI
+    pub events: broadcast::Sender<api::DaemonEvent>,
 }
 
 #[tokio::main]
@@ -36,20 +38,22 @@ async fn main() -> Result<()> {
         )
         .init();
     info!("Starting SocketGuard daemon");
-    info!("Backend: {}", config.backend);
-    info!("Interface: {}", config.interface);
+    info!("Backend: {} on interface {}", config.backend.backend_type(), config.backend.interface());
 
     let db = state::Database::new(&config.db_path).await?;
     db.migrate().await?;
     info!("Database initialized at {}", config.db_path);
 
-    let engine = engine::Engine::new(&config);
+    let engine = engine::Engine::new(&config)?;
+
+    let (events_tx, _) = broadcast::channel::<api::DaemonEvent>(64);
 
     let state = Arc::new(AppState {
         config: RwLock::new(config.clone()),
         db,
         engine: RwLock::new(engine),
         firewall_lock: Mutex::new(()),
+        events: events_tx,
     });
 
     // Shutdown signal channel

@@ -1,3 +1,4 @@
+use crate::config::BackendConfig;
 use crate::types::{AclEntry, BackendType, ManagedSocket, Policy};
 use serde::{Deserialize, Serialize};
 
@@ -45,16 +46,14 @@ pub struct UpdatePolicyRequest {
 pub struct ConfigResponse {
     pub listen_addr: String,
     pub listen_port: u16,
-    pub backend: BackendType,
-    pub interface: String,
+    pub backend: BackendConfig,
     pub poll_interval_secs: u64,
 }
 
 /// Request to update config
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateConfigRequest {
-    pub backend: Option<BackendType>,
-    pub interface: Option<String>,
+    pub backend: Option<BackendConfig>,
     pub poll_interval_secs: Option<u64>,
 }
 

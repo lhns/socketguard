@@ -3,35 +3,25 @@ use anyhow::Result;
 use socketguard_core::{ListeningSocket, Protocol};
 use std::collections::HashMap;
 use std::net::IpAddr;
+use windows::Win32::Foundation::FALSE;
+use windows::Win32::NetworkManagement::IpHelper::{
+    GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6TABLE_OWNER_PID,
+    MIB_TCPTABLE_OWNER_PID, MIB_UDP6TABLE_OWNER_PID, MIB_UDPTABLE_OWNER_PID,
+    TCP_TABLE_OWNER_PID_LISTENER, UDP_TABLE_OWNER_PID,
+};
+use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
 pub struct WindowsSocketMonitor;
 
 impl SocketMonitor for WindowsSocketMonitor {
     fn list_listening_sockets(&self) -> Result<Vec<ListeningSocket>> {
         let mut sockets = Vec::new();
+        sockets.extend(list_tcp4_listeners()?);
+        sockets.extend(list_tcp6_listeners()?);
+        sockets.extend(list_udp4_listeners()?);
+        sockets.extend(list_udp6_listeners()?);
 
-        // Single netstat call for all protocols — much faster than 4 separate calls
-        let output = std::process::Command::new("netstat")
-            .args(["-ano"])
-            .output()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let line = line.trim();
-            if line.contains("LISTENING") {
-                // TCP/TCPv6
-                if let Some(socket) = parse_netstat_line(line, Protocol::Tcp) {
-                    sockets.push(socket);
-                }
-            } else if line.starts_with("UDP") && line.contains("*:*") {
-                // UDP/UDPv6 (no "LISTENING" state for UDP in netstat)
-                if let Some(socket) = parse_netstat_line(line, Protocol::Udp) {
-                    sockets.push(socket);
-                }
-            }
-        }
-
-        tracing::debug!("netstat detected {} raw sockets", sockets.len());
+        tracing::debug!("native API detected {} raw sockets", sockets.len());
 
         // Collect unique PIDs and resolve process info in batch
         let unique_pids: Vec<u32> = sockets
@@ -54,36 +44,229 @@ impl SocketMonitor for WindowsSocketMonitor {
     }
 }
 
-fn parse_netstat_line(line: &str, protocol: Protocol) -> Option<ListeningSocket> {
-    let fields: Vec<&str> = line.split_whitespace().collect();
-    if fields.len() < 4 {
-        return None;
+fn list_tcp4_listeners() -> Result<Vec<ListeningSocket>> {
+    unsafe {
+        let mut size: u32 = 0;
+        // First call to get required buffer size
+        GetExtendedTcpTable(
+            None,
+            &mut size,
+            FALSE,
+            AF_INET.0 as u32,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        );
+
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut buf = vec![0u8; size as usize];
+        let ret = GetExtendedTcpTable(
+            Some(buf.as_mut_ptr() as *mut _),
+            &mut size,
+            FALSE,
+            AF_INET.0 as u32,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        );
+
+        if ret != 0 {
+            anyhow::bail!("GetExtendedTcpTable (TCP4) failed with error {ret}");
+        }
+
+        let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
+        let count = table.dwNumEntries as usize;
+        let rows = std::slice::from_raw_parts(table.table.as_ptr(), count);
+
+        let mut sockets = Vec::with_capacity(count);
+        for row in rows {
+            let port = u16::from_be(row.dwLocalPort as u16);
+            let ip_bytes = row.dwLocalAddr.to_ne_bytes();
+            let addr = IpAddr::V4(std::net::Ipv4Addr::new(
+                ip_bytes[0],
+                ip_bytes[1],
+                ip_bytes[2],
+                ip_bytes[3],
+            ));
+            sockets.push(ListeningSocket {
+                pid: row.dwOwningPid,
+                process_name: "unknown".to_string(),
+                port,
+                protocol: Protocol::Tcp,
+                bind_address: addr,
+                exe_path: None,
+                cmdline: None,
+            });
+        }
+
+        Ok(sockets)
     }
+}
 
-    let local_addr = fields[1];
-    let pid_str = fields.last()?;
-    let pid: u32 = pid_str.parse().ok()?;
+fn list_tcp6_listeners() -> Result<Vec<ListeningSocket>> {
+    unsafe {
+        let mut size: u32 = 0;
+        GetExtendedTcpTable(
+            None,
+            &mut size,
+            FALSE,
+            AF_INET6.0 as u32,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        );
 
-    let (addr_str, port_str) = if local_addr.contains("]:") {
-        let idx = local_addr.rfind("]:")?;
-        (&local_addr[1..idx], &local_addr[idx + 2..])
-    } else {
-        let idx = local_addr.rfind(':')?;
-        (&local_addr[..idx], &local_addr[idx + 1..])
-    };
+        if size == 0 {
+            return Ok(Vec::new());
+        }
 
-    let port: u16 = port_str.parse().ok()?;
-    let bind_address: IpAddr = addr_str.parse().ok()?;
+        let mut buf = vec![0u8; size as usize];
+        let ret = GetExtendedTcpTable(
+            Some(buf.as_mut_ptr() as *mut _),
+            &mut size,
+            FALSE,
+            AF_INET6.0 as u32,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        );
 
-    Some(ListeningSocket {
-        pid,
-        process_name: "unknown".to_string(), // filled in later from process_map
-        port,
-        protocol,
-        bind_address,
-        exe_path: None,
-        cmdline: None,
-    })
+        if ret != 0 {
+            anyhow::bail!("GetExtendedTcpTable (TCP6) failed with error {ret}");
+        }
+
+        let table = &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID);
+        let count = table.dwNumEntries as usize;
+        let rows = std::slice::from_raw_parts(table.table.as_ptr(), count);
+
+        let mut sockets = Vec::with_capacity(count);
+        for row in rows {
+            let port = u16::from_be(row.dwLocalPort as u16);
+            let addr = IpAddr::V6(std::net::Ipv6Addr::from(row.ucLocalAddr));
+            sockets.push(ListeningSocket {
+                pid: row.dwOwningPid,
+                process_name: "unknown".to_string(),
+                port,
+                protocol: Protocol::Tcp,
+                bind_address: addr,
+                exe_path: None,
+                cmdline: None,
+            });
+        }
+
+        Ok(sockets)
+    }
+}
+
+fn list_udp4_listeners() -> Result<Vec<ListeningSocket>> {
+    unsafe {
+        let mut size: u32 = 0;
+        GetExtendedUdpTable(
+            None,
+            &mut size,
+            FALSE,
+            AF_INET.0 as u32,
+            UDP_TABLE_OWNER_PID,
+            0,
+        );
+
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut buf = vec![0u8; size as usize];
+        let ret = GetExtendedUdpTable(
+            Some(buf.as_mut_ptr() as *mut _),
+            &mut size,
+            FALSE,
+            AF_INET.0 as u32,
+            UDP_TABLE_OWNER_PID,
+            0,
+        );
+
+        if ret != 0 {
+            anyhow::bail!("GetExtendedUdpTable (UDP4) failed with error {ret}");
+        }
+
+        let table = &*(buf.as_ptr() as *const MIB_UDPTABLE_OWNER_PID);
+        let count = table.dwNumEntries as usize;
+        let rows = std::slice::from_raw_parts(table.table.as_ptr(), count);
+
+        let mut sockets = Vec::with_capacity(count);
+        for row in rows {
+            let port = u16::from_be(row.dwLocalPort as u16);
+            let ip_bytes = row.dwLocalAddr.to_ne_bytes();
+            let addr = IpAddr::V4(std::net::Ipv4Addr::new(
+                ip_bytes[0],
+                ip_bytes[1],
+                ip_bytes[2],
+                ip_bytes[3],
+            ));
+            sockets.push(ListeningSocket {
+                pid: row.dwOwningPid,
+                process_name: "unknown".to_string(),
+                port,
+                protocol: Protocol::Udp,
+                bind_address: addr,
+                exe_path: None,
+                cmdline: None,
+            });
+        }
+
+        Ok(sockets)
+    }
+}
+
+fn list_udp6_listeners() -> Result<Vec<ListeningSocket>> {
+    unsafe {
+        let mut size: u32 = 0;
+        GetExtendedUdpTable(
+            None,
+            &mut size,
+            FALSE,
+            AF_INET6.0 as u32,
+            UDP_TABLE_OWNER_PID,
+            0,
+        );
+
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut buf = vec![0u8; size as usize];
+        let ret = GetExtendedUdpTable(
+            Some(buf.as_mut_ptr() as *mut _),
+            &mut size,
+            FALSE,
+            AF_INET6.0 as u32,
+            UDP_TABLE_OWNER_PID,
+            0,
+        );
+
+        if ret != 0 {
+            anyhow::bail!("GetExtendedUdpTable (UDP6) failed with error {ret}");
+        }
+
+        let table = &*(buf.as_ptr() as *const MIB_UDP6TABLE_OWNER_PID);
+        let count = table.dwNumEntries as usize;
+        let rows = std::slice::from_raw_parts(table.table.as_ptr(), count);
+
+        let mut sockets = Vec::with_capacity(count);
+        for row in rows {
+            let port = u16::from_be(row.dwLocalPort as u16);
+            let addr = IpAddr::V6(std::net::Ipv6Addr::from(row.ucLocalAddr));
+            sockets.push(ListeningSocket {
+                pid: row.dwOwningPid,
+                process_name: "unknown".to_string(),
+                port,
+                protocol: Protocol::Udp,
+                bind_address: addr,
+                exe_path: None,
+                cmdline: None,
+            });
+        }
+
+        Ok(sockets)
+    }
 }
 
 struct ProcessInfo {

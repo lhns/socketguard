@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from "react";
-import { listSockets, ManagedSocket } from "../api";
+import { listSockets, onSocketsChanged, onDaemonConnected, startDaemon, ManagedSocket } from "../api";
 
 interface Props {
   onSelect: (id: string) => void;
@@ -9,7 +9,9 @@ export default function SocketList({ onSelect }: Props) {
   const [sockets, setSockets] = useState<ManagedSocket[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [starting, setStarting] = useState(false);
   const lastJson = useRef("");
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -21,6 +23,7 @@ export default function SocketList({ onSelect }: Props) {
         lastJson.current = json;
         setSockets(resp.sockets);
       }
+      setStarting(false);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -28,14 +31,43 @@ export default function SocketList({ onSelect }: Props) {
     }
   }, []);
 
+  // Fallback retry when in error state
+  useEffect(() => {
+    if (error) {
+      retryTimer.current = setTimeout(() => refresh(), 5000);
+      return () => {
+        if (retryTimer.current) clearTimeout(retryTimer.current);
+      };
+    }
+  }, [error, refresh]);
+
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 10000);
-    return () => clearInterval(interval);
+    const unlistens: (() => void)[] = [];
+    onSocketsChanged(() => refresh()).then((fn) => unlistens.push(fn));
+    onDaemonConnected(() => refresh()).then((fn) => unlistens.push(fn));
+    return () => unlistens.forEach((fn) => fn());
   }, [refresh]);
 
+  const handleStartDaemon = async () => {
+    setStarting(true);
+    try {
+      await startDaemon();
+    } catch (e) {
+      setStarting(false);
+      setError(String(e));
+    }
+  };
+
   if (loading) return <div className="loading">Loading sockets...</div>;
-  if (error) return <div className="error-banner">Cannot connect to daemon: {error}</div>;
+  if (error) return (
+    <div className="error-banner" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+      <span>Cannot connect to daemon: {error}</span>
+      <button className="btn btn-primary btn-sm" onClick={handleStartDaemon} disabled={starting}>
+        {starting ? "Starting..." : "Start Daemon"}
+      </button>
+    </div>
+  );
 
   if (sockets.length === 0) {
     return (

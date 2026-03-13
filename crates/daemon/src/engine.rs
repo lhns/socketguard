@@ -2,8 +2,8 @@ use crate::backend::{self, Ipv6Backend};
 use crate::firewall::{self, Firewall};
 use crate::monitor::{self, SocketMonitor};
 use crate::AppState;
-use socketguard_core::config::DaemonConfig;
-use socketguard_core::{socket_id, BackendType, ManagedSocket, Policy};
+use socketguard_core::config::{BackendConfig, DaemonConfig};
+use socketguard_core::{socket_id, ManagedSocket, Policy};
 use std::net::Ipv6Addr;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -14,20 +14,18 @@ pub struct Engine {
     monitor: Box<dyn SocketMonitor>,
     backend: Box<dyn Ipv6Backend>,
     firewall: Box<dyn Firewall>,
-    /// Track which backend/interface the engine was built with
-    current_backend: BackendType,
-    current_interface: String,
+    /// Track which backend config the engine was built with
+    current_backend_config: BackendConfig,
 }
 
 impl Engine {
-    pub fn new(config: &DaemonConfig) -> Self {
-        Self {
+    pub fn new(config: &DaemonConfig) -> anyhow::Result<Self> {
+        Ok(Self {
             monitor: monitor::create_monitor(),
-            backend: backend::create_backend(config.backend),
+            backend: backend::create_backend(&config.backend)?,
             firewall: firewall::create_firewall(),
-            current_backend: config.backend,
-            current_interface: config.interface.clone(),
-        }
+            current_backend_config: config.backend.clone(),
+        })
     }
 
     /// Clean up all SocketGuard-managed firewall rules.
@@ -55,7 +53,7 @@ impl Engine {
         };
 
         let config = state.config.read().await;
-        let iface = config.interface.clone();
+        let iface = config.backend.interface().to_string();
         drop(config);
 
         // Pre-fetch ACL data for closed sockets (async DB calls)
@@ -125,7 +123,7 @@ impl Engine {
         };
 
         let config = state.config.read().await;
-        let iface = config.interface.clone();
+        let iface = config.backend.interface().to_string();
         drop(config);
 
         // Remove addresses in parallel
@@ -155,27 +153,34 @@ impl Engine {
     /// Check if config has changed and rebuild subsystems if needed.
     /// Returns the old interface name if it changed (addresses need migration).
     fn check_config_change(&mut self, config: &DaemonConfig) -> Option<String> {
-        let mut old_interface = None;
-
-        if config.backend != self.current_backend {
-            info!(
-                "Backend changed from {} to {}, new sockets will use new backend",
-                self.current_backend, config.backend
-            );
-            self.backend = backend::create_backend(config.backend);
-            self.current_backend = config.backend;
+        if config.backend == self.current_backend_config {
+            return None;
         }
 
-        if config.interface != self.current_interface {
-            info!(
-                "Interface changed from {} to {}, migrating addresses",
-                self.current_interface, config.interface
-            );
-            old_interface = Some(self.current_interface.clone());
-            self.current_interface = config.interface.clone();
+        let old_interface = self.current_backend_config.interface().to_string();
+        let new_interface = config.backend.interface().to_string();
+
+        info!(
+            "Backend config changed from {:?} to {:?}",
+            self.current_backend_config, config.backend
+        );
+
+        match backend::create_backend(&config.backend) {
+            Ok(new_backend) => {
+                self.backend = new_backend;
+                self.current_backend_config = config.backend.clone();
+            }
+            Err(e) => {
+                error!("Failed to create new backend: {e}, keeping current");
+                return None;
+            }
         }
 
-        old_interface
+        if old_interface != new_interface {
+            Some(old_interface)
+        } else {
+            None
+        }
     }
 
     /// Reconcile: detect sockets, assign IPs, apply firewall rules.
@@ -187,11 +192,11 @@ impl Engine {
         drop(config);
 
         if let Some(old_iface) = self.check_config_change(&config_snapshot) {
-            self.migrate_addresses(state, &old_iface, &config_snapshot.interface)
+            self.migrate_addresses(state, &old_iface, config_snapshot.backend.interface())
                 .await;
         }
 
-        let iface = config_snapshot.interface.clone();
+        let iface = config_snapshot.backend.interface().to_string();
 
         // 1. Detect current listening sockets
         let current_sockets = match self.monitor.list_listening_sockets() {
@@ -308,6 +313,8 @@ impl Engine {
             }
         }
 
+        let had_new_sockets = !new_provisions.is_empty();
+
         // Run all network+firewall operations in parallel
         let mut join_set = JoinSet::new();
 
@@ -353,7 +360,9 @@ impl Engine {
         let stale_threshold =
             now - chrono::Duration::seconds(config_snapshot.poll_interval_secs as i64 * 3);
 
+        let mut had_stale = false;
         if let Ok(stale) = state.db.stale_sockets(stale_threshold).await {
+            had_stale = !stale.is_empty();
             let mut stale_join_set = JoinSet::new();
             for s in stale {
                 info!(
@@ -383,6 +392,10 @@ impl Engine {
                     warn!("Stale cleanup task failed: {e}");
                 }
             }
+        }
+
+        if had_new_sockets || had_stale {
+            let _ = state.events.send(crate::api::DaemonEvent::SocketsChanged);
         }
 
         Ok(())
