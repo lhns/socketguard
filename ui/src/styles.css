@@ -243,6 +243,49 @@ select.input {
   background-position: right 10px center;
 }
 
+select.input option {
+  background: var(--bg-card);
+  color: var(--text);
+}
+
+/* Backend filter */
+.backend-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.backend-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+  user-select: none;
+}
+
+.backend-filter:hover {
+  border-color: var(--text-muted);
+}
+
+.backend-filter.checked {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.backend-filter input[type="checkbox"] {
+  display: none;
+}
+
 /* Table */
 .table-wrap {
   overflow-x: auto;
@@ -291,6 +334,11 @@ tr.clickable:hover {
   letter-spacing: 0.2px;
 }
 
+.badge-disabled {
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+
 .badge-closed {
   background: var(--red-bg);
   color: var(--red);
@@ -299,6 +347,11 @@ tr.clickable:hover {
 .badge-open {
   background: var(--green-bg);
   color: var(--green);
+}
+
+.badge-mixed {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .badge-dot {
@@ -332,6 +385,11 @@ tr.clickable:hover {
 
 .policy-btn:hover {
   color: var(--text);
+}
+
+.policy-btn.active-disabled {
+  background: var(--text-muted);
+  color: #fff;
 }
 
 .policy-btn.active-closed {

@@ -2,7 +2,7 @@ pub mod api_types;
 pub mod config;
 pub mod types;
 
-pub use config::BackendConfig;
+pub use config::{BackendConfig, ProcessFilter};
 pub use types::*;
 
 use std::path::PathBuf;

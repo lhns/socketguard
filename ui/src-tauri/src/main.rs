@@ -43,10 +43,14 @@ fn read_api_token() -> Option<String> {
 
 fn get_token() -> Result<String, String> {
     let store = token_store();
-    let guard = store.read().unwrap();
-    guard
-        .clone()
-        .ok_or_else(|| "API token not available — is the daemon running?".into())
+    {
+        let guard = store.read().unwrap();
+        if let Some(ref t) = *guard {
+            return Ok(t.clone());
+        }
+    }
+    // Token not cached yet — try reading from disk (daemon may have started since)
+    refresh_token()
 }
 
 /// Re-read token from disk (after a 401 / daemon restart).
@@ -143,6 +147,36 @@ async fn set_policy(socket_id: String, policy: String) -> Result<(), String> {
     let resp = authed_request(|token| {
         client()
             .put(format!("{}/api/sockets/{socket_id}/policy", api_base()))
+            .bearer_auth(token)
+            .json(&req)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+#[tauri::command]
+async fn set_backend_policy(socket_id: String, backend_id: String, policy: String) -> Result<(), String> {
+    let policy: Policy = policy.parse().map_err(|e: String| e)?;
+    let req = UpdatePolicyRequest { policy };
+    let resp = authed_request(|token| {
+        client()
+            .put(format!("{}/api/sockets/{socket_id}/backends/{backend_id}/policy", api_base()))
+            .bearer_auth(token)
+            .json(&req)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+#[tauri::command]
+async fn allow_backend_ip(socket_id: String, backend_id: String, ip: String, label: Option<String>) -> Result<(), String> {
+    let req = AllowIpRequest {
+        allowed_ip: ip,
+        label,
+    };
+    let resp = authed_request(|token| {
+        client()
+            .post(format!("{}/api/sockets/{socket_id}/backends/{backend_id}/acl/allow", api_base()))
             .bearer_auth(token)
             .json(&req)
     })
@@ -343,6 +377,8 @@ fn main() {
             allow_ip,
             remove_acl_entry,
             set_policy,
+            set_backend_policy,
+            allow_backend_ip,
             get_config,
             update_config,
             list_interfaces,

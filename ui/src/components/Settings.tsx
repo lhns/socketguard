@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import {
-  getConfig, onConfigChanged, onDaemonConnected,
+  getConfig, updateConfig, onConfigChanged, onDaemonConnected,
   listBackendInstances, listInterfaces, addBackend, removeBackend,
   ConfigResponse, BackendInstanceConfig, BackendInfo, AddBackendRequest,
 } from "../api";
@@ -24,7 +24,12 @@ function InterfaceSelect({
 
   useEffect(() => {
     listInterfaces()
-      .then((r) => setInterfaces(r.interfaces))
+      .then((r) => {
+        setInterfaces(r.interfaces);
+        if (!value && r.interfaces.length > 0) {
+          onChange(r.interfaces[0]);
+        }
+      })
       .catch(() => {});
   }, []);
 
@@ -77,7 +82,7 @@ function InterfaceSelect({
             left: 0,
             right: 0,
             zIndex: 100,
-            background: "var(--bg-primary)",
+            background: "var(--bg-card)",
             border: "1px solid var(--border)",
             borderRadius: 6,
             marginTop: 2,
@@ -95,12 +100,12 @@ function InterfaceSelect({
                 cursor: "pointer",
                 fontSize: 13,
                 fontFamily: "var(--font-mono, monospace)",
-                background: iface === value ? "var(--bg-secondary)" : "transparent",
+                background: iface === value ? "var(--bg-hover)" : "transparent",
               }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-secondary)")}
+              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-hover)")}
               onMouseLeave={(e) =>
                 (e.currentTarget.style.background =
-                  iface === value ? "var(--bg-secondary)" : "transparent")
+                  iface === value ? "var(--bg-hover)" : "transparent")
               }
             >
               {iface}
@@ -116,7 +121,7 @@ function InterfaceSelect({
             left: 0,
             right: 0,
             zIndex: 100,
-            background: "var(--bg-primary)",
+            background: "var(--bg-card)",
             border: "1px solid var(--border)",
             borderRadius: 6,
             marginTop: 2,
@@ -127,6 +132,98 @@ function InterfaceSelect({
           }}
         >
           No matching interfaces
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TypeSelect({
+  value,
+  onChange,
+  types,
+  activeSingletons,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  types: BackendInfo[];
+  activeSingletons: Set<string>;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const selected = types.find((t) => t.name === value);
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <div
+        className="input"
+        onClick={() => setOpen(!open)}
+        style={{ cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between" }}
+      >
+        <span>{selected ? selected.name.toUpperCase() : value.toUpperCase()}</span>
+        <svg width="10" height="6" viewBox="0 0 10 6" style={{ opacity: 0.5 }}>
+          <path d="M1 1l4 4 4-4" stroke="currentColor" fill="none" strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
+      </div>
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: "100%",
+            left: 0,
+            right: 0,
+            zIndex: 100,
+            background: "var(--bg-card)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            marginTop: 2,
+            maxHeight: 200,
+            overflowY: "auto",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+          }}
+        >
+          {types.map((t) => {
+            const disabled = t.singleton && activeSingletons.has(t.name);
+            return (
+              <div
+                key={t.name}
+                onClick={() => {
+                  if (!disabled) {
+                    onChange(t.name);
+                    setOpen(false);
+                  }
+                }}
+                style={{
+                  padding: "8px 12px",
+                  cursor: disabled ? "default" : "pointer",
+                  fontSize: 13,
+                  opacity: disabled ? 0.4 : 1,
+                  background: t.name === value ? "var(--bg-hover)" : "transparent",
+                }}
+                onMouseEnter={(e) => {
+                  if (!disabled) e.currentTarget.style.background = "var(--bg-hover)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = t.name === value ? "var(--bg-hover)" : "transparent";
+                }}
+              >
+                <div style={{ fontWeight: 500 }}>{t.name.toUpperCase()}</div>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 1 }}>
+                  {t.description}
+                  {t.singleton && disabled ? " (already active)" : ""}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -144,12 +241,17 @@ export default function Settings() {
   const [addId, setAddId] = useState("");
   const [saving, setSaving] = useState(false);
   const [confirm, setConfirm] = useState<{ message: string; action: () => void } | null>(null);
+  const [filterMode, setFilterMode] = useState<"allowlist" | "denylist">("denylist");
+  const [filterPatterns, setFilterPatterns] = useState("");
+  const [savingFilter, setSavingFilter] = useState(false);
   const toast = useToast();
 
   const load = async () => {
     try {
       const c = await getConfig();
       setConfig(c);
+      setFilterMode(c.process_filter.mode);
+      setFilterPatterns(c.process_filter.patterns.join(", "));
       const b = await listBackendInstances();
       setAvailableTypes(b.available_types);
       setError(null);
@@ -303,27 +405,16 @@ export default function Settings() {
         )}
 
         {adding && (
-          <div style={{ marginTop: 16, padding: "16px", background: "var(--bg-secondary)", borderRadius: 6 }}>
+          <div style={{ marginTop: 16, padding: "16px", background: "var(--bg-hover)", borderRadius: 6 }}>
             <div className="section-title" style={{ marginBottom: 12 }}>Add Backend Instance</div>
             <div className="info-grid" style={{ alignItems: "center" }}>
               <span className="info-label">Type</span>
-              <select
-                className="input"
+              <TypeSelect
                 value={addType}
-                onChange={(e) => setAddType(e.target.value)}
-              >
-                {availableTypes.map((t) => (
-                  <option
-                    key={t.name}
-                    value={t.name}
-                    disabled={t.singleton && activeSingletons.has(t.name)}
-                  >
-                    {t.name.toUpperCase()}
-                    {t.singleton && activeSingletons.has(t.name) ? " (already active)" : ""}
-                    {t.singleton ? " (singleton)" : ""}
-                  </option>
-                ))}
-              </select>
+                onChange={setAddType}
+                types={availableTypes}
+                activeSingletons={activeSingletons}
+              />
 
               <span className="info-label">Interface</span>
               <InterfaceSelect
@@ -372,6 +463,62 @@ export default function Settings() {
             </div>
           </div>
         )}
+      </div>
+
+      {/* Process Filter */}
+      <div className="card-header">
+        <span className="card-title">Process Filter</span>
+      </div>
+      <div className="card">
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
+            <button
+              className={`btn btn-sm${filterMode === "denylist" ? " btn-primary" : ""}`}
+              onClick={() => setFilterMode("denylist")}
+            >
+              Denylist
+            </button>
+            <button
+              className={`btn btn-sm${filterMode === "allowlist" ? " btn-primary" : ""}`}
+              onClick={() => setFilterMode("allowlist")}
+            >
+              Allowlist
+            </button>
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
+            {filterMode === "denylist"
+              ? "Matching processes will NOT get IPv6 addresses. Empty = allow all."
+              : "Only matching processes will get IPv6 addresses. Empty = allow none."}
+          </div>
+          <input
+            className="input"
+            value={filterPatterns}
+            onChange={(e) => setFilterPatterns(e.target.value)}
+            placeholder="svchost*,System,OneDrive*"
+            style={{ width: "100%" }}
+          />
+        </div>
+        <button
+          className="btn btn-primary btn-sm"
+          disabled={savingFilter}
+          onClick={async () => {
+            setSavingFilter(true);
+            try {
+              const patterns = filterPatterns
+                .split(",")
+                .map((p) => p.trim())
+                .filter((p) => p.length > 0);
+              await updateConfig({ process_filter: { mode: filterMode, patterns } });
+              toast.success("Process filter saved");
+            } catch (e) {
+              toast.error(String(e));
+            } finally {
+              setSavingFilter(false);
+            }
+          }}
+        >
+          {savingFilter ? "Saving..." : "Save Filter"}
+        </button>
       </div>
     </div>
   );

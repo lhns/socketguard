@@ -1,4 +1,4 @@
-use crate::config::{BackendConfig, BackendInstanceConfig};
+use crate::config::{BackendConfig, BackendInstanceConfig, ProcessFilter};
 use crate::types::{AclEntry, BackendType, ManagedSocket, Policy};
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +48,7 @@ pub struct ConfigResponse {
     pub listen_port: u16,
     pub backends: Vec<BackendInstanceConfig>,
     pub poll_interval_secs: u64,
+    pub process_filter: ProcessFilter,
 }
 
 /// Request to update config
@@ -55,6 +56,7 @@ pub struct ConfigResponse {
 pub struct UpdateConfigRequest {
     pub backends: Option<Vec<BackendInstanceConfig>>,
     pub poll_interval_secs: Option<u64>,
+    pub process_filter: Option<ProcessFilter>,
 }
 
 /// Available backends response

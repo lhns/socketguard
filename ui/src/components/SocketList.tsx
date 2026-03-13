@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { listSockets, onSocketsChanged, onDaemonConnected, startDaemon, ManagedSocket } from "../api";
 
 interface Props {
@@ -11,12 +11,13 @@ export default function SocketList({ onSelect }: Props) {
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
   const lastJson = useRef("");
+  const [hiddenBackends, setHiddenBackends] = useState<Set<string>>(new Set());
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      setError(null);
       const resp = await listSockets();
+      setError(null);
       // Only update state if data actually changed
       const json = JSON.stringify(resp.sockets);
       if (json !== lastJson.current) {
@@ -59,6 +60,24 @@ export default function SocketList({ onSelect }: Props) {
     }
   };
 
+  // Collect all unique backend IDs across all sockets
+  const allBackendIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const s of sockets) {
+      for (const a of s.addresses) ids.add(a.backend_id);
+    }
+    return Array.from(ids).sort();
+  }, [sockets]);
+
+  const toggleBackend = (id: string) => {
+    setHiddenBackends((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   if (loading) return <div className="loading">Loading sockets...</div>;
   if (error) return (
     <div className="error-banner" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -93,6 +112,27 @@ export default function SocketList({ onSelect }: Props) {
         <button className="btn btn-sm" onClick={refresh}>Refresh</button>
       </div>
 
+      {allBackendIds.length > 1 && (
+        <div className="backend-filters">
+          {allBackendIds.map((id) => {
+            const checked = !hiddenBackends.has(id);
+            return (
+              <label
+                key={id}
+                className={`backend-filter${checked ? " checked" : ""}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => toggleBackend(id)}
+                />
+                {id}
+              </label>
+            );
+          })}
+        </div>
+      )}
+
       <div className="card" style={{ padding: 0, overflow: "hidden" }}>
         <div className="table-wrap">
           <table>
@@ -106,8 +146,8 @@ export default function SocketList({ onSelect }: Props) {
             </thead>
             <tbody>
               {sockets.map((s) => {
-                const primary = s.addresses[0];
-                const extraCount = s.addresses.length - 1;
+                const visible = s.addresses.filter((a) => !hiddenBackends.has(a.backend_id));
+                const multiBackend = allBackendIds.length > 1;
                 return (
                   <tr key={s.id} className="clickable" onClick={() => onSelect(s.id)}>
                     <td>
@@ -119,22 +159,33 @@ export default function SocketList({ onSelect }: Props) {
                       <span style={{ color: "var(--text-muted)", marginLeft: 2 }}>/{s.protocol}</span>
                     </td>
                     <td className="mono">
-                      {primary ? primary.address : "(none)"}
-                      {extraCount > 0 && (
-                        <span
-                          className="badge"
-                          style={{ marginLeft: 6, fontSize: 11, padding: "1px 5px" }}
-                          title={s.addresses.map((a) => `${a.address} [${a.backend_id}]`).join("\n")}
-                        >
-                          +{extraCount} more
-                        </span>
+                      {visible.length === 0 ? (
+                        <span style={{ color: "var(--text-muted)" }}>(none)</span>
+                      ) : (
+                        visible.map((a) => (
+                          <div key={a.backend_id} style={{ lineHeight: 1.4 }}>
+                            {a.address}
+                            {multiBackend && (
+                              <span style={{ color: "var(--text-muted)", fontSize: 11, marginLeft: 4 }}>
+                                [{a.backend_id}]
+                              </span>
+                            )}
+                          </div>
+                        ))
                       )}
                     </td>
                     <td>
-                      <span className={`badge badge-${s.policy}`}>
-                        <span className="badge-dot" />
-                        {s.policy}
-                      </span>
+                      {(() => {
+                        const policies = visible.map((a) => a.policy);
+                        const unique = [...new Set(policies)];
+                        if (unique.length === 0) {
+                          return <span className="badge badge-closed"><span className="badge-dot" />{s.policy}</span>;
+                        }
+                        if (unique.length === 1) {
+                          return <span className={`badge badge-${unique[0]}`}><span className="badge-dot" />{unique[0]}</span>;
+                        }
+                        return <span className="badge badge-mixed"><span className="badge-dot" />mixed</span>;
+                      })()}
                     </td>
                   </tr>
                 );

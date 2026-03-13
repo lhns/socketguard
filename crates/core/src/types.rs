@@ -43,13 +43,20 @@ pub struct ListeningSocket {
     pub cmdline: Option<String>,
 }
 
-/// Access control policy for a socket
+/// Access control policy for a socket address.
+///
+/// When used on `SocketAddress`, controls the per-backend behavior.
+/// When used on `ManagedSocket.policy`, serves as the default policy for
+/// newly added backend addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Policy {
+    /// No address assigned — the socket does not participate in this backend.
+    /// Address is removed from the OS interface and firewall rules are cleaned up.
+    Disabled,
     /// ACL-based access control (default).
     /// With no ACL entries: blocks all incoming connections.
-    /// With ACL entries: allows only whitelisted IPs.
+    /// With ACL entries: allows only whitelisted source IPs.
     Closed,
     /// Allow all incoming connections (no restrictions)
     Open,
@@ -64,6 +71,7 @@ impl Default for Policy {
 impl std::fmt::Display for Policy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Policy::Disabled => write!(f, "disabled"),
             Policy::Closed => write!(f, "closed"),
             Policy::Open => write!(f, "open"),
         }
@@ -74,6 +82,7 @@ impl std::str::FromStr for Policy {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "disabled" => Ok(Policy::Disabled),
             "closed" => Ok(Policy::Closed),
             "open" => Ok(Policy::Open),
             // Accept "managed" as alias for backwards compatibility with existing DBs
@@ -121,7 +130,10 @@ impl std::str::FromStr for BackendType {
     }
 }
 
-/// An address assigned to a socket from a specific backend instance
+/// An address assigned to a socket from a specific backend instance.
+///
+/// Each address carries its own policy and ACL, allowing per-backend
+/// security control (ADR 0017).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SocketAddress {
     pub backend_id: String,
@@ -130,9 +142,15 @@ pub struct SocketAddress {
     pub interface: String,
     pub prefix_len: u8,
     pub keypair_id: Option<String>,
+    /// Per-address policy (disabled/closed/open). See ADR 0017.
+    pub policy: Policy,
 }
 
-/// A managed socket with its assigned IPv6 addresses and metadata
+/// A managed socket with its assigned IPv6 addresses and metadata.
+///
+/// The `policy` field serves as the default policy for newly added backend
+/// addresses (ADR 0017). The authoritative per-address policy lives in
+/// each `SocketAddress.policy`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedSocket {
     pub id: String,
@@ -141,6 +159,7 @@ pub struct ManagedSocket {
     pub port: u16,
     pub protocol: Protocol,
     pub addresses: Vec<SocketAddress>,
+    /// Default policy for new backend addresses.
     pub policy: Policy,
     pub exe_path: Option<String>,
     pub cmdline: Option<String>,
@@ -165,11 +184,16 @@ impl ManagedSocket {
     }
 }
 
-/// An ACL entry allowing a specific source IP to connect
+/// An ACL entry allowing a specific source IP to connect.
+///
+/// Scoped to a specific backend instance (ADR 0017). Each
+/// socket+backend pair has its own ACL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AclEntry {
     pub id: i64,
     pub socket_id: String,
+    /// The backend instance this ACL entry applies to.
+    pub backend_id: String,
     pub allowed_ip: String,
     pub label: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -258,8 +282,10 @@ mod tests {
 
     #[test]
     fn policy_display_roundtrip() {
+        assert_eq!(Policy::Disabled.to_string(), "disabled");
         assert_eq!(Policy::Closed.to_string(), "closed");
         assert_eq!(Policy::Open.to_string(), "open");
+        assert_eq!("disabled".parse::<Policy>().unwrap(), Policy::Disabled);
         assert_eq!("closed".parse::<Policy>().unwrap(), Policy::Closed);
         assert_eq!("open".parse::<Policy>().unwrap(), Policy::Open);
         // "managed" accepted as backwards-compat alias for closed
@@ -299,7 +325,7 @@ mod tests {
 
     #[test]
     fn policy_serde_roundtrip() {
-        for policy in [Policy::Closed, Policy::Open] {
+        for policy in [Policy::Disabled, Policy::Closed, Policy::Open] {
             let json = serde_json::to_string(&policy).unwrap();
             let parsed: Policy = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, policy);

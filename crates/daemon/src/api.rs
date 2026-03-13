@@ -28,10 +28,13 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/sockets", get(list_sockets))
         .route("/api/sockets/{id}", get(get_socket))
-        .route("/api/sockets/{id}/acl", put(update_acl))
-        .route("/api/sockets/{id}/acl/allow", post(allow_ip))
+        .route("/api/sockets/{id}/acl/allow", post(allow_ip_all))
         .route("/api/sockets/{id}/acl/{entry_id}", delete(remove_acl_entry))
-        .route("/api/sockets/{id}/policy", put(update_policy))
+        .route("/api/sockets/{id}/policy", put(update_policy_all))
+        // Per-backend routes (ADR 0017)
+        .route("/api/sockets/{id}/backends/{backend_id}/policy", put(update_backend_policy))
+        .route("/api/sockets/{id}/backends/{backend_id}/acl/allow", post(allow_backend_ip))
+        .route("/api/sockets/{id}/backends/{backend_id}/acl/{entry_id}", delete(remove_acl_entry))
         .route("/api/config", get(get_config))
         .route("/api/config", put(update_config))
         .route("/api/backends", get(list_backends))
@@ -162,44 +165,8 @@ async fn get_socket(
     Json(SocketDetailResponse { socket, acl }).into_response()
 }
 
-async fn update_acl(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Json(req): Json<UpdateAclRequest>,
-) -> impl IntoResponse {
-    match state.db.get_socket(&id).await {
-        Ok(Some(_)) => {}
-        Ok(None) => return not_found("socket not found").into_response(),
-        Err(e) => return internal_error(e.to_string()).into_response(),
-    }
-
-    for entry in &req.entries {
-        if entry.allowed_ip.parse::<Ipv6Addr>().is_err() {
-            return bad_request(format!("invalid IPv6 address: '{}'", entry.allowed_ip))
-                .into_response();
-        }
-    }
-
-    let entries: Vec<(String, Option<String>)> = req
-        .entries
-        .into_iter()
-        .map(|e| (e.allowed_ip, e.label))
-        .collect();
-
-    match state.db.replace_acl(&id, &entries).await {
-        Ok(_) => {
-            if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
-                return internal_error(format!("ACL saved but firewall update failed: {e}"))
-                    .into_response();
-            }
-            let _ = state.events.send(DaemonEvent::SocketsChanged);
-            StatusCode::OK.into_response()
-        }
-        Err(e) => internal_error(e.to_string()).into_response(),
-    }
-}
-
-async fn allow_ip(
+/// Add ACL entry to ALL backends for a socket (fan-out, legacy compat).
+async fn allow_ip_all(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<AllowIpRequest>,
@@ -216,7 +183,39 @@ async fn allow_ip(
 
     match state
         .db
-        .add_acl_entry(&id, &req.allowed_ip, req.label.as_deref())
+        .add_acl_entry_all_backends(&id, &req.allowed_ip, req.label.as_deref())
+        .await
+    {
+        Ok(entries) => {
+            if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
+                tracing::warn!("Firewall update failed after adding ACL entries: {e}");
+            }
+            let _ = state.events.send(DaemonEvent::SocketsChanged);
+            (StatusCode::CREATED, Json(entries)).into_response()
+        }
+        Err(e) => internal_error(e.to_string()).into_response(),
+    }
+}
+
+/// Add ACL entry for a specific backend (ADR 0017).
+async fn allow_backend_ip(
+    State(state): State<Arc<AppState>>,
+    Path((id, backend_id)): Path<(String, String)>,
+    Json(req): Json<AllowIpRequest>,
+) -> impl IntoResponse {
+    if req.allowed_ip.parse::<Ipv6Addr>().is_err() {
+        return bad_request(format!("invalid IPv6 address: '{}'", req.allowed_ip)).into_response();
+    }
+
+    match state.db.get_socket(&id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found("socket not found").into_response(),
+        Err(e) => return internal_error(e.to_string()).into_response(),
+    }
+
+    match state
+        .db
+        .add_acl_entry(&id, &backend_id, &req.allowed_ip, req.label.as_deref())
         .await
     {
         Ok(entry) => {
@@ -252,7 +251,8 @@ async fn remove_acl_entry(
     }
 }
 
-async fn update_policy(
+/// Set policy on ALL backends for a socket (fan-out, legacy compat).
+async fn update_policy_all(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<UpdatePolicyRequest>,
@@ -263,7 +263,32 @@ async fn update_policy(
         Err(e) => return internal_error(e.to_string()).into_response(),
     }
 
-    match state.db.update_policy(&id, req.policy).await {
+    match state.db.update_policy_all_backends(&id, req.policy).await {
+        Ok(_) => {
+            if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
+                return internal_error(format!("Policy saved but firewall update failed: {e}"))
+                    .into_response();
+            }
+            let _ = state.events.send(DaemonEvent::SocketsChanged);
+            StatusCode::OK.into_response()
+        }
+        Err(e) => internal_error(e.to_string()).into_response(),
+    }
+}
+
+/// Set policy on a specific backend for a socket (ADR 0017).
+async fn update_backend_policy(
+    State(state): State<Arc<AppState>>,
+    Path((id, backend_id)): Path<(String, String)>,
+    Json(req): Json<UpdatePolicyRequest>,
+) -> impl IntoResponse {
+    match state.db.get_socket(&id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found("socket not found").into_response(),
+        Err(e) => return internal_error(e.to_string()).into_response(),
+    }
+
+    match state.db.update_address_policy(&id, &backend_id, req.policy).await {
         Ok(_) => {
             if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
                 return internal_error(format!("Policy saved but firewall update failed: {e}"))
@@ -283,6 +308,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         listen_port: config.listen_port,
         backends: config.backends.clone(),
         poll_interval_secs: config.poll_interval_secs,
+        process_filter: config.process_filter.clone(),
     })
 }
 
@@ -307,6 +333,9 @@ async fn update_config(
     }
     if let Some(interval) = req.poll_interval_secs {
         config.poll_interval_secs = interval;
+    }
+    if let Some(process_filter) = req.process_filter {
+        config.process_filter = process_filter;
     }
     let _ = state.events.send(DaemonEvent::ConfigChanged);
     StatusCode::OK.into_response()

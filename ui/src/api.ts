@@ -8,6 +8,7 @@ export interface SocketAddress {
   interface: string;
   prefix_len: number;
   keypair_id: string | null;
+  policy: string;
 }
 
 export interface ManagedSocket {
@@ -27,6 +28,7 @@ export interface ManagedSocket {
 export interface AclEntry {
   id: number;
   socket_id: string;
+  backend_id: string;
   allowed_ip: string;
   label: string | null;
   created_at: string;
@@ -66,16 +68,23 @@ export interface BackendsResponse {
   active_instances: BackendInstanceConfig[];
 }
 
+export interface ProcessFilter {
+  mode: "allowlist" | "denylist";
+  patterns: string[];
+}
+
 export interface ConfigResponse {
   listen_addr: string;
   listen_port: number;
   backends: BackendInstanceConfig[];
   poll_interval_secs: number;
+  process_filter: ProcessFilter;
 }
 
 export interface UpdateConfigRequest {
   backends?: BackendInstanceConfig[];
   poll_interval_secs?: number;
+  process_filter?: ProcessFilter;
 }
 
 export interface AddBackendRequest {
@@ -113,6 +122,23 @@ export async function setPolicy(
   policy: string
 ): Promise<void> {
   return invoke("set_policy", { socketId, policy });
+}
+
+export async function setBackendPolicy(
+  socketId: string,
+  backendId: string,
+  policy: string
+): Promise<void> {
+  return invoke("set_backend_policy", { socketId, backendId, policy });
+}
+
+export async function allowBackendIp(
+  socketId: string,
+  backendId: string,
+  ip: string,
+  label?: string
+): Promise<void> {
+  return invoke("allow_backend_ip", { socketId, backendId, ip, label });
 }
 
 export async function getConfig(): Promise<ConfigResponse> {

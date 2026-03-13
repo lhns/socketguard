@@ -80,6 +80,93 @@ pub struct BackendInstanceConfig {
     pub backend: BackendConfig,
 }
 
+/// Process filter mode
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FilterMode {
+    Allowlist,
+    Denylist,
+}
+
+impl Default for FilterMode {
+    fn default() -> Self {
+        FilterMode::Denylist
+    }
+}
+
+/// Process filter: controls which processes get IPv6 addresses assigned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessFilter {
+    #[serde(default)]
+    pub mode: FilterMode,
+    #[serde(default)]
+    pub patterns: Vec<String>,
+}
+
+impl Default for ProcessFilter {
+    fn default() -> Self {
+        Self {
+            mode: FilterMode::Denylist,
+            patterns: Vec::new(),
+        }
+    }
+}
+
+impl ProcessFilter {
+    /// Check if a process name is allowed by this filter.
+    pub fn matches(&self, process_name: &str) -> bool {
+        match self.mode {
+            FilterMode::Denylist => {
+                if self.patterns.is_empty() {
+                    return true; // empty denylist = allow all
+                }
+                // Denied if any pattern matches
+                !self.patterns.iter().any(|p| glob_match(p, process_name))
+            }
+            FilterMode::Allowlist => {
+                if self.patterns.is_empty() {
+                    return false; // empty allowlist = allow none
+                }
+                // Allowed if any pattern matches
+                self.patterns.iter().any(|p| glob_match(p, process_name))
+            }
+        }
+    }
+}
+
+/// Simple case-insensitive wildcard glob matcher supporting `*`.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let pattern = pattern.to_lowercase();
+    let text = text.to_lowercase();
+    let pat: Vec<char> = pattern.chars().collect();
+    let txt: Vec<char> = text.chars().collect();
+
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star_pi, mut star_ti) = (usize::MAX, 0usize);
+
+    while ti < txt.len() {
+        if pi < pat.len() && (pat[pi] == txt[ti] || pat[pi] == '?') {
+            pi += 1;
+            ti += 1;
+        } else if pi < pat.len() && pat[pi] == '*' {
+            star_pi = pi;
+            star_ti = ti;
+            pi += 1;
+        } else if star_pi != usize::MAX {
+            pi = star_pi + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < pat.len() && pat[pi] == '*' {
+        pi += 1;
+    }
+    pi == pat.len()
+}
+
 /// Daemon configuration
 ///
 /// Supports three JSON formats:
@@ -105,6 +192,10 @@ pub struct DaemonConfig {
 
     /// Log level: trace, debug, info, warn, error
     pub log_level: String,
+
+    /// Process filter (allowlist/denylist)
+    #[serde(default)]
+    pub process_filter: ProcessFilter,
 }
 
 impl Default for DaemonConfig {
@@ -121,6 +212,7 @@ impl Default for DaemonConfig {
             poll_interval_secs: 2,
             db_path: "socketguard.db".to_string(),
             log_level: "info".to_string(),
+            process_filter: ProcessFilter::default(),
         }
     }
 }
@@ -231,6 +323,8 @@ impl<'de> Deserialize<'de> for DaemonConfig {
             db_path: String,
             #[serde(default = "default_log_level")]
             log_level: String,
+            #[serde(default)]
+            process_filter: ProcessFilter,
         }
 
         let raw = RawConfig::deserialize(deserializer)?;
@@ -267,6 +361,7 @@ impl<'de> Deserialize<'de> for DaemonConfig {
             poll_interval_secs: raw.poll_interval_secs,
             db_path: raw.db_path,
             log_level: raw.log_level,
+            process_filter: raw.process_filter,
         })
     }
 }
@@ -457,6 +552,95 @@ mod tests {
             prefix: None,
         };
         assert_eq!(slaac.interface(), "eth0");
+    }
+
+    #[test]
+    fn glob_match_basic() {
+        assert!(glob_match("svchost*", "svchost.exe"));
+        assert!(glob_match("svchost*", "svchost"));
+        assert!(glob_match("*host*", "svchost.exe"));
+        assert!(glob_match("System", "System"));
+        assert!(glob_match("system", "System")); // case-insensitive
+        assert!(glob_match("SYSTEM", "system"));
+        assert!(!glob_match("svchost", "svchost.exe"));
+        assert!(!glob_match("nginx", "svchost"));
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("*.*", "svc.exe"));
+        assert!(!glob_match("*.*", "svchost"));
+        assert!(glob_match("OneDrive*", "OneDrive.exe"));
+    }
+
+    #[test]
+    fn process_filter_denylist_empty_allows_all() {
+        let f = ProcessFilter::default();
+        assert!(f.matches("nginx"));
+        assert!(f.matches("svchost.exe"));
+    }
+
+    #[test]
+    fn process_filter_denylist_blocks_matched() {
+        let f = ProcessFilter {
+            mode: FilterMode::Denylist,
+            patterns: vec!["svchost*".into(), "System".into()],
+        };
+        assert!(!f.matches("svchost.exe"));
+        assert!(!f.matches("System"));
+        assert!(f.matches("nginx"));
+    }
+
+    #[test]
+    fn process_filter_allowlist_empty_blocks_all() {
+        let f = ProcessFilter {
+            mode: FilterMode::Allowlist,
+            patterns: vec![],
+        };
+        assert!(!f.matches("nginx"));
+    }
+
+    #[test]
+    fn process_filter_allowlist_allows_matched() {
+        let f = ProcessFilter {
+            mode: FilterMode::Allowlist,
+            patterns: vec!["nginx".into(), "httpd*".into()],
+        };
+        assert!(f.matches("nginx"));
+        assert!(f.matches("httpd.exe"));
+        assert!(!f.matches("svchost.exe"));
+    }
+
+    #[test]
+    fn process_filter_serialization() {
+        let f = ProcessFilter {
+            mode: FilterMode::Allowlist,
+            patterns: vec!["nginx".into()],
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        let parsed: ProcessFilter = serde_json::from_str(&json).unwrap();
+        assert_eq!(f, parsed);
+    }
+
+    #[test]
+    fn config_with_process_filter() {
+        let json = r#"{
+            "process_filter": {
+                "mode": "denylist",
+                "patterns": ["svchost*", "System"]
+            }
+        }"#;
+        let config: DaemonConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.process_filter.mode, FilterMode::Denylist);
+        assert_eq!(config.process_filter.patterns.len(), 2);
+        assert!(!config.process_filter.matches("svchost.exe"));
+        assert!(config.process_filter.matches("nginx"));
+    }
+
+    #[test]
+    fn config_without_process_filter_defaults() {
+        let json = r#"{}"#;
+        let config: DaemonConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.process_filter.mode, FilterMode::Denylist);
+        assert!(config.process_filter.patterns.is_empty());
+        assert!(config.process_filter.matches("anything"));
     }
 
     #[test]

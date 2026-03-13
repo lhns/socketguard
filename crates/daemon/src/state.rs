@@ -53,6 +53,7 @@ impl Database {
                 interface TEXT NOT NULL,
                 prefix_len INTEGER NOT NULL DEFAULT 128,
                 keypair_id TEXT,
+                policy TEXT NOT NULL DEFAULT 'closed',
                 PRIMARY KEY (socket_id, backend_id)
             )
             "#,
@@ -64,10 +65,12 @@ impl Database {
             r#"
             CREATE TABLE IF NOT EXISTS acl_entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                socket_id TEXT NOT NULL REFERENCES sockets(id) ON DELETE CASCADE,
+                socket_id TEXT NOT NULL,
+                backend_id TEXT NOT NULL,
                 allowed_ip TEXT NOT NULL,
                 label TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (socket_id, backend_id) REFERENCES socket_addresses(socket_id, backend_id) ON DELETE CASCADE
             )
             "#,
         )
@@ -90,6 +93,9 @@ impl Database {
 
         // Migration: if old sockets table has assigned_ipv6 column, migrate data
         self.migrate_from_single_backend().await?;
+
+        // Migration: ADR 0017 — per-backend policy and ACL
+        self.migrate_per_backend_policy_acl().await?;
 
         Ok(())
     }
@@ -165,6 +171,103 @@ impl Database {
         Ok(())
     }
 
+    /// Migrate to per-backend policy and ACL (ADR 0017).
+    ///
+    /// 1. Add `policy` column to `socket_addresses` (if missing), copy from `sockets.policy`.
+    /// 2. Add `backend_id` column to `acl_entries` (if missing), duplicate entries per backend.
+    async fn migrate_per_backend_policy_acl(&self) -> Result<()> {
+        // Check if socket_addresses already has a policy column
+        let has_addr_policy = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('socket_addresses') WHERE name = 'policy'",
+        )
+        .fetch_one(&self.pool)
+        .await?
+            > 0;
+
+        if has_addr_policy {
+            // Already migrated — check if acl_entries needs backend_id
+            let has_acl_backend = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM pragma_table_info('acl_entries') WHERE name = 'backend_id'",
+            )
+            .fetch_one(&self.pool)
+            .await?
+                > 0;
+
+            if has_acl_backend {
+                return Ok(()); // Fully migrated
+            }
+        }
+
+        tracing::info!("Migrating to per-backend policy and ACL (ADR 0017)...");
+
+        // Step 1: Add policy column to socket_addresses
+        if !has_addr_policy {
+            sqlx::query("ALTER TABLE socket_addresses ADD COLUMN policy TEXT NOT NULL DEFAULT 'closed'")
+                .execute(&self.pool)
+                .await?;
+
+            // Copy existing socket-level policy to each address
+            sqlx::query(
+                r#"
+                UPDATE socket_addresses SET policy = (
+                    SELECT policy FROM sockets WHERE sockets.id = socket_addresses.socket_id
+                )
+                "#,
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+
+        // Step 2: Add backend_id to acl_entries by recreating the table
+        let has_acl_backend = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('acl_entries') WHERE name = 'backend_id'",
+        )
+        .fetch_one(&self.pool)
+        .await?
+            > 0;
+
+        if !has_acl_backend {
+            sqlx::query("ALTER TABLE acl_entries RENAME TO acl_entries_old")
+                .execute(&self.pool)
+                .await?;
+
+            sqlx::query(
+                r#"
+                CREATE TABLE acl_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    socket_id TEXT NOT NULL,
+                    backend_id TEXT NOT NULL,
+                    allowed_ip TEXT NOT NULL,
+                    label TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (socket_id, backend_id) REFERENCES socket_addresses(socket_id, backend_id) ON DELETE CASCADE
+                )
+                "#,
+            )
+            .execute(&self.pool)
+            .await?;
+
+            // Duplicate each old ACL entry for every backend the socket has
+            sqlx::query(
+                r#"
+                INSERT INTO acl_entries (socket_id, backend_id, allowed_ip, label, created_at)
+                SELECT ao.socket_id, sa.backend_id, ao.allowed_ip, ao.label, ao.created_at
+                FROM acl_entries_old ao
+                JOIN socket_addresses sa ON ao.socket_id = sa.socket_id
+                "#,
+            )
+            .execute(&self.pool)
+            .await?;
+
+            sqlx::query("DROP TABLE acl_entries_old")
+                .execute(&self.pool)
+                .await?;
+        }
+
+        tracing::info!("Per-backend policy/ACL migration complete");
+        Ok(())
+    }
+
     pub async fn upsert_socket(&self, socket: &ManagedSocket) -> Result<()> {
         sqlx::query(
             r#"
@@ -202,13 +305,14 @@ impl Database {
     ) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO socket_addresses (socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO socket_addresses (socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id, policy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(socket_id, backend_id) DO UPDATE SET
                 address = excluded.address,
                 interface = excluded.interface,
                 prefix_len = excluded.prefix_len,
-                keypair_id = excluded.keypair_id
+                keypair_id = excluded.keypair_id,
+                policy = excluded.policy
             "#,
         )
         .bind(socket_id)
@@ -218,6 +322,7 @@ impl Database {
         .bind(&addr.interface)
         .bind(addr.prefix_len as i64)
         .bind(&addr.keypair_id)
+        .bind(addr.policy.to_string())
         .execute(&self.pool)
         .await?;
 
@@ -227,7 +332,7 @@ impl Database {
     /// Get all addresses for a socket.
     pub async fn get_socket_addresses(&self, socket_id: &str) -> Result<Vec<SocketAddress>> {
         let rows = sqlx::query_as::<_, SocketAddressRow>(
-            "SELECT * FROM socket_addresses WHERE socket_id = ?",
+            "SELECT backend_id, backend_type, address, interface, prefix_len, keypair_id, policy FROM socket_addresses WHERE socket_id = ?",
         )
         .bind(socket_id)
         .fetch_all(&self.pool)
@@ -240,7 +345,7 @@ impl Database {
     pub async fn delete_addresses_by_backend(&self, backend_id: &str) -> Result<Vec<(String, SocketAddress)>> {
         // First fetch them so we can return them for cleanup
         let rows = sqlx::query_as::<_, SocketAddressRowWithSocket>(
-            "SELECT socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id FROM socket_addresses WHERE backend_id = ?",
+            "SELECT socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id, policy FROM socket_addresses WHERE backend_id = ?",
         )
         .bind(backend_id)
         .fetch_all(&self.pool)
@@ -274,6 +379,39 @@ impl Database {
         Ok(())
     }
 
+    /// Update the policy of a specific socket address (per-backend).
+    pub async fn update_address_policy(&self, socket_id: &str, backend_id: &str, policy: Policy) -> Result<()> {
+        sqlx::query("UPDATE socket_addresses SET policy = ? WHERE socket_id = ? AND backend_id = ?")
+            .bind(policy.to_string())
+            .bind(socket_id)
+            .bind(backend_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Update the default policy on the socket (used when adding new backends).
+    pub async fn update_default_policy(&self, id: &str, policy: Policy) -> Result<()> {
+        sqlx::query("UPDATE sockets SET policy = ? WHERE id = ?")
+            .bind(policy.to_string())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Update policy on ALL addresses for a socket (fan-out).
+    pub async fn update_policy_all_backends(&self, socket_id: &str, policy: Policy) -> Result<()> {
+        sqlx::query("UPDATE socket_addresses SET policy = ? WHERE socket_id = ?")
+            .bind(policy.to_string())
+            .bind(socket_id)
+            .execute(&self.pool)
+            .await?;
+        // Also update the default policy
+        self.update_default_policy(socket_id, policy).await?;
+        Ok(())
+    }
+
     pub async fn list_sockets(&self) -> Result<Vec<ManagedSocket>> {
         let rows = sqlx::query_as::<_, SocketRow>("SELECT * FROM sockets ORDER BY last_seen DESC")
             .fetch_all(&self.pool)
@@ -281,7 +419,7 @@ impl Database {
 
         // Fetch all addresses and group by socket_id
         let addr_rows = sqlx::query_as::<_, SocketAddressRowWithSocket>(
-            "SELECT socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id FROM socket_addresses",
+            "SELECT socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id, policy FROM socket_addresses",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -324,18 +462,23 @@ impl Database {
         Ok(())
     }
 
-    pub async fn update_policy(&self, id: &str, policy: Policy) -> Result<()> {
-        sqlx::query("UPDATE sockets SET policy = ? WHERE id = ?")
-            .bind(policy.to_string())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    /// Get ACL entries for a specific socket+backend pair.
+    pub async fn get_acl_for_backend(&self, socket_id: &str, backend_id: &str) -> Result<Vec<AclEntry>> {
+        let rows = sqlx::query_as::<_, AclRow>(
+            "SELECT * FROM acl_entries WHERE socket_id = ? AND backend_id = ? ORDER BY created_at",
+        )
+        .bind(socket_id)
+        .bind(backend_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(|r| r.try_into()).collect()
     }
 
+    /// Get all ACL entries for a socket (across all backends).
     pub async fn get_acl(&self, socket_id: &str) -> Result<Vec<AclEntry>> {
         let rows = sqlx::query_as::<_, AclRow>(
-            "SELECT * FROM acl_entries WHERE socket_id = ? ORDER BY created_at",
+            "SELECT * FROM acl_entries WHERE socket_id = ? ORDER BY backend_id, created_at",
         )
         .bind(socket_id)
         .fetch_all(&self.pool)
@@ -344,9 +487,11 @@ impl Database {
         rows.into_iter().map(|r| r.try_into()).collect()
     }
 
+    /// Add an ACL entry for a specific backend.
     pub async fn add_acl_entry(
         &self,
         socket_id: &str,
+        backend_id: &str,
         allowed_ip: &str,
         label: Option<&str>,
     ) -> Result<AclEntry> {
@@ -357,9 +502,10 @@ impl Database {
 
         let now = chrono::Utc::now();
         let result = sqlx::query(
-            "INSERT INTO acl_entries (socket_id, allowed_ip, label, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO acl_entries (socket_id, backend_id, allowed_ip, label, created_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(socket_id)
+        .bind(backend_id)
         .bind(allowed_ip)
         .bind(label)
         .bind(now.to_rfc3339())
@@ -369,10 +515,27 @@ impl Database {
         Ok(AclEntry {
             id: result.last_insert_rowid(),
             socket_id: socket_id.to_string(),
+            backend_id: backend_id.to_string(),
             allowed_ip: allowed_ip.to_string(),
             label: label.map(|s| s.to_string()),
             created_at: now,
         })
+    }
+
+    /// Add an ACL entry to ALL backends for a socket (fan-out).
+    pub async fn add_acl_entry_all_backends(
+        &self,
+        socket_id: &str,
+        allowed_ip: &str,
+        label: Option<&str>,
+    ) -> Result<Vec<AclEntry>> {
+        let addresses = self.get_socket_addresses(socket_id).await?;
+        let mut entries = Vec::new();
+        for addr in &addresses {
+            let entry = self.add_acl_entry(socket_id, &addr.backend_id, allowed_ip, label).await?;
+            entries.push(entry);
+        }
+        Ok(entries)
     }
 
     pub async fn delete_acl_entry(&self, entry_id: i64) -> Result<()> {
@@ -381,27 +544,6 @@ impl Database {
             .execute(&self.pool)
             .await?;
         Ok(())
-    }
-
-    pub async fn replace_acl(
-        &self,
-        socket_id: &str,
-        entries: &[(String, Option<String>)],
-    ) -> Result<Vec<AclEntry>> {
-        sqlx::query("DELETE FROM acl_entries WHERE socket_id = ?")
-            .bind(socket_id)
-            .execute(&self.pool)
-            .await?;
-
-        let mut result = Vec::new();
-        for (ip, label) in entries {
-            let entry = self
-                .add_acl_entry(socket_id, ip, label.as_deref())
-                .await?;
-            result.push(entry);
-        }
-
-        Ok(result)
     }
 
     pub async fn save_keypair(
@@ -484,6 +626,7 @@ struct SocketAddressRow {
     interface: String,
     prefix_len: i64,
     keypair_id: Option<String>,
+    policy: String,
 }
 
 impl TryFrom<SocketAddressRow> for SocketAddress {
@@ -497,6 +640,7 @@ impl TryFrom<SocketAddressRow> for SocketAddress {
             interface: row.interface,
             prefix_len: row.prefix_len as u8,
             keypair_id: row.keypair_id,
+            policy: row.policy.parse().map_err(|e: String| anyhow::anyhow!(e))?,
         })
     }
 }
@@ -510,6 +654,7 @@ struct SocketAddressRowWithSocket {
     interface: String,
     prefix_len: i64,
     keypair_id: Option<String>,
+    policy: String,
 }
 
 impl TryFrom<SocketAddressRowWithSocket> for SocketAddress {
@@ -523,6 +668,7 @@ impl TryFrom<SocketAddressRowWithSocket> for SocketAddress {
             interface: row.interface,
             prefix_len: row.prefix_len as u8,
             keypair_id: row.keypair_id,
+            policy: row.policy.parse().map_err(|e: String| anyhow::anyhow!(e))?,
         })
     }
 }
@@ -531,6 +677,7 @@ impl TryFrom<SocketAddressRowWithSocket> for SocketAddress {
 struct AclRow {
     id: i64,
     socket_id: String,
+    backend_id: String,
     allowed_ip: String,
     label: Option<String>,
     created_at: String,
@@ -543,6 +690,7 @@ impl TryFrom<AclRow> for AclEntry {
         Ok(AclEntry {
             id: row.id,
             socket_id: row.socket_id,
+            backend_id: row.backend_id,
             allowed_ip: row.allowed_ip,
             label: row.label,
             created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?.with_timezone(&chrono::Utc),
@@ -575,6 +723,7 @@ mod tests {
                 interface: "lo".to_string(),
                 prefix_len: 128,
                 keypair_id: None,
+                policy: Policy::Closed,
             }],
             policy: Policy::Closed,
             exe_path: None,
@@ -607,6 +756,7 @@ mod tests {
         assert_eq!(retrieved.addresses.len(), 1);
         assert_eq!(retrieved.addresses[0].address, socket.addresses[0].address);
         assert_eq!(retrieved.addresses[0].backend_id, "ula");
+        assert_eq!(retrieved.addresses[0].policy, Policy::Closed);
     }
 
     #[tokio::test]
@@ -642,7 +792,6 @@ mod tests {
 
         let sockets = db.list_sockets().await.unwrap();
         assert_eq!(sockets.len(), 2);
-        // Each should have addresses
         for s in &sockets {
             assert!(!s.addresses.is_empty());
         }
@@ -663,63 +812,124 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_policy() {
+    async fn update_address_policy() {
         let db = test_db().await;
         insert_test_socket(&db, "abc123", "nginx", 80).await;
 
-        db.update_policy("abc123", Policy::Open).await.unwrap();
+        db.update_address_policy("abc123", "ula", Policy::Open).await.unwrap();
         let socket = db.get_socket("abc123").await.unwrap().unwrap();
-        assert_eq!(socket.policy, Policy::Open);
+        assert_eq!(socket.addresses[0].policy, Policy::Open);
 
-        db.update_policy("abc123", Policy::Closed).await.unwrap();
+        db.update_address_policy("abc123", "ula", Policy::Disabled).await.unwrap();
         let socket = db.get_socket("abc123").await.unwrap().unwrap();
-        assert_eq!(socket.policy, Policy::Closed);
+        assert_eq!(socket.addresses[0].policy, Policy::Disabled);
     }
 
     #[tokio::test]
-    async fn acl_crud() {
+    async fn update_policy_all_backends() {
+        let db = test_db().await;
+        let socket = test_socket("multi1", "nginx", 80);
+        db.upsert_socket(&socket).await.unwrap();
+
+        let addr1 = SocketAddress {
+            backend_id: "ula".to_string(),
+            backend_type: BackendType::Ula,
+            address: "fd00::1".parse().unwrap(),
+            interface: "lo".to_string(),
+            prefix_len: 128,
+            keypair_id: None,
+            policy: Policy::Closed,
+        };
+        let addr2 = SocketAddress {
+            backend_id: "slaac-Ethernet".to_string(),
+            backend_type: BackendType::Slaac,
+            address: "2001:db8::1".parse().unwrap(),
+            interface: "Ethernet".to_string(),
+            prefix_len: 64,
+            keypair_id: None,
+            policy: Policy::Closed,
+        };
+        db.upsert_socket_address("multi1", &addr1).await.unwrap();
+        db.upsert_socket_address("multi1", &addr2).await.unwrap();
+
+        db.update_policy_all_backends("multi1", Policy::Open).await.unwrap();
+
+        let retrieved = db.get_socket("multi1").await.unwrap().unwrap();
+        assert_eq!(retrieved.policy, Policy::Open); // default policy updated
+        for a in &retrieved.addresses {
+            assert_eq!(a.policy, Policy::Open);
+        }
+    }
+
+    #[tokio::test]
+    async fn acl_crud_per_backend() {
         let db = test_db().await;
         insert_test_socket(&db, "abc123", "nginx", 80).await;
 
-        let entry = db.add_acl_entry("abc123", "fd00::100", Some("laptop")).await.unwrap();
+        let entry = db.add_acl_entry("abc123", "ula", "fd00::100", Some("laptop")).await.unwrap();
         assert_eq!(entry.allowed_ip, "fd00::100");
+        assert_eq!(entry.backend_id, "ula");
         assert_eq!(entry.label, Some("laptop".to_string()));
 
-        let acl = db.get_acl("abc123").await.unwrap();
+        let acl = db.get_acl_for_backend("abc123", "ula").await.unwrap();
         assert_eq!(acl.len(), 1);
 
+        // Different backend has no entries
+        let acl_other = db.get_acl_for_backend("abc123", "slaac").await.unwrap();
+        assert_eq!(acl_other.len(), 0);
+
         db.delete_acl_entry(entry.id).await.unwrap();
-        let acl = db.get_acl("abc123").await.unwrap();
+        let acl = db.get_acl_for_backend("abc123", "ula").await.unwrap();
         assert_eq!(acl.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn acl_fan_out_all_backends() {
+        let db = test_db().await;
+        let socket = test_socket("multi1", "nginx", 80);
+        db.upsert_socket(&socket).await.unwrap();
+
+        let addr1 = SocketAddress {
+            backend_id: "ula".to_string(),
+            backend_type: BackendType::Ula,
+            address: "fd00::1".parse().unwrap(),
+            interface: "lo".to_string(),
+            prefix_len: 128,
+            keypair_id: None,
+            policy: Policy::Closed,
+        };
+        let addr2 = SocketAddress {
+            backend_id: "slaac-Ethernet".to_string(),
+            backend_type: BackendType::Slaac,
+            address: "2001:db8::1".parse().unwrap(),
+            interface: "Ethernet".to_string(),
+            prefix_len: 64,
+            keypair_id: None,
+            policy: Policy::Closed,
+        };
+        db.upsert_socket_address("multi1", &addr1).await.unwrap();
+        db.upsert_socket_address("multi1", &addr2).await.unwrap();
+
+        let entries = db.add_acl_entry_all_backends("multi1", "fd00::100", Some("peer")).await.unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // Each backend should have one entry
+        let acl_ula = db.get_acl_for_backend("multi1", "ula").await.unwrap();
+        assert_eq!(acl_ula.len(), 1);
+        let acl_slaac = db.get_acl_for_backend("multi1", "slaac-Ethernet").await.unwrap();
+        assert_eq!(acl_slaac.len(), 1);
+
+        // get_acl returns all
+        let all = db.get_acl("multi1").await.unwrap();
+        assert_eq!(all.len(), 2);
     }
 
     #[tokio::test]
     async fn acl_rejects_invalid_ipv6() {
         let db = test_db().await;
         insert_test_socket(&db, "abc123", "nginx", 80).await;
-        let result = db.add_acl_entry("abc123", "not-an-ip", None).await;
+        let result = db.add_acl_entry("abc123", "ula", "not-an-ip", None).await;
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn replace_acl() {
-        let db = test_db().await;
-        insert_test_socket(&db, "abc123", "nginx", 80).await;
-
-        db.add_acl_entry("abc123", "fd00::1", Some("host1")).await.unwrap();
-        db.add_acl_entry("abc123", "fd00::2", Some("host2")).await.unwrap();
-
-        let entries = vec![
-            ("fd00::10".to_string(), Some("new1".to_string())),
-            ("fd00::20".to_string(), None),
-        ];
-        let result = db.replace_acl("abc123", &entries).await.unwrap();
-        assert_eq!(result.len(), 2);
-
-        let acl = db.get_acl("abc123").await.unwrap();
-        assert_eq!(acl.len(), 2);
-        assert_eq!(acl[0].allowed_ip, "fd00::10");
-        assert_eq!(acl[1].allowed_ip, "fd00::20");
     }
 
     #[tokio::test]
@@ -743,8 +953,8 @@ mod tests {
     async fn cascade_delete_removes_acl() {
         let db = test_db().await;
         insert_test_socket(&db, "abc123", "nginx", 80).await;
-        db.add_acl_entry("abc123", "fd00::1", None).await.unwrap();
-        db.add_acl_entry("abc123", "fd00::2", None).await.unwrap();
+        db.add_acl_entry("abc123", "ula", "fd00::1", None).await.unwrap();
+        db.add_acl_entry("abc123", "ula", "fd00::2", None).await.unwrap();
 
         db.delete_socket("abc123").await.unwrap();
         let acl = db.get_acl("abc123").await.unwrap();
@@ -788,6 +998,7 @@ mod tests {
             interface: "lo".to_string(),
             prefix_len: 128,
             keypair_id: None,
+            policy: Policy::Closed,
         };
         let addr2 = SocketAddress {
             backend_id: "slaac-Ethernet".to_string(),
@@ -796,6 +1007,7 @@ mod tests {
             interface: "Ethernet".to_string(),
             prefix_len: 64,
             keypair_id: None,
+            policy: Policy::Open,
         };
 
         db.upsert_socket_address("multi1", &addr1).await.unwrap();
@@ -803,6 +1015,11 @@ mod tests {
 
         let retrieved = db.get_socket("multi1").await.unwrap().unwrap();
         assert_eq!(retrieved.addresses.len(), 2);
+        // Verify per-address policies
+        let ula = retrieved.addresses.iter().find(|a| a.backend_id == "ula").unwrap();
+        let slaac = retrieved.addresses.iter().find(|a| a.backend_id == "slaac-Ethernet").unwrap();
+        assert_eq!(ula.policy, Policy::Closed);
+        assert_eq!(slaac.policy, Policy::Open);
     }
 
     #[tokio::test]
@@ -817,5 +1034,17 @@ mod tests {
 
         let s1 = db.get_socket("s1").await.unwrap().unwrap();
         assert!(s1.addresses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_address_cascades_acl() {
+        let db = test_db().await;
+        insert_test_socket(&db, "abc123", "nginx", 80).await;
+        db.add_acl_entry("abc123", "ula", "fd00::100", None).await.unwrap();
+
+        db.delete_socket_address("abc123", "ula").await.unwrap();
+
+        let acl = db.get_acl_for_backend("abc123", "ula").await.unwrap();
+        assert_eq!(acl.len(), 0);
     }
 }

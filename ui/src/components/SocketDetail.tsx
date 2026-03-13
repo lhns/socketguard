@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
-import { getSocket, allowIp, removeAclEntry, setPolicy, onSocketsChanged, onDaemonConnected, ManagedSocket, AclEntry } from "../api";
+import {
+  getSocket, setBackendPolicy, allowBackendIp, removeAclEntry,
+  onSocketsChanged, onDaemonConnected,
+  ManagedSocket, AclEntry, SocketAddress,
+} from "../api";
 import { useToast } from "./Toast";
 import ConfirmDialog from "./ConfirmDialog";
 
@@ -8,14 +12,200 @@ interface Props {
   onBack: () => void;
 }
 
-export default function SocketDetail({ socketId, onBack }: Props) {
-  const [socket, setSocket] = useState<ManagedSocket | null>(null);
-  const [acl, setAcl] = useState<AclEntry[]>([]);
-  const [error, setError] = useState<string | null>(null);
+function AddressCard({
+  socketId,
+  addr,
+  acl,
+  onRefresh,
+}: {
+  socketId: string;
+  addr: SocketAddress;
+  acl: AclEntry[];
+  onRefresh: () => void;
+}) {
   const [newIp, setNewIp] = useState("");
   const [newLabel, setNewLabel] = useState("");
   const [confirm, setConfirm] = useState<{ message: string; action: () => void } | null>(null);
   const toast = useToast();
+
+  const handlePolicy = (p: string) => {
+    if (p === "open") {
+      setConfirm({
+        message: `Setting ${addr.backend_id} to open will allow ALL incoming connections on this address. Are you sure?`,
+        action: () => doSetPolicy(p),
+      });
+    } else if (p === "disabled") {
+      setConfirm({
+        message: `Disabling ${addr.backend_id} will remove the IPv6 address from the system. Continue?`,
+        action: () => doSetPolicy(p),
+      });
+    } else {
+      doSetPolicy(p);
+    }
+  };
+
+  const doSetPolicy = async (p: string) => {
+    try {
+      await setBackendPolicy(socketId, addr.backend_id, p);
+      toast.success(`${addr.backend_id} policy set to ${p}`);
+      onRefresh();
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
+  const handleAllow = async () => {
+    if (!newIp.trim()) return;
+    try {
+      await allowBackendIp(socketId, addr.backend_id, newIp.trim(), newLabel.trim() || undefined);
+      setNewIp("");
+      setNewLabel("");
+      toast.success(`Allowed ${newIp.trim()} on ${addr.backend_id}`);
+      onRefresh();
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
+  const handleRemove = (entry: AclEntry) => {
+    setConfirm({
+      message: `Remove access for ${entry.allowed_ip}${entry.label ? ` (${entry.label})` : ""} on ${addr.backend_id}?`,
+      action: async () => {
+        try {
+          await removeAclEntry(socketId, entry.id);
+          toast.success(`Removed ${entry.allowed_ip}`);
+          onRefresh();
+        } catch (e) {
+          toast.error(String(e));
+        }
+      },
+    });
+  };
+
+  return (
+    <div className="card" style={{ marginBottom: 12 }}>
+      {confirm && (
+        <ConfirmDialog
+          message={confirm.message}
+          onConfirm={() => { confirm.action(); setConfirm(null); }}
+          onCancel={() => setConfirm(null)}
+        />
+      )}
+
+      {/* Address header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div>
+          <span className="badge" style={{ fontSize: 11, padding: "1px 6px", marginRight: 8 }}>
+            {addr.backend_id}
+          </span>
+          <span className="mono" style={{ fontSize: 13 }}>{addr.address}</span>
+          <span style={{ color: "var(--text-muted)", fontSize: 12, marginLeft: 6 }}>
+            /{addr.prefix_len} on {addr.interface}
+          </span>
+        </div>
+        <span className={`badge badge-${addr.policy}`}>
+          <span className="badge-dot" />
+          {addr.policy}
+        </span>
+      </div>
+
+      {/* Policy toggle */}
+      <div className="policy-toggle" style={{ marginBottom: 8 }}>
+        <button
+          className={`policy-btn ${addr.policy === "disabled" ? "active-disabled" : ""}`}
+          onClick={() => handlePolicy("disabled")}
+        >
+          Disabled
+        </button>
+        <button
+          className={`policy-btn ${addr.policy === "closed" ? "active-closed" : ""}`}
+          onClick={() => handlePolicy("closed")}
+        >
+          Closed
+        </button>
+        <button
+          className={`policy-btn ${addr.policy === "open" ? "active-open" : ""}`}
+          onClick={() => handlePolicy("open")}
+        >
+          Open
+        </button>
+      </div>
+
+      <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
+        {addr.policy === "disabled"
+          ? "No address assigned — this backend is inactive for this socket."
+          : addr.policy === "closed"
+          ? "Only allowed IPs can connect via this address."
+          : "All incoming connections are allowed on this address."}
+      </p>
+
+      {/* ACL section — only shown when closed */}
+      {addr.policy === "closed" && (
+        <>
+          <div className="acl-form" style={{ marginBottom: 8 }}>
+            <input
+              className="input"
+              value={newIp}
+              onChange={(e) => setNewIp(e.target.value)}
+              placeholder="IPv6 address to allow"
+              onKeyDown={(e) => e.key === "Enter" && handleAllow()}
+              style={{ flex: 2 }}
+            />
+            <input
+              className="input"
+              value={newLabel}
+              onChange={(e) => setNewLabel(e.target.value)}
+              placeholder="Label (optional)"
+              onKeyDown={(e) => e.key === "Enter" && handleAllow()}
+              style={{ flex: 1 }}
+            />
+            <button className="btn btn-primary btn-sm" onClick={handleAllow}>Allow</button>
+          </div>
+
+          {acl.length === 0 ? (
+            <div style={{ padding: "8px 0", color: "var(--text-muted)", fontSize: 12 }}>
+              No allowed IPs — all incoming traffic on this address is blocked.
+            </div>
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Allowed IP</th>
+                    <th>Label</th>
+                    <th>Added</th>
+                    <th style={{ width: 60 }}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {acl.map((entry) => (
+                    <tr key={entry.id}>
+                      <td className="mono">{entry.allowed_ip}</td>
+                      <td>{entry.label || <span style={{ color: "var(--text-muted)" }}>&mdash;</span>}</td>
+                      <td style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                        {new Date(entry.created_at).toLocaleString()}
+                      </td>
+                      <td>
+                        <button className="btn-danger btn-sm" onClick={() => handleRemove(entry)}>
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+export default function SocketDetail({ socketId, onBack }: Props) {
+  const [socket, setSocket] = useState<ManagedSocket | null>(null);
+  const [acl, setAcl] = useState<AclEntry[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = async () => {
     try {
@@ -37,67 +227,17 @@ export default function SocketDetail({ socketId, onBack }: Props) {
     return () => unlistens.forEach((fn) => fn());
   }, [socketId]);
 
-  const handleAllow = async () => {
-    if (!newIp.trim()) return;
-    try {
-      await allowIp(socketId, newIp.trim(), newLabel.trim() || undefined);
-      setNewIp("");
-      setNewLabel("");
-      toast.success(`Allowed ${newIp.trim()}`);
-      refresh();
-    } catch (e) {
-      toast.error(String(e));
-    }
-  };
-
-  const handleRemove = (entry: AclEntry) => {
-    setConfirm({
-      message: `Remove access for ${entry.allowed_ip}${entry.label ? ` (${entry.label})` : ""}?`,
-      action: async () => {
-        try {
-          await removeAclEntry(socketId, entry.id);
-          toast.success(`Removed ${entry.allowed_ip}`);
-          refresh();
-        } catch (e) {
-          toast.error(String(e));
-        }
-      },
-    });
-  };
-
-  const handlePolicy = (p: string) => {
-    if (p === "open") {
-      setConfirm({
-        message: "Setting policy to open will allow ALL incoming connections to this socket. Are you sure?",
-        action: () => doSetPolicy(p),
-      });
-    } else {
-      doSetPolicy(p);
-    }
-  };
-
-  const doSetPolicy = async (p: string) => {
-    try {
-      await setPolicy(socketId, p);
-      toast.success(`Policy set to ${p}`);
-      refresh();
-    } catch (e) {
-      toast.error(String(e));
-    }
-  };
-
   if (!socket) return <div className="loading">Loading...</div>;
+
+  // Group ACL entries by backend_id
+  const aclByBackend: Record<string, AclEntry[]> = {};
+  for (const entry of acl) {
+    if (!aclByBackend[entry.backend_id]) aclByBackend[entry.backend_id] = [];
+    aclByBackend[entry.backend_id].push(entry);
+  }
 
   return (
     <div>
-      {confirm && (
-        <ConfirmDialog
-          message={confirm.message}
-          onConfirm={() => { confirm.action(); setConfirm(null); }}
-          onCancel={() => setConfirm(null)}
-        />
-      )}
-
       <button className="back-link" onClick={onBack}>
         &larr; Back to sockets
       </button>
@@ -114,54 +254,6 @@ export default function SocketDetail({ socketId, onBack }: Props) {
             PID {socket.pid}
           </div>
         </div>
-        <span className={`badge badge-${socket.policy}`}>
-          <span className="badge-dot" />
-          {socket.policy}
-        </span>
-      </div>
-
-      {/* Addresses */}
-      <div className="card">
-        <div className="section-title">
-          Addresses
-          {socket.addresses.length > 0 && (
-            <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400, marginLeft: 6 }}>
-              ({socket.addresses.length})
-            </span>
-          )}
-        </div>
-        {socket.addresses.length === 0 ? (
-          <div style={{ padding: "8px 0", color: "var(--text-muted)", fontSize: 13 }}>
-            No addresses assigned.
-          </div>
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>IPv6 Address</th>
-                  <th>Backend</th>
-                  <th>Interface</th>
-                  <th>Prefix</th>
-                </tr>
-              </thead>
-              <tbody>
-                {socket.addresses.map((addr, i) => (
-                  <tr key={`${addr.backend_id}-${i}`}>
-                    <td className="mono">{addr.address}</td>
-                    <td>
-                      <span className="badge" style={{ fontSize: 11, padding: "1px 6px" }}>
-                        {addr.backend_id}
-                      </span>
-                    </td>
-                    <td>{addr.interface}</td>
-                    <td className="mono">/{addr.prefix_len}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
       </div>
 
       {/* Details */}
@@ -181,100 +273,35 @@ export default function SocketDetail({ socketId, onBack }: Props) {
         </div>
       </div>
 
-      {/* Policy */}
-      <div className="card">
-        <div className="section-title">Policy</div>
-        <div className="policy-toggle">
-          <button
-            className={`policy-btn ${socket.policy === "closed" ? "active-closed" : ""}`}
-            onClick={() => handlePolicy("closed")}
-          >
-            Closed
-          </button>
-          <button
-            className={`policy-btn ${socket.policy === "open" ? "active-open" : ""}`}
-            onClick={() => handlePolicy("open")}
-          >
-            Open
-          </button>
-        </div>
-        <p style={{ marginTop: 10, fontSize: 12, color: "var(--text-muted)" }}>
-          {socket.policy === "closed"
-            ? "Only allowed IPs can connect. Add entries below to grant access."
-            : "All incoming connections are allowed without restriction."}
-        </p>
-      </div>
-
-      {/* ACL */}
-      <div className="card">
-        <div className="section-title">
-          Access Control List
-          {acl.length > 0 && (
-            <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400, marginLeft: 6 }}>
-              ({acl.length} {acl.length === 1 ? "entry" : "entries"})
+      {/* Per-backend address cards */}
+      <div className="card-header">
+        <span className="card-title">
+          Backend Addresses
+          {socket.addresses.length > 0 && (
+            <span style={{ color: "var(--text-muted)", fontWeight: 400, fontSize: 13, marginLeft: 8 }}>
+              ({socket.addresses.length})
             </span>
           )}
-        </div>
-
-        {socket.policy === "closed" && (
-          <div className="acl-form">
-            <input
-              className="input"
-              value={newIp}
-              onChange={(e) => setNewIp(e.target.value)}
-              placeholder="IPv6 address to allow"
-              onKeyDown={(e) => e.key === "Enter" && handleAllow()}
-              style={{ flex: 2 }}
-            />
-            <input
-              className="input"
-              value={newLabel}
-              onChange={(e) => setNewLabel(e.target.value)}
-              placeholder="Label (optional)"
-              onKeyDown={(e) => e.key === "Enter" && handleAllow()}
-              style={{ flex: 1 }}
-            />
-            <button className="btn btn-primary" onClick={handleAllow}>Allow</button>
-          </div>
-        )}
-
-        {acl.length === 0 ? (
-          <div style={{ padding: "16px 0", color: "var(--text-muted)", fontSize: 13 }}>
-            {socket.policy === "closed"
-              ? "No allowed IPs. All incoming traffic to this socket is blocked."
-              : "ACL is not active when policy is open."}
-          </div>
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Allowed IP</th>
-                  <th>Label</th>
-                  <th>Added</th>
-                  <th style={{ width: 60 }}></th>
-                </tr>
-              </thead>
-              <tbody>
-                {acl.map((entry) => (
-                  <tr key={entry.id}>
-                    <td className="mono">{entry.allowed_ip}</td>
-                    <td>{entry.label || <span style={{ color: "var(--text-muted)" }}>&mdash;</span>}</td>
-                    <td style={{ fontSize: 12, color: "var(--text-muted)" }}>
-                      {new Date(entry.created_at).toLocaleString()}
-                    </td>
-                    <td>
-                      <button className="btn-danger btn-sm" onClick={() => handleRemove(entry)}>
-                        Remove
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        </span>
       </div>
+
+      {socket.addresses.length === 0 ? (
+        <div className="card">
+          <div style={{ padding: "8px 0", color: "var(--text-muted)", fontSize: 13 }}>
+            No addresses assigned.
+          </div>
+        </div>
+      ) : (
+        socket.addresses.map((addr) => (
+          <AddressCard
+            key={addr.backend_id}
+            socketId={socketId}
+            addr={addr}
+            acl={aclByBackend[addr.backend_id] || []}
+            onRefresh={refresh}
+          />
+        ))
+      )}
     </div>
   );
 }
