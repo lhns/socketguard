@@ -2,17 +2,32 @@
 
 use socketguard_core::api_types::*;
 use socketguard_core::Policy;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 const DEFAULT_API: &str = "http://127.0.0.1:9476";
 
-fn api_base() -> String {
-    std::env::var("SOCKETGUARD_API").unwrap_or_else(|_| DEFAULT_API.to_string())
+fn api_base() -> &'static str {
+    static BASE: OnceLock<String> = OnceLock::new();
+    BASE.get_or_init(|| {
+        std::env::var("SOCKETGUARD_API").unwrap_or_else(|_| DEFAULT_API.to_string())
+    })
+}
+
+fn client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .pool_idle_timeout(Duration::from_secs(60))
+            .build()
+            .expect("failed to build HTTP client")
+    })
 }
 
 #[tauri::command]
 async fn list_sockets() -> Result<SocketListResponse, String> {
-    let client = reqwest::Client::new();
-    client
+    client()
         .get(format!("{}/api/sockets", api_base()))
         .send()
         .await
@@ -24,8 +39,7 @@ async fn list_sockets() -> Result<SocketListResponse, String> {
 
 #[tauri::command]
 async fn get_socket(id: String) -> Result<SocketDetailResponse, String> {
-    let client = reqwest::Client::new();
-    client
+    client()
         .get(format!("{}/api/sockets/{id}", api_base()))
         .send()
         .await
@@ -37,12 +51,11 @@ async fn get_socket(id: String) -> Result<SocketDetailResponse, String> {
 
 #[tauri::command]
 async fn allow_ip(socket_id: String, ip: String, label: Option<String>) -> Result<(), String> {
-    let client = reqwest::Client::new();
     let req = AllowIpRequest {
         allowed_ip: ip,
         label,
     };
-    let resp = client
+    let resp = client()
         .post(format!("{}/api/sockets/{socket_id}/acl/allow", api_base()))
         .json(&req)
         .send()
@@ -59,8 +72,7 @@ async fn allow_ip(socket_id: String, ip: String, label: Option<String>) -> Resul
 
 #[tauri::command]
 async fn remove_acl_entry(socket_id: String, entry_id: i64) -> Result<(), String> {
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = client()
         .delete(format!(
             "{}/api/sockets/{socket_id}/acl/{entry_id}",
             api_base()
@@ -79,10 +91,9 @@ async fn remove_acl_entry(socket_id: String, entry_id: i64) -> Result<(), String
 
 #[tauri::command]
 async fn set_policy(socket_id: String, policy: String) -> Result<(), String> {
-    let client = reqwest::Client::new();
     let policy: Policy = policy.parse().map_err(|e: String| e)?;
     let req = UpdatePolicyRequest { policy };
-    let resp = client
+    let resp = client()
         .put(format!("{}/api/sockets/{socket_id}/policy", api_base()))
         .json(&req)
         .send()
@@ -99,8 +110,7 @@ async fn set_policy(socket_id: String, policy: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn get_config() -> Result<ConfigResponse, String> {
-    let client = reqwest::Client::new();
-    client
+    client()
         .get(format!("{}/api/config", api_base()))
         .send()
         .await
@@ -112,8 +122,7 @@ async fn get_config() -> Result<ConfigResponse, String> {
 
 #[tauri::command]
 async fn update_config(config: UpdateConfigRequest) -> Result<(), String> {
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = client()
         .put(format!("{}/api/config", api_base()))
         .json(&config)
         .send()

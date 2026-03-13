@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { listSockets, ManagedSocket } from "../api";
 
 interface Props {
@@ -9,24 +9,30 @@ export default function SocketList({ onSelect }: Props) {
   const [sockets, setSockets] = useState<ManagedSocket[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const lastJson = useRef("");
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     try {
       setError(null);
       const resp = await listSockets();
-      setSockets(resp.sockets);
+      // Only update state if data actually changed
+      const json = JSON.stringify(resp.sockets);
+      if (json !== lastJson.current) {
+        lastJson.current = json;
+        setSockets(resp.sockets);
+      }
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 5000);
+    const interval = setInterval(refresh, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [refresh]);
 
   if (loading) return <div className="loading">Loading sockets...</div>;
   if (error) return <div className="error-banner">Cannot connect to daemon: {error}</div>;

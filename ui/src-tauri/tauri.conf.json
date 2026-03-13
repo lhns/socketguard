@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/nicbarker/tauri/next/packages/tauri-schema-gen/schemas/config.schema.json",
   "productName": "SocketGuard",
   "version": "0.1.0",
-  "identifier": "com.socketguard.app",
+  "identifier": "com.socketguard.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173"
