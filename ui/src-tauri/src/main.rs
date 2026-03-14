@@ -374,6 +374,49 @@ async fn remove_socket_from_socket_group(group_id: String, socket_id: String) ->
     check_response(resp).await
 }
 
+// ======== Socket Group address policy & ACL ========
+
+#[tauri::command]
+async fn set_socket_group_address_policy(group_id: String, backend_id: String, policy: String) -> Result<(), String> {
+    let policy: Policy = policy.parse().map_err(|e: String| e)?;
+    let req = UpdatePolicyRequest { policy };
+    let resp = authed_request(|token| {
+        client()
+            .put(format!("{}/api/socket-groups/{group_id}/backends/{backend_id}/policy", api_base()))
+            .bearer_auth(token)
+            .json(&req)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+#[tauri::command]
+async fn add_socket_group_acl_entry(group_id: String, backend_id: String, ip: String, label: Option<String>) -> Result<(), String> {
+    let req = AllowIpRequest {
+        allowed_ip: ip,
+        label,
+    };
+    let resp = authed_request(|token| {
+        client()
+            .post(format!("{}/api/socket-groups/{group_id}/backends/{backend_id}/acl", api_base()))
+            .bearer_auth(token)
+            .json(&req)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+#[tauri::command]
+async fn remove_socket_group_acl_entry(group_id: String, entry_id: i64) -> Result<(), String> {
+    let resp = authed_request(|token| {
+        client()
+            .delete(format!("{}/api/socket-groups/{group_id}/acl/{entry_id}", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    check_response(resp).await
+}
+
 // ======== Config, Backends, Interfaces, Events, Daemon ========
 
 #[tauri::command]
@@ -587,6 +630,9 @@ fn main() {
             delete_socket_group,
             add_socket_to_socket_group,
             remove_socket_from_socket_group,
+            set_socket_group_address_policy,
+            add_socket_group_acl_entry,
+            remove_socket_group_acl_entry,
             // Config, backends, events
             get_config,
             update_config,

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use socketguard_core::{AclEntry, AclGroup, ManagedSocket, Policy, SocketAddress, SocketGroup, SocketGroupAddress};
+use socketguard_core::{AclEntry, AclGroup, ManagedSocket, Policy, SocketAddress, SocketGroup, SocketGroupAclEntry, SocketGroupAddress};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -376,6 +376,38 @@ impl Database {
                 prefix_len INTEGER NOT NULL,
                 keypair_id TEXT,
                 PRIMARY KEY (group_id, backend_id)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Add policy column to socket_group_addresses
+        let has_sg_policy_col = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('socket_group_addresses') WHERE name = 'policy'",
+        )
+        .fetch_one(&self.pool)
+        .await?
+            > 0;
+
+        if !has_sg_policy_col {
+            sqlx::query(
+                "ALTER TABLE socket_group_addresses ADD COLUMN policy TEXT NOT NULL DEFAULT 'closed'",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+
+        // ACL entries for socket group addresses
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS socket_group_acl_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id TEXT NOT NULL REFERENCES socket_groups(id) ON DELETE CASCADE,
+                backend_id TEXT NOT NULL,
+                allowed_ip TEXT NOT NULL,
+                label TEXT,
+                created_at TEXT NOT NULL
             )
             "#,
         )
@@ -939,8 +971,8 @@ impl Database {
     pub async fn upsert_socket_group_address(&self, addr: &SocketGroupAddress) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO socket_group_addresses (group_id, backend_id, address, interface, prefix_len, keypair_id)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO socket_group_addresses (group_id, backend_id, address, interface, prefix_len, keypair_id, policy)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(group_id, backend_id) DO UPDATE SET
                 address = excluded.address,
                 interface = excluded.interface,
@@ -954,6 +986,7 @@ impl Database {
         .bind(&addr.interface)
         .bind(addr.prefix_len as i64)
         .bind(&addr.keypair_id)
+        .bind(addr.policy.to_string())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -962,6 +995,70 @@ impl Database {
     pub async fn get_socket_group_addresses(&self, group_id: &str) -> Result<Vec<SocketGroupAddress>> {
         let rows = sqlx::query_as::<_, SocketGroupAddressRow>(
             "SELECT * FROM socket_group_addresses WHERE group_id = ?",
+        )
+        .bind(group_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(|r| r.try_into()).collect()
+    }
+
+    // Socket group address policy & ACL
+
+    pub async fn set_socket_group_address_policy(&self, group_id: &str, backend_id: &str, policy: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE socket_group_addresses SET policy = ? WHERE group_id = ? AND backend_id = ?",
+        )
+        .bind(policy)
+        .bind(group_id)
+        .bind(backend_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn add_socket_group_acl_entry(
+        &self,
+        group_id: &str,
+        backend_id: &str,
+        ip: &str,
+        label: Option<&str>,
+    ) -> Result<SocketGroupAclEntry> {
+        ip.parse::<std::net::Ipv6Addr>()
+            .map_err(|e| anyhow::anyhow!("invalid IPv6 address '{}': {}", ip, e))?;
+
+        let now = chrono::Utc::now();
+        let result = sqlx::query(
+            "INSERT INTO socket_group_acl_entries (group_id, backend_id, allowed_ip, label, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(group_id)
+        .bind(backend_id)
+        .bind(ip)
+        .bind(label)
+        .bind(now.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(SocketGroupAclEntry {
+            id: result.last_insert_rowid(),
+            group_id: group_id.to_string(),
+            backend_id: backend_id.to_string(),
+            allowed_ip: ip.to_string(),
+            label: label.map(|s| s.to_string()),
+            created_at: now,
+        })
+    }
+
+    pub async fn remove_socket_group_acl_entry(&self, entry_id: i64) -> Result<()> {
+        sqlx::query("DELETE FROM socket_group_acl_entries WHERE id = ?")
+            .bind(entry_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_socket_group_acl_entries(&self, group_id: &str) -> Result<Vec<SocketGroupAclEntry>> {
+        let rows = sqlx::query_as::<_, SocketGroupAclEntryRow>(
+            "SELECT * FROM socket_group_acl_entries WHERE group_id = ? ORDER BY backend_id, created_at",
         )
         .bind(group_id)
         .fetch_all(&self.pool)
@@ -1231,6 +1328,7 @@ struct SocketGroupAddressRow {
     interface: String,
     prefix_len: i64,
     keypair_id: Option<String>,
+    policy: String,
 }
 
 impl TryFrom<SocketGroupAddressRow> for SocketGroupAddress {
@@ -1244,6 +1342,32 @@ impl TryFrom<SocketGroupAddressRow> for SocketGroupAddress {
             interface: row.interface,
             prefix_len: row.prefix_len as u8,
             keypair_id: row.keypair_id,
+            policy: row.policy.parse().map_err(|e: String| anyhow::anyhow!(e))?,
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct SocketGroupAclEntryRow {
+    id: i64,
+    group_id: String,
+    backend_id: String,
+    allowed_ip: String,
+    label: Option<String>,
+    created_at: String,
+}
+
+impl TryFrom<SocketGroupAclEntryRow> for SocketGroupAclEntry {
+    type Error = anyhow::Error;
+
+    fn try_from(row: SocketGroupAclEntryRow) -> Result<Self> {
+        Ok(SocketGroupAclEntry {
+            id: row.id,
+            group_id: row.group_id,
+            backend_id: row.backend_id,
+            allowed_ip: row.allowed_ip,
+            label: row.label,
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?.with_timezone(&chrono::Utc),
         })
     }
 }

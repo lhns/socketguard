@@ -112,6 +112,7 @@ function App() {
         ) : selectedSocket ? (
           <SocketDetail
             socketId={selectedSocket}
+            aclGroups={aclGroups}
             onBack={() => setSelectedSocket(null)}
           />
         ) : sockets.length === 0 && !error ? (

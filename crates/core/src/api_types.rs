@@ -1,5 +1,5 @@
 use crate::config::{BackendConfig, BackendInstanceConfig, ProcessFilter};
-use crate::types::{AclEntry, AclGroup, BackendType, ManagedSocket, Policy, SocketGroup, SocketGroupAddress};
+use crate::types::{AclEntry, AclGroup, BackendType, ManagedSocket, Policy, SocketGroup, SocketGroupAclEntry, SocketGroupAddress};
 use serde::{Deserialize, Serialize};
 
 /// Response for listing sockets
@@ -143,6 +143,8 @@ pub struct SocketGroupResponse {
     pub group: SocketGroup,
     pub addresses: Vec<SocketGroupAddress>,
     pub members: Vec<String>,
+    #[serde(default)]
+    pub acl_entries: Vec<SocketGroupAclEntry>,
 }
 
 /// Request to create a socket group.
@@ -150,4 +152,88 @@ pub struct SocketGroupResponse {
 pub struct CreateSocketGroupRequest {
     pub label: String,
     pub app_name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn socket_list_response_roundtrip() {
+        // Simulate what the daemon would send with new fields
+        let json = r#"{
+            "sockets": [],
+            "acl_groups": [],
+            "socket_groups": [
+                {
+                    "group": {
+                        "id": "g1",
+                        "label": "test",
+                        "app_name": "nginx",
+                        "created_at": "2024-01-01T00:00:00Z"
+                    },
+                    "addresses": [
+                        {
+                            "group_id": "g1",
+                            "backend_id": "ula",
+                            "address": "fd00::1",
+                            "interface": "lo",
+                            "prefix_len": 128,
+                            "keypair_id": null,
+                            "policy": "closed"
+                        }
+                    ],
+                    "members": ["s1"],
+                    "acl_entries": [
+                        {
+                            "id": 1,
+                            "group_id": "g1",
+                            "backend_id": "ula",
+                            "allowed_ip": "fd00::10",
+                            "label": "peer",
+                            "created_at": "2024-01-01T00:00:00Z"
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let resp: SocketListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.socket_groups.len(), 1);
+        assert_eq!(resp.socket_groups[0].acl_entries.len(), 1);
+        assert_eq!(resp.socket_groups[0].addresses[0].policy, Policy::Closed);
+    }
+
+    #[test]
+    fn socket_list_response_backwards_compat() {
+        // Simulate old daemon response WITHOUT acl_entries and policy
+        let json = r#"{
+            "sockets": [],
+            "acl_groups": [],
+            "socket_groups": [
+                {
+                    "group": {
+                        "id": "g1",
+                        "label": "test",
+                        "app_name": "nginx",
+                        "created_at": "2024-01-01T00:00:00Z"
+                    },
+                    "addresses": [
+                        {
+                            "group_id": "g1",
+                            "backend_id": "ula",
+                            "address": "fd00::1",
+                            "interface": "lo",
+                            "prefix_len": 128,
+                            "keypair_id": null
+                        }
+                    ],
+                    "members": ["s1"]
+                }
+            ]
+        }"#;
+        let resp: SocketListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.socket_groups.len(), 1);
+        assert_eq!(resp.socket_groups[0].acl_entries.len(), 0);
+        assert_eq!(resp.socket_groups[0].addresses[0].policy, Policy::Closed);
+    }
 }

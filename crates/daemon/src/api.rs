@@ -51,6 +51,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/socket-groups/{id}", delete(delete_socket_group))
         .route("/api/socket-groups/{id}/members", post(add_socket_group_members))
         .route("/api/socket-groups/{id}/members/{socket_id}", delete(remove_socket_group_member))
+        .route("/api/socket-groups/{id}/backends/{backend_id}/policy", put(set_socket_group_address_policy))
+        .route("/api/socket-groups/{id}/backends/{backend_id}/acl", post(add_socket_group_acl_entry))
+        .route("/api/socket-groups/{id}/acl/{entry_id}", delete(remove_socket_group_acl_entry))
         // Config, backends, interfaces, events
         .route("/api/config", get(get_config))
         .route("/api/config", put(update_config))
@@ -195,7 +198,8 @@ async fn build_socket_group_responses(state: &AppState) -> anyhow::Result<Vec<So
     for group in groups {
         let addresses = state.db.get_socket_group_addresses(&group.id).await?;
         let members = state.db.get_socket_group_members(&group.id).await?;
-        responses.push(SocketGroupResponse { group, addresses, members });
+        let acl_entries = state.db.get_socket_group_acl_entries(&group.id).await?;
+        responses.push(SocketGroupResponse { group, addresses, members, acl_entries });
     }
     Ok(responses)
 }
@@ -590,6 +594,7 @@ async fn create_socket_group(
                 group,
                 addresses: vec![],
                 members: vec![],
+                acl_entries: vec![],
             })).into_response()
         }
         Err(e) => internal_error(e.to_string()).into_response(),
@@ -629,6 +634,60 @@ async fn remove_socket_group_member(
 ) -> impl IntoResponse {
     match state.db.remove_socket_from_group(&socket_id).await {
         Ok(_) => {
+            let _ = state.events.send(DaemonEvent::SocketsChanged);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => internal_error(e.to_string()).into_response(),
+    }
+}
+
+async fn set_socket_group_address_policy(
+    State(state): State<Arc<AppState>>,
+    Path((id, backend_id)): Path<(String, String)>,
+    Json(req): Json<UpdatePolicyRequest>,
+) -> impl IntoResponse {
+    match state.db.set_socket_group_address_policy(&id, &backend_id, &req.policy.to_string()).await {
+        Ok(_) => {
+            if let Err(e) = state.engine.read().await.apply_socket_group_acl(&state, &id).await {
+                tracing::warn!("Firewall update failed after socket group policy change: {e}");
+            }
+            let _ = state.events.send(DaemonEvent::SocketsChanged);
+            StatusCode::OK.into_response()
+        }
+        Err(e) => internal_error(e.to_string()).into_response(),
+    }
+}
+
+async fn add_socket_group_acl_entry(
+    State(state): State<Arc<AppState>>,
+    Path((id, backend_id)): Path<(String, String)>,
+    Json(req): Json<AllowIpRequest>,
+) -> impl IntoResponse {
+    if req.allowed_ip.parse::<Ipv6Addr>().is_err() {
+        return bad_request(format!("invalid IPv6 address: '{}'", req.allowed_ip)).into_response();
+    }
+
+    match state.db.add_socket_group_acl_entry(&id, &backend_id, &req.allowed_ip, req.label.as_deref()).await {
+        Ok(entry) => {
+            if let Err(e) = state.engine.read().await.apply_socket_group_acl(&state, &id).await {
+                tracing::warn!("Firewall update failed after adding socket group ACL entry: {e}");
+            }
+            let _ = state.events.send(DaemonEvent::SocketsChanged);
+            (StatusCode::CREATED, Json(entry)).into_response()
+        }
+        Err(e) => internal_error(e.to_string()).into_response(),
+    }
+}
+
+async fn remove_socket_group_acl_entry(
+    State(state): State<Arc<AppState>>,
+    Path((id, entry_id)): Path<(String, i64)>,
+) -> impl IntoResponse {
+    match state.db.remove_socket_group_acl_entry(entry_id).await {
+        Ok(_) => {
+            if let Err(e) = state.engine.read().await.apply_socket_group_acl(&state, &id).await {
+                tracing::warn!("Firewall update failed after removing socket group ACL entry: {e}");
+            }
             let _ = state.events.send(DaemonEvent::SocketsChanged);
             StatusCode::NO_CONTENT.into_response()
         }

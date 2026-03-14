@@ -669,6 +669,57 @@ impl Engine {
         }
         Ok(())
     }
+    /// Apply firewall rules for a socket group address based on its policy and ACL entries.
+    /// Uses port/protocol from member sockets to configure firewall rules.
+    pub async fn apply_socket_group_acl(
+        &self,
+        state: &AppState,
+        group_id: &str,
+    ) -> anyhow::Result<()> {
+        let addresses = state.db.get_socket_group_addresses(group_id).await?;
+        let members = state.db.get_socket_group_members(group_id).await?;
+        let acl_entries = state.db.get_socket_group_acl_entries(group_id).await?;
+
+        // Get port/protocol from first member socket
+        let member_socket = if let Some(sid) = members.first() {
+            state.db.get_socket(sid).await?
+        } else {
+            None
+        };
+
+        let (port, protocol) = match member_socket {
+            Some(ref s) => (s.port, s.protocol),
+            None => return Ok(()), // No members, nothing to apply
+        };
+
+        let _lock = state.firewall_lock.lock().await;
+
+        for addr in &addresses {
+            let backend_acl: Vec<Ipv6Addr> = acl_entries
+                .iter()
+                .filter(|e| e.backend_id == addr.backend_id)
+                .filter_map(|e| e.allowed_ip.parse().ok())
+                .collect();
+
+            match addr.policy {
+                Policy::Open => {
+                    self.firewall.allow_all(addr.address, port, protocol)?;
+                }
+                Policy::Closed => {
+                    if backend_acl.is_empty() {
+                        let _ = self.firewall.remove_acl(addr.address, port, protocol);
+                    } else {
+                        self.firewall.apply_acl(addr.address, port, protocol, &backend_acl)?;
+                    }
+                }
+                Policy::Group => {
+                    let _ = self.firewall.remove_acl(addr.address, port, protocol);
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Apply firewall rules synchronously (for use in spawn_blocking).

@@ -65,12 +65,23 @@ export interface SocketGroupAddress {
   interface: string;
   prefix_len: number;
   keypair_id: string | null;
+  policy: string;
+}
+
+export interface SocketGroupAclEntry {
+  id: number;
+  group_id: string;
+  backend_id: string;
+  allowed_ip: string;
+  label: string | null;
+  created_at: string;
 }
 
 export interface SocketGroupResponse {
   group: SocketGroup;
   addresses: SocketGroupAddress[];
   members: string[];
+  acl_entries: SocketGroupAclEntry[];
 }
 
 export interface SocketListResponse {
@@ -270,6 +281,30 @@ export async function removeSocketFromSocketGroup(
   socketId: string
 ): Promise<void> {
   return invoke("remove_socket_from_socket_group", { groupId, socketId });
+}
+
+export async function setSocketGroupAddressPolicy(
+  groupId: string,
+  backendId: string,
+  policy: string
+): Promise<void> {
+  return invoke("set_socket_group_address_policy", { groupId, backendId, policy });
+}
+
+export async function addSocketGroupAclEntry(
+  groupId: string,
+  backendId: string,
+  ip: string,
+  label?: string
+): Promise<void> {
+  return invoke("add_socket_group_acl_entry", { groupId, backendId, ip, label });
+}
+
+export async function removeSocketGroupAclEntry(
+  groupId: string,
+  entryId: number
+): Promise<void> {
+  return invoke("remove_socket_group_acl_entry", { groupId, entryId });
 }
 
 // ======== Config functions ========

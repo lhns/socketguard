@@ -236,6 +236,19 @@ pub struct SocketGroupAddress {
     pub interface: String,
     pub prefix_len: u8,
     pub keypair_id: Option<String>,
+    #[serde(default)]
+    pub policy: Policy,
+}
+
+/// An ACL entry for a socket group address.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketGroupAclEntry {
+    pub id: i64,
+    pub group_id: String,
+    pub backend_id: String,
+    pub allowed_ip: String,
+    pub label: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Result of allocating a new IPv6 address

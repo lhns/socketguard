@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
   AclGroupResponse, AclEntry, ManagedSocket,
-  updateAclGroup, deleteAclGroup, addToAclGroup, removeFromAclGroup,
+  updateAclGroup, deleteAclGroup, removeFromAclGroup,
   addAclGroupEntry, removeAclGroupEntry,
 } from "../api";
 import { useToast } from "./Toast";
@@ -19,11 +19,9 @@ export default function AclGroupNode({ group, allSockets, onRefresh }: Props) {
   const [newIp, setNewIp] = useState("");
   const [newLabel, setNewLabel] = useState("");
   const [newBackend, setNewBackend] = useState("");
-  const [adding, setAdding] = useState(false);
   const toast = useToast();
 
   const memberSockets = allSockets.filter((s) => group.members.includes(s.id));
-  const nonMembers = allSockets.filter((s) => !group.members.includes(s.id));
 
   const handlePolicyToggle = async (p: string) => {
     try {
@@ -48,16 +46,6 @@ export default function AclGroupNode({ group, allSockets, onRefresh }: Props) {
         }
       },
     });
-  };
-
-  const handleAddSocket = async (socketId: string) => {
-    try {
-      await addToAclGroup(group.group.id, [socketId]);
-      toast.success("Socket added to group");
-      onRefresh();
-    } catch (e) {
-      toast.error(String(e));
-    }
   };
 
   const handleRemoveSocket = (socketId: string, name: string) => {
@@ -253,29 +241,6 @@ export default function AclGroupNode({ group, allSockets, onRefresh }: Props) {
                   </button>
                 </div>
               ))
-            )}
-            {!adding && nonMembers.length > 0 && (
-              <button
-                className="btn btn-sm btn-ghost"
-                style={{ marginTop: 4 }}
-                onClick={() => setAdding(true)}
-              >
-                + Add socket
-              </button>
-            )}
-            {adding && (
-              <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 4 }}>
-                {nonMembers.map((s) => (
-                  <button
-                    key={s.id}
-                    className="btn btn-sm"
-                    onClick={() => { handleAddSocket(s.id); setAdding(false); }}
-                  >
-                    {s.process_name}:{s.port}
-                  </button>
-                ))}
-                <button className="btn btn-sm btn-ghost" onClick={() => setAdding(false)}>Cancel</button>
-              </div>
             )}
           </div>
 

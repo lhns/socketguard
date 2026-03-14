@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
 import {
   getSocket, setBackendPolicy, allowBackendIp, removeAclEntry,
-  onSocketsChanged, onDaemonConnected,
-  ManagedSocket, AclEntry, SocketAddress,
+  onSocketsChanged, onDaemonConnected, addToAclGroup,
+  ManagedSocket, AclEntry, SocketAddress, AclGroupResponse,
 } from "../api";
 import { useToast } from "./Toast";
 import ConfirmDialog from "./ConfirmDialog";
 
 interface Props {
   socketId: string;
+  aclGroups: AclGroupResponse[];
   onBack: () => void;
 }
 
@@ -17,12 +18,14 @@ function AddressCard({
   addr,
   acl,
   aclGroupId,
+  aclGroups,
   onRefresh,
 }: {
   socketId: string;
   addr: SocketAddress;
   acl: AclEntry[];
   aclGroupId: string | null;
+  aclGroups: AclGroupResponse[];
   onRefresh: () => void;
 }) {
   const [newIp, setNewIp] = useState("");
@@ -36,11 +39,31 @@ function AddressCard({
         message: `Setting ${addr.backend_id} to open will allow ALL incoming connections on this address. Are you sure?`,
         action: () => doSetPolicy(p),
       });
-    } else if (p === "group" && !aclGroupId) {
-      toast.error("Socket is not in any ACL group. Add it to a group first.");
-      return;
+    } else if (p === "group") {
+      if (aclGroups.length === 0) {
+        toast.error("No ACL groups exist");
+        return;
+      }
+      if (!aclGroupId) {
+        // Auto-select first group
+        addToAclGroup(aclGroups[0].group.id, [socketId])
+          .then(() => doSetPolicy("group"))
+          .catch((e) => toast.error(String(e)));
+      } else {
+        doSetPolicy(p);
+      }
     } else {
       doSetPolicy(p);
+    }
+  };
+
+  const handleGroupChange = async (newGroupId: string) => {
+    try {
+      await addToAclGroup(newGroupId, [socketId]);
+      toast.success("Moved to group");
+      onRefresh();
+    } catch (e) {
+      toast.error(String(e));
     }
   };
 
@@ -134,6 +157,22 @@ function AddressCard({
         </button>
       </div>
 
+      {/* ACL Group dropdown — shown when policy is "group" */}
+      {addr.policy === "group" && aclGroups.length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          <select
+            className="input"
+            value={aclGroupId || ""}
+            onChange={(e) => handleGroupChange(e.target.value)}
+            style={{ width: "100%" }}
+          >
+            {aclGroups.map((g) => (
+              <option key={g.group.id} value={g.group.id}>{g.group.label}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
       <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
         {addr.policy === "group"
           ? aclGroupId
@@ -209,7 +248,7 @@ function AddressCard({
   );
 }
 
-export default function SocketDetail({ socketId, onBack }: Props) {
+export default function SocketDetail({ socketId, aclGroups, onBack }: Props) {
   const [socket, setSocket] = useState<ManagedSocket | null>(null);
   const [acl, setAcl] = useState<AclEntry[]>([]);
   const [aclGroupId, setAclGroupId] = useState<string | null>(null);
@@ -314,6 +353,7 @@ export default function SocketDetail({ socketId, onBack }: Props) {
             addr={addr}
             acl={aclByBackend[addr.backend_id] || []}
             aclGroupId={aclGroupId}
+            aclGroups={aclGroups}
             onRefresh={refresh}
           />
         ))
