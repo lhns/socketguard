@@ -24,7 +24,8 @@ ADRs document significant architectural decisions made during the project's deve
 | [0014](0014-sse-push-and-native-socket-detection.md) | SSE Push Notifications and Native Socket Detection | Accepted |
 | [0015](0015-api-authentication.md) | API Authentication via Bearer Token | Accepted |
 | [0016](0016-multi-backend-architecture.md) | Multi-Backend Architecture | Accepted |
-| [0017](0017-per-backend-policy-and-acl.md) | Per-Backend Policy and ACL with Disabled Mode | Accepted |
+| [0017](0017-per-backend-policy-and-acl.md) | Per-Backend Policy and ACL with Disabled Mode | Accepted (Disabled superseded by 0018) |
+| [0018](0018-tree-view-acl-groups.md) | Tree View UX with ACL Groups and Socket Groups | Accepted |
 
 ## Format
 

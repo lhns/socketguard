@@ -334,9 +334,9 @@ tr.clickable:hover {
   letter-spacing: 0.2px;
 }
 
-.badge-disabled {
-  background: var(--bg-hover);
-  color: var(--text-muted);
+.badge-group {
+  background: rgba(91, 141, 239, 0.12);
+  color: var(--accent);
 }
 
 .badge-closed {
@@ -387,8 +387,8 @@ tr.clickable:hover {
   color: var(--text);
 }
 
-.policy-btn.active-disabled {
-  background: var(--text-muted);
+.policy-btn.active-group {
+  background: var(--accent);
   color: #fff;
 }
 
@@ -601,4 +601,91 @@ tr.clickable:hover {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
+}
+
+/* Tree view */
+.tree-l1 {
+  margin-bottom: 4px;
+}
+
+.tree-l2 {
+  padding-left: 16px;
+}
+
+.tree-l2.clickable {
+  cursor: pointer;
+  transition: background 0.1s;
+  border-radius: var(--radius-sm);
+  padding-left: 16px;
+  margin: 0 -8px;
+  padding-right: 8px;
+}
+
+.tree-l2.clickable:hover {
+  background: var(--bg-hover);
+}
+
+.tree-l3 {
+  padding-left: 12px;
+}
+
+.tree-node-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* Backend filter tabs */
+.backend-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--bg-card);
+  padding: 3px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.backend-tab {
+  padding: 4px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.backend-tab:hover {
+  color: var(--text);
+}
+
+.backend-tab.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Inactive address (closed + no ACL) */
+.address-inactive {
+  opacity: 0.5;
+}
+
+/* Group policy indicator */
+.policy-group {
+  background: rgba(91, 141, 239, 0.12);
+  color: var(--accent);
+}
+
+/* Group reference badge */
+.group-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: rgba(91, 141, 239, 0.08);
+  color: var(--accent);
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
 }

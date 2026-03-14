@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.socketguard.desktop",
   "build": {
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173"
   },

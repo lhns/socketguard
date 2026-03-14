@@ -6,8 +6,9 @@ fn main() {
     let dist_dir = ui_dir.join("dist");
     let src_dir = ui_dir.join("src");
 
-    // Re-run this build script if any frontend source file changes
+    // Re-run this build script if any frontend source or dist file changes
     println!("cargo:rerun-if-changed={}", src_dir.display());
+    println!("cargo:rerun-if-changed={}", dist_dir.display());
     println!("cargo:rerun-if-changed={}", ui_dir.join("index.html").display());
     println!("cargo:rerun-if-changed={}", ui_dir.join("package.json").display());
 

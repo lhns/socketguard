@@ -16,11 +16,13 @@ function AddressCard({
   socketId,
   addr,
   acl,
+  aclGroupId,
   onRefresh,
 }: {
   socketId: string;
   addr: SocketAddress;
   acl: AclEntry[];
+  aclGroupId: string | null;
   onRefresh: () => void;
 }) {
   const [newIp, setNewIp] = useState("");
@@ -34,11 +36,9 @@ function AddressCard({
         message: `Setting ${addr.backend_id} to open will allow ALL incoming connections on this address. Are you sure?`,
         action: () => doSetPolicy(p),
       });
-    } else if (p === "disabled") {
-      setConfirm({
-        message: `Disabling ${addr.backend_id} will remove the IPv6 address from the system. Continue?`,
-        action: () => doSetPolicy(p),
-      });
+    } else if (p === "group" && !aclGroupId) {
+      toast.error("Socket is not in any ACL group. Add it to a group first.");
+      return;
     } else {
       doSetPolicy(p);
     }
@@ -82,8 +82,10 @@ function AddressCard({
     });
   };
 
+  const isInactive = addr.policy === "closed" && acl.length === 0;
+
   return (
-    <div className="card" style={{ marginBottom: 12 }}>
+    <div className={`card${isInactive ? " address-inactive" : ""}`} style={{ marginBottom: 12 }}>
       {confirm && (
         <ConfirmDialog
           message={confirm.message}
@@ -112,12 +114,6 @@ function AddressCard({
       {/* Policy toggle */}
       <div className="policy-toggle" style={{ marginBottom: 8 }}>
         <button
-          className={`policy-btn ${addr.policy === "disabled" ? "active-disabled" : ""}`}
-          onClick={() => handlePolicy("disabled")}
-        >
-          Disabled
-        </button>
-        <button
           className={`policy-btn ${addr.policy === "closed" ? "active-closed" : ""}`}
           onClick={() => handlePolicy("closed")}
         >
@@ -129,17 +125,28 @@ function AddressCard({
         >
           Open
         </button>
+        <button
+          className={`policy-btn ${addr.policy === "group" ? "active-group" : ""}`}
+          onClick={() => handlePolicy("group")}
+          title={aclGroupId ? "Inherit from ACL group" : "Join an ACL group first"}
+        >
+          Group
+        </button>
       </div>
 
       <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
-        {addr.policy === "disabled"
-          ? "No address assigned — this backend is inactive for this socket."
+        {addr.policy === "group"
+          ? aclGroupId
+            ? "Policy and ACL inherited from ACL group."
+            : "Not in any group — treated as inactive (closed, no ACL)."
           : addr.policy === "closed"
-          ? "Only allowed IPs can connect via this address."
+          ? isInactive
+            ? "Inactive — closed with no ACL entries. Address not active on interface."
+            : "Only allowed IPs can connect via this address."
           : "All incoming connections are allowed on this address."}
       </p>
 
-      {/* ACL section — only shown when closed */}
+      {/* ACL section — only shown when closed (not group) */}
       {addr.policy === "closed" && (
         <>
           <div className="acl-form" style={{ marginBottom: 8 }}>
@@ -164,7 +171,7 @@ function AddressCard({
 
           {acl.length === 0 ? (
             <div style={{ padding: "8px 0", color: "var(--text-muted)", fontSize: 12 }}>
-              No allowed IPs — all incoming traffic on this address is blocked.
+              No allowed IPs — address is inactive (not added to interface).
             </div>
           ) : (
             <div className="table-wrap">
@@ -205,6 +212,7 @@ function AddressCard({
 export default function SocketDetail({ socketId, onBack }: Props) {
   const [socket, setSocket] = useState<ManagedSocket | null>(null);
   const [acl, setAcl] = useState<AclEntry[]>([]);
+  const [aclGroupId, setAclGroupId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = async () => {
@@ -212,6 +220,7 @@ export default function SocketDetail({ socketId, onBack }: Props) {
       const resp = await getSocket(socketId);
       setSocket(resp.socket);
       setAcl(resp.acl);
+      setAclGroupId(resp.acl_group_id);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -252,6 +261,12 @@ export default function SocketDetail({ socketId, onBack }: Props) {
             Port {socket.port}/{socket.protocol}
             <span style={{ margin: "0 6px", opacity: 0.3 }}>|</span>
             PID {socket.pid}
+            {aclGroupId && (
+              <>
+                <span style={{ margin: "0 6px", opacity: 0.3 }}>|</span>
+                <span style={{ color: "var(--accent)" }}>In ACL group</span>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -298,6 +313,7 @@ export default function SocketDetail({ socketId, onBack }: Props) {
             socketId={socketId}
             addr={addr}
             acl={aclByBackend[addr.backend_id] || []}
+            aclGroupId={aclGroupId}
             onRefresh={refresh}
           />
         ))

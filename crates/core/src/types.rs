@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv6Addr};
 
@@ -51,15 +52,15 @@ pub struct ListeningSocket {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Policy {
-    /// No address assigned — the socket does not participate in this backend.
-    /// Address is removed from the OS interface and firewall rules are cleaned up.
-    Disabled,
     /// ACL-based access control (default).
-    /// With no ACL entries: blocks all incoming connections.
+    /// With no ACL entries: blocks all incoming connections (inactive — address not added to OS).
     /// With ACL entries: allows only whitelisted source IPs.
     Closed,
     /// Allow all incoming connections (no restrictions)
     Open,
+    /// Inherit policy and ACL from the socket's ACL group (ADR 0018).
+    /// If the socket is not in any group, treated as closed with no ACL (= inactive).
+    Group,
 }
 
 impl Default for Policy {
@@ -71,9 +72,9 @@ impl Default for Policy {
 impl std::fmt::Display for Policy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Policy::Disabled => write!(f, "disabled"),
             Policy::Closed => write!(f, "closed"),
             Policy::Open => write!(f, "open"),
+            Policy::Group => write!(f, "group"),
         }
     }
 }
@@ -82,10 +83,11 @@ impl std::str::FromStr for Policy {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "disabled" => Ok(Policy::Disabled),
             "closed" => Ok(Policy::Closed),
             "open" => Ok(Policy::Open),
-            // Accept "managed" as alias for backwards compatibility with existing DBs
+            "group" => Ok(Policy::Group),
+            // Backwards compatibility: "disabled" and "managed" both map to Closed (ADR 0018)
+            "disabled" => Ok(Policy::Closed),
             "managed" => Ok(Policy::Closed),
             _ => Err(format!("invalid policy: {s}")),
         }
@@ -163,8 +165,16 @@ pub struct ManagedSocket {
     pub policy: Policy,
     pub exe_path: Option<String>,
     pub cmdline: Option<String>,
-    pub first_seen: chrono::DateTime<chrono::Utc>,
-    pub last_seen: chrono::DateTime<chrono::Utc>,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    /// ACL group membership (ADR 0018). If set, addresses with `Policy::Group`
+    /// inherit the group's policy and ACL entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acl_group_id: Option<String>,
+    /// Socket group membership (ADR 0018). Sockets in a socket group share
+    /// a single IPv6 address per backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_group_id: Option<String>,
 }
 
 impl ManagedSocket {
@@ -197,6 +207,35 @@ pub struct AclEntry {
     pub allowed_ip: String,
     pub label: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// An ACL group providing shared policy + ACL for member sockets (ADR 0018).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AclGroup {
+    pub id: String,
+    pub label: String,
+    pub policy: Policy,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A socket group allowing multiple sockets to share a single IPv6 per backend (ADR 0018).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketGroup {
+    pub id: String,
+    pub label: String,
+    pub app_name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// An address shared by all sockets in a socket group for a specific backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketGroupAddress {
+    pub group_id: String,
+    pub backend_id: String,
+    pub address: Ipv6Addr,
+    pub interface: String,
+    pub prefix_len: u8,
+    pub keypair_id: Option<String>,
 }
 
 /// Result of allocating a new IPv6 address
@@ -282,13 +321,14 @@ mod tests {
 
     #[test]
     fn policy_display_roundtrip() {
-        assert_eq!(Policy::Disabled.to_string(), "disabled");
         assert_eq!(Policy::Closed.to_string(), "closed");
         assert_eq!(Policy::Open.to_string(), "open");
-        assert_eq!("disabled".parse::<Policy>().unwrap(), Policy::Disabled);
+        assert_eq!(Policy::Group.to_string(), "group");
         assert_eq!("closed".parse::<Policy>().unwrap(), Policy::Closed);
         assert_eq!("open".parse::<Policy>().unwrap(), Policy::Open);
-        // "managed" accepted as backwards-compat alias for closed
+        assert_eq!("group".parse::<Policy>().unwrap(), Policy::Group);
+        // Backwards-compat aliases
+        assert_eq!("disabled".parse::<Policy>().unwrap(), Policy::Closed);
         assert_eq!("managed".parse::<Policy>().unwrap(), Policy::Closed);
         assert!("invalid".parse::<Policy>().is_err());
     }
@@ -325,7 +365,7 @@ mod tests {
 
     #[test]
     fn policy_serde_roundtrip() {
-        for policy in [Policy::Disabled, Policy::Closed, Policy::Open] {
+        for policy in [Policy::Closed, Policy::Open, Policy::Group] {
             let json = serde_json::to_string(&policy).unwrap();
             let parsed: Policy = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, policy);

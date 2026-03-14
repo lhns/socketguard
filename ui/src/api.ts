@@ -23,6 +23,8 @@ export interface ManagedSocket {
   cmdline: string | null;
   first_seen: string;
   last_seen: string;
+  acl_group_id?: string | null;
+  socket_group_id?: string | null;
 }
 
 export interface AclEntry {
@@ -34,13 +36,53 @@ export interface AclEntry {
   created_at: string;
 }
 
+// ACL Group types (ADR 0018)
+export interface AclGroup {
+  id: string;
+  label: string;
+  policy: string;
+  created_at: string;
+}
+
+export interface AclGroupResponse {
+  group: AclGroup;
+  entries: AclEntry[];
+  members: string[];
+}
+
+// Socket Group types (ADR 0018)
+export interface SocketGroup {
+  id: string;
+  label: string;
+  app_name: string;
+  created_at: string;
+}
+
+export interface SocketGroupAddress {
+  group_id: string;
+  backend_id: string;
+  address: string;
+  interface: string;
+  prefix_len: number;
+  keypair_id: string | null;
+}
+
+export interface SocketGroupResponse {
+  group: SocketGroup;
+  addresses: SocketGroupAddress[];
+  members: string[];
+}
+
 export interface SocketListResponse {
   sockets: ManagedSocket[];
+  acl_groups: AclGroupResponse[];
+  socket_groups: SocketGroupResponse[];
 }
 
 export interface SocketDetailResponse {
   socket: ManagedSocket;
   acl: AclEntry[];
+  acl_group_id: string | null;
 }
 
 export type BackendConfig =
@@ -94,6 +136,8 @@ export interface AddBackendRequest {
   prefix?: string;
 }
 
+// ======== Socket functions ========
+
 export async function listSockets(): Promise<SocketListResponse> {
   return invoke("list_sockets");
 }
@@ -141,6 +185,95 @@ export async function allowBackendIp(
   return invoke("allow_backend_ip", { socketId, backendId, ip, label });
 }
 
+// ======== ACL Group functions (ADR 0018) ========
+
+export async function listAclGroups(): Promise<AclGroupResponse[]> {
+  return invoke("list_acl_groups");
+}
+
+export async function createAclGroup(label: string): Promise<AclGroupResponse> {
+  return invoke("create_acl_group", { label });
+}
+
+export async function getAclGroup(id: string): Promise<AclGroupResponse> {
+  return invoke("get_acl_group", { id });
+}
+
+export async function updateAclGroup(
+  id: string,
+  label?: string,
+  policy?: string
+): Promise<void> {
+  return invoke("update_acl_group", { id, label, policy });
+}
+
+export async function deleteAclGroup(id: string): Promise<void> {
+  return invoke("delete_acl_group", { id });
+}
+
+export async function addToAclGroup(
+  groupId: string,
+  socketIds: string[]
+): Promise<void> {
+  return invoke("add_to_acl_group", { groupId, socketIds });
+}
+
+export async function removeFromAclGroup(
+  groupId: string,
+  socketId: string
+): Promise<void> {
+  return invoke("remove_from_acl_group", { groupId, socketId });
+}
+
+export async function addAclGroupEntry(
+  groupId: string,
+  backendId: string,
+  ip: string,
+  label?: string
+): Promise<void> {
+  return invoke("add_acl_group_entry", { groupId, backendId, ip, label });
+}
+
+export async function removeAclGroupEntry(
+  groupId: string,
+  entryId: number
+): Promise<void> {
+  return invoke("remove_acl_group_entry", { groupId, entryId });
+}
+
+// ======== Socket Group functions (ADR 0018) ========
+
+export async function listSocketGroups(): Promise<SocketGroupResponse[]> {
+  return invoke("list_socket_groups");
+}
+
+export async function createSocketGroup(
+  label: string,
+  appName: string
+): Promise<SocketGroupResponse> {
+  return invoke("create_socket_group", { label, appName });
+}
+
+export async function deleteSocketGroup(id: string): Promise<void> {
+  return invoke("delete_socket_group", { id });
+}
+
+export async function addSocketToSocketGroup(
+  groupId: string,
+  socketIds: string[]
+): Promise<void> {
+  return invoke("add_socket_to_socket_group", { groupId, socketIds });
+}
+
+export async function removeSocketFromSocketGroup(
+  groupId: string,
+  socketId: string
+): Promise<void> {
+  return invoke("remove_socket_from_socket_group", { groupId, socketId });
+}
+
+// ======== Config functions ========
+
 export async function getConfig(): Promise<ConfigResponse> {
   return invoke("get_config");
 }
@@ -168,6 +301,8 @@ export async function addBackend(req: AddBackendRequest): Promise<BackendInstanc
 export async function removeBackend(id: string): Promise<void> {
   return invoke("remove_backend", { id });
 }
+
+// ======== Events ========
 
 export function onSocketsChanged(callback: () => void): Promise<UnlistenFn> {
   return listen("sockets_changed", callback);

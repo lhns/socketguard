@@ -1,11 +1,13 @@
 use crate::config::{BackendConfig, BackendInstanceConfig, ProcessFilter};
-use crate::types::{AclEntry, BackendType, ManagedSocket, Policy};
+use crate::types::{AclEntry, AclGroup, BackendType, ManagedSocket, Policy, SocketGroup, SocketGroupAddress};
 use serde::{Deserialize, Serialize};
 
 /// Response for listing sockets
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SocketListResponse {
     pub sockets: Vec<ManagedSocket>,
+    pub acl_groups: Vec<AclGroupResponse>,
+    pub socket_groups: Vec<SocketGroupResponse>,
 }
 
 /// Response for a single socket with its ACL
@@ -13,6 +15,7 @@ pub struct SocketListResponse {
 pub struct SocketDetailResponse {
     pub socket: ManagedSocket,
     pub acl: Vec<AclEntry>,
+    pub acl_group_id: Option<String>,
 }
 
 /// Request to update an ACL (replace all entries)
@@ -93,4 +96,58 @@ pub struct InterfacesResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ApiError {
     pub error: String,
+}
+
+// --- ACL Group types (ADR 0018) ---
+
+/// Full ACL group response with entries and member socket IDs.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AclGroupResponse {
+    pub group: AclGroup,
+    pub entries: Vec<AclEntry>,
+    pub members: Vec<String>,
+}
+
+/// Request to create an ACL group.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateAclGroupRequest {
+    pub label: String,
+}
+
+/// Request to update an ACL group.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateAclGroupRequest {
+    pub label: Option<String>,
+    pub policy: Option<Policy>,
+}
+
+/// Request to add an ACL entry to a group.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AddAclGroupEntryRequest {
+    pub backend_id: String,
+    pub allowed_ip: String,
+    pub label: Option<String>,
+}
+
+/// Request to add sockets to a group.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AddToGroupRequest {
+    pub socket_ids: Vec<String>,
+}
+
+// --- Socket Group types (ADR 0018) ---
+
+/// Full socket group response with addresses.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SocketGroupResponse {
+    pub group: SocketGroup,
+    pub addresses: Vec<SocketGroupAddress>,
+    pub members: Vec<String>,
+}
+
+/// Request to create a socket group.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateSocketGroupRequest {
+    pub label: String,
+    pub app_name: String,
 }

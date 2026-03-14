@@ -3,7 +3,7 @@ use crate::firewall::{self, Firewall};
 use crate::monitor::{self, SocketMonitor};
 use crate::AppState;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
-use socketguard_core::{socket_id, ManagedSocket, Policy, SocketAddress};
+use socketguard_core::{socket_id, AclEntry, ManagedSocket, Policy, SocketAddress};
 use std::collections::HashMap;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
@@ -67,37 +67,53 @@ impl Engine {
             }
         };
 
-        // Pre-fetch per-backend ACL data
-        let mut socket_acls: Vec<(ManagedSocket, HashMap<String, Vec<Ipv6Addr>>)> = Vec::new();
+        // Pre-fetch per-backend ACL data with group resolution
+        let mut socket_acls: Vec<(ManagedSocket, HashMap<String, Vec<Ipv6Addr>>, HashMap<String, Policy>)> = Vec::new();
         for socket in &sockets {
             let mut acl_map: HashMap<String, Vec<Ipv6Addr>> = HashMap::new();
+            let mut resolved_policies: HashMap<String, Policy> = HashMap::new();
             for addr in &socket.addresses {
-                if addr.policy == Policy::Closed {
-                    match state.db.get_acl_for_backend(&socket.id, &addr.backend_id).await {
-                        Ok(acl) => {
-                            let allowed = acl.iter().filter_map(|e| e.allowed_ip.parse().ok()).collect();
-                            acl_map.insert(addr.backend_id.clone(), allowed);
-                        }
-                        Err(e) => {
-                            warn!("Failed to fetch ACL for {}:{}: {e}", socket.id, addr.backend_id);
-                        }
+                let (effective_policy, _source) = match state.db.resolve_effective_policy(&socket.id, &addr.backend_id).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!("Failed to resolve policy for {}:{}: {e}", socket.id, addr.backend_id);
+                        (addr.policy, "address".to_string())
                     }
+                };
+                resolved_policies.insert(addr.backend_id.clone(), effective_policy);
+
+                if effective_policy == Policy::Closed {
+                    let acl = if addr.policy == Policy::Group {
+                        // Get ACL entries from group
+                        match state.db.get_acl_group_for_socket(&socket.id).await {
+                            Ok(Some(group_id)) => state.db.get_acl_group_entries_for_backend(&group_id, &addr.backend_id).await.unwrap_or_default(),
+                            _ => Vec::new(),
+                        }
+                    } else {
+                        state.db.get_acl_for_backend(&socket.id, &addr.backend_id).await.unwrap_or_default()
+                    };
+                    let allowed = acl.iter().filter_map(|e| e.allowed_ip.parse().ok()).collect();
+                    acl_map.insert(addr.backend_id.clone(), allowed);
                 }
             }
-            socket_acls.push((socket.clone(), acl_map));
+            socket_acls.push((socket.clone(), acl_map, resolved_policies));
         }
 
         // Run address + firewall setup in parallel
         let mut join_set = JoinSet::new();
-        for (socket, acl_map) in socket_acls {
+        for (socket, acl_map, resolved_policies) in socket_acls {
             join_set.spawn_blocking(move || {
                 let network = crate::network::create_network_interface();
                 let firewall = crate::firewall::create_firewall();
 
                 for addr in &socket.addresses {
-                    // Skip disabled addresses — don't add them to the interface
-                    if addr.policy == Policy::Disabled {
-                        continue;
+                    let effective = resolved_policies.get(&addr.backend_id).copied().unwrap_or(addr.policy);
+                    // Closed with no ACL = inactive, don't add to interface
+                    if effective == Policy::Closed {
+                        let has_acl = acl_map.get(&addr.backend_id).map(|v| !v.is_empty()).unwrap_or(false);
+                        if !has_acl {
+                            continue;
+                        }
                     }
                     if let Err(e) = network.add_address(&addr.interface, addr.address, addr.prefix_len) {
                         warn!(
@@ -107,7 +123,7 @@ impl Engine {
                     }
                 }
 
-                if let Err(e) = apply_firewall_sync(&*firewall, &socket, &acl_map) {
+                if let Err(e) = apply_firewall_sync(&*firewall, &socket, &acl_map, &resolved_policies) {
                     warn!("Failed to re-apply firewall for socket {}: {e}", socket.id);
                 }
             });
@@ -357,6 +373,7 @@ impl Engine {
         struct ExistingUpdate {
             socket: ManagedSocket,
             acl_map: HashMap<String, Vec<Ipv6Addr>>,
+            resolved_policies: HashMap<String, Policy>,
         }
         struct NewProvision {
             socket: ManagedSocket,
@@ -384,12 +401,23 @@ impl Engine {
                     error!("Failed to update socket {sid}: {e}");
                 }
 
-                // Build per-backend ACL map
+                // Build per-backend ACL map with group resolution
                 let mut acl_map: HashMap<String, Vec<Ipv6Addr>> = HashMap::new();
+                let mut resolved_policies: HashMap<String, Policy> = HashMap::new();
                 for addr in &existing.addresses {
-                    if addr.policy == Policy::Closed {
-                        let acl = state.db.get_acl_for_backend(&existing.id, &addr.backend_id)
-                            .await.unwrap_or_default();
+                    let (effective_policy, _) = state.db.resolve_effective_policy(&existing.id, &addr.backend_id)
+                        .await.unwrap_or((addr.policy, "address".to_string()));
+                    resolved_policies.insert(addr.backend_id.clone(), effective_policy);
+
+                    if effective_policy == Policy::Closed {
+                        let acl: Vec<AclEntry> = if addr.policy == Policy::Group {
+                            match state.db.get_acl_group_for_socket(&existing.id).await {
+                                Ok(Some(group_id)) => state.db.get_acl_group_entries_for_backend(&group_id, &addr.backend_id).await.unwrap_or_default(),
+                                _ => Vec::new(),
+                            }
+                        } else {
+                            state.db.get_acl_for_backend(&existing.id, &addr.backend_id).await.unwrap_or_default()
+                        };
                         let allowed = acl.iter().filter_map(|e| e.allowed_ip.parse().ok()).collect();
                         acl_map.insert(addr.backend_id.clone(), allowed);
                     }
@@ -398,6 +426,7 @@ impl Engine {
                 existing_updates.push(ExistingUpdate {
                     socket: existing,
                     acl_map,
+                    resolved_policies,
                 });
                 continue;
             }
@@ -464,6 +493,8 @@ impl Engine {
                 cmdline: ls.cmdline.clone(),
                 first_seen: now,
                 last_seen: now,
+                acl_group_id: None,
+                socket_group_id: None,
             };
 
             if let Err(e) = state.db.upsert_socket(&managed).await {
@@ -489,7 +520,7 @@ impl Engine {
         for update in existing_updates {
             join_set.spawn_blocking(move || {
                 let firewall = crate::firewall::create_firewall();
-                if let Err(e) = apply_firewall_sync(&*firewall, &update.socket, &update.acl_map) {
+                if let Err(e) = apply_firewall_sync(&*firewall, &update.socket, &update.acl_map, &update.resolved_policies) {
                     warn!("Failed to reconcile firewall for {}: {e}", update.socket.id);
                 }
             });
@@ -591,37 +622,48 @@ impl Engine {
         self.apply_firewall_for_socket(state, &socket).await
     }
 
-    /// Apply firewall rules for a socket (per-address policy, ADR 0017).
+    /// Apply firewall rules for a socket (per-address policy with group resolution, ADR 0018).
     async fn apply_firewall_for_socket(
         &self,
         state: &AppState,
         socket: &ManagedSocket,
     ) -> anyhow::Result<()> {
         for addr in &socket.addresses {
-            match addr.policy {
-                Policy::Disabled => {
-                    // Disabled addresses should not have firewall rules.
-                    // Clean up any stale rules that might exist.
-                    if let Err(e) = self.firewall.remove_acl(addr.address, socket.port, socket.protocol) {
-                        warn!("Failed to clean up firewall for disabled address {}: {e}", addr.address);
-                    }
-                }
+            let (effective_policy, _source) = state.db.resolve_effective_policy(&socket.id, &addr.backend_id).await?;
+
+            match effective_policy {
                 Policy::Closed => {
-                    let acl = state.db.get_acl_for_backend(&socket.id, &addr.backend_id).await?;
+                    let acl: Vec<AclEntry> = if addr.policy == Policy::Group {
+                        match state.db.get_acl_group_for_socket(&socket.id).await? {
+                            Some(group_id) => state.db.get_acl_group_entries_for_backend(&group_id, &addr.backend_id).await?,
+                            None => Vec::new(),
+                        }
+                    } else {
+                        state.db.get_acl_for_backend(&socket.id, &addr.backend_id).await?
+                    };
                     let allowed: Vec<Ipv6Addr> = acl
                         .iter()
                         .filter_map(|e| e.allowed_ip.parse().ok())
                         .collect();
-                    self.firewall.apply_acl(
-                        addr.address,
-                        socket.port,
-                        socket.protocol,
-                        &allowed,
-                    )?;
+                    if allowed.is_empty() {
+                        // Closed + no ACL = inactive. Remove any stale firewall rules.
+                        let _ = self.firewall.remove_acl(addr.address, socket.port, socket.protocol);
+                    } else {
+                        self.firewall.apply_acl(
+                            addr.address,
+                            socket.port,
+                            socket.protocol,
+                            &allowed,
+                        )?;
+                    }
                 }
                 Policy::Open => {
                     self.firewall
                         .allow_all(addr.address, socket.port, socket.protocol)?;
+                }
+                Policy::Group => {
+                    // Should not reach here — resolve_effective_policy returns Closed or Open
+                    let _ = self.firewall.remove_acl(addr.address, socket.port, socket.protocol);
                 }
             }
         }
@@ -630,19 +672,18 @@ impl Engine {
 }
 
 /// Apply firewall rules synchronously (for use in spawn_blocking).
-/// Uses per-address policy (ADR 0017). The `acl_by_backend` map provides
-/// allowed IPs keyed by backend_id.
+/// Uses per-address policy with group resolution (ADR 0018).
+/// `acl_by_backend` provides allowed IPs keyed by backend_id.
+/// `resolved_policies` provides the effective policy after group resolution.
 fn apply_firewall_sync(
     firewall: &dyn Firewall,
     socket: &ManagedSocket,
     acl_by_backend: &HashMap<String, Vec<Ipv6Addr>>,
+    resolved_policies: &HashMap<String, Policy>,
 ) -> anyhow::Result<()> {
     for addr in &socket.addresses {
-        match addr.policy {
-            Policy::Disabled => {
-                // Clean up any stale rules
-                let _ = firewall.remove_acl(addr.address, socket.port, socket.protocol);
-            }
+        let effective = resolved_policies.get(&addr.backend_id).copied().unwrap_or(addr.policy);
+        match effective {
             Policy::Open => {
                 firewall.allow_all(addr.address, socket.port, socket.protocol)?;
             }
@@ -650,7 +691,16 @@ fn apply_firewall_sync(
                 let allowed = acl_by_backend.get(&addr.backend_id)
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
-                firewall.apply_acl(addr.address, socket.port, socket.protocol, allowed)?;
+                if allowed.is_empty() {
+                    // Closed + no ACL = inactive. Clean up any stale rules.
+                    let _ = firewall.remove_acl(addr.address, socket.port, socket.protocol);
+                } else {
+                    firewall.apply_acl(addr.address, socket.port, socket.protocol, allowed)?;
+                }
+            }
+            Policy::Group => {
+                // Should not reach here — resolved_policies should have resolved this
+                let _ = firewall.remove_acl(addr.address, socket.port, socket.protocol);
             }
         }
     }
@@ -687,6 +737,7 @@ mod tests {
     use super::*;
     use crate::firewall::Firewall;
     use anyhow::Result;
+    #[allow(unused_imports)]
     use socketguard_core::{BackendType, ManagedSocket, Policy, Protocol, SocketAddress};
     use std::net::Ipv6Addr;
     use std::sync::{Arc as StdArc, Mutex as StdMutex};
@@ -755,6 +806,10 @@ mod tests {
         }
     }
 
+    fn resolved_map(socket: &ManagedSocket) -> HashMap<String, Policy> {
+        socket.addresses.iter().map(|a| (a.backend_id.clone(), a.policy)).collect()
+    }
+
     fn test_socket(policy: Policy) -> ManagedSocket {
         ManagedSocket {
             id: "test123".to_string(),
@@ -776,6 +831,8 @@ mod tests {
             cmdline: None,
             first_seen: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
+            acl_group_id: None,
+            socket_group_id: None,
         }
     }
 
@@ -811,27 +868,30 @@ mod tests {
             cmdline: None,
             first_seen: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
+            acl_group_id: None,
+            socket_group_id: None,
         }
     }
 
     #[test]
-    fn apply_firewall_sync_closed_no_acl_blocks_all() {
+    fn apply_firewall_sync_closed_no_acl_inactive() {
         let calls = StdArc::new(StdMutex::new(Vec::new()));
         let fw = MockFirewall::new(calls.clone());
         let socket = test_socket(Policy::Closed);
         let acl_map = HashMap::new();
+        let resolved = resolved_map(&socket);
 
-        apply_firewall_sync(&fw, &socket, &acl_map).unwrap();
+        apply_firewall_sync(&fw, &socket, &acl_map, &resolved).unwrap();
 
         let recorded = calls.lock().unwrap();
+        // Closed + no ACL = inactive → remove any stale rules
         assert_eq!(recorded.len(), 1);
         assert_eq!(
             recorded[0],
-            FirewallCall::ApplyAcl {
+            FirewallCall::RemoveAcl {
                 dest_ip: "fd00::1".parse().unwrap(),
                 port: 8080,
                 protocol: Protocol::Tcp,
-                allowed: vec![],
             }
         );
     }
@@ -844,8 +904,9 @@ mod tests {
         let allowed: Vec<Ipv6Addr> =
             vec!["fd00::10".parse().unwrap(), "fd00::20".parse().unwrap()];
         let acl_map: HashMap<String, Vec<Ipv6Addr>> = [("ula".to_string(), allowed.clone())].into();
+        let resolved = resolved_map(&socket);
 
-        apply_firewall_sync(&fw, &socket, &acl_map).unwrap();
+        apply_firewall_sync(&fw, &socket, &acl_map, &resolved).unwrap();
 
         let recorded = calls.lock().unwrap();
         assert_eq!(recorded.len(), 1);
@@ -866,29 +927,9 @@ mod tests {
         let fw = MockFirewall::new(calls.clone());
         let socket = test_socket(Policy::Open);
         let acl_map = HashMap::new();
+        let resolved = resolved_map(&socket);
 
-        apply_firewall_sync(&fw, &socket, &acl_map).unwrap();
-
-        let recorded = calls.lock().unwrap();
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(
-            recorded[0],
-            FirewallCall::RemoveAcl {
-                dest_ip: "fd00::1".parse().unwrap(),
-                port: 8080,
-                protocol: Protocol::Tcp,
-            }
-        );
-    }
-
-    #[test]
-    fn apply_firewall_sync_disabled_cleans_up() {
-        let calls = StdArc::new(StdMutex::new(Vec::new()));
-        let fw = MockFirewall::new(calls.clone());
-        let socket = test_socket(Policy::Disabled);
-        let acl_map = HashMap::new();
-
-        apply_firewall_sync(&fw, &socket, &acl_map).unwrap();
+        apply_firewall_sync(&fw, &socket, &acl_map, &resolved).unwrap();
 
         let recorded = calls.lock().unwrap();
         assert_eq!(recorded.len(), 1);
@@ -913,8 +954,9 @@ mod tests {
         let acl_map: HashMap<String, Vec<Ipv6Addr>> = [
             ("slaac-Ethernet".to_string(), vec!["fd00::10".parse().unwrap()]),
         ].into();
+        let resolved = resolved_map(&socket);
 
-        apply_firewall_sync(&fw, &socket, &acl_map).unwrap();
+        apply_firewall_sync(&fw, &socket, &acl_map, &resolved).unwrap();
 
         let recorded = calls.lock().unwrap();
         assert_eq!(recorded.len(), 2);
@@ -925,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_firewall_sync_multi_address_closed() {
+    fn apply_firewall_sync_multi_address_closed_with_acl() {
         let calls = StdArc::new(StdMutex::new(Vec::new()));
         let fw = MockFirewall::new(calls.clone());
         let socket = test_socket_multi_addr(Policy::Closed);
@@ -933,8 +975,9 @@ mod tests {
             ("ula".to_string(), vec!["fd00::10".parse().unwrap()]),
             ("slaac-Ethernet".to_string(), vec!["fd00::10".parse().unwrap()]),
         ].into();
+        let resolved = resolved_map(&socket);
 
-        apply_firewall_sync(&fw, &socket, &acl_map).unwrap();
+        apply_firewall_sync(&fw, &socket, &acl_map, &resolved).unwrap();
 
         let recorded = calls.lock().unwrap();
         assert_eq!(recorded.len(), 2);
@@ -946,8 +989,9 @@ mod tests {
         let fw = MockFirewall::new(calls.clone());
         let socket = test_socket_multi_addr(Policy::Open);
         let acl_map = HashMap::new();
+        let resolved = resolved_map(&socket);
 
-        apply_firewall_sync(&fw, &socket, &acl_map).unwrap();
+        apply_firewall_sync(&fw, &socket, &acl_map, &resolved).unwrap();
 
         let recorded = calls.lock().unwrap();
         assert_eq!(recorded.len(), 2);

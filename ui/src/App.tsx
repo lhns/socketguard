@@ -1,18 +1,72 @@
-import { useState, useEffect } from "react";
-import SocketList from "./components/SocketList";
+import { useState, useEffect, useCallback, useRef } from "react";
+import {
+  listSockets, onSocketsChanged, onDaemonConnected, startDaemon, initSSE,
+  ManagedSocket, AclGroupResponse, SocketGroupResponse,
+} from "./api";
+import AppTree from "./components/AppTree";
 import SocketDetail from "./components/SocketDetail";
 import Settings from "./components/Settings";
-import { initSSE } from "./api";
-
-type View = "list" | "detail" | "settings";
 
 function App() {
-  const [view, setView] = useState<View>("list");
+  const [sockets, setSockets] = useState<ManagedSocket[]>([]);
+  const [aclGroups, setAclGroups] = useState<AclGroupResponse[]>([]);
+  const [socketGroups, setSocketGroups] = useState<SocketGroupResponse[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [starting, setStarting] = useState(false);
   const [selectedSocket, setSelectedSocket] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const lastJson = useRef("");
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const resp = await listSockets();
+      setError(null);
+      const json = JSON.stringify(resp);
+      if (json !== lastJson.current) {
+        lastJson.current = json;
+        setSockets(resp.sockets);
+        setAclGroups(resp.acl_groups);
+        setSocketGroups(resp.socket_groups);
+      }
+      setStarting(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (error) {
+      retryTimer.current = setTimeout(() => refresh(), 5000);
+      return () => {
+        if (retryTimer.current) clearTimeout(retryTimer.current);
+      };
+    }
+  }, [error, refresh]);
 
   useEffect(() => {
     initSSE().catch(console.error);
-  }, []);
+    refresh();
+    const unlistens: (() => void)[] = [];
+    onSocketsChanged(() => refresh()).then((fn) => unlistens.push(fn));
+    onDaemonConnected(() => refresh()).then((fn) => unlistens.push(fn));
+    return () => unlistens.forEach((fn) => fn());
+  }, [refresh]);
+
+  const handleStartDaemon = async () => {
+    setStarting(true);
+    try {
+      await startDaemon();
+    } catch (e) {
+      setStarting(false);
+      setError(String(e));
+    }
+  };
+
+  if (loading) return <div className="loading">Loading...</div>;
 
   return (
     <>
@@ -22,34 +76,61 @@ function App() {
             <span className="logo">S</span>
             SocketGuard
           </h1>
-          <nav className="nav">
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {selectedSocket && (
+              <button
+                className="btn btn-sm btn-ghost"
+                onClick={() => setSelectedSocket(null)}
+              >
+                &larr; Back
+              </button>
+            )}
             <button
-              className={`nav-btn ${view !== "settings" ? "active" : ""}`}
-              onClick={() => { setView("list"); setSelectedSocket(null); }}
+              className="btn btn-sm btn-ghost"
+              onClick={() => { setShowSettings(!showSettings); setSelectedSocket(null); }}
+              title="Settings"
+              style={{ fontSize: 16, padding: "4px 8px" }}
             >
-              Sockets
+              {showSettings ? "x" : "\u2699"}
             </button>
-            <button
-              className={`nav-btn ${view === "settings" ? "active" : ""}`}
-              onClick={() => setView("settings")}
-            >
-              Settings
-            </button>
-          </nav>
+          </div>
         </div>
       </header>
 
       <main className="content">
-        {view === "list" && (
-          <SocketList onSelect={(id) => { setSelectedSocket(id); setView("detail"); }} />
+        {error && (
+          <div className="error-banner" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16 }}>
+            <span>Cannot connect to daemon: {error}</span>
+            <button className="btn btn-primary btn-sm" onClick={handleStartDaemon} disabled={starting}>
+              {starting ? "Starting..." : "Start Daemon"}
+            </button>
+          </div>
         )}
-        {view === "detail" && selectedSocket && (
+
+        {showSettings ? (
+          <Settings />
+        ) : selectedSocket ? (
           <SocketDetail
             socketId={selectedSocket}
-            onBack={() => { setView("list"); setSelectedSocket(null); }}
+            onBack={() => setSelectedSocket(null)}
+          />
+        ) : sockets.length === 0 && !error ? (
+          <div className="card">
+            <div className="empty">
+              <div className="empty-icon">~</div>
+              <p>No sockets detected yet.</p>
+              <p style={{ fontSize: 12, marginTop: 4 }}>The daemon will discover listening sockets automatically.</p>
+            </div>
+          </div>
+        ) : (
+          <AppTree
+            sockets={sockets}
+            aclGroups={aclGroups}
+            socketGroups={socketGroups}
+            onRefresh={refresh}
+            onSelectSocket={(id) => setSelectedSocket(id)}
           />
         )}
-        {view === "settings" && <Settings />}
       </main>
     </>
   );

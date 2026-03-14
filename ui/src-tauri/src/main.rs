@@ -88,6 +88,8 @@ async fn check_response(resp: reqwest::Response) -> Result<(), String> {
     }
 }
 
+// ======== Socket commands ========
+
 #[tauri::command]
 async fn list_sockets() -> Result<SocketListResponse, String> {
     let resp = authed_request(|token| {
@@ -183,6 +185,196 @@ async fn allow_backend_ip(socket_id: String, backend_id: String, ip: String, lab
     .await?;
     check_response(resp).await
 }
+
+// ======== ACL Group commands (ADR 0018) ========
+
+#[tauri::command]
+async fn list_acl_groups() -> Result<Vec<AclGroupResponse>, String> {
+    let resp = authed_request(|token| {
+        client()
+            .get(format!("{}/api/acl-groups", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_acl_group(label: String) -> Result<AclGroupResponse, String> {
+    let req = CreateAclGroupRequest { label };
+    let resp = authed_request(|token| {
+        client()
+            .post(format!("{}/api/acl-groups", api_base()))
+            .bearer_auth(token)
+            .json(&req)
+    })
+    .await?;
+    if resp.status().is_success() {
+        resp.json().await.map_err(|e| e.to_string())
+    } else {
+        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
+        Err(err.error)
+    }
+}
+
+#[tauri::command]
+async fn get_acl_group(id: String) -> Result<AclGroupResponse, String> {
+    let resp = authed_request(|token| {
+        client()
+            .get(format!("{}/api/acl-groups/{id}", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn update_acl_group(id: String, label: Option<String>, policy: Option<String>) -> Result<(), String> {
+    let policy = match policy {
+        Some(p) => Some(p.parse::<Policy>().map_err(|e: String| e)?),
+        None => None,
+    };
+    let req = UpdateAclGroupRequest { label, policy };
+    let resp = authed_request(|token| {
+        client()
+            .put(format!("{}/api/acl-groups/{id}", api_base()))
+            .bearer_auth(token)
+            .json(&req)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+#[tauri::command]
+async fn delete_acl_group(id: String) -> Result<(), String> {
+    let resp = authed_request(|token| {
+        client()
+            .delete(format!("{}/api/acl-groups/{id}", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+#[tauri::command]
+async fn add_to_acl_group(group_id: String, socket_ids: Vec<String>) -> Result<(), String> {
+    let req = AddToGroupRequest { socket_ids };
+    let resp = authed_request(|token| {
+        client()
+            .post(format!("{}/api/acl-groups/{group_id}/members", api_base()))
+            .bearer_auth(token)
+            .json(&req)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+#[tauri::command]
+async fn remove_from_acl_group(group_id: String, socket_id: String) -> Result<(), String> {
+    let resp = authed_request(|token| {
+        client()
+            .delete(format!("{}/api/acl-groups/{group_id}/members/{socket_id}", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+#[tauri::command]
+async fn add_acl_group_entry(group_id: String, backend_id: String, ip: String, label: Option<String>) -> Result<(), String> {
+    let req = AddAclGroupEntryRequest {
+        backend_id,
+        allowed_ip: ip,
+        label,
+    };
+    let resp = authed_request(|token| {
+        client()
+            .post(format!("{}/api/acl-groups/{group_id}/acl", api_base()))
+            .bearer_auth(token)
+            .json(&req)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+#[tauri::command]
+async fn remove_acl_group_entry(group_id: String, entry_id: i64) -> Result<(), String> {
+    let resp = authed_request(|token| {
+        client()
+            .delete(format!("{}/api/acl-groups/{group_id}/acl/{entry_id}", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+// ======== Socket Group commands (ADR 0018) ========
+
+#[tauri::command]
+async fn list_socket_groups() -> Result<Vec<SocketGroupResponse>, String> {
+    let resp = authed_request(|token| {
+        client()
+            .get(format!("{}/api/socket-groups", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_socket_group(label: String, app_name: String) -> Result<SocketGroupResponse, String> {
+    let req = CreateSocketGroupRequest { label, app_name };
+    let resp = authed_request(|token| {
+        client()
+            .post(format!("{}/api/socket-groups", api_base()))
+            .bearer_auth(token)
+            .json(&req)
+    })
+    .await?;
+    if resp.status().is_success() {
+        resp.json().await.map_err(|e| e.to_string())
+    } else {
+        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
+        Err(err.error)
+    }
+}
+
+#[tauri::command]
+async fn delete_socket_group(id: String) -> Result<(), String> {
+    let resp = authed_request(|token| {
+        client()
+            .delete(format!("{}/api/socket-groups/{id}", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+#[tauri::command]
+async fn add_socket_to_socket_group(group_id: String, socket_ids: Vec<String>) -> Result<(), String> {
+    let req = AddToGroupRequest { socket_ids };
+    let resp = authed_request(|token| {
+        client()
+            .post(format!("{}/api/socket-groups/{group_id}/members", api_base()))
+            .bearer_auth(token)
+            .json(&req)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+#[tauri::command]
+async fn remove_socket_from_socket_group(group_id: String, socket_id: String) -> Result<(), String> {
+    let resp = authed_request(|token| {
+        client()
+            .delete(format!("{}/api/socket-groups/{group_id}/members/{socket_id}", api_base()))
+            .bearer_auth(token)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+// ======== Config, Backends, Interfaces, Events, Daemon ========
 
 #[tauri::command]
 async fn get_config() -> Result<ConfigResponse, String> {
@@ -379,6 +571,23 @@ fn main() {
             set_policy,
             set_backend_policy,
             allow_backend_ip,
+            // ACL groups (ADR 0018)
+            list_acl_groups,
+            create_acl_group,
+            get_acl_group,
+            update_acl_group,
+            delete_acl_group,
+            add_to_acl_group,
+            remove_from_acl_group,
+            add_acl_group_entry,
+            remove_acl_group_entry,
+            // Socket groups (ADR 0018)
+            list_socket_groups,
+            create_socket_group,
+            delete_socket_group,
+            add_socket_to_socket_group,
+            remove_socket_from_socket_group,
+            // Config, backends, events
             get_config,
             update_config,
             list_interfaces,

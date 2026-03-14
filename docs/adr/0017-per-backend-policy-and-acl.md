@@ -103,3 +103,5 @@ DROP TABLE acl_entries_old;
 - Legacy API routes continue working via fan-out, ensuring Tauri bridge backward compatibility during transition.
 - Database migration is one-way; cannot downgrade to pre-0017 schema.
 - The `allow_all` and `block_all` firewall traits are unchanged — they already operate per-address.
+
+**Note**: `Policy::Disabled` was superseded by ADR 0018's closed+no-ACL=inactive pattern. The `Group` policy variant replaces the disabled slot.
