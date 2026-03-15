@@ -340,6 +340,23 @@ async fn create_socket_group(label: String, app_name: String) -> Result<SocketGr
 }
 
 #[tauri::command]
+async fn update_socket_group(id: String, label: String) -> Result<(), String> {
+    #[derive(serde::Serialize)]
+    struct Req {
+        label: Option<String>,
+    }
+    let req = Req { label: Some(label) };
+    let resp = authed_request(|token| {
+        client()
+            .put(format!("{}/api/socket-groups/{id}", api_base()))
+            .bearer_auth(token)
+            .json(&req)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+#[tauri::command]
 async fn delete_socket_group(id: String) -> Result<(), String> {
     let resp = authed_request(|token| {
         client()
@@ -412,6 +429,25 @@ async fn remove_socket_group_acl_entry(group_id: String, entry_id: i64) -> Resul
         client()
             .delete(format!("{}/api/socket-groups/{group_id}/acl/{entry_id}", api_base()))
             .bearer_auth(token)
+    })
+    .await?;
+    check_response(resp).await
+}
+
+// ======== Socket Group ACL Group (ADR 0020) ========
+
+#[tauri::command]
+async fn set_socket_group_acl_group(group_id: String, acl_group_id: Option<String>) -> Result<(), String> {
+    #[derive(serde::Serialize)]
+    struct Req {
+        acl_group_id: Option<String>,
+    }
+    let req = Req { acl_group_id };
+    let resp = authed_request(|token| {
+        client()
+            .put(format!("{}/api/socket-groups/{group_id}/acl-group", api_base()))
+            .bearer_auth(token)
+            .json(&req)
     })
     .await?;
     check_response(resp).await
@@ -627,12 +663,14 @@ fn main() {
             // Socket groups (ADR 0018)
             list_socket_groups,
             create_socket_group,
+            update_socket_group,
             delete_socket_group,
             add_socket_to_socket_group,
             remove_socket_from_socket_group,
             set_socket_group_address_policy,
             add_socket_group_acl_entry,
             remove_socket_group_acl_entry,
+            set_socket_group_acl_group,
             // Config, backends, events
             get_config,
             update_config,

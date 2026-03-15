@@ -10,15 +10,19 @@ import ConfirmDialog from "./ConfirmDialog";
 interface Props {
   group: AclGroupResponse;
   allSockets: ManagedSocket[];
+  isManaging: boolean;
+  onToggleManage: () => void;
   onRefresh: () => void;
 }
 
-export default function AclGroupNode({ group, allSockets, onRefresh }: Props) {
+export default function AclGroupNode({ group, allSockets, isManaging, onToggleManage, onRefresh }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [confirm, setConfirm] = useState<{ message: string; action: () => void } | null>(null);
   const [newIp, setNewIp] = useState("");
   const [newLabel, setNewLabel] = useState("");
   const [newBackend, setNewBackend] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [editLabel, setEditLabel] = useState("");
   const toast = useToast();
 
   const memberSockets = allSockets.filter((s) => group.members.includes(s.id));
@@ -91,6 +95,17 @@ export default function AclGroupNode({ group, allSockets, onRefresh }: Props) {
     });
   };
 
+  const handleRename = async () => {
+    if (!editLabel.trim()) return;
+    try {
+      await updateAclGroup(group.group.id, editLabel.trim());
+      setEditing(false);
+      onRefresh();
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
   // Get unique backend IDs from member sockets
   const backendIds = [...new Set(memberSockets.flatMap((s) => s.addresses.map((a) => a.backend_id)))].sort();
   if (!newBackend && backendIds.length > 0) {
@@ -99,7 +114,7 @@ export default function AclGroupNode({ group, allSockets, onRefresh }: Props) {
   }
 
   return (
-    <div className="card tree-l1" style={{ marginBottom: 8 }}>
+    <div className={`card tree-l1${isManaging ? " socket-group-managing" : ""}`} style={{ marginBottom: 8 }}>
       {confirm && (
         <ConfirmDialog
           message={confirm.message}
@@ -116,9 +131,34 @@ export default function AclGroupNode({ group, allSockets, onRefresh }: Props) {
         <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
           <span style={{ opacity: 0.5, fontSize: 12 }}>{expanded ? "\u25BE" : "\u25B8"}</span>
           <span style={{ fontWeight: 500, color: "var(--accent)" }}>ACL Group:</span>
-          <span style={{ fontWeight: 600 }}>{group.group.label}</span>
+          {editing ? (
+            <div style={{ display: "flex", gap: 4, alignItems: "center" }} onClick={(e) => e.stopPropagation()}>
+              <input
+                className="input"
+                value={editLabel}
+                onChange={(e) => setEditLabel(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleRename(); if (e.key === "Escape") setEditing(false); }}
+                autoFocus
+                style={{ width: 160 }}
+              />
+              <button className="btn btn-primary btn-sm" onClick={handleRename}>Save</button>
+              <button className="btn btn-sm" onClick={() => setEditing(false)}>Cancel</button>
+            </div>
+          ) : (
+            <>
+              <span style={{ fontWeight: 600 }}>{group.group.label}</span>
+              <button
+                className="btn btn-sm btn-ghost"
+                onClick={(e) => { e.stopPropagation(); setEditLabel(group.group.label); setEditing(true); }}
+                title="Rename"
+                style={{ padding: "0 4px", fontSize: 11, lineHeight: 1 }}
+              >
+                &#9998;
+              </button>
+            </>
+          )}
           <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
-            ({group.members.length} socket{group.members.length !== 1 ? "s" : ""})
+            ({group.members.length} member{group.members.length !== 1 ? "s" : ""})
           </span>
         </div>
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -222,10 +262,18 @@ export default function AclGroupNode({ group, allSockets, onRefresh }: Props) {
 
           {/* Members */}
           <div style={{ marginBottom: 12 }}>
-            <div className="section-title">Members</div>
-            {memberSockets.length === 0 ? (
-              <div style={{ fontSize: 12, color: "var(--text-muted)", padding: "4px 0" }}>
-                No sockets in this group.
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <div className="section-title" style={{ margin: 0 }}>Members ({memberSockets.length})</div>
+              <button
+                className={`btn btn-sm ${isManaging ? "btn-primary" : "btn-ghost"}`}
+                onClick={(e) => { e.stopPropagation(); onToggleManage(); }}
+              >
+                {isManaging ? "Done" : "Manage Members"}
+              </button>
+            </div>
+            {memberSockets.length === 0 && !isManaging ? (
+              <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic", padding: "4px 0" }}>
+                Click "Manage Members" to add sockets to this group
               </div>
             ) : (
               memberSockets.map((s) => (

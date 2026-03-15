@@ -494,7 +494,7 @@ impl Engine {
                 first_seen: now,
                 last_seen: now,
                 acl_group_id: None,
-                socket_group_id: None,
+                socket_group_ids: vec![],
             };
 
             if let Err(e) = state.db.upsert_socket(&managed).await {
@@ -603,6 +603,18 @@ impl Engine {
             }
         }
 
+        // 4. Ensure socket groups have addresses allocated for all active backends
+        if let Ok(groups) = state.db.list_socket_groups().await {
+            for group in &groups {
+                let members = state.db.get_socket_group_members(&group.id).await.unwrap_or_default();
+                if !members.is_empty() {
+                    if let Err(e) = self.ensure_socket_group_addresses(state, &group.id).await {
+                        warn!("Failed to ensure socket group addresses for {}: {e}", group.id);
+                    }
+                }
+            }
+        }
+
         if had_new_sockets || had_stale {
             let _ = state.events.send(crate::api::DaemonEvent::SocketsChanged);
         }
@@ -669,6 +681,77 @@ impl Engine {
         }
         Ok(())
     }
+    /// Ensure a socket group has addresses allocated for all active backends.
+    /// Called when members are added to a group.
+    pub async fn ensure_socket_group_addresses(
+        &self,
+        state: &AppState,
+        group_id: &str,
+    ) -> anyhow::Result<()> {
+        use socketguard_core::{SocketGroupAddress, Policy};
+
+        let existing = state.db.get_socket_group_addresses(group_id).await?;
+        let existing_backend_ids: Vec<&str> = existing.iter().map(|a| a.backend_id.as_str()).collect();
+
+        for (backend_id, active) in &self.backends {
+            if existing_backend_ids.contains(&backend_id.as_str()) {
+                continue;
+            }
+
+            match active.backend.allocate_address() {
+                Ok(alloc) => {
+                    let keypair_id = if let Some(ref kp) = alloc.keypair {
+                        if let Err(e) = state
+                            .db
+                            .save_keypair(
+                                &kp.id,
+                                &kp.public_key,
+                                &kp.private_key,
+                                &kp.derived_ipv6.to_string(),
+                            )
+                            .await
+                        {
+                            error!("Failed to save keypair for socket group address: {e}");
+                        }
+                        Some(kp.id.clone())
+                    } else {
+                        None
+                    };
+
+                    let sg_addr = SocketGroupAddress {
+                        group_id: group_id.to_string(),
+                        backend_id: backend_id.clone(),
+                        address: alloc.address,
+                        interface: active.config.backend.interface().to_string(),
+                        prefix_len: alloc.prefix_len,
+                        keypair_id,
+                        policy: Policy::Closed,
+                    };
+
+                    if let Err(e) = state.db.upsert_socket_group_address(&sg_addr).await {
+                        error!("Failed to save socket group address: {e}");
+                    } else {
+                        // Add the address to the network interface
+                        let network = crate::network::create_network_interface();
+                        if let Err(e) = network.add_address(&sg_addr.interface, sg_addr.address, sg_addr.prefix_len) {
+                            error!("Failed to add socket group IPv6 {} to {}: {e}", sg_addr.address, sg_addr.interface);
+                        } else {
+                            info!(
+                                "Allocated {} ({}) for socket group {}",
+                                sg_addr.address, backend_id, group_id
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to allocate IPv6 from backend '{}' for socket group: {e}", backend_id);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Apply firewall rules for a socket group address based on its policy and ACL entries.
     /// Uses port/protocol from member sockets to configure firewall rules.
     pub async fn apply_socket_group_acl(
@@ -713,6 +796,38 @@ impl Engine {
                     }
                 }
                 Policy::Group => {
+                    // Resolve ACL from linked ACL group (ADR 0020)
+                    let sg = state.db.list_socket_groups().await?;
+                    let socket_group = sg.iter().find(|g| g.id == addr.group_id);
+                    if let Some(sg) = socket_group {
+                        if let Some(ref acl_gid) = sg.acl_group_id {
+                            if let Some(acl_group) = state.db.get_acl_group(acl_gid).await? {
+                                match acl_group.policy {
+                                    Policy::Open => {
+                                        self.firewall.allow_all(addr.address, port, protocol)?;
+                                    }
+                                    Policy::Closed => {
+                                        let group_entries = state.db.get_acl_group_entries(acl_gid).await?;
+                                        let group_acl: Vec<Ipv6Addr> = group_entries
+                                            .iter()
+                                            .filter(|e| e.backend_id == addr.backend_id)
+                                            .filter_map(|e| e.allowed_ip.parse().ok())
+                                            .collect();
+                                        if group_acl.is_empty() {
+                                            let _ = self.firewall.remove_acl(addr.address, port, protocol);
+                                        } else {
+                                            self.firewall.apply_acl(addr.address, port, protocol, &group_acl)?;
+                                        }
+                                    }
+                                    Policy::Group => {
+                                        let _ = self.firewall.remove_acl(addr.address, port, protocol);
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    // No ACL group linked — treat as inactive
                     let _ = self.firewall.remove_acl(addr.address, port, protocol);
                 }
             }
@@ -883,7 +998,7 @@ mod tests {
             first_seen: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             acl_group_id: None,
-            socket_group_id: None,
+            socket_group_ids: vec![],
         }
     }
 
@@ -920,7 +1035,7 @@ mod tests {
             first_seen: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             acl_group_id: None,
-            socket_group_id: None,
+            socket_group_ids: vec![],
         }
     }
 

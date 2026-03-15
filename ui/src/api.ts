@@ -24,7 +24,7 @@ export interface ManagedSocket {
   first_seen: string;
   last_seen: string;
   acl_group_id?: string | null;
-  socket_group_id?: string | null;
+  socket_group_ids: string[];
 }
 
 export interface AclEntry {
@@ -82,6 +82,7 @@ export interface SocketGroupResponse {
   addresses: SocketGroupAddress[];
   members: string[];
   acl_entries: SocketGroupAclEntry[];
+  acl_group_id?: string | null;
 }
 
 export interface SocketListResponse {
@@ -265,6 +266,13 @@ export async function createSocketGroup(
   return invoke("create_socket_group", { label, appName });
 }
 
+export async function updateSocketGroup(
+  id: string,
+  label: string
+): Promise<void> {
+  return invoke("update_socket_group", { id, label });
+}
+
 export async function deleteSocketGroup(id: string): Promise<void> {
   return invoke("delete_socket_group", { id });
 }
@@ -305,6 +313,13 @@ export async function removeSocketGroupAclEntry(
   entryId: number
 ): Promise<void> {
   return invoke("remove_socket_group_acl_entry", { groupId, entryId });
+}
+
+export async function setSocketGroupAclGroup(
+  groupId: string,
+  aclGroupId: string | null
+): Promise<void> {
+  return invoke("set_socket_group_acl_group", { groupId, aclGroupId });
 }
 
 // ======== Config functions ========

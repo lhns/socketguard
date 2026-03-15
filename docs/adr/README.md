@@ -26,6 +26,12 @@ ADRs document significant architectural decisions made during the project's deve
 | [0016](0016-multi-backend-architecture.md) | Multi-Backend Architecture | Accepted |
 | [0017](0017-per-backend-policy-and-acl.md) | Per-Backend Policy and ACL with Disabled Mode | Accepted (Disabled superseded by 0018) |
 | [0018](0018-tree-view-acl-groups.md) | Tree View UX with ACL Groups and Socket Groups | Accepted |
+| [0019](0019-ui-tree-structure.md) | UI Tree Structure | Accepted |
+| [0020](0020-socket-group-acl-group-inheritance.md) | Socket Group ACL Group Inheritance | Accepted |
+| [0021](0021-opacity-fix-and-checkbox-member-management.md) | Opacity Fix and Checkbox-Based Member Management | Accepted |
+| [0022](0022-acl-group-manage-members-rename-port-styling.md) | ACL Group Manage Members, Rename Groups, Port/Protocol Styling | Accepted |
+| [0023](0023-badge-consolidation-ux.md) | Badge Consolidation and UX Improvements | Accepted |
+| [0024](0024-label-consistency-acl-group-checkboxes.md) | Label Consistency and ACL Group Checkboxes in Socket Groups | Accepted |
 
 ## Format
 

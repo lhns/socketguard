@@ -145,6 +145,8 @@ pub struct SocketGroupResponse {
     pub members: Vec<String>,
     #[serde(default)]
     pub acl_entries: Vec<SocketGroupAclEntry>,
+    #[serde(default)]
+    pub acl_group_id: Option<String>,
 }
 
 /// Request to create a socket group.
@@ -152,6 +154,18 @@ pub struct SocketGroupResponse {
 pub struct CreateSocketGroupRequest {
     pub label: String,
     pub app_name: String,
+}
+
+/// Request to update a socket group (rename).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateSocketGroupRequest {
+    pub label: Option<String>,
+}
+
+/// Request to set/clear a socket group's ACL group (ADR 0020).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SetSocketGroupAclGroupRequest {
+    pub acl_group_id: Option<String>,
 }
 
 #[cfg(test)]

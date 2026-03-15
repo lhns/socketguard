@@ -100,6 +100,9 @@ impl Database {
         // Migration: ADR 0018 — ACL groups, socket groups, remove disabled
         self.migrate_add_groups().await?;
 
+        // Migration: many-to-many socket group membership (junction table)
+        self.migrate_socket_group_junction().await?;
+
         Ok(())
     }
 
@@ -398,6 +401,22 @@ impl Database {
             .await?;
         }
 
+        // Add acl_group_id column to socket_groups (ADR 0020)
+        let has_sg_acl_group_col = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('socket_groups') WHERE name = 'acl_group_id'",
+        )
+        .fetch_one(&self.pool)
+        .await?
+            > 0;
+
+        if !has_sg_acl_group_col {
+            sqlx::query(
+                "ALTER TABLE socket_groups ADD COLUMN acl_group_id TEXT REFERENCES acl_groups(id) ON DELETE SET NULL",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+
         // ACL entries for socket group addresses
         sqlx::query(
             r#"
@@ -426,13 +445,64 @@ impl Database {
         Ok(())
     }
 
+    /// Migrate from single FK `sockets.socket_group_id` to many-to-many
+    /// `socket_group_members` junction table.
+    async fn migrate_socket_group_junction(&self) -> Result<()> {
+        let has_junction = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='socket_group_members'",
+        )
+        .fetch_one(&self.pool)
+        .await?
+            > 0;
+
+        if has_junction {
+            return Ok(());
+        }
+
+        tracing::info!("Migrating socket group membership to many-to-many junction table...");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS socket_group_members (
+                group_id TEXT NOT NULL REFERENCES socket_groups(id) ON DELETE CASCADE,
+                socket_id TEXT NOT NULL,
+                PRIMARY KEY (group_id, socket_id)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Migrate existing data from sockets.socket_group_id
+        let has_sg_col = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('sockets') WHERE name = 'socket_group_id'",
+        )
+        .fetch_one(&self.pool)
+        .await?
+            > 0;
+
+        if has_sg_col {
+            sqlx::query(
+                r#"
+                INSERT OR IGNORE INTO socket_group_members (group_id, socket_id)
+                SELECT socket_group_id, id FROM sockets WHERE socket_group_id IS NOT NULL
+                "#,
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+
+        tracing::info!("Socket group junction migration complete");
+        Ok(())
+    }
+
     // ======== Socket CRUD ========
 
     pub async fn upsert_socket(&self, socket: &ManagedSocket) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO sockets (id, pid, process_name, port, protocol, policy, exe_path, cmdline, first_seen, last_seen, socket_group_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO sockets (id, pid, process_name, port, protocol, policy, exe_path, cmdline, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 pid = excluded.pid,
                 process_name = excluded.process_name,
@@ -451,7 +521,6 @@ impl Database {
         .bind(&socket.cmdline)
         .bind(socket.first_seen.to_rfc3339())
         .bind(socket.last_seen.to_rfc3339())
-        .bind(&socket.socket_group_id)
         .execute(&self.pool)
         .await?;
 
@@ -603,11 +672,23 @@ impl Database {
             group_map.insert(socket_id, group_id);
         }
 
+        // Fetch socket group memberships (many-to-many)
+        let sg_membership_rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT socket_id, group_id FROM socket_group_members",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut sg_map: HashMap<String, Vec<String>> = HashMap::new();
+        for (socket_id, group_id) in sg_membership_rows {
+            sg_map.entry(socket_id).or_default().push(group_id);
+        }
+
         rows.into_iter()
             .map(|r| {
                 let addresses = addr_map.remove(&r.id).unwrap_or_default();
                 let acl_group_id = group_map.remove(&r.id);
-                r.into_managed_socket(addresses, acl_group_id)
+                let socket_group_ids = sg_map.remove(&r.id).unwrap_or_default();
+                r.into_managed_socket(addresses, acl_group_id, socket_group_ids)
             })
             .collect()
     }
@@ -622,7 +703,8 @@ impl Database {
             Some(r) => {
                 let addresses = self.get_socket_addresses(id).await?;
                 let acl_group_id = self.get_acl_group_for_socket(id).await?;
-                Ok(Some(r.into_managed_socket(addresses, acl_group_id)?))
+                let socket_group_ids = self.get_socket_group_ids_for_socket(id).await?;
+                Ok(Some(r.into_managed_socket(addresses, acl_group_id, socket_group_ids)?))
             }
             None => Ok(None),
         }
@@ -918,8 +1000,22 @@ impl Database {
             id,
             label: label.to_string(),
             app_name: app_name.to_string(),
+            acl_group_id: None,
             created_at: now,
         })
+    }
+
+    pub async fn get_socket_group(&self, id: &str) -> Result<Option<SocketGroup>> {
+        let row = sqlx::query_as::<_, SocketGroupRow>(
+            "SELECT * FROM socket_groups WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(r) => Ok(Some(r.try_into()?)),
+            None => Ok(None),
+        }
     }
 
     pub async fn list_socket_groups(&self) -> Result<Vec<SocketGroup>> {
@@ -931,6 +1027,15 @@ impl Database {
         rows.into_iter().map(|r| r.try_into()).collect()
     }
 
+    pub async fn update_socket_group(&self, id: &str, label: &str) -> Result<()> {
+        sqlx::query("UPDATE socket_groups SET label = ? WHERE id = ?")
+            .bind(label)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn delete_socket_group(&self, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM socket_groups WHERE id = ?")
             .bind(id)
@@ -940,27 +1045,42 @@ impl Database {
     }
 
     pub async fn add_socket_to_group(&self, group_id: &str, socket_id: &str) -> Result<()> {
-        sqlx::query("UPDATE sockets SET socket_group_id = ? WHERE id = ?")
-            .bind(group_id)
-            .bind(socket_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO socket_group_members (group_id, socket_id) VALUES (?, ?)",
+        )
+        .bind(group_id)
+        .bind(socket_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    pub async fn remove_socket_from_group(&self, socket_id: &str) -> Result<()> {
-        sqlx::query("UPDATE sockets SET socket_group_id = NULL WHERE id = ?")
-            .bind(socket_id)
-            .execute(&self.pool)
-            .await?;
+    pub async fn remove_socket_from_group(&self, group_id: &str, socket_id: &str) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM socket_group_members WHERE group_id = ? AND socket_id = ?",
+        )
+        .bind(group_id)
+        .bind(socket_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn get_socket_group_members(&self, group_id: &str) -> Result<Vec<String>> {
         let rows = sqlx::query_scalar::<_, String>(
-            "SELECT id FROM sockets WHERE socket_group_id = ?",
+            "SELECT socket_id FROM socket_group_members WHERE group_id = ?",
         )
         .bind(group_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn get_socket_group_ids_for_socket(&self, socket_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT group_id FROM socket_group_members WHERE socket_id = ?",
+        )
+        .bind(socket_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
@@ -1066,6 +1186,17 @@ impl Database {
         rows.into_iter().map(|r| r.try_into()).collect()
     }
 
+    // ======== Socket Group ACL Group (ADR 0020) ========
+
+    pub async fn set_socket_group_acl_group(&self, group_id: &str, acl_group_id: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE socket_groups SET acl_group_id = ? WHERE id = ?")
+            .bind(acl_group_id)
+            .bind(group_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     // ======== Misc ========
 
     pub async fn save_keypair(
@@ -1101,7 +1232,8 @@ impl Database {
         for r in rows {
             let addresses = self.get_socket_addresses(&r.id).await?;
             let acl_group_id = self.get_acl_group_for_socket(&r.id).await?;
-            result.push(r.into_managed_socket(addresses, acl_group_id)?);
+            let socket_group_ids = self.get_socket_group_ids_for_socket(&r.id).await?;
+            result.push(r.into_managed_socket(addresses, acl_group_id, socket_group_ids)?);
         }
         Ok(result)
     }
@@ -1148,11 +1280,13 @@ struct SocketRow {
     cmdline: Option<String>,
     first_seen: String,
     last_seen: String,
+    // Legacy column — kept for DB compat; membership now in socket_group_members table
+    #[allow(dead_code)]
     socket_group_id: Option<String>,
 }
 
 impl SocketRow {
-    fn into_managed_socket(self, addresses: Vec<SocketAddress>, acl_group_id: Option<String>) -> Result<ManagedSocket> {
+    fn into_managed_socket(self, addresses: Vec<SocketAddress>, acl_group_id: Option<String>, socket_group_ids: Vec<String>) -> Result<ManagedSocket> {
         Ok(ManagedSocket {
             id: self.id,
             pid: self.pid as u32,
@@ -1168,7 +1302,7 @@ impl SocketRow {
             last_seen: chrono::DateTime::parse_from_rfc3339(&self.last_seen)?
                 .with_timezone(&chrono::Utc),
             acl_group_id,
-            socket_group_id: self.socket_group_id,
+            socket_group_ids,
         })
     }
 }
@@ -1304,6 +1438,7 @@ struct SocketGroupRow {
     id: String,
     label: String,
     app_name: String,
+    acl_group_id: Option<String>,
     created_at: String,
 }
 
@@ -1315,6 +1450,7 @@ impl TryFrom<SocketGroupRow> for SocketGroup {
             id: row.id,
             label: row.label,
             app_name: row.app_name,
+            acl_group_id: row.acl_group_id,
             created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?.with_timezone(&chrono::Utc),
         })
     }
@@ -1405,7 +1541,7 @@ mod tests {
             first_seen: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             acl_group_id: None,
-            socket_group_id: None,
+            socket_group_ids: vec![],
         }
     }
 
@@ -1791,12 +1927,12 @@ mod tests {
     #[tokio::test]
     async fn socket_group_crud() {
         let db = test_db().await;
-        insert_test_socket(&db, "s1", "vsftpd", 20).await;
-        insert_test_socket(&db, "s2", "vsftpd", 21).await;
+        insert_test_socket(&db, "s1", "myapp", 20).await;
+        insert_test_socket(&db, "s2", "myapp", 21).await;
 
-        let group = db.create_socket_group("FTP", "vsftpd").await.unwrap();
-        assert_eq!(group.label, "FTP");
-        assert_eq!(group.app_name, "vsftpd");
+        let group = db.create_socket_group("Group A", "myapp").await.unwrap();
+        assert_eq!(group.label, "Group A");
+        assert_eq!(group.app_name, "myapp");
 
         db.add_socket_to_group(&group.id, "s1").await.unwrap();
         db.add_socket_to_group(&group.id, "s2").await.unwrap();
@@ -1805,16 +1941,26 @@ mod tests {
         assert_eq!(members.len(), 2);
 
         let s1 = db.get_socket("s1").await.unwrap().unwrap();
-        assert_eq!(s1.socket_group_id, Some(group.id.clone()));
+        assert!(s1.socket_group_ids.contains(&group.id));
 
-        db.remove_socket_from_group("s1").await.unwrap();
+        // Many-to-many: s1 can be in a second group
+        let group2 = db.create_socket_group("Group B", "myapp").await.unwrap();
+        db.add_socket_to_group(&group2.id, "s1").await.unwrap();
         let s1 = db.get_socket("s1").await.unwrap().unwrap();
-        assert_eq!(s1.socket_group_id, None);
+        assert_eq!(s1.socket_group_ids.len(), 2);
+        assert!(s1.socket_group_ids.contains(&group.id));
+        assert!(s1.socket_group_ids.contains(&group2.id));
+
+        // Remove from first group — should still be in second
+        db.remove_socket_from_group(&group.id, "s1").await.unwrap();
+        let s1 = db.get_socket("s1").await.unwrap().unwrap();
+        assert_eq!(s1.socket_group_ids, vec![group2.id.clone()]);
 
         let groups = db.list_socket_groups().await.unwrap();
-        assert_eq!(groups.len(), 1);
+        assert_eq!(groups.len(), 2);
 
         db.delete_socket_group(&group.id).await.unwrap();
+        db.delete_socket_group(&group2.id).await.unwrap();
         let groups = db.list_socket_groups().await.unwrap();
         assert_eq!(groups.len(), 0);
     }

@@ -171,10 +171,11 @@ pub struct ManagedSocket {
     /// inherit the group's policy and ACL entries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acl_group_id: Option<String>,
-    /// Socket group membership (ADR 0018). Sockets in a socket group share
-    /// a single IPv6 address per backend.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub socket_group_id: Option<String>,
+    /// Socket group memberships (ADR 0018). Sockets in a socket group share
+    /// a single IPv6 address per backend. Many-to-many: a socket can be in
+    /// multiple socket groups.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub socket_group_ids: Vec<String>,
 }
 
 impl ManagedSocket {
@@ -224,6 +225,7 @@ pub struct SocketGroup {
     pub id: String,
     pub label: String,
     pub app_name: String,
+    pub acl_group_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

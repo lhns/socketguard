@@ -2,6 +2,8 @@ import { useState, useMemo } from "react";
 import {
   ManagedSocket, AclGroupResponse, SocketGroupResponse,
   createAclGroup, createSocketGroup,
+  addSocketToSocketGroup, removeSocketFromSocketGroup,
+  addToAclGroup, setBackendPolicy,
 } from "../api";
 import { useToast } from "./Toast";
 import AclGroupNode from "./AclGroupNode";
@@ -23,6 +25,9 @@ function AppNode({
   aclGroups,
   socketGroups,
   backendFilter,
+  allBackendIds,
+  managingAclGroup,
+  onToggleAclMember,
   onRefresh,
   onSelectSocket,
 }: {
@@ -31,15 +36,38 @@ function AppNode({
   aclGroups: AclGroupResponse[];
   socketGroups: SocketGroupResponse[];
   backendFilter: string | null;
+  allBackendIds: string[];
+  managingAclGroup: { groupId: string; memberSocketIds: string[] } | null;
+  onToggleAclMember: (socketId: string, backendId: string, add: boolean) => void;
   onRefresh: () => void;
   onSelectSocket: (id: string) => void;
 }) {
   const [expanded, setExpanded] = useState(true);
+  const [showInfo, setShowInfo] = useState(false);
   const [creatingSG, setCreatingSG] = useState(false);
   const [newSGLabel, setNewSGLabel] = useState("");
+  const [managingGroupId, setManagingGroupId] = useState<string | null>(null);
   const toast = useToast();
+  const exePath = sockets.find((s) => s.exe_path)?.exe_path ?? null;
 
   const appSocketGroups = socketGroups.filter((sg) => sg.group.app_name === appName);
+  const managingGroup = managingGroupId
+    ? appSocketGroups.find((sg) => sg.group.id === managingGroupId) ?? null
+    : null;
+
+  const handleToggleMember = async (socketId: string, add: boolean) => {
+    if (!managingGroupId) return;
+    try {
+      if (add) {
+        await addSocketToSocketGroup(managingGroupId, [socketId]);
+      } else {
+        await removeSocketFromSocketGroup(managingGroupId, socketId);
+      }
+      onRefresh();
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
 
   const handleCreateSocketGroup = async () => {
     if (!newSGLabel.trim()) return;
@@ -90,6 +118,19 @@ function AppNode({
 
       {expanded && (
         <div style={{ paddingLeft: 16 }}>
+          {/* App-level info section */}
+          <div className="tree-info-toggle" onClick={() => setShowInfo(!showInfo)}>
+            <span>{showInfo ? "\u25BE" : "\u25B8"}</span>
+            <span>&#9432; App Details</span>
+          </div>
+          {showInfo && (
+            <div className="tree-info-content">
+              {exePath && (
+                <div><span style={{ fontWeight: 500 }}>Exe:</span> <span className="mono" style={{ wordBreak: "break-all" }}>{exePath}</span></div>
+              )}
+            </div>
+          )}
+
           {/* Socket groups for this app */}
           {appSocketGroups.map((sg) => (
             <SocketGroupFoldout
@@ -98,7 +139,12 @@ function AppNode({
               allSockets={sockets}
               aclGroups={aclGroups}
               backendFilter={backendFilter}
+              allBackendIds={allBackendIds}
+              isManaging={managingGroupId === sg.group.id}
+              onToggleManage={() => setManagingGroupId(managingGroupId === sg.group.id ? null : sg.group.id)}
               onRefresh={onRefresh}
+              managingAclGroup={managingAclGroup}
+              onToggleAclMember={onToggleAclMember}
             />
           ))}
 
@@ -108,8 +154,13 @@ function AppNode({
               key={socket.id}
               socket={socket}
               aclGroups={aclGroups}
+              backendFilter={backendFilter}
               onRefresh={onRefresh}
               onOpenDetail={onSelectSocket}
+              managingGroup={managingGroup ? { groupId: managingGroup.group.id, members: managingGroup.members } : null}
+              onToggleMember={handleToggleMember}
+              managingAclGroup={managingAclGroup}
+              onToggleAclMember={onToggleAclMember}
             />
           ))}
         </div>
@@ -122,7 +173,12 @@ export default function AppTree({ sockets, aclGroups, socketGroups, onRefresh, o
   const [backendFilter, setBackendFilter] = useState<string | null>(null);
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [newGroupLabel, setNewGroupLabel] = useState("");
+  const [managingAclGroupId, setManagingAclGroupId] = useState<string | null>(null);
   const toast = useToast();
+
+  const managingAclGroup = managingAclGroupId
+    ? aclGroups.find((g) => g.group.id === managingAclGroupId) ?? null
+    : null;
 
   // Collect all unique backend IDs
   const allBackendIds = useMemo(() => {
@@ -151,6 +207,21 @@ export default function AppTree({ sockets, aclGroups, socketGroups, onRefresh, o
       setNewGroupLabel("");
       setCreatingGroup(false);
       toast.success("ACL group created");
+      onRefresh();
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
+  const handleToggleAclMember = async (socketId: string, backendId: string, add: boolean) => {
+    if (!managingAclGroupId) return;
+    try {
+      if (add) {
+        await addToAclGroup(managingAclGroupId, [socketId]);
+        await setBackendPolicy(socketId, backendId, "group");
+      } else {
+        await setBackendPolicy(socketId, backendId, "closed");
+      }
       onRefresh();
     } catch (e) {
       toast.error(String(e));
@@ -195,6 +266,8 @@ export default function AppTree({ sockets, aclGroups, socketGroups, onRefresh, o
           key={g.group.id}
           group={g}
           allSockets={sockets}
+          isManaging={managingAclGroupId === g.group.id}
+          onToggleManage={() => setManagingAclGroupId(managingAclGroupId === g.group.id ? null : g.group.id)}
           onRefresh={onRefresh}
         />
       ))}
@@ -208,6 +281,9 @@ export default function AppTree({ sockets, aclGroups, socketGroups, onRefresh, o
           aclGroups={aclGroups}
           socketGroups={socketGroups}
           backendFilter={backendFilter}
+          allBackendIds={allBackendIds}
+          managingAclGroup={managingAclGroup ? { groupId: managingAclGroup.group.id, memberSocketIds: managingAclGroup.members } : null}
+          onToggleAclMember={handleToggleAclMember}
           onRefresh={onRefresh}
           onSelectSocket={onSelectSocket}
         />

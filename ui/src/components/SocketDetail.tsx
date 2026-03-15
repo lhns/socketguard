@@ -108,7 +108,7 @@ function AddressCard({
   const isInactive = addr.policy === "closed" && acl.length === 0;
 
   return (
-    <div className={`card${isInactive ? " address-inactive" : ""}`} style={{ marginBottom: 12 }}>
+    <div className="card" style={{ marginBottom: 12 }}>
       {confirm && (
         <ConfirmDialog
           message={confirm.message}
@@ -118,7 +118,7 @@ function AddressCard({
       )}
 
       {/* Address header */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+      <div className={isInactive ? "address-inactive-label" : ""} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <div>
           <span className="badge" style={{ fontSize: 11, padding: "1px 6px", marginRight: 8 }}>
             {addr.backend_id}
