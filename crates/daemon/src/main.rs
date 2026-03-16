@@ -1,30 +1,9 @@
-mod api;
-mod auth;
-mod backend;
-mod engine;
-mod firewall;
-mod monitor;
-mod network;
-mod state;
-
 use anyhow::Result;
 use socketguard_core::config::DaemonConfig;
+use socketguard_daemon::*;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::broadcast;
 use tracing::{error, info};
-
-pub struct AppState {
-    pub config: RwLock<DaemonConfig>,
-    pub db: state::Database,
-    pub engine: RwLock<engine::Engine>,
-    /// Mutex to synchronize firewall rule modifications between the
-    /// reconciliation loop and API-triggered ACL changes.
-    pub firewall_lock: Mutex<()>,
-    /// Broadcast channel for SSE push notifications to GUI
-    pub events: broadcast::Sender<api::DaemonEvent>,
-    /// Bearer token for API authentication
-    pub api_token: String,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -56,10 +35,10 @@ async fn main() -> Result<()> {
     let (events_tx, _) = broadcast::channel::<api::DaemonEvent>(64);
 
     let state = Arc::new(AppState {
-        config: RwLock::new(config.clone()),
+        config: tokio::sync::RwLock::new(config.clone()),
         db,
-        engine: RwLock::new(engine),
-        firewall_lock: Mutex::new(()),
+        engine: tokio::sync::RwLock::new(engine),
+        firewall_lock: tokio::sync::Mutex::new(()),
         events: events_tx,
         api_token,
     });

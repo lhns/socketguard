@@ -1,6 +1,7 @@
 use crate::backend::{self, Ipv6Backend};
 use crate::firewall::{self, Firewall};
 use crate::monitor::{self, SocketMonitor};
+use crate::network::{self, NetworkInterface};
 use crate::AppState;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
 use socketguard_core::{socket_id, AclEntry, ManagedSocket, Policy, SocketAddress};
@@ -11,21 +12,36 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 
-struct ActiveBackend {
-    config: BackendInstanceConfig,
-    backend: Box<dyn Ipv6Backend>,
+pub struct ActiveBackend {
+    pub config: BackendInstanceConfig,
+    pub backend: Box<dyn Ipv6Backend>,
 }
 
 pub struct Engine {
     monitor: Box<dyn SocketMonitor>,
-    backends: HashMap<String, ActiveBackend>,
-    firewall: Box<dyn Firewall>,
+    pub(crate) backends: HashMap<String, ActiveBackend>,
+    firewall: Arc<dyn Firewall>,
+    network: Arc<dyn NetworkInterface>,
     /// Track which backend configs the engine was built with (by ID)
     current_backend_ids: Vec<String>,
 }
 
 impl Engine {
     pub fn new(config: &DaemonConfig) -> anyhow::Result<Self> {
+        Self::new_with_deps(
+            config,
+            monitor::create_monitor(),
+            Arc::from(firewall::create_firewall()),
+            Arc::from(network::create_network_interface()),
+        )
+    }
+
+    pub fn new_with_deps(
+        config: &DaemonConfig,
+        monitor: Box<dyn SocketMonitor>,
+        firewall: Arc<dyn Firewall>,
+        network: Arc<dyn NetworkInterface>,
+    ) -> anyhow::Result<Self> {
         let mut backends = HashMap::new();
         for inst in &config.backends {
             let b = backend::create_backend(&inst.backend)?;
@@ -40,11 +56,29 @@ impl Engine {
         let current_backend_ids: Vec<String> = config.backends.iter().map(|b| b.id.clone()).collect();
 
         Ok(Self {
-            monitor: monitor::create_monitor(),
+            monitor,
             backends,
-            firewall: firewall::create_firewall(),
+            firewall,
+            network,
             current_backend_ids,
         })
+    }
+
+    /// Fully injectable constructor — for tests only.
+    pub fn new_injectable(
+        monitor: Box<dyn SocketMonitor>,
+        firewall: Arc<dyn Firewall>,
+        network: Arc<dyn NetworkInterface>,
+        backends: HashMap<String, ActiveBackend>,
+        backend_ids: Vec<String>,
+    ) -> Self {
+        Self {
+            monitor,
+            backends,
+            firewall,
+            network,
+            current_backend_ids: backend_ids,
+        }
     }
 
     /// Clean up all SocketGuard-managed firewall rules.
@@ -102,10 +136,9 @@ impl Engine {
         // Run address + firewall setup in parallel
         let mut join_set = JoinSet::new();
         for (socket, acl_map, resolved_policies) in socket_acls {
+            let network = self.network.clone();
+            let firewall = self.firewall.clone();
             join_set.spawn_blocking(move || {
-                let network = crate::network::create_network_interface();
-                let firewall = crate::firewall::create_firewall();
-
                 for addr in &socket.addresses {
                     let effective = resolved_policies.get(&addr.backend_id).copied().unwrap_or(addr.policy);
                     // Closed with no ACL = inactive, don't add to interface
@@ -157,8 +190,8 @@ impl Engine {
 
         let mut join_set = JoinSet::new();
         for socket in sockets {
+            let network = self.network.clone();
             join_set.spawn_blocking(move || {
-                let network = crate::network::create_network_interface();
                 for addr in &socket.addresses {
                     if let Err(e) = network.remove_address(&addr.interface, addr.address) {
                         warn!(
@@ -287,8 +320,8 @@ impl Engine {
             let iface = addr.interface.clone();
             let ip = addr.address;
             let prefix = addr.prefix_len;
+            let network = self.network.clone();
             join_set.spawn_blocking(move || {
-                let network = crate::network::create_network_interface();
                 if let Err(e) = network.add_address(&iface, ip, prefix) {
                     warn!("Failed to add address {} to {}: {e}", ip, iface);
                 }
@@ -329,8 +362,8 @@ impl Engine {
         // Remove addresses from interfaces
         let mut join_set = JoinSet::new();
         for (_socket_id, addr) in deleted {
+            let network = self.network.clone();
             join_set.spawn_blocking(move || {
-                let network = crate::network::create_network_interface();
                 if let Err(e) = network.remove_address(&addr.interface, addr.address) {
                     warn!("Failed to remove address {} from {}: {e}", addr.address, addr.interface);
                 }
@@ -518,8 +551,8 @@ impl Engine {
         let mut join_set = JoinSet::new();
 
         for update in existing_updates {
+            let firewall = self.firewall.clone();
             join_set.spawn_blocking(move || {
-                let firewall = crate::firewall::create_firewall();
                 if let Err(e) = apply_firewall_sync(&*firewall, &update.socket, &update.acl_map, &update.resolved_policies) {
                     warn!("Failed to reconcile firewall for {}: {e}", update.socket.id);
                 }
@@ -527,10 +560,9 @@ impl Engine {
         }
 
         for prov in new_provisions {
+            let network = self.network.clone();
+            let firewall = self.firewall.clone();
             join_set.spawn_blocking(move || {
-                let network = crate::network::create_network_interface();
-                let firewall = crate::firewall::create_firewall();
-
                 for addr in &prov.socket.addresses {
                     if let Err(e) = network.add_address(&addr.interface, addr.address, addr.prefix_len) {
                         error!(
@@ -577,10 +609,9 @@ impl Engine {
                     s.process_name, s.port, s.id
                 );
                 let sid = s.id.clone();
+                let firewall = self.firewall.clone();
+                let network = self.network.clone();
                 stale_join_set.spawn_blocking(move || {
-                    let firewall = crate::firewall::create_firewall();
-                    let network = crate::network::create_network_interface();
-
                     for addr in &s.addresses {
                         if let Err(e) = firewall.remove_acl(addr.address, s.port, s.protocol) {
                             warn!("Failed to remove firewall rules for {}: {e}", sid);
@@ -732,8 +763,7 @@ impl Engine {
                         error!("Failed to save socket group address: {e}");
                     } else {
                         // Add the address to the network interface
-                        let network = crate::network::create_network_interface();
-                        if let Err(e) = network.add_address(&sg_addr.interface, sg_addr.address, sg_addr.prefix_len) {
+                        if let Err(e) = self.network.add_address(&sg_addr.interface, sg_addr.address, sg_addr.prefix_len) {
                             error!("Failed to add socket group IPv6 {} to {}: {e}", sg_addr.address, sg_addr.interface);
                         } else {
                             info!(
@@ -901,76 +931,11 @@ pub async fn run_loop(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::firewall::Firewall;
-    use anyhow::Result;
+    use crate::test_support::{FirewallCall, MockFirewall};
     #[allow(unused_imports)]
     use socketguard_core::{BackendType, ManagedSocket, Policy, Protocol, SocketAddress};
     use std::net::Ipv6Addr;
     use std::sync::{Arc as StdArc, Mutex as StdMutex};
-
-    /// Mock firewall that records all operations for verification.
-    struct MockFirewall {
-        calls: StdArc<StdMutex<Vec<FirewallCall>>>,
-    }
-
-    #[derive(Debug, Clone, PartialEq)]
-    enum FirewallCall {
-        ApplyAcl {
-            dest_ip: Ipv6Addr,
-            port: u16,
-            protocol: Protocol,
-            allowed: Vec<Ipv6Addr>,
-        },
-        RemoveAcl {
-            dest_ip: Ipv6Addr,
-            port: u16,
-            protocol: Protocol,
-        },
-        CleanupAll,
-    }
-
-    impl MockFirewall {
-        fn new(calls: StdArc<StdMutex<Vec<FirewallCall>>>) -> Self {
-            Self { calls }
-        }
-    }
-
-    impl Firewall for MockFirewall {
-        fn apply_acl(
-            &self,
-            dest_ip: Ipv6Addr,
-            dest_port: u16,
-            protocol: Protocol,
-            allowed: &[Ipv6Addr],
-        ) -> Result<()> {
-            self.calls.lock().unwrap().push(FirewallCall::ApplyAcl {
-                dest_ip,
-                port: dest_port,
-                protocol,
-                allowed: allowed.to_vec(),
-            });
-            Ok(())
-        }
-
-        fn remove_acl(
-            &self,
-            dest_ip: Ipv6Addr,
-            dest_port: u16,
-            protocol: Protocol,
-        ) -> Result<()> {
-            self.calls.lock().unwrap().push(FirewallCall::RemoveAcl {
-                dest_ip,
-                port: dest_port,
-                protocol,
-            });
-            Ok(())
-        }
-
-        fn cleanup_all_rules(&self) -> Result<()> {
-            self.calls.lock().unwrap().push(FirewallCall::CleanupAll);
-            Ok(())
-        }
-    }
 
     fn resolved_map(socket: &ManagedSocket) -> HashMap<String, Policy> {
         socket.addresses.iter().map(|a| (a.backend_id.clone(), a.policy)).collect()
