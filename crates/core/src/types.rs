@@ -44,7 +44,7 @@ pub struct ListeningSocket {
     pub cmdline: Option<Vec<String>>,
 }
 
-/// IPv6 backend type
+/// Network backend type
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -57,6 +57,8 @@ pub enum BackendType {
     Slaac,
     /// DHCPv6 addresses requested from a DHCPv6 server
     Dhcpv6,
+    /// Onion services published through a Tor control port (not an IPv6 backend)
+    Tor,
 }
 
 impl std::fmt::Display for BackendType {
@@ -66,6 +68,7 @@ impl std::fmt::Display for BackendType {
             BackendType::Yggdrasil => write!(f, "yggdrasil"),
             BackendType::Slaac => write!(f, "slaac"),
             BackendType::Dhcpv6 => write!(f, "dhcpv6"),
+            BackendType::Tor => write!(f, "tor"),
         }
     }
 }
@@ -78,6 +81,7 @@ impl std::str::FromStr for BackendType {
             "yggdrasil" => Ok(BackendType::Yggdrasil),
             "slaac" => Ok(BackendType::Slaac),
             "dhcpv6" => Ok(BackendType::Dhcpv6),
+            "tor" => Ok(BackendType::Tor),
             _ => Err(format!("invalid backend: {s}")),
         }
     }
@@ -111,6 +115,7 @@ mod tests {
             (BackendType::Yggdrasil, "yggdrasil"),
             (BackendType::Slaac, "slaac"),
             (BackendType::Dhcpv6, "dhcpv6"),
+            (BackendType::Tor, "tor"),
         ] {
             assert_eq!(t.to_string(), s);
             assert_eq!(s.parse::<BackendType>().unwrap(), t);

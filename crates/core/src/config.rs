@@ -31,6 +31,26 @@ pub enum BackendConfig {
         /// Physical network interface connected to the router with DHCPv6 server
         interface: String,
     },
+    /// Onion services through a Tor control port (ADR 0037). No interface.
+    Tor {
+        /// Control port: `host:port` or `unix:/path/to/socket`.
+        #[serde(default = "default_tor_control")]
+        control: String,
+        #[serde(default)]
+        auth: TorAuth,
+    },
+}
+
+/// How the daemon authenticates to the Tor control port.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TorAuth {
+    /// Read the cookie file named by PROTOCOLINFO.
+    #[default]
+    Cookie,
+    Password(String),
+    None,
 }
 
 impl Default for BackendConfig {
@@ -49,16 +69,18 @@ impl BackendConfig {
             BackendConfig::Yggdrasil { .. } => BackendType::Yggdrasil,
             BackendConfig::Slaac { .. } => BackendType::Slaac,
             BackendConfig::Dhcpv6 { .. } => BackendType::Dhcpv6,
+            BackendConfig::Tor { .. } => BackendType::Tor,
         }
     }
 
-    /// Get the network interface
-    pub fn interface(&self) -> &str {
+    /// The network interface; None for networks without one (Tor).
+    pub fn interface(&self) -> Option<&str> {
         match self {
-            BackendConfig::Ula { interface } => interface,
-            BackendConfig::Yggdrasil { interface, .. } => interface,
-            BackendConfig::Slaac { interface, .. } => interface,
-            BackendConfig::Dhcpv6 { interface } => interface,
+            BackendConfig::Ula { interface } => Some(interface),
+            BackendConfig::Yggdrasil { interface, .. } => Some(interface),
+            BackendConfig::Slaac { interface, .. } => Some(interface),
+            BackendConfig::Dhcpv6 { interface } => Some(interface),
+            BackendConfig::Tor { .. } => None,
         }
     }
 
@@ -66,7 +88,7 @@ impl BackendConfig {
     pub fn is_singleton(&self) -> bool {
         matches!(
             self,
-            BackendConfig::Ula { .. } | BackendConfig::Yggdrasil { .. }
+            BackendConfig::Ula { .. } | BackendConfig::Yggdrasil { .. } | BackendConfig::Tor { .. }
         )
     }
 
@@ -75,7 +97,11 @@ impl BackendConfig {
         if self.is_singleton() {
             self.backend_type().to_string()
         } else {
-            format!("{}-{}", self.backend_type(), self.interface())
+            format!(
+                "{}-{}",
+                self.backend_type(),
+                self.interface().unwrap_or_default()
+            )
         }
     }
 }
@@ -255,6 +281,7 @@ impl DaemonConfig {
         let mut ids = HashSet::new();
         let mut ula_count = 0u32;
         let mut ygg_count = 0u32;
+        let mut tor_count = 0u32;
 
         for inst in backends {
             if !ids.insert(&inst.id) {
@@ -273,9 +300,15 @@ impl DaemonConfig {
                         return Err("at most one Yggdrasil backend instance is allowed".into());
                     }
                 }
+                BackendType::Tor => {
+                    tor_count += 1;
+                    if tor_count > 1 {
+                        return Err("at most one Tor backend instance is allowed".into());
+                    }
+                }
                 _ => {}
             }
-            if inst.backend.interface().is_empty() {
+            if inst.backend.interface().is_some_and(str::is_empty) {
                 return Err(format!(
                     "backend '{}': interface must not be empty",
                     inst.id
@@ -284,6 +317,13 @@ impl DaemonConfig {
         }
         Ok(())
     }
+}
+
+/// Default Tor control port.
+pub const DEFAULT_TOR_CONTROL: &str = "127.0.0.1:9051";
+
+fn default_tor_control() -> String {
+    DEFAULT_TOR_CONTROL.to_string()
 }
 
 fn default_loopback() -> String {
@@ -317,6 +357,10 @@ fn parse_single_backend(
                 prefix: None,
             }),
             "dhcpv6" => Ok(BackendConfig::Dhcpv6 { interface: iface }),
+            "tor" => Ok(BackendConfig::Tor {
+                control: default_tor_control(),
+                auth: TorAuth::default(),
+            }),
             other => Err(format!("invalid backend: {other}")),
         }
     } else {
@@ -448,7 +492,7 @@ mod tests {
         assert_eq!(config.poll_interval_secs, 2);
         assert_eq!(config.db_path, "socketguard.db");
         assert_eq!(config.log_level, "info");
-        assert!(!config.backends[0].backend.interface().is_empty());
+        assert!(!config.backends[0].backend.interface().unwrap().is_empty());
     }
 
     #[test]
@@ -460,7 +504,7 @@ mod tests {
             config.backends[0].backend.backend_type(),
             BackendType::Yggdrasil
         );
-        assert_eq!(config.backends[0].backend.interface(), "tun0");
+        assert_eq!(config.backends[0].backend.interface(), Some("tun0"));
         assert_eq!(config.backends[0].id, "yggdrasil");
         assert_eq!(config.api_socket, DEFAULT_API_SOCKET);
         assert_eq!(config.api_pipe, DEFAULT_API_PIPE);
@@ -477,7 +521,7 @@ mod tests {
             config.backends[0].backend.backend_type(),
             BackendType::Slaac
         );
-        assert_eq!(config.backends[0].backend.interface(), "Ethernet");
+        assert_eq!(config.backends[0].backend.interface(), Some("Ethernet"));
         assert_eq!(config.backends[0].id, "slaac-Ethernet");
         match &config.backends[0].backend {
             BackendConfig::Slaac { prefix, .. } => {
@@ -504,7 +548,7 @@ mod tests {
             config.backends[1].backend.backend_type(),
             BackendType::Slaac
         );
-        assert_eq!(config.backends[1].backend.interface(), "Ethernet");
+        assert_eq!(config.backends[1].backend.interface(), Some("Ethernet"));
     }
 
     #[test]
@@ -602,7 +646,7 @@ mod tests {
             config.backends[0].backend.backend_type(),
             BackendType::Dhcpv6
         );
-        assert_eq!(config.backends[0].backend.interface(), "Ethernet");
+        assert_eq!(config.backends[0].backend.interface(), Some("Ethernet"));
     }
 
     #[test]
@@ -610,19 +654,78 @@ mod tests {
         let ula = BackendConfig::Ula {
             interface: "lo".to_string(),
         };
-        assert_eq!(ula.interface(), "lo");
+        assert_eq!(ula.interface(), Some("lo"));
 
         let ygg = BackendConfig::Yggdrasil {
             interface: "tun0".to_string(),
             admin_endpoint: None,
         };
-        assert_eq!(ygg.interface(), "tun0");
+        assert_eq!(ygg.interface(), Some("tun0"));
 
         let slaac = BackendConfig::Slaac {
             interface: "eth0".to_string(),
             prefix: None,
         };
-        assert_eq!(slaac.interface(), "eth0");
+        assert_eq!(slaac.interface(), Some("eth0"));
+
+        let tor = BackendConfig::Tor {
+            control: DEFAULT_TOR_CONTROL.to_string(),
+            auth: TorAuth::Cookie,
+        };
+        assert_eq!(tor.interface(), None);
+        assert!(tor.is_singleton());
+        assert_eq!(tor.default_id(), "tor");
+    }
+
+    #[test]
+    fn tor_backend_config_roundtrip() {
+        let defaults: BackendInstanceConfig = serde_json::from_str(r#"{"type":"tor"}"#).unwrap();
+        assert_eq!(defaults.id, "tor");
+        assert_eq!(
+            defaults.backend,
+            BackendConfig::Tor {
+                control: "127.0.0.1:9051".into(),
+                auth: TorAuth::Cookie
+            }
+        );
+        for auth in [
+            TorAuth::Cookie,
+            TorAuth::None,
+            TorAuth::Password("pw".into()),
+        ] {
+            let inst = BackendInstanceConfig {
+                id: "tor".into(),
+                backend: BackendConfig::Tor {
+                    control: "unix:/run/tor/control".into(),
+                    auth,
+                },
+            };
+            let json = serde_json::to_string(&inst).unwrap();
+            assert_eq!(
+                serde_json::from_str::<BackendInstanceConfig>(&json).unwrap(),
+                inst
+            );
+        }
+        let json = r#"{"type":"tor","auth":{"password":"pw"}}"#;
+        let inst: BackendInstanceConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            inst.backend,
+            BackendConfig::Tor { auth: TorAuth::Password(ref p), .. } if p == "pw"
+        ));
+    }
+
+    #[test]
+    fn at_most_one_tor_backend() {
+        let tor = |id: &str| BackendInstanceConfig {
+            id: id.into(),
+            backend: BackendConfig::Tor {
+                control: DEFAULT_TOR_CONTROL.into(),
+                auth: TorAuth::Cookie,
+            },
+        };
+        assert!(DaemonConfig::validate_backends(&[tor("tor")]).is_ok());
+        let err = DaemonConfig::validate_backends(&[tor("a"), tor("b")]).unwrap_err();
+        assert!(err.starts_with("at most one"), "{err}");
     }
 
     #[test]

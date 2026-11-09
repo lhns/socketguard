@@ -30,7 +30,7 @@ describe("reach badges", () => {
     ["ip", "IP only"],
     ["ip_suffix", "IP only"],
     ["wg_key", "stored, not enforced yet"],
-    ["tor_client_key", "stored, not enforced yet"],
+    ["tor_client_key", "verified by key"],
     ["tls_spki", "stored, not enforced yet"],
   ];
   it.each(creds)("credential %s is badged %s", (kind, label) => {

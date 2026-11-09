@@ -36,7 +36,7 @@ fn sorted_unique<T: Ord>(v: impl IntoIterator<Item = T>) -> Vec<T> {
 
 /// The ports an address serves: its `Only` list, or for `All` every app port that no
 /// `Only` address on the same network claims.
-fn served_ports(app: &App, address: &socketguard_core::Address) -> BTreeSet<PortRef> {
+pub(crate) fn served_ports(app: &App, address: &socketguard_core::Address) -> BTreeSet<PortRef> {
     match &address.ports {
         PortSet::Only(list) => list.iter().copied().collect(),
         PortSet::All => {
@@ -63,7 +63,7 @@ fn served_ports(app: &App, address: &socketguard_core::Address) -> BTreeSet<Port
 }
 
 /// The credentials of a grant's peers (all members of a group); empty for Anyone.
-fn subject_credentials<'a>(
+pub(crate) fn subject_credentials<'a>(
     snap: &'a Snapshot,
     peers: &HashMap<&'a str, &'a Peer>,
     subject: &Subject,

@@ -150,8 +150,20 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
             interface,
             id,
             admin_endpoint,
+            control,
+            password,
         } => {
-            let backend = backend_config(&r#type, interface, admin_endpoint)?;
+            let backend = if r#type.eq_ignore_ascii_case("tor") {
+                if interface.is_some() || admin_endpoint.is_some() {
+                    bail!("tor has no --interface or --admin-endpoint");
+                }
+                tor_config(control, password)?
+            } else {
+                if control.is_some() || password.is_some() {
+                    bail!("--control and --password only apply to tor");
+                }
+                backend_config(&r#type, interface, admin_endpoint)?
+            };
             let n = c.client.add_network(&NewNetwork { id, backend }).await?;
             c.print(&n, || {
                 format!(
@@ -166,6 +178,18 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
             c.done(format!("removed network {id}"))
         }
     }
+}
+
+/// `tor [--control X] [--password P]` as the daemon's backend config.
+pub fn tor_config(control: Option<String>, password: Option<String>) -> Result<BackendConfig> {
+    let mut v = serde_json::json!({"type": "tor"});
+    if let Some(c) = control {
+        v["control"] = c.into();
+    }
+    if let Some(p) = password {
+        v["auth"] = serde_json::json!({ "password": p });
+    }
+    serde_json::from_value(v).context("invalid network")
 }
 
 /// `<type> --interface X [--admin-endpoint Z]` as the daemon's backend config.
@@ -467,6 +491,9 @@ pub fn peer_credentials(a: &PeerAddArgs) -> Result<Vec<socketguard_core::NewCred
     let mut out = Vec::new();
     if let Some(k) = &a.key {
         out.push(parse::cred(CredentialKind::YggKey, k));
+    }
+    if let Some(k) = &a.tor_key {
+        out.push(parse::cred(CredentialKind::TorClientKey, k));
     }
     for addr in &a.addr {
         // The daemon files addresses in 200::/7 under ygg_addr.

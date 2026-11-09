@@ -200,6 +200,26 @@ Generates random addresses in the `fd00::/8` range. No external dependencies. Su
 
 Generates Ed25519 keypairs and derives addresses in the `200::/7` range using Yggdrasil's address derivation algorithm. This enables identity-based access control — allowing a Yggdrasil address is equivalent to allowing the holder of the corresponding private key.
 
+### Tor (onion services)
+
+A Tor network publishes each app as an onion service through Tor's control port, so peers behind
+NAT can reach it without any open port. Access is enforced by Tor client authorization: an app is
+not published until it is granted, and a grant to a peer holding a `tor_client_key` (the base32
+x25519 public key from `authorized_clients`) lets only that client in.
+
+```bash
+# tor with: ControlPort 9051 and CookieAuthentication 1
+socketguard networks add tor                    # --control 127.0.0.1:9051 [--password ...]
+socketguard peers add bob --tor-key <base32>    # the key bob's Tor client generated
+socketguard grant myapp:8080 bob
+socketguard apps show myapp                     # prints the .onion name
+socketguard share myapp                         # http://<id>.onion:8080
+```
+
+The service keys live in the daemon's database (mode 0600 on Unix; on Windows keep it where only
+the service account and Administrators have access). See ADR 0037 and 0039. A Docker end-to-end
+test is in `deploy/e2e/tor-e2e.sh`.
+
 ## API
 
 The daemon exposes a local REST API with server-sent events on a Unix socket or Windows named

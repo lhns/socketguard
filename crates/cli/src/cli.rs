@@ -123,7 +123,8 @@ pub enum PeersCmd {
     /// Show a peer with its credentials and grants
     Show { peer: String },
     /// Add a peer. Bare values are guessed: 64 hex characters are a Yggdrasil key, an IP
-    /// address or CIDR is an IP credential
+    /// address or CIDR is an IP credential, 52 base32 characters (or a
+    /// `descriptor:x25519:` line) are a Tor client key
     Add(PeerAddArgs),
     /// Rename a peer
     Rename { peer: String, new_label: String },
@@ -142,6 +143,10 @@ pub struct PeerAddArgs {
     /// Yggdrasil public key (64 hex characters)
     #[arg(long)]
     pub key: Option<String>,
+    /// Tor client authorization public key (52 base32 characters, or the
+    /// `descriptor:x25519:<key>` line of an authorized_clients file)
+    #[arg(long)]
+    pub tor_key: Option<String>,
     /// An IP or Yggdrasil address (repeatable)
     #[arg(long)]
     pub addr: Vec<String>,
@@ -220,7 +225,7 @@ pub enum NetworksCmd {
     List,
     /// Add a network (saved to the daemon's config file)
     Add {
-        /// ula, slaac, dhcpv6 or yggdrasil
+        /// ula, slaac, dhcpv6, yggdrasil or tor
         r#type: String,
         #[arg(long)]
         interface: Option<String>,
@@ -230,6 +235,12 @@ pub enum NetworksCmd {
         /// Yggdrasil admin endpoint, e.g. unix:///var/run/yggdrasil.sock
         #[arg(long)]
         admin_endpoint: Option<String>,
+        /// Tor control port, `host:port` or `unix:/path` [default: 127.0.0.1:9051]
+        #[arg(long)]
+        control: Option<String>,
+        /// Tor control password; without it the cookie file named by Tor is used
+        #[arg(long)]
+        password: Option<String>,
     },
     /// Remove a network; its addresses leave the interfaces
     Rm { id: String },

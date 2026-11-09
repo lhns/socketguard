@@ -498,10 +498,7 @@ pub async fn standard_daemon(
         };
         backends.insert(
             id.to_string(),
-            ActiveBackend {
-                config: cfg.clone(),
-                backend: Box::new(mock),
-            },
+            ActiveBackend::ip(cfg.clone(), Box::new(mock)),
         );
         configs.push(cfg);
     }
@@ -518,4 +515,141 @@ pub async fn standard_daemon(
     )
     .await;
     StandardDaemon { state, sockets, fw }
+}
+
+// ─── MockTorControl ──────────────────────────────────────────────────────────
+
+#[derive(Default)]
+struct MockTorState {
+    commands: Vec<String>,
+    /// Running onion services: id -> the ADD_ONION command that created it.
+    services: std::collections::BTreeMap<String, String>,
+    created: u32,
+    down: bool,
+}
+
+/// A scripted Tor control port on 127.0.0.1 (no authentication). It records every
+/// command and keeps the set of detached onion services like Tor would. `ADD_ONION` with
+/// `NEW:ED25519-V3` creates service `mocksvc<N>` with key `ED25519-V3:mocksvc<N>`; a
+/// given key `ED25519-V3:<name>` runs service `<name>`.
+pub struct MockTorControl {
+    addr: std::net::SocketAddr,
+    state: Arc<Mutex<MockTorState>>,
+}
+
+impl MockTorControl {
+    pub fn start() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let state = Arc::new(Mutex::new(MockTorState::default()));
+        let shared = state.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                let state = shared.clone();
+                std::thread::spawn(move || Self::serve(stream, state));
+            }
+        });
+        Self { addr, state }
+    }
+
+    /// The control address to configure (`host:port`).
+    pub fn addr(&self) -> String {
+        self.addr.to_string()
+    }
+
+    /// Every command received, oldest first (including AUTHENTICATE and QUIT).
+    pub fn commands(&self) -> Vec<String> {
+        self.state.lock().unwrap().commands.clone()
+    }
+
+    pub fn add_commands(&self) -> Vec<String> {
+        self.commands()
+            .into_iter()
+            .filter(|c| c.starts_with("ADD_ONION"))
+            .collect()
+    }
+
+    /// Ids of the running services.
+    pub fn detached(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .services
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Tor restarted: every service is gone.
+    pub fn forget_services(&self) {
+        self.state.lock().unwrap().services.clear();
+    }
+
+    /// Refuse (drop) new connections.
+    pub fn set_down(&self, down: bool) {
+        self.state.lock().unwrap().down = down;
+    }
+
+    fn serve(stream: std::net::TcpStream, state: Arc<Mutex<MockTorState>>) {
+        use std::io::{BufRead, BufReader, Write};
+        if state.lock().unwrap().down {
+            return;
+        }
+        let mut writer = stream.try_clone().unwrap();
+        let reader = BufReader::new(stream);
+        for line in reader.lines() {
+            let Ok(line) = line else { return };
+            let reply = {
+                let mut st = state.lock().unwrap();
+                st.commands.push(line.clone());
+                Self::reply(&mut st, &line)
+            };
+            if writer.write_all(reply.as_bytes()).is_err() || line == "QUIT" {
+                return;
+            }
+        }
+    }
+
+    fn reply(st: &mut MockTorState, line: &str) -> String {
+        let (cmd, rest) = line.split_once(' ').unwrap_or((line, ""));
+        match cmd {
+            "PROTOCOLINFO" => "250-PROTOCOLINFO 1\r\n250-AUTH METHODS=NULL\r\n250-VERSION Tor=\"0.4.8.0\"\r\n250 OK\r\n".into(),
+            "AUTHENTICATE" => "250 OK\r\n".into(),
+            "QUIT" => "250 closing connection\r\n".into(),
+            "GETINFO" if rest == "version" => "250-version=0.4.8.0\r\n250 OK\r\n".into(),
+            "GETINFO" if rest == "onions/detached" => {
+                if st.services.is_empty() {
+                    "250-onions/detached=\r\n250 OK\r\n".into()
+                } else {
+                    let ids: Vec<&str> = st.services.keys().map(String::as_str).collect();
+                    format!("250+onions/detached=\r\n{}\r\n.\r\n250 OK\r\n", ids.join("\r\n"))
+                }
+            }
+            "ADD_ONION" => {
+                let key = rest.split(' ').next().unwrap_or_default();
+                let (id, private) = match key.strip_prefix("ED25519-V3:") {
+                    Some(name) => (name.to_string(), None),
+                    None => {
+                        st.created += 1;
+                        let id = format!("mocksvc{}", st.created);
+                        (id.clone(), Some(format!("ED25519-V3:{id}")))
+                    }
+                };
+                st.services.insert(id.clone(), line.to_string());
+                match private {
+                    Some(k) => format!("250-ServiceID={id}\r\n250-PrivateKey={k}\r\n250 OK\r\n"),
+                    None => format!("250-ServiceID={id}\r\n250 OK\r\n"),
+                }
+            }
+            "DEL_ONION" => {
+                if st.services.remove(rest).is_some() {
+                    "250 OK\r\n".into()
+                } else {
+                    "552 Unknown Onion Service id\r\n".into()
+                }
+            }
+            _ => "510 Unrecognized command\r\n".into(),
+        }
+    }
 }

@@ -446,7 +446,19 @@ pub fn share_lines(app: &App, network: Option<&str>) -> Vec<String> {
         };
         let host = match &a.locator {
             Locator::Ipv6 { addr } => format!("[{addr}]"),
-            Locator::Onion { hostname } => hostname.clone(),
+            Locator::Onion { hostname } => {
+                // Onion services take no URL port for the default web ports, and a URL
+                // replaces the plain form.
+                for port in ports {
+                    match port {
+                        80 => urls.push(format!("http://{hostname}")),
+                        443 => urls.push(format!("https://{hostname}")),
+                        8080 => urls.push(format!("http://{hostname}:8080")),
+                        _ => plain.push(format!("{hostname}:{port}")),
+                    }
+                }
+                continue;
+            }
         };
         for port in ports {
             plain.push(format!("{host}:{port}"));

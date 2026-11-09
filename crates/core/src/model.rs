@@ -125,6 +125,7 @@ impl From<crate::types::BackendType> for NetworkKind {
             B::Ula => NetworkKind::Local,
             B::Slaac | B::Dhcpv6 => NetworkKind::Lan,
             B::Yggdrasil => NetworkKind::Yggdrasil,
+            B::Tor => NetworkKind::Tor,
         }
     }
 }
@@ -563,7 +564,10 @@ fn is_base64(value: &str) -> bool {
 ///   networks in that range are rejected.
 /// - `IpSuffix`: an interface ID written as an address with zero upper 64 bits
 ///   (`::a:b:c:d`, optionally followed by `/64`), stored as the address.
-/// - `WgKey`, `TorClientKey`, `TlsSpki`: base64, stored as given.
+/// - `TorClientKey`: an x25519 public key in base32 (52 characters), or a full
+///   `descriptor:x25519:<base32>` authorized_clients line; stored as the bare key,
+///   uppercase.
+/// - `WgKey`, `TlsSpki`: base64, stored as given.
 pub fn normalize_credential(
     kind: CredentialKind,
     value: &str,
@@ -574,7 +578,8 @@ pub fn normalize_credential(
             Some(_) => Ok((kind, value.to_ascii_lowercase())),
             None => invalid("a Yggdrasil key is 64 hex characters"),
         },
-        CredentialKind::WgKey | CredentialKind::TorClientKey | CredentialKind::TlsSpki => {
+        CredentialKind::TorClientKey => normalize_tor_key(value).map(|k| (kind, k)),
+        CredentialKind::WgKey | CredentialKind::TlsSpki => {
             if is_base64(value) {
                 Ok((kind, value.to_string()))
             } else {
@@ -610,6 +615,35 @@ pub fn normalize_credential(
             }
             Ok((CredentialKind::Ip, net.trunc().to_string()))
         }
+    }
+}
+
+/// Whether `key` is a Tor v3 client-auth public key: 52 base32 characters (no padding)
+/// encoding 32 bytes, so the last character carries no extra bits.
+fn is_tor_key(key: &str) -> bool {
+    key.len() == 52
+        && key.bytes().all(|b| matches!(b, b'A'..=b'Z' | b'2'..=b'7'))
+        && matches!(key.as_bytes()[51], b'A' | b'Q')
+}
+
+fn normalize_tor_key(value: &str) -> Result<String, CredentialError> {
+    let bare = match value.rsplit_once(':') {
+        Some((prefix, key)) => {
+            if !prefix.eq_ignore_ascii_case("descriptor:x25519") {
+                return invalid(
+                    "a Tor client key is 52 base32 characters, or a line like \
+                     descriptor:x25519:<key> from authorized_clients",
+                );
+            }
+            key
+        }
+        None => value,
+    };
+    let key = bare.to_ascii_uppercase();
+    if is_tor_key(&key) {
+        Ok(key)
+    } else {
+        invalid("a Tor client key is a public key in base32 (52 characters)")
     }
 }
 
@@ -678,6 +712,10 @@ pub fn reach(credential: &Credential, network: &Network) -> Reach {
             if network.prefix.is_some() =>
         {
             Reach::IpOnly
+        }
+        // Tor authorizes each client by its key (ClientAuthV3).
+        (CredentialKind::TorClientKey, NetworkKind::Tor) if is_tor_key(&credential.value) => {
+            Reach::Verified
         }
         _ => Reach::NotReachable,
     }
@@ -963,6 +1001,8 @@ mod tests {
         }
     }
 
+    const TOR_KEY: &str = "ZGBMJ4VIRNVUOQ5SJ2JXPSSWHB2R4YGTKPDGSMZ4HWCD5WLT2YKQ";
+
     const KEY: &str = "ba83a2e554a8a087cebdb3f053468cd3ff915b5dd94bf11b7a5fc2e36f13158b";
 
     #[test]
@@ -970,7 +1010,7 @@ mod tests {
         use CredentialKind as C;
         use NetworkKind as N;
         use Reach::*;
-        let creds: [(Credential, [Reach; 5]); 9] = [
+        let creds: [(Credential, [Reach; 5]); 10] = [
             // Local, Lan, Yggdrasil, WireGuard, Tor
             (
                 cred(C::YggKey, KEY),
@@ -1033,6 +1073,16 @@ mod tests {
                 ],
             ),
             (cred(C::WgKey, "AAAA"), [NotReachable; 5]),
+            (
+                cred(C::TorClientKey, TOR_KEY),
+                [
+                    NotReachable,
+                    NotReachable,
+                    NotReachable,
+                    NotReachable,
+                    Verified,
+                ],
+            ),
             (cred(C::TorClientKey, "AAAA"), [NotReachable; 5]),
             (cred(C::TlsSpki, "AAAA"), [NotReachable; 5]),
         ];
@@ -1273,6 +1323,28 @@ mod tests {
         assert_eq!(norm(WgKey, k).unwrap(), (WgKey, k.into()));
         assert!(norm(TlsSpki, "not base64!").is_err());
         assert!(norm(TorClientKey, "").is_err());
+    }
+
+    #[test]
+    fn tor_client_keys_normalize() {
+        use CredentialKind::TorClientKey;
+        let want = (TorClientKey, TOR_KEY.to_string());
+        assert_eq!(norm(TorClientKey, TOR_KEY).unwrap(), want);
+        assert_eq!(norm(TorClientKey, &TOR_KEY.to_lowercase()).unwrap(), want);
+        let line = format!("descriptor:x25519:{TOR_KEY}");
+        assert_eq!(norm(TorClientKey, &line).unwrap(), want);
+        assert_eq!(
+            norm(TorClientKey, &format!(" {} ", line.to_lowercase())).unwrap(),
+            want
+        );
+        // Wrong length, characters or trailing bits.
+        assert!(norm(TorClientKey, &TOR_KEY[1..]).is_err());
+        assert!(norm(TorClientKey, &format!("{TOR_KEY}A")).is_err());
+        assert!(norm(TorClientKey, &format!("{}1", &TOR_KEY[..51])).is_err());
+        assert!(norm(TorClientKey, &format!("{}B", &TOR_KEY[..51])).is_err());
+        // A client's private-key line carries the onion name first.
+        assert!(norm(TorClientKey, &format!("abc:descriptor:x25519:{TOR_KEY}")).is_err());
+        assert!(norm(TorClientKey, &format!("other:{TOR_KEY}")).is_err());
     }
 
     #[test]

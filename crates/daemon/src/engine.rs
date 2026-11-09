@@ -8,21 +8,22 @@
 //! interfaces. Stopping the daemon removes nothing; only [`disable_all`] does.
 
 use crate::api::DaemonEvent;
-use crate::backend::{self, iid_of, same_prefix64, with_prefix64, Ipv6Backend};
+use crate::backend::{iid_of, same_prefix64, with_prefix64, Ipv6Backend};
 use crate::firewall::{self, DesiredRuleset, DropEvent, Firewall};
 use crate::metrics::{CounterKey, Metrics};
 use crate::monitor::{self, SocketMonitor};
 use crate::network::{self, NetworkInterface};
+use crate::networks::{self, IpNetwork, LocatorRequest, NewLocator};
 use crate::ruleset::{self, HostInterface, LockoutRisk, Snapshot};
 use crate::state::{self, Database, NewActivity};
 use crate::AppState;
 use chrono::Utc;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
 use socketguard_core::{
-    app_identity, grant_reach, is_loopback_interface, new_id, normalize_credential, ActivityKind,
-    ActivityQuery, ActivityRecord, Address, AddressId, AddressMode, App, AppDetail, AppId,
-    Credential, CredentialError, Grant, GrantView, Locator, Network, NetworkKind, NetworkStatus,
-    NewCredential, NewGrant, Peer, PeerGroup, PortRef, PortSet, Protocol, Settings, Subject,
+    app_identity, grant_reach, new_id, normalize_credential, ActivityKind, ActivityQuery,
+    ActivityRecord, Address, AddressId, AddressMode, App, AppDetail, AppId, Credential,
+    CredentialError, Grant, GrantView, Locator, Network, NetworkKind, NewCredential, NewGrant,
+    Peer, PeerGroup, PortRef, PortSet, Protocol, Settings, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
@@ -49,7 +50,15 @@ const MAX_DROP_KEYS: usize = 5_000;
 
 pub struct ActiveBackend {
     pub config: BackendInstanceConfig,
-    pub backend: Box<dyn Ipv6Backend>,
+    pub network: Arc<dyn networks::Network>,
+}
+
+impl ActiveBackend {
+    /// An IP network over an already built allocator (tests inject mocks).
+    pub fn ip(config: BackendInstanceConfig, backend: Box<dyn Ipv6Backend>) -> Self {
+        let network = Arc::new(IpNetwork::for_config(&config.backend, backend));
+        Self { config, network }
+    }
 }
 
 /// Why `set_protect_host` did not change anything.
@@ -128,6 +137,10 @@ pub struct Engine {
     metrics: Metrics,
     /// (app, scope) pairs already reported as `RemoteAdminExposed`.
     exposed_reported: Mutex<HashSet<(String, String)>>,
+    /// Where each app port's listener is bound, from the last socket scan (Tor targets).
+    binds: Mutex<HashMap<(AppId, PortRef), IpAddr>>,
+    /// The last enforcement error per non-IP network (log each distinct one once).
+    enforce_failing: Mutex<HashMap<String, String>>,
 }
 
 impl Engine {
@@ -150,12 +163,12 @@ impl Engine {
     ) -> anyhow::Result<Self> {
         let mut backends = HashMap::new();
         for inst in &config.backends {
-            let b = backend::create_backend(&inst.backend, ula_global_id)?;
+            let network = networks::create(&inst.backend, ula_global_id)?;
             backends.insert(
                 inst.id.clone(),
                 ActiveBackend {
                     config: inst.clone(),
-                    backend: b,
+                    network,
                 },
             );
         }
@@ -186,7 +199,7 @@ impl Engine {
             network,
             backends,
             backend_ids,
-            backend::ula::UlaBackend::random_global_id(),
+            crate::backend::ula::UlaBackend::random_global_id(),
         )
     }
 
@@ -215,6 +228,8 @@ impl Engine {
             counter_keys: Mutex::default(),
             metrics: Metrics::default(),
             exposed_reported: Mutex::default(),
+            binds: Mutex::default(),
+            enforce_failing: Mutex::default(),
         }
     }
 
@@ -245,26 +260,13 @@ impl Engine {
     }
 
     fn network_of(id: &str, active: &ActiveBackend) -> Network {
-        let kind = NetworkKind::from(active.config.backend.backend_type());
-        let (status, prefix) = match active.backend.current_prefix() {
-            Ok(Some(p)) if p.len == 64 => (NetworkStatus::Up, Some(p.addr)),
-            Ok(_) => (NetworkStatus::Up, None),
-            Err(e) => (
-                NetworkStatus::Down {
-                    reason: e.to_string(),
-                },
-                None,
-            ),
-        };
+        let (status, prefix) = active.network.status();
         Network {
             id: id.to_string(),
-            kind,
+            kind: active.network.kind(),
             name: id.to_string(),
-            interface: Some(active.config.backend.interface().to_string()),
-            // Local on loopback is this machine only; on another interface it takes grants
-            // like any IP network (ADR 0027).
-            grants_apply: kind != NetworkKind::Local
-                || !is_loopback_interface(active.config.backend.interface()),
+            interface: active.config.backend.interface().map(str::to_string),
+            grants_apply: active.network.capabilities().grants_apply,
             status,
             prefix,
         }
@@ -281,7 +283,7 @@ impl Engine {
     fn interface_of(&self, network_id: &str) -> Option<&str> {
         self.backends
             .get(network_id)
-            .map(|b| b.config.backend.interface())
+            .and_then(|b| b.config.backend.interface())
     }
 
     // ─── Firewall ────────────────────────────────────────────────────────────
@@ -352,12 +354,71 @@ impl Engine {
     /// apps, addresses, peers, groups, grants or networks.
     pub async fn apply_firewall(&self, state: &AppState) -> anyhow::Result<()> {
         let _lock = state.firewall_lock.lock().await;
-        self.apply_locked(state, false).await
+        let result = self.apply_locked(state, false).await;
+        self.enforce_networks(state).await;
+        result
     }
 
     async fn apply_firewall_if_changed(&self, state: &AppState) -> anyhow::Result<()> {
         let _lock = state.firewall_lock.lock().await;
-        self.apply_locked(state, true).await
+        let result = self.apply_locked(state, true).await;
+        self.enforce_networks(state).await;
+        result
+    }
+
+    /// Enforce the grants on the networks that do not use the firewall (Tor). The caller
+    /// holds the firewall lock, which also keeps two enforcements from interleaving. A
+    /// failure (e.g. Tor is down) is logged and shows as the network's status; the next
+    /// pass retries.
+    async fn enforce_networks(&self, state: &AppState) {
+        let nets: Vec<(String, Arc<dyn networks::Network>)> = self
+            .sorted_backend_ids()
+            .into_iter()
+            .map(|id| (id.clone(), self.backends[id].network.clone()))
+            .filter(|(_, n)| !n.capabilities().ip_locators)
+            .collect();
+        if nets.is_empty() || state.db.disabled().await.unwrap_or(false) {
+            return;
+        }
+        let prepared = async {
+            let snapshot = self.gather_snapshot(state).await?;
+            let secrets = state.db.onion_keys().await?;
+            anyhow::Ok((snapshot, secrets))
+        }
+        .await;
+        let (snapshot, secrets) = match prepared {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Could not gather the state to enforce: {e}");
+                return;
+            }
+        };
+        let binds = self.binds.lock().unwrap().clone();
+        for (id, net) in nets {
+            let Some(info) = snapshot.networks.iter().find(|n| n.id == id) else {
+                continue;
+            };
+            let enforcement = networks::enforcement_for(info, &snapshot, &secrets, &binds);
+            let result = tokio::task::spawn_blocking(move || net.enforce(&enforcement)).await;
+            let outcome = match result {
+                Ok(r) => r,
+                Err(e) => Err(anyhow::anyhow!("enforcement task failed: {e}")),
+            };
+            let mut failing = self.enforce_failing.lock().unwrap();
+            match outcome {
+                Ok(()) => {
+                    if failing.remove(&id).is_some() {
+                        info!("Network '{id}' enforcement recovered");
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    if failing.insert(id.clone(), msg.clone()).as_deref() != Some(msg.as_str()) {
+                        warn!("Cannot enforce grants on network '{id}', will retry: {msg}");
+                    }
+                }
+            }
+        }
     }
 
     /// Apply, then put missing addresses on their interfaces (the ruleset first).
@@ -464,7 +525,7 @@ impl Engine {
         let ifaces = self
             .backends
             .iter()
-            .map(|(id, b)| (id.clone(), b.config.backend.interface().to_string()))
+            .filter_map(|(id, b)| Some((id.clone(), b.config.backend.interface()?.to_string())))
             .collect();
         disable_all(
             &state.db,
@@ -473,6 +534,12 @@ impl Engine {
             self.network.clone(),
         )
         .await?;
+        let nets = self
+            .backends
+            .iter()
+            .map(|(id, b)| (id.clone(), b.network.clone()))
+            .collect();
+        disable_networks(&state.db, nets).await;
         self.emit(state, DaemonEvent::SettingsChanged);
         Ok(())
     }
@@ -518,8 +585,8 @@ impl Engine {
 
     /// Add a network and give every app an address on it.
     pub async fn add_backend_instance(&mut self, state: &AppState, inst: &BackendInstanceConfig) {
-        match backend::create_backend(&inst.backend, self.ula_global_id) {
-            Ok(b) => self.add_backend_instance_with(state, inst, b).await,
+        match networks::create(&inst.backend, self.ula_global_id) {
+            Ok(n) => self.add_network_instance(state, inst, n).await,
             Err(e) => error!("Failed to create backend '{}': {e}", inst.id),
         }
     }
@@ -547,9 +614,9 @@ impl Engine {
                 EngineError::Invalid(e)
             }
         })?;
-        let b = backend::create_backend(&inst.backend, self.ula_global_id)
+        let n = networks::create(&inst.backend, self.ula_global_id)
             .map_err(|e| EngineError::Invalid(format!("cannot create network: {e}")))?;
-        self.add_backend_instance_with(state, &inst, b).await;
+        self.add_network_instance(state, &inst, n).await;
         self.networks()
             .into_iter()
             .find(|n| n.id == inst.id)
@@ -572,13 +639,24 @@ impl Engine {
         inst: &BackendInstanceConfig,
         b: Box<dyn Ipv6Backend>,
     ) {
+        let network = Arc::new(IpNetwork::for_config(&inst.backend, b));
+        self.add_network_instance(state, inst, network).await;
+    }
+
+    /// Add a network that is already built.
+    pub async fn add_network_instance(
+        &mut self,
+        state: &AppState,
+        inst: &BackendInstanceConfig,
+        network: Arc<dyn networks::Network>,
+    ) {
         // The ruleset (overlay scope, managed addresses) must know the network before
         // its addresses go on the interface.
         self.backends.insert(
             inst.id.clone(),
             ActiveBackend {
                 config: inst.clone(),
-                backend: b,
+                network,
             },
         );
         // Keep the config (and the change detector) in step, so the next reconcile does
@@ -617,6 +695,7 @@ impl Engine {
                 Vec::new()
             }
         };
+        self.remove_locators(backend_id, &deleted).await;
         let iface = self.interface_of(backend_id).map(str::to_string);
         if let Some(iface) = iface {
             self.remove_from_interface(
@@ -640,6 +719,27 @@ impl Engine {
         self.emit(state, DaemonEvent::AppsChanged);
         self.emit(state, DaemonEvent::GrantsChanged);
         info!("Backend '{}' removed", backend_id);
+    }
+
+    /// Release the locators of `addresses` on a network that is not an IP network (the
+    /// onion services leave Tor). IP addresses are taken off their interface by
+    /// `remove_from_interface` instead.
+    async fn remove_locators(&self, network_id: &str, addresses: &[Address]) {
+        let Some(active) = self.backends.get(network_id) else {
+            return;
+        };
+        if active.network.capabilities().ip_locators {
+            return;
+        }
+        for a in addresses {
+            let net = active.network.clone();
+            let a = a.clone();
+            match tokio::task::spawn_blocking(move || net.remove_locator(&a)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!("Could not release a locator on '{network_id}': {e}"),
+                Err(e) => warn!("Release task failed: {e}"),
+            }
+        }
     }
 
     async fn remove_from_interface(&self, addrs: Vec<(String, Ipv6Addr)>) {
@@ -724,6 +824,7 @@ impl Engine {
             ports: BTreeSet<PortRef>,
         }
         let mut live: BTreeMap<AppId, Live> = BTreeMap::new();
+        let mut binds: HashMap<(AppId, PortRef), IpAddr> = HashMap::new();
         for ls in sockets {
             if !config.process_filter.matches(&ls.process_name) {
                 continue;
@@ -733,6 +834,16 @@ impl Engine {
                 ls.exe_path.as_deref(),
                 ls.cmdline.as_deref(),
             );
+            let port_ref = PortRef {
+                port: ls.port,
+                proto: ls.protocol,
+            };
+            let slot = binds
+                .entry((id.clone(), port_ref))
+                .or_insert(ls.bind_address);
+            if networks::bind_rank(&ls.bind_address) < networks::bind_rank(slot) {
+                *slot = ls.bind_address;
+            }
             live.entry(id)
                 .or_insert_with(|| Live {
                     name,
@@ -747,6 +858,8 @@ impl Engine {
                     proto: ls.protocol,
                 });
         }
+
+        *self.binds.lock().unwrap() = binds;
 
         let db = &state.db;
         let now = Utc::now();
@@ -832,24 +945,38 @@ impl Engine {
                     .iter()
                     .filter(|a| a.network_id == *nid)
                     .collect();
-                for ports in plan_addresses(mode, &app.ports_refs(), &existing) {
-                    match active.backend.allocate(None) {
-                        Ok(alloc) => {
+                let mut app_ports = app.ports_refs();
+                if !active.network.capabilities().udp {
+                    app_ports.retain(|p| p.proto == Protocol::Tcp);
+                    if app_ports.is_empty() {
+                        continue; // nothing this network can serve
+                    }
+                }
+                for ports in plan_addresses(mode, &app_ports, &existing) {
+                    let address_id = new_id();
+                    match self
+                        .make_locator(active, &app.id, &address_id, &ports)
+                        .await
+                    {
+                        Ok(NewLocator { locator, secret }) => {
                             self.alloc_failing.lock().unwrap().remove(nid);
                             let address = Address {
-                                id: new_id(),
+                                id: address_id,
                                 app_id: app.id.clone(),
                                 network_id: nid.clone(),
                                 ports,
-                                locator: Locator::Ipv6 {
-                                    addr: alloc.address,
-                                },
+                                locator,
                                 created_at: Utc::now(),
                             };
-                            state.db.insert_address(&address).await?;
+                            state
+                                .db
+                                .insert_address_with_secret(&address, secret.as_deref())
+                                .await?;
                             info!(
                                 "Assigned {} ({nid}) to {} ({})",
-                                alloc.address, app.name, app.id
+                                locator_text(&address.locator),
+                                app.name,
+                                app.id
                             );
                             created += 1;
                         }
@@ -866,6 +993,23 @@ impl Engine {
         Ok(created)
     }
 
+    /// Ask a network for the locator of a new address.
+    async fn make_locator(
+        &self,
+        active: &ActiveBackend,
+        app_id: &str,
+        address_id: &str,
+        ports: &PortSet,
+    ) -> anyhow::Result<NewLocator> {
+        let net = active.network.clone();
+        let req = LocatorRequest {
+            app_id: app_id.to_string(),
+            address_id: address_id.to_string(),
+            ports: ports.clone(),
+        };
+        tokio::task::spawn_blocking(move || net.ensure_locator(&req)).await?
+    }
+
     /// Re-home stored addresses of prefix-based networks whose /64 changed: keep the
     /// interface ID, swap the prefix, update the DB, take the old addresses off the
     /// interface, apply the ruleset that covers the new ones and only then add them.
@@ -880,7 +1024,7 @@ impl Engine {
         };
         for network_id in self.sorted_backend_ids() {
             let active = &self.backends[network_id];
-            let prefix = match active.backend.current_prefix() {
+            let prefix = match active.network.current_prefix() {
                 Ok(Some(p)) if p.len == 64 => p,
                 Ok(_) => continue,
                 Err(e) => {
@@ -888,7 +1032,9 @@ impl Engine {
                     continue;
                 }
             };
-            let iface = active.config.backend.interface();
+            let Some(iface) = active.config.backend.interface() else {
+                continue;
+            };
             for a in addresses.iter().filter(|a| a.network_id == *network_id) {
                 let Some(old) = a.locator.ipv6() else {
                     continue;
@@ -1354,6 +1500,7 @@ impl Engine {
             .ok_or_else(|| EngineError::NotFound(format!("app {id}")))?;
         self.remove_from_interface(self.interface_addrs(&app.addresses))
             .await;
+        self.remove_app_locators(&app.addresses).await;
         state.db.delete_app(id).await?;
         self.apply_firewall(state).await?;
         self.record(
@@ -1368,6 +1515,18 @@ impl Engine {
         self.emit(state, DaemonEvent::AppsChanged);
         self.emit(state, DaemonEvent::GrantsChanged);
         Ok(())
+    }
+
+    async fn remove_app_locators(&self, addresses: &[Address]) {
+        let networks: BTreeSet<&str> = addresses.iter().map(|a| a.network_id.as_str()).collect();
+        for nid in networks {
+            let of_network: Vec<Address> = addresses
+                .iter()
+                .filter(|a| a.network_id == nid)
+                .cloned()
+                .collect();
+            self.remove_locators(nid, &of_network).await;
+        }
     }
 
     fn interface_addrs(&self, addresses: &[Address]) -> Vec<(String, Ipv6Addr)> {
@@ -1423,21 +1582,29 @@ impl Engine {
                 }
             }
         }
-        let alloc = active
-            .backend
-            .allocate(None)
+        if port.proto == Protocol::Udp && !active.network.capabilities().udp {
+            return Err(EngineError::Invalid(format!(
+                "network {network_id} does not serve UDP ports"
+            )));
+        }
+        let address_id = new_id();
+        let ports = PortSet::Only(vec![port]);
+        let NewLocator { locator, secret } = self
+            .make_locator(active, app_id, &address_id, &ports)
+            .await
             .map_err(|e| EngineError::Conflict(format!("cannot allocate an address: {e}")))?;
         let address = Address {
-            id: new_id(),
+            id: address_id,
             app_id: app_id.to_string(),
             network_id: network_id.to_string(),
-            ports: PortSet::Only(vec![port]),
-            locator: Locator::Ipv6 {
-                addr: alloc.address,
-            },
+            ports,
+            locator,
             created_at: Utc::now(),
         };
-        state.db.insert_address(&address).await?;
+        state
+            .db
+            .insert_address_with_secret(&address, secret.as_deref())
+            .await?;
         if let Some((a, rest)) = shrink {
             state
                 .db
@@ -1500,6 +1667,7 @@ impl Engine {
         // The others' addresses leave the interface before their rules go.
         self.remove_from_interface(self.interface_addrs(&gone))
             .await;
+        self.remove_locators(network_id, &gone).await;
         state.db.update_address_ports(&keep.id, &merged).await?;
         for a in &gone {
             state.db.delete_address(&a.id).await?;
@@ -2047,6 +2215,41 @@ pub async fn disable_all(
         firewall.disable()
     })
     .await?
+}
+
+/// Take everything of ours off the networks that are not IP networks (the onion services
+/// leave Tor), for the `disable` latch. A network that cannot be reached is logged; its
+/// services stay until it is back and the latch is still set (enforcement is suspended).
+pub async fn disable_networks(db: &Database, networks: Vec<(String, Arc<dyn networks::Network>)>) {
+    let addresses = match db.list_addresses().await {
+        Ok(a) => a,
+        Err(e) => {
+            warn!("Could not list addresses to disable: {e}");
+            return;
+        }
+    };
+    for (id, net) in networks {
+        if net.capabilities().ip_locators {
+            continue;
+        }
+        let mine: Vec<Address> = addresses
+            .iter()
+            .filter(|a| a.network_id == id)
+            .cloned()
+            .collect();
+        match tokio::task::spawn_blocking(move || net.disable(&mine)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!("Could not disable network '{id}': {e}"),
+            Err(e) => warn!("Disable task failed: {e}"),
+        }
+    }
+}
+
+fn locator_text(l: &Locator) -> String {
+    match l {
+        Locator::Ipv6 { addr } => addr.to_string(),
+        Locator::Onion { hostname } => hostname.clone(),
+    }
 }
 
 /// Run the reconciliation loop with shutdown support.

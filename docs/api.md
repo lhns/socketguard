@@ -95,6 +95,42 @@ creates return 201 with the new object, deletes 204 with no body. Every error ha
 | POST | `/api/disable` | `DisableRequest` | 204 | needs `"confirm": true`. Sets the persisted `disabled` latch, then removes all rules and addresses. While it is set the daemon (also after a restart) applies no rules and adds no addresses, but keeps tracking apps. `socketguard-daemon --disable` sets it too |
 | POST | `/api/enable` | | 204 | clears the latch and re-applies rules and addresses |
 
+## Credentials and networks
+
+Credential `kind`s and the values they accept (the daemon normalizes them and rejects the rest):
+
+| Kind | Value | Stored as |
+|---|---|---|
+| `ygg_key` | 64 hex characters | lowercase |
+| `ygg_addr` | one address in `200::/7` | the address |
+| `ygg_subnet` | a /64 in `300::/8` | `net/64` |
+| `ip` | IPv6 address or CIDR (IPv4 is rejected); a value in `200::/7` becomes `ygg_addr` or `ygg_subnet` | `net/len` |
+| `ip_suffix` | an interface ID such as `::a:b:c:d`, optionally `/64` | the address |
+| `tor_client_key` | an x25519 public key in base32: 52 characters, case-insensitive, or the full `descriptor:x25519:<base32>` line of an `authorized_clients` file | the bare key, uppercase |
+| `wg_key`, `tls_spki` | base64 | as given; not enforced yet |
+
+A `tor_client_key` is `verified` on a Tor network and `not_reachable` on every other network; a
+grant to Anyone is `open` everywhere.
+
+A network is a backend instance (`POST /api/networks`, `{"id"?, "type": ..., ...}`):
+
+| `type` | Fields | Notes |
+|---|---|---|
+| `ula` | `interface` (default loopback) | Local; singleton |
+| `slaac`, `dhcpv6` | `interface`, `prefix?` | LAN |
+| `yggdrasil` | `interface`, `admin_endpoint?` | singleton |
+| `tor` | `control` (`host:port` or `unix:/path`, default `127.0.0.1:9051`), `auth` | singleton; no interface. `auth` is `"cookie"` (default; the cookie file named by PROTOCOLINFO), `"none"` or `{"password": "..."}` |
+
+On a Tor network each address is one onion service, and its locator is
+`{"kind": "onion", "hostname": "<id>.onion"}`. The service key is created with the address and
+kept (in the daemon's database), so the name never changes. An address is **not published** until
+a grant applies: a grant to Anyone publishes it openly; grants to peers publish it for their
+`tor_client_key`s only (Tor client authorization). Tor authorizes per service, not per port, so the
+published ports are the TCP ports covered by grants, and a key granted fewer of them than that is
+left out until the port gets its own address (`split`). UDP is not served over Tor. A Tor control
+port that cannot be reached shows as the network's `status` `down`; nothing is published or
+removed until it is back.
+
 ## Errors
 
 Every non-2xx response is JSON, `ApiError`:

@@ -2,7 +2,7 @@
 //! credentials. Pure functions, unit tested.
 
 use anyhow::{anyhow, bail, Result};
-use socketguard_core::{CredentialKind, NewCredential, PortRef, Protocol};
+use socketguard_core::{normalize_credential, CredentialKind, NewCredential, PortRef, Protocol};
 
 /// `80`, `80/tcp`, `53/udp`; the protocol defaults to tcp.
 pub fn parse_port(s: &str) -> Result<PortRef> {
@@ -60,12 +60,15 @@ fn kinds() -> String {
 }
 
 /// A bare credential value: 64 hex characters are a Yggdrasil key, an IP address or CIDR
-/// is `ip` (the daemon turns values in 200::/7 into `ygg_addr` or `ygg_subnet`).
+/// is `ip` (the daemon turns values in 200::/7 into `ygg_addr` or `ygg_subnet`), 52
+/// base32 characters or a `descriptor:x25519:` line are a Tor client key.
 pub fn guess_credential(value: &str) -> Result<NewCredential> {
     let kind = if is_hex64(value) {
         CredentialKind::YggKey
     } else if looks_like_ip(value) {
         CredentialKind::Ip
+    } else if normalize_credential(CredentialKind::TorClientKey, value).is_ok() {
+        CredentialKind::TorClientKey
     } else {
         bail!(
             "cannot tell what {value:?} is; use --key, --addr, --subnet, --suffix or \
@@ -149,6 +152,18 @@ mod tests {
         assert_eq!(guess_credential(key).unwrap().kind, CredentialKind::YggKey);
         for ip in ["2001:db8::1", "2001:db8::/64", "10.0.0.1"] {
             assert_eq!(guess_credential(ip).unwrap().kind, CredentialKind::Ip);
+        }
+        let tor = "ZGBMJ4VIRNVUOQ5SJ2JXPSSWHB2R4YGTKPDGSMZ4HWCD5WLT2YKQ";
+        for v in [
+            tor.to_string(),
+            tor.to_lowercase(),
+            format!("descriptor:x25519:{tor}"),
+        ] {
+            assert_eq!(
+                guess_credential(&v).unwrap().kind,
+                CredentialKind::TorClientKey,
+                "{v}"
+            );
         }
         let err = guess_credential("hello").unwrap_err().to_string();
         assert!(err.contains("--cred kind=value"), "{err}");

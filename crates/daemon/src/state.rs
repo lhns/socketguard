@@ -1,6 +1,12 @@
-//! SQLite persistence, schema v1 (ADR 0027): apps, ports, addresses, peers, credentials,
-//! groups, grants, settings and activity. Versioned with `PRAGMA user_version`; a database
-//! from before the redesign is renamed out of the way, never migrated.
+//! SQLite persistence, schema v2 (ADR 0027, 0037): apps, ports, addresses, peers, credentials,
+//! groups, grants, settings, activity and onion service keys. Versioned with
+//! `PRAGMA user_version`; a database from before the redesign is renamed out of the way,
+//! never migrated.
+//!
+//! The database holds private keys (`onion_keys`), so it is protected at rest: on Unix the
+//! file (and its -wal/-shm) is mode 0600. On Windows the daemon runs as a service and the
+//! file lives where only that account and Administrators have access (the install puts it
+//! under `%ProgramData%\SocketGuard` with that ACL); the daemon does not change ACLs.
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
@@ -16,7 +22,15 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tracing::{info, warn};
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
+
+/// Schema v1 -> v2: the service keys of onion addresses (ADR 0037).
+const MIGRATION_1_TO_2: &str = r#"
+CREATE TABLE onion_keys (
+    address_id TEXT PRIMARY KEY REFERENCES addresses(id) ON DELETE CASCADE,
+    private_key TEXT NOT NULL
+);
+"#;
 
 /// Settings keys.
 pub const PROTECT_HOST_KEY: &str = "protect_host_interfaces";
@@ -115,7 +129,28 @@ CREATE INDEX activity_at ON activity(at);
 
 pub struct Database {
     pool: SqlitePool,
+    /// The file, for protecting it after the schema (and -wal/-shm) exist.
+    path: Option<String>,
 }
+
+/// Restrict the database file and its WAL companions to the owner (Unix). Failures are
+/// logged: a daemon that cannot chmod its own database should still run.
+#[cfg(unix)]
+fn protect_files(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    for suffix in ["", "-wal", "-shm"] {
+        let file = with_suffix(path, suffix);
+        if !file.exists() {
+            continue;
+        }
+        if let Err(e) = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)) {
+            warn!("Could not restrict {} to its owner: {e}", file.display());
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn protect_files(_path: &Path) {}
 
 fn ts(dt: DateTime<Utc>) -> String {
     // Fixed width, so text comparison orders like time.
@@ -207,7 +242,13 @@ impl Database {
             .max_connections(5)
             .connect_with(options)
             .await?;
-        Ok(Self { pool })
+        if path != ":memory:" {
+            protect_files(Path::new(path));
+        }
+        Ok(Self {
+            pool,
+            path: (path != ":memory:").then(|| path.to_string()),
+        })
     }
 
     /// Create the schema on a fresh database; refuse one from a newer daemon.
@@ -216,20 +257,34 @@ impl Database {
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&mut *tx)
             .await?;
-        match version {
-            0 => {
-                sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
-                sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
-                    .execute(&mut *tx)
-                    .await?;
-                info!("Created database schema v{SCHEMA_VERSION}");
-            }
-            SCHEMA_VERSION => {}
-            v => {
-                bail!("database schema v{v} is newer than this daemon supports (v{SCHEMA_VERSION})")
+        if version > SCHEMA_VERSION {
+            bail!(
+                "database schema v{version} is newer than this daemon supports (v{SCHEMA_VERSION})"
+            );
+        }
+        let mut current = version;
+        if current == 0 {
+            sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
+            current = 1;
+        }
+        if current == 1 {
+            sqlx::raw_sql(MIGRATION_1_TO_2).execute(&mut *tx).await?;
+            current = 2;
+        }
+        if current != version {
+            sqlx::query(&format!("PRAGMA user_version = {current}"))
+                .execute(&mut *tx)
+                .await?;
+            if version == 0 {
+                info!("Created database schema v{current}");
+            } else {
+                info!("Migrated database schema v{version} to v{current}");
             }
         }
         tx.commit().await?;
+        if let Some(path) = self.path.as_deref() {
+            protect_files(Path::new(path));
+        }
         Ok(())
     }
 
@@ -516,6 +571,54 @@ impl Database {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Insert an address together with its locator secret (the onion service key) in one
+    /// transaction, so a stored address never lacks its key.
+    pub async fn insert_address_with_secret(
+        &self,
+        a: &Address,
+        secret: Option<&str>,
+    ) -> Result<()> {
+        let Some(secret) = secret else {
+            return self.insert_address(a).await;
+        };
+        let mut tx = self.pool.begin().await?;
+        let (kind, locator) = match &a.locator {
+            Locator::Ipv6 { addr } => ("ipv6", addr.to_string()),
+            Locator::Onion { hostname } => ("onion", hostname.clone()),
+        };
+        sqlx::query(
+            "INSERT INTO addresses (id, app_id, network_id, ports, locator_kind, locator, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&a.id)
+        .bind(&a.app_id)
+        .bind(&a.network_id)
+        .bind(encode_ports(&a.ports)?)
+        .bind(kind)
+        .bind(locator)
+        .bind(ts(a.created_at))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("INSERT INTO onion_keys (address_id, private_key) VALUES (?, ?)")
+            .bind(&a.id)
+            .bind(secret)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// The onion service keys by address id.
+    pub async fn onion_keys(&self) -> Result<HashMap<String, String>> {
+        Ok(
+            sqlx::query_as::<_, (String, String)>("SELECT address_id, private_key FROM onion_keys")
+                .fetch_all(&self.pool)
+                .await?
+                .into_iter()
+                .collect(),
+        )
     }
 
     pub async fn get_address(&self, id: &str) -> Result<Option<Address>> {
@@ -1250,6 +1353,7 @@ mod tests {
                 "app_ports",
                 "apps",
                 "grants",
+                "onion_keys",
                 "peer_credentials",
                 "peer_group_members",
                 "peer_groups",
@@ -1502,6 +1606,95 @@ mod tests {
         assert_eq!(db.list_grants().await.unwrap().len(), 1);
         assert_eq!(count(&db, "peer_group_members").await, 0);
         assert!(db.get_peer(&p.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn v1_database_migrates_to_v2() {
+        let path = temp_db_path("v1-to-v2");
+        {
+            let opts = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true);
+            let mut c = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::raw_sql(SCHEMA).execute(&mut c).await.unwrap();
+            sqlx::query("PRAGMA user_version = 1")
+                .execute(&mut c)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO settings (key, value) VALUES ('k', 'kept')")
+                .execute(&mut c)
+                .await
+                .unwrap();
+        }
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        let v: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(v, 2);
+        assert_eq!(count(&db, "onion_keys").await, 0);
+        assert_eq!(db.get_setting("k").await.unwrap().as_deref(), Some("kept"));
+        db.migrate().await.expect("idempotent");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn onion_keys_follow_their_address() {
+        let db = db().await;
+        db.insert_app(&app("a1")).await.unwrap();
+        let mut a = address("a1", "tor", "fd00::1");
+        a.locator = Locator::Onion {
+            hostname: "abc.onion".into(),
+        };
+        db.insert_address_with_secret(&a, Some("ED25519-V3:k"))
+            .await
+            .unwrap();
+        assert_eq!(db.onion_keys().await.unwrap()[&a.id], "ED25519-V3:k");
+        assert_eq!(
+            db.get_address(&a.id).await.unwrap().unwrap().locator,
+            a.locator
+        );
+        // The key is stored with the address or not at all.
+        let mut b = address("a1", "tor", "fd00::2");
+        b.id = a.id.clone();
+        assert!(db.insert_address_with_secret(&b, Some("x")).await.is_err());
+        assert_eq!(count(&db, "onion_keys").await, 1);
+        // Gone with the address.
+        db.delete_address(&a.id).await.unwrap();
+        assert_eq!(count(&db, "onion_keys").await, 0);
+        // And with the app.
+        let mut c = address("a1", "tor", "fd00::3");
+        c.locator = Locator::Onion {
+            hostname: "def.onion".into(),
+        };
+        db.insert_address_with_secret(&c, Some("ED25519-V3:k2"))
+            .await
+            .unwrap();
+        db.delete_app("a1").await.unwrap();
+        assert_eq!(count(&db, "onion_keys").await, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn database_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp_db_path("perms");
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        db.set_setting("k", "v").await.unwrap();
+        db.migrate().await.unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            let f = with_suffix(&path, suffix);
+            if let Ok(m) = std::fs::metadata(&f) {
+                assert_eq!(m.permissions().mode() & 0o777, 0o600, "{}", f.display());
+            }
+        }
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(with_suffix(&path, suffix));
+        }
     }
 
     #[tokio::test]

@@ -66,6 +66,7 @@ pub fn create_backend(
             prefix.as_deref(),
         )?)),
         BackendConfig::Dhcpv6 { interface } => Ok(Box::new(dhcpv6::Dhcpv6Backend::new(interface)?)),
+        BackendConfig::Tor { .. } => anyhow::bail!("Tor is not an IPv6 backend"),
     }
 }
 

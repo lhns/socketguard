@@ -2,10 +2,16 @@ import { toDaemonError, type CredentialKind, type PeerGroup, type Peer, type Sub
 
 export const errorText = (e: unknown): string => toDaemonError(e).message;
 
-/** 64 hex characters are a Yggdrasil key; anything else is sent as an IP or CIDR. The
- * daemon validates and reclassifies (a 200::/7 address becomes `ygg_addr`). */
+/** 64 hex characters are a Yggdrasil key; 52 base32 characters (or a
+ * `descriptor:x25519:` line) are a Tor client key; anything else is sent as an IP or
+ * CIDR. The daemon validates and reclassifies (a 200::/7 address becomes `ygg_addr`). */
 export function guessCredentialKind(value: string): CredentialKind {
-  return /^[0-9a-fA-F]{64}$/.test(value.trim()) ? "ygg_key" : "ip";
+  const v = value.trim();
+  if (/^[0-9a-fA-F]{64}$/.test(v)) return "ygg_key";
+  if (/^([a-z0-9]+:){0,2}[A-Za-z2-7]{52}$/.test(v) && (!v.includes(":") || /^descriptor:x25519:/i.test(v))) {
+    return "tor_client_key";
+  }
+  return "ip";
 }
 
 export function subjectLabel(s: Subject, peers: Peer[] = [], groups: PeerGroup[] = []): string {

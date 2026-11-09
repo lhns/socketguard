@@ -56,7 +56,7 @@ export const CREDENTIAL_INFO: Record<CredentialKind, BadgeInfo & { name: string 
   ip: { name: "IP", label: "IP only", tip: "Matched by source address only; it can be faked on a shared network.", cls: "warn" },
   ip_suffix: { name: "IP suffix", label: "IP only", tip: "Matched by source address within the network prefix; it can be faked.", cls: "warn" },
   wg_key: { name: "WireGuard key", label: "stored, not enforced yet", tip: "Kept for later; no network enforces it yet.", cls: "muted" },
-  tor_client_key: { name: "Tor client key", label: "stored, not enforced yet", tip: "Kept for later; no network enforces it yet.", cls: "muted" },
+  tor_client_key: { name: "Tor client key", label: "verified by key", tip: "On a Tor network, only a client holding the matching key can reach the onion service.", cls: "ok" },
   tls_spki: { name: "TLS key", label: "stored, not enforced yet", tip: "Kept for later; no network enforces it yet.", cls: "muted" },
 };
 

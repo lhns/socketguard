@@ -344,6 +344,57 @@ fn share_connection_strings() {
 }
 
 #[test]
+fn share_onion_addresses() {
+    let mut app = nginx();
+    app.ports.push(AppPort {
+        port: 8080,
+        proto: Protocol::Tcp,
+        listening: true,
+        last_seen: t("2026-11-09T12:30:00Z"),
+    });
+    app.ports.push(AppPort {
+        port: 22,
+        proto: Protocol::Tcp,
+        listening: true,
+        last_seen: t("2026-11-09T12:30:00Z"),
+    });
+    let mut onion = address("d4e5f6a1b2c3", "tor", "::1", PortSet::All);
+    onion.locator = Locator::Onion {
+        hostname: "abcdefghijklmnop.onion".into(),
+    };
+    app.addresses = vec![onion];
+    assert_eq!(
+        render::share_lines(&app, Some("tor")),
+        [
+            "abcdefghijklmnop.onion:22",
+            "http://abcdefghijklmnop.onion",
+            "https://abcdefghijklmnop.onion",
+            "http://abcdefghijklmnop.onion:8080",
+        ]
+    );
+}
+
+#[test]
+fn tor_network_config_from_flags() {
+    use socketguard_core::config::{BackendConfig, TorAuth};
+    assert_eq!(
+        socketguard_cli::commands::tor_config(None, None).unwrap(),
+        BackendConfig::Tor {
+            control: "127.0.0.1:9051".into(),
+            auth: TorAuth::Cookie
+        }
+    );
+    assert_eq!(
+        socketguard_cli::commands::tor_config(Some("unix:/run/tor/c".into()), Some("pw".into()))
+            .unwrap(),
+        BackendConfig::Tor {
+            control: "unix:/run/tor/c".into(),
+            auth: TorAuth::Password("pw".into())
+        }
+    );
+}
+
+#[test]
 fn diff_and_risks() {
     let r = ApplyResponse {
         dry_run: true,

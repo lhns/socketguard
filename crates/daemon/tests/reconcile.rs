@@ -112,10 +112,7 @@ impl Harness {
             mocks.insert(n.id, n.mock.clone());
             backends.insert(
                 n.id.to_string(),
-                ActiveBackend {
-                    config: cfg.clone(),
-                    backend: Box::new(n.mock),
-                },
+                ActiveBackend::ip(cfg.clone(), Box::new(n.mock)),
             );
             configs.push(cfg);
         }

@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
             "Backend '{}': {} on interface {}",
             inst.id,
             inst.backend.backend_type(),
-            inst.backend.interface()
+            inst.backend.interface().unwrap_or("-")
         );
     }
 
@@ -124,7 +124,7 @@ async fn disable(config: &DaemonConfig) -> Result<()> {
     let interfaces = config
         .backends
         .iter()
-        .map(|b| (b.id.clone(), b.backend.interface().to_string()))
+        .filter_map(|b| Some((b.id.clone(), b.backend.interface()?.to_string())))
         .collect();
     engine::disable_all(
         &db,
@@ -133,7 +133,15 @@ async fn disable(config: &DaemonConfig) -> Result<()> {
         Arc::from(network::create_network_interface()),
     )
     .await?;
-    eprintln!("[socketguard] Firewall rules and addresses removed");
+    let mut nets = Vec::new();
+    for b in &config.backends {
+        // Networks without an interface (Tor) hold services outside the firewall.
+        if b.backend.interface().is_none() {
+            nets.push((b.id.clone(), networks::create(&b.backend, [0; 5])?));
+        }
+    }
+    engine::disable_networks(&db, nets).await;
+    eprintln!("[socketguard] Firewall rules, addresses and onion services removed");
     Ok(())
 }
 

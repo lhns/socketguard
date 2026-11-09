@@ -7,6 +7,7 @@ pub mod firewall;
 pub mod metrics;
 pub mod monitor;
 pub mod network;
+pub mod networks;
 pub mod ruleset;
 pub mod state;
 pub mod telemetry;
