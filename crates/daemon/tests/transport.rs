@@ -198,16 +198,56 @@ mod windows {
         r.stop().await;
     }
 
-    /// The production ACL shape with a group: BUILTIN\Users stands in for `SocketGuard
-    /// Users` (the test user is in it), so a member gets read/write through the group entry.
+    /// The SID of the user running the test.
+    fn my_sid() -> String {
+        let out = std::process::Command::new("whoami")
+            .args(["/user", "/fo", "csv", "/nh"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.trim().rsplit('"').nth(1).unwrap().to_string()
+    }
+
+    /// The production ACL shape with a group (BUILTIN Users stands in for `SocketGuard
+    /// Users`), with the server account added: in production the daemon is SYSTEM, which
+    /// may create the next pipe instance, but here the server is the test user, who
+    /// would otherwise only be a group member and could not (see the next test).
     #[tokio::test]
-    async fn a_group_member_gets_through_the_acl() {
+    async fn the_client_works_against_the_production_acl_shape() {
         let name = pipe_name();
-        let sddl = transport::pipe_sddl(Some("S-1-5-32-545"));
+        let sddl = format!(
+            "{}(A;;GA;;;{})",
+            transport::pipe_sddl(Some("S-1-5-32-545")),
+            my_sid()
+        );
         let server = transport::bind_pipe(&name, &sddl).unwrap();
         let r = Running::start(server, name).await;
         assert_eq!(r.client.status().await.unwrap().counts.apps, 1);
         r.stop().await;
+    }
+
+    /// A second server on a name that is taken fails (FILE_FLAG_FIRST_PIPE_INSTANCE), so a
+    /// squatter cannot be stood in for the daemon, nor the daemon for a squatter.
+    #[tokio::test]
+    async fn a_second_server_cannot_take_the_pipe_name() {
+        let name = pipe_name();
+        let _first = transport::bind_pipe(&name, "D:(A;;GA;;;WD)").unwrap();
+        assert!(transport::bind_pipe(&name, "D:(A;;GA;;;WD)").is_err());
+    }
+
+    /// With only the group entry in the ACL, even a member cannot add a server instance
+    /// to the daemon's pipe.
+    #[tokio::test]
+    async fn a_group_member_cannot_create_a_pipe_instance() {
+        use tokio::net::windows::named_pipe::ServerOptions;
+        let name = pipe_name();
+        let sddl = transport::pipe_sddl(Some("S-1-5-32-545"));
+        let _server = transport::bind_pipe(&name, &sddl).unwrap();
+        let rogue = ServerOptions::new()
+            .first_pipe_instance(false)
+            .create(&name);
+        let err = rogue.expect_err("a rogue instance must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
     }
 
     #[tokio::test]

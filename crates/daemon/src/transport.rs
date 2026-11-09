@@ -297,20 +297,29 @@ mod platform {
         SDDL_REVISION_1,
     };
     use windows::Win32::Security::{
-        LookupAccountNameW, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SID_NAME_USE,
+        LookupAccountNameW, SidTypeAlias, SidTypeGroup, PSECURITY_DESCRIPTOR, PSID,
+        SECURITY_ATTRIBUTES, SID_NAME_USE,
     };
 
+    /// What the group may do on the pipe: FILE_GENERIC_READ (0x120089, with SYNCHRONIZE)
+    /// plus FILE_WRITE_DATA (0x2). Not GENERIC_WRITE: that includes FILE_APPEND_DATA
+    /// (0x4), the same bit as FILE_CREATE_PIPE_INSTANCE, which would let a member create
+    /// a rogue server instance and capture other users' requests.
+    pub const GROUP_PIPE_MASK: u32 = 0x0012_0089 | 0x2;
+
     /// SYSTEM and Administrators get full access, the group (when it exists) read and
-    /// write. The DACL is protected, so nothing is inherited.
+    /// write data. The DACL is protected, so nothing is inherited.
     pub fn pipe_sddl(group_sid: Option<&str>) -> String {
         let mut s = String::from("D:P(A;;GA;;;SY)(A;;GA;;;BA)");
         if let Some(sid) = group_sid {
-            s.push_str(&format!("(A;;GRGW;;;{sid})"));
+            s.push_str(&format!("(A;;0x{GROUP_PIPE_MASK:X};;;{sid})"));
         }
         s
     }
 
-    /// The SID of the local group `name` as a string, if it exists.
+    /// The SID of the local group `name` as a string, if it exists and is a group (a
+    /// user or other account of that name is ignored with a warning: it would hand the
+    /// pipe to one account).
     pub fn group_sid(name: &str) -> Option<String> {
         let name = HSTRING::from(name);
         let mut sid_len = 0u32;
@@ -345,6 +354,13 @@ mod platform {
                 &mut use_,
             )
             .ok()?;
+            if use_ != SidTypeAlias && use_ != SidTypeGroup {
+                warn!(
+                    "{name} is not a group (account type {}); ignoring it for the API pipe",
+                    use_.0
+                );
+                return None;
+            }
             let mut out = PWSTR::null();
             ConvertSidToStringSidW(PSID(sid.as_mut_ptr().cast()), &mut out).ok()?;
             let s = out.to_string().ok();
@@ -499,13 +515,74 @@ mod tests {
         assert_eq!(platform::pipe_sddl(None), "D:P(A;;GA;;;SY)(A;;GA;;;BA)");
         assert_eq!(
             platform::pipe_sddl(Some("S-1-5-21-1")),
-            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;S-1-5-21-1)"
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12008B;;;S-1-5-21-1)"
         );
     }
 
+    /// GENERIC_WRITE would carry FILE_APPEND_DATA (0x4) = FILE_CREATE_PIPE_INSTANCE.
     #[test]
-    fn account_names_resolve_to_sids() {
-        assert_eq!(platform::group_sid("SYSTEM").as_deref(), Some("S-1-5-18"));
+    fn the_group_cannot_create_pipe_instances() {
+        let mask = platform::GROUP_PIPE_MASK;
+        assert_eq!(mask & 0x4, 0, "FILE_CREATE_PIPE_INSTANCE");
+        assert_ne!(mask & 0x0010_0000, 0, "SYNCHRONIZE");
+        assert_ne!(mask & 0x1, 0, "FILE_READ_DATA");
+        assert_ne!(mask & 0x2, 0, "FILE_WRITE_DATA");
+        let sddl = platform::pipe_sddl(Some("S-1-5-21-1"));
+        assert!(
+            !sddl.contains("GW") && !sddl.contains("GA;;;S-1-5-21"),
+            "{sddl}"
+        );
+    }
+
+    /// The (localized) name of the BUILTIN Users group.
+    fn users_group_name() -> String {
+        use windows::core::{w, PWSTR};
+        use windows::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows::Win32::Security::{LookupAccountSidW, PSID, SID_NAME_USE};
+        let mut sid = PSID::default();
+        let (mut name_len, mut domain_len) = (0u32, 0u32);
+        let mut use_ = SID_NAME_USE::default();
+        // SAFETY: buffers are sized by the first call; the SID lives for the whole function.
+        unsafe {
+            ConvertStringSidToSidW(w!("S-1-5-32-545"), &mut sid).unwrap();
+            let _ = LookupAccountSidW(
+                None,
+                sid,
+                None,
+                &mut name_len,
+                None,
+                &mut domain_len,
+                &mut use_,
+            );
+            let mut name = vec![0u16; name_len as usize];
+            let mut domain = vec![0u16; domain_len as usize];
+            LookupAccountSidW(
+                None,
+                sid,
+                Some(PWSTR(name.as_mut_ptr())),
+                &mut name_len,
+                Some(PWSTR(domain.as_mut_ptr())),
+                &mut domain_len,
+                &mut use_,
+            )
+            .unwrap();
+            String::from_utf16_lossy(&name[..name_len as usize])
+        }
+    }
+
+    #[test]
+    fn groups_resolve_to_sids_but_other_accounts_do_not() {
+        // BUILTIN Users is an alias (its name is localized); SYSTEM is a well-known
+        // account, not a group.
+        let users = users_group_name();
+        assert_eq!(
+            platform::group_sid(&users).as_deref(),
+            Some("S-1-5-32-545"),
+            "{users}"
+        );
+        assert_eq!(platform::group_sid("SYSTEM"), None);
+        let me = std::env::var("USERNAME").unwrap();
+        assert_eq!(platform::group_sid(&me), None, "a user is not a group");
     }
 
     #[test]
