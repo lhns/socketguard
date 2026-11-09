@@ -1,0 +1,8 @@
+---
+source: crates/cli/tests/render.rs
+expression: "render::networks(&networks())"
+---
+ID     KIND       INTERFACE  STATUS           NOTE
+local  local      lo         up               this machine only, grants do not apply
+ygg    yggdrasil  ygg0       up
+lan    lan        eth0       down: no prefix

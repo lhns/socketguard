@@ -3,8 +3,30 @@ name = "socketguard-cli"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "socketguard_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "socketguard"
+path = "src/main.rs"
+
 [dependencies]
+socketguard-core = { workspace = true }
 socketguard-client = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+comfy-table = "7"
+toml = "0.8"
 tokio = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+futures-util = "0.3"
+
+[dev-dependencies]
+socketguard-daemon = { path = "../daemon" }
+assert_cmd = "2"
+insta = { workspace = true }
+uuid = { workspace = true }

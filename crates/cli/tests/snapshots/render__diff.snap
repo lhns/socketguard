@@ -1,0 +1,9 @@
+---
+source: crates/cli/tests/render.rs
+expression: "render::changes(&r)"
+---
++ peer carol (1 credentials)
+~ setting address_mode
++ grant nginx 80/tcp on ygg to Anyone  [opens to anyone]
+
+3 change(s) (dry run)

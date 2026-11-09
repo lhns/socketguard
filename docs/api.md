@@ -59,7 +59,7 @@ creates return 201 with the new object, deletes 204 with no body. Every error ha
 
 | Method | Path | Request | Response | Notes |
 |---|---|---|---|---|
-| GET | `/api/status` | | `StatusResponse` | version, networks, protect-host interfaces, counts |
+| GET | `/api/status` | | `StatusResponse` | version, networks, protect-host interfaces, `disabled`, counts |
 | GET | `/api/events` | | SSE stream | [events](#events) |
 | GET | `/api/apps` | query `pending=true` (optional) | `App[]` | `pending=true`: only apps without a decision |
 | GET | `/api/apps/{id}` | | `AppDetail` | app with addresses, ports, grants (with reach) and counters |
@@ -84,15 +84,16 @@ creates return 201 with the new object, deletes 204 with no body. Every error ha
 | POST | `/api/grants` | `NewGrant` | `GrantView` (201) | Anyone needs `"confirm_open": true` |
 | DELETE | `/api/grants/{id}` | | 204 | |
 | GET | `/api/networks` | | `Network[]` | |
-| POST | `/api/networks` | `NewNetwork` | `Network` (201) | a backend instance: `{"id"?, "type": "slaac", "interface": "eth0", ...}`; held in the running daemon's config, not written to the config file |
-| DELETE | `/api/networks/{id}` | | 204 | its addresses leave the interfaces first |
+| POST | `/api/networks` | `NewNetwork` | `Network` (201) | a backend instance: `{"id"?, "type": "slaac", "interface": "eth0", ...}`; also written to the `backends` key of the config file (`SOCKETGUARD_CONFIG` or the default; created if missing), so it survives a restart |
+| DELETE | `/api/networks/{id}` | | 204 | its addresses leave the interfaces first; removed from the config file as well |
 | GET | `/api/settings` | | `Settings` | |
 | PUT | `/api/settings` | `UpdateSettings` | `Settings` | absent fields stay as they are |
 | PUT | `/api/settings/protect-host` | `ProtectHostRequest` | `ProtectHostResponse` | an empty list turns it off; refused with 409 `protect_host_refused` unless `force` |
 | GET | `/api/activity` | query `since`, `kind`, `app`, `peer`, `limit`, `before` | `ActivityRecord[]` | newest first; `since` is RFC 3339; `before` is a record id, for paging |
 | GET | `/api/export` | | `ExportDocument` | [export and apply](#export-and-apply) |
 | POST | `/api/apply` | `ApplyRequest` | `ApplyResponse` | |
-| POST | `/api/disable` | `DisableRequest` | 204 | needs `"confirm": true`. Removes all rules and addresses **now**; the running daemon puts them back on its next pass, so stop it first (or use `socketguard-daemon --disable`) |
+| POST | `/api/disable` | `DisableRequest` | 204 | needs `"confirm": true`. Sets the persisted `disabled` latch, then removes all rules and addresses. While it is set the daemon (also after a restart) applies no rules and adds no addresses, but keeps tracking apps. `socketguard-daemon --disable` sets it too |
+| POST | `/api/enable` | | 204 | clears the latch and re-applies rules and addresses |
 
 ## Errors
 
@@ -182,8 +183,9 @@ hook set with `Client::with_header_hook`.
 `socketguard-client` has one method per route (`Client::status`, `list_apps`, `create_grant`,
 `events`, ...), returning the core types, and a typed `Error` (`Connect`, `Api { status, code,
 message, details }`, `Protocol`). The daemon's test `tests/coverage.rs` compares the daemon's
-`api::ROUTES` with the client's `CLIENT_ROUTES` and fails when they differ; the CLI joins it
-in phase 7a (ADR 0033).
+`api::ROUTES` with the client's `CLIENT_ROUTES` and fails when they differ; the CLI's own table
+(`CLI_ROUTES`, which lists the client method behind every command) is checked against
+`ROUTES` too (ADR 0033).
 
 ## TypeScript types
 

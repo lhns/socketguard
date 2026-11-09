@@ -59,10 +59,11 @@ pass "build node image"
 docker run --rm -v "$HOST_ROOT":/work -w /work \
   -v sg-cargo-registry:/usr/local/cargo/registry -v sg-target:/work/target \
   -e CARGO_PROFILE_DEV_DEBUG=0 -e CARGO_PROFILE_TEST_DEBUG=0 \
-  rust:1-bookworm cargo build -p socketguard-daemon \
-  || { fail "build daemon"; exit 1; }
-pass "build daemon"
+  rust:1-bookworm cargo build -p socketguard-daemon -p socketguard-cli \
+  || { fail "build daemon and CLI"; exit 1; }
+pass "build daemon and CLI"
 DAEMON=/target/debug/socketguard-daemon
+SG=/target/debug/socketguard
 
 # ── Nodes ────────────────────────────────────────────────────────────────────
 docker network create "$NET" >/dev/null || { fail "create network"; exit 1; }
@@ -104,44 +105,13 @@ docker exec -i "$NODE_A" sh -c 'cat > /etc/sg.json' <<JSON
 }
 JSON
 
-# The CLI is a stub until the API v1 lands, so the test drives the model through the
-# database: `sgdb addr` prints the listener's Yggdrasil address, `sgdb grant KEY` adds a peer
-# with that Yggdrasil key plus a grant to the listener's app, `sgdb revoke` deletes the
-# grants. The daemon picks the change up on its next reconcile pass.
-docker exec -i "$NODE_A" sh -c 'cat > /usr/local/bin/sgdb && chmod +x /usr/local/bin/sgdb' <<PY
-#!/usr/bin/env python3
-import datetime, sqlite3, sys, uuid
-PORT = $PORT
-c = sqlite3.connect("/var/lib/sg.db", timeout=10)
-c.execute("PRAGMA foreign_keys = ON")
-now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-cmd = sys.argv[1]
-if cmd == "addr":
-    row = c.execute(
-        "SELECT a.locator FROM addresses a JOIN app_ports p ON p.app_id = a.app_id "
-        "WHERE p.port = ? AND a.network_id = 'ygg'", (PORT,)).fetchone()
-    if not row:
-        sys.exit(1)
-    print(row[0])
-elif cmd == "grant":
-    app = c.execute("SELECT app_id FROM app_ports WHERE port = ?", (PORT,)).fetchone()[0]
-    peer = str(uuid.uuid4())
-    c.execute("INSERT INTO peers (id, label, created_at) VALUES (?, 'node-b', ?)", (peer, now))
-    c.execute("INSERT INTO peer_credentials (id, peer_id, kind, value) VALUES (?, ?, 'ygg_key', ?)",
-              (str(uuid.uuid4()), peer, sys.argv[2].lower()))
-    c.execute("INSERT INTO grants (id, app_id, subject_kind, subject_id, created_at) "
-              "VALUES (?, ?, 'peer', ?, ?)", (str(uuid.uuid4()), app, peer, now))
-elif cmd == "revoke":
-    c.execute("DELETE FROM grants")
-else:
-    sys.exit(2)
-c.commit()
-PY
 daemon_start
 
 # ── Allocation ───────────────────────────────────────────────────────────────
 # The listener's address, and whether that address is inside A's subnet.
-sock_addr() { A sgdb addr; }
+# The CLI drives the model: find the listener's app, then its address on the ygg network.
+app_id()    { A $SG apps list --json | jq -er --argjson p "$PORT" '[.[] | select(any(.ports[]; .port == $p))][0].id'; }
+sock_addr() { local id; id="$(app_id)" && A $SG apps show "$id" --json | jq -er '[.addresses[] | select(.network_id == "ygg") | .locator.addr][0]'; }
 in_subnet() { A python3 -c 'import ipaddress,sys; sys.exit(0 if ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv[2]) else 1)' "$1" "$2"; }
 on_ygg0()   { A ip -6 -j addr show dev ygg0 | jq -e --arg a "$1" '[.[].addr_info[].local] | index($a)' >/dev/null; }
 
@@ -166,7 +136,10 @@ step "the daemon installed the nftables table" table_exists
 step "closed by default: B cannot fetch the allocated address" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
 step "closed address is still configured on ygg0" on_ygg0 "$ADDR"
 
-step "grant the listener to a peer holding B's Yggdrasil key" A sgdb grant "$B_KEY"
+APP_ID="$(app_id)"
+step "add a peer holding B's Yggdrasil key" A $SG peers add bnode --key "$B_KEY"
+step "grant the listener's port to that peer" A $SG grant "$APP_ID:$PORT" bnode --network ygg
+step "the grant is verified on the overlay" sh -c "docker exec $NODE_A $SG grants --app $APP_ID --json | jq -e '.[0].reach[0].reach == \"verified\"' >/dev/null"
 step "granted: B can fetch from the new address" retry 30 fetch_from_b
 
 # The listener is bound to ::, so it also answers on A's own node address; the overlay
@@ -193,8 +166,22 @@ step "stopped: the node address stays closed" sh -c "! docker exec $NODE_B curl 
 daemon_start
 step "restarted: daemon is up" retry 20 daemon_running
 step "restarted: the grant stays in force" fetch_from_b
-step "revoke the grant" A sgdb revoke
+# `disable` removes everything and keeps it off, also against the running daemon's reconcile.
+step "socketguard disable succeeds" A $SG disable --yes
+step "disabled: the table is gone" sh -c "! docker exec $NODE_A nft list table inet socketguard >/dev/null 2>&1"
+step "disabled: the address left ygg0" sh -c "! docker exec $NODE_A ip -6 -j addr show dev ygg0 | jq -e --arg a '$ADDR' '[.[].addr_info[].local] | index(\$a)' >/dev/null"
+sleep 6
+step "disabled: a reconcile pass did not put the table back" sh -c "! docker exec $NODE_A nft list table inet socketguard >/dev/null 2>&1"
+step "status reports disabled" sh -c "docker exec $NODE_A $SG status --json | jq -e .disabled >/dev/null"
+step "socketguard enable succeeds" A $SG enable
+step "enabled: the table is back" retry 20 table_exists
+step "enabled: the address is back on ygg0" retry 20 on_ygg0 "$ADDR"
+step "enabled: the grant is in force again" retry 30 fetch_from_b
+step "enabled: the node address is closed again" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
+
+step "revoke the grant" A $SG revoke "$APP_ID:$PORT" bnode
 step "revoked: B cannot fetch" retry 30 sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
+step "blocked attempts are listed by 'activity --blocked'" retry 150 sh -c "docker exec $NODE_B curl -s --max-time 2 http://[$ADDR]:$PORT/ >/dev/null; docker exec $NODE_A $SG activity --blocked --json | jq -e 'length > 0' >/dev/null"
 step "stop the daemon again" daemon_stop
 step "stopped: revoked stays closed" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
 step "stopped: the table stays" table_exists
@@ -204,6 +191,13 @@ step "daemon --disable succeeds" A sh -c "SOCKETGUARD_CONFIG=/etc/sg.json $DAEMO
 step "disable removed the table" sh -c "! docker exec $NODE_A nft list table inet socketguard >/dev/null 2>&1"
 step "disable removed the address from ygg0" sh -c "! docker exec $NODE_A ip -6 -j addr show dev ygg0 | jq -e --arg a '$ADDR' '[.[].addr_info[].local] | index(\$a)' >/dev/null"
 step "disabled: the wildcard listener is reachable via the node address" retry 10 fetch_node_addr_from_b
+
+# The latch is persistent: a daemon started afterwards leaves the host open until enabled.
+daemon_start
+step "latch: daemon is up" retry 20 daemon_running
+sleep 6
+step "latch: the restarted daemon did not reinstall the table" sh -c "! docker exec $NODE_A nft list table inet socketguard >/dev/null 2>&1"
+step "latch: enable (CLI, running daemon) restores the table" sh -c "docker exec $NODE_A $SG enable && docker exec $NODE_A nft list table inet socketguard >/dev/null"
 
 echo
 if [ "$failures" -eq 0 ]; then echo "ALL STEPS PASSED"; else echo "$failures STEP(S) FAILED"; exit 1; fi

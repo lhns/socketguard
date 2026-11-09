@@ -416,6 +416,15 @@ impl NetworkInterface for FailingNetworkInterface {
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
 pub async fn test_app_state(engine: crate::engine::Engine, config: DaemonConfig) -> Arc<AppState> {
+    test_app_state_at(engine, config, None).await
+}
+
+/// [`test_app_state`] with a config file path that API-made network changes are saved to.
+pub async fn test_app_state_at(
+    engine: crate::engine::Engine,
+    config: DaemonConfig,
+    config_path: Option<std::path::PathBuf>,
+) -> Arc<AppState> {
     let db = crate::state::Database::new(":memory:").await.unwrap();
     db.migrate().await.unwrap();
 
@@ -423,9 +432,90 @@ pub async fn test_app_state(engine: crate::engine::Engine, config: DaemonConfig)
 
     Arc::new(AppState {
         config: tokio::sync::RwLock::new(config),
+        config_path,
         db,
         engine: tokio::sync::RwLock::new(engine),
         firewall_lock: tokio::sync::Mutex::new(()),
         events: events_tx,
     })
+}
+
+/// An in-memory daemon with three mock networks and a controllable set of sockets.
+pub struct StandardDaemon {
+    pub state: Arc<AppState>,
+    pub sockets: Arc<Mutex<Vec<ListeningSocket>>>,
+    pub fw: Arc<MockFirewall>,
+}
+
+/// Networks `local` (lo, ULA), `lan` (eth0, SLAAC) and `ygg` (ygg0, Yggdrasil), all mocks,
+/// and a monitor that reports `initial` listening sockets. Nothing is reconciled yet.
+pub async fn standard_daemon(
+    initial: Vec<ListeningSocket>,
+    config_path: Option<std::path::PathBuf>,
+) -> StandardDaemon {
+    use crate::engine::{ActiveBackend, Engine};
+    use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
+
+    let fw = Arc::new(MockFirewall::new(Arc::new(Mutex::new(Vec::new()))));
+    let net = MockNetworkInterface::new(Arc::new(Mutex::new(Vec::new())));
+    let monitor = MockSocketMonitor::new(initial);
+    let sockets = monitor.sockets.clone();
+
+    let lan = MockIpv6Backend::new("2001:db8:1:2::", 128, "eth0");
+    lan.set_prefix("2001:db8:1:2::");
+    let ygg = MockIpv6Backend::new("300:1:2:3::", 128, "ygg0");
+    ygg.set_prefix("300:1:2:3::");
+    let mut backends = HashMap::new();
+    let mut configs = Vec::new();
+    for (id, config, mock) in [
+        (
+            "local",
+            BackendConfig::Ula {
+                interface: "lo".into(),
+            },
+            MockIpv6Backend::new("fd00:1:2:3::", 128, "lo"),
+        ),
+        (
+            "lan",
+            BackendConfig::Slaac {
+                interface: "eth0".into(),
+                prefix: None,
+            },
+            lan,
+        ),
+        (
+            "ygg",
+            BackendConfig::Yggdrasil {
+                interface: "ygg0".into(),
+                admin_endpoint: None,
+            },
+            ygg,
+        ),
+    ] {
+        let cfg = BackendInstanceConfig {
+            id: id.to_string(),
+            backend: config,
+        };
+        backends.insert(
+            id.to_string(),
+            ActiveBackend {
+                config: cfg.clone(),
+                backend: Box::new(mock),
+            },
+        );
+        configs.push(cfg);
+    }
+    let ids = configs.iter().map(|c| c.id.clone()).collect();
+    let engine =
+        Engine::new_injectable(Box::new(monitor), fw.clone(), Arc::new(net), backends, ids);
+    let state = test_app_state_at(
+        engine,
+        DaemonConfig {
+            backends: configs,
+            ..DaemonConfig::default()
+        },
+        config_path,
+    )
+    .await;
+    StandardDaemon { state, sockets, fw }
 }

@@ -574,6 +574,64 @@ async fn networks_list_add_and_remove() {
     );
 }
 
+#[tokio::test]
+async fn networks_are_saved_to_the_config_file() {
+    let dir = std::env::temp_dir().join(format!("sg-cfg-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("socketguard.json");
+    let backends = |path: &std::path::Path| -> Vec<String> {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        v["backends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let add = |id: &str, iface: &str, prefix: &str| json!({"id": id, "type": "slaac", "interface": iface, "prefix": prefix});
+
+    // No file yet: the first change creates it, with the daemon's whole config.
+    let d = Daemon::new_at(Some(path.clone())).await;
+    assert!(!path.exists());
+    let (s, _) = d
+        .post("/api/networks", add("lan2", "eth9", "2001:db8:9:9::/64"))
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(backends(&path), ["local", "lan", "ygg", "lan2"]);
+
+    // An existing file keeps its other keys; nothing is left behind.
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    v["poll_interval_secs"] = json!(17);
+    v["something_else"] = json!({"kept": true});
+    std::fs::write(&path, v.to_string()).unwrap();
+    assert_eq!(
+        d.delete("/api/networks/lan2").await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(backends(&path), ["local", "lan", "ygg"]);
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(v["poll_interval_secs"], 17);
+    assert_eq!(v["something_else"], json!({"kept": true}));
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temp file");
+
+    // The file loads back as a config.
+    let loaded: socketguard_core::config::DaemonConfig =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(loaded.backends.len(), 3);
+
+    // A file that is not an object is not overwritten; the change still happens.
+    std::fs::write(&path, "[1]").unwrap();
+    let (s, _) = d
+        .post("/api/networks", add("lan3", "eth8", "2001:db8:8:8::/64"))
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "[1]");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ─── Settings, protect-host ──────────────────────────────────────────────────
 
 #[tokio::test]
@@ -711,8 +769,10 @@ async fn disable_needs_confirmation() {
         (s, code(&body)),
         (StatusCode::CONFLICT, "confirmation_required")
     );
+    assert_eq!(d.get("/api/status").await.1["disabled"], false);
     let (s, _) = d.post("/api/disable", json!({"confirm": true})).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(d.get("/api/status").await.1["disabled"], true);
     assert!(d
         .fw
         .calls
@@ -720,6 +780,29 @@ async fn disable_needs_confirmation() {
         .unwrap()
         .iter()
         .any(|c| matches!(c, FirewallCall::Disable)));
+}
+
+#[tokio::test]
+async fn enable_clears_the_latch_and_reapplies() {
+    use socketguard_daemon::test_support::FirewallCall;
+    let d = Daemon::new().await;
+    d.post("/api/disable", json!({"confirm": true})).await;
+    d.fw.calls.lock().unwrap().clear();
+
+    // A reconcile while disabled applies nothing.
+    d.reconcile().await;
+    assert!(d.fw.calls.lock().unwrap().is_empty());
+
+    let (s, _) = d.post("/api/enable", json!({})).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(d.get("/api/status").await.1["disabled"], false);
+    assert!(d
+        .fw
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|c| matches!(c, FirewallCall::Apply(_))));
 }
 
 // ─── Events ──────────────────────────────────────────────────────────────────

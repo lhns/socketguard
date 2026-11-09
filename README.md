@@ -44,7 +44,8 @@ The project is a Cargo workspace with three crates plus a Tauri desktop app:
 |-------|-------------|
 | `socketguard-core` | Shared types, config, API types |
 | `socketguard-daemon` | System daemon with monitoring, IPv6 backends, firewall, REST API |
-| `socketguard-cli` | CLI client for managing sockets and ACLs |
+| `socketguard-client` | Typed client for the local API (used by the CLI and the UI) |
+| `socketguard-cli` | The `socketguard` command line, the primary frontend |
 | `socketguard-ui` | Tauri v2 desktop app with React frontend |
 
 ## Building
@@ -66,7 +67,7 @@ cargo build --release
 ./target/release/socketguard-daemon
 
 # The CLI binary
-./target/release/socketguard-cli
+./target/release/socketguard
 ```
 
 ### Tauri Desktop App
@@ -108,43 +109,44 @@ sudo ./target/release/socketguard-daemon
 
 The daemon serves a local API on a Unix socket (`/run/socketguard.sock`) or, on Windows, the named pipe `\\.\pipe\socketguard` (see [docs/api.md](docs/api.md) for access control), and begins polling for listening sockets every 2 seconds (configurable via `poll_interval_secs`).
 
-On startup, the daemon cleans up any stale firewall rules left by a previous crash and re-applies rules from the database. On shutdown (Ctrl+C or SIGTERM), it removes all managed firewall rules and IPv6 addresses.
+On startup, the daemon cleans up any stale firewall rules left by a previous crash and re-applies rules from the database. On shutdown (Ctrl+C or SIGTERM) rules and addresses stay in place, so the host stays protected; `socketguard disable` (or `socketguard-daemon --disable` with the daemon stopped) removes them and keeps them off until `socketguard enable`.
 
 ### CLI
 
-All commands support `--json` for machine-readable output and `--api <url>` to connect to a non-default daemon address.
+`socketguard` covers the whole API. `--json` prints the API types as JSON for every command; `--socket <path>` (or `SOCKETGUARD_SOCKET`) selects a non-default daemon. Apps, peers and groups can be named by id, unique id prefix or name. Errors print `error: <code>: <message>` and exit 1. Details are in [docs/api.md](docs/api.md) and ADR 0033.
 
 ```bash
-# List all detected sockets
-socketguard-cli list
+socketguard init                              # first-run setup (networks, sshd/RDP grants, protect-host)
+socketguard status                            # daemon, networks, protect-host, counts
+socketguard pending                           # new apps; interactive on a terminal
+socketguard apps list [--pending]             # also: show, review, rm, split, merge
+socketguard apps show nginx                   # addresses, ports, grants with reach, counters
+socketguard share nginx                       # [addr]:port and http(s):// URLs
 
-# Show details for a socket (use ID from list output)
-socketguard-cli show <socket-id>
+socketguard peers add alice <ygg-key>         # bare values: 64 hex = ygg_key, IP/CIDR = ip
+socketguard peers add bob --addr 2001:db8::7 --cred wg_key=<base64>
+socketguard peers list                        # also: show, rename, rm, cred add|rm
+socketguard groups add team alice bob         # also: list, show, rename, rm, members
 
-# Set a socket's policy to managed
-socketguard-cli policy <socket-id> managed
+socketguard grant nginx:80 alice              # or group:team, or anyone (asks, or --yes)
+socketguard grant sshd:22 alice --network ygg
+socketguard revoke nginx:80 alice             # or: revoke <grant-id>
+socketguard grants [--app A] [--peer P] [--group G]
 
-# Allow a specific IPv6 to connect
-socketguard-cli acl allow <socket-id> fd12:3456::1 --label "my-laptop"
+socketguard networks list                     # also: add <type> --interface X, rm <id>
+socketguard settings address-mode per-port    # or per-app; `settings show`
+socketguard protect-host on eth0              # refused if sshd/RDP would be cut off; --force
+socketguard activity --blocked [--follow]     # also: --app, --peer, --kind, --limit
+socketguard watch                             # every push event, one line each
 
-# Remove an ACL entry
-socketguard-cli acl remove <socket-id> <entry-id>
-
-# View current ACL
-socketguard-cli acl list <socket-id>
-
-# Check if daemon is running
-socketguard-cli status
-
-# Show daemon config
-socketguard-cli config
-
-# List available IPv6 backends
-socketguard-cli backends
-
-# Generate shell completions
-socketguard-cli completions bash   # also: zsh, fish, powershell
+socketguard export -o socketguard.toml        # TOML, or JSON with a .json name / --format json
+socketguard apply -f socketguard.toml         # shows the diff, asks; --dry-run, --yes
+socketguard disable --yes                     # remove all rules and addresses, keep them off
+socketguard enable
+socketguard completions bash                  # also: zsh, fish, powershell, elvish
 ```
+
+Reach is shown per network as `verified`, `whole subnet`, `IP only`, `open` or `not reachable`. Completions are static (subcommands and options, not app or peer names).
 
 ### Policies
 

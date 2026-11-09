@@ -21,6 +21,9 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// Settings keys.
 pub const PROTECT_HOST_KEY: &str = "protect_host_interfaces";
 pub const ADDRESS_MODE_KEY: &str = "address_mode";
+/// Set by `disable` (API or `--disable`), cleared by `enable`: while set, the daemon puts
+/// no rules and no addresses back.
+pub const DISABLED_KEY: &str = "disabled";
 const ULA_GLOBAL_ID_KEY: &str = "ula_global_id";
 
 /// Activity retention: whichever limit trims more.
@@ -277,6 +280,16 @@ impl Database {
 
     pub async fn set_protect_host(&self, interfaces: &[String]) -> Result<()> {
         self.set_setting(PROTECT_HOST_KEY, &serde_json::to_string(interfaces)?)
+            .await
+    }
+
+    /// Whether enforcement is switched off (see [`DISABLED_KEY`]).
+    pub async fn disabled(&self) -> Result<bool> {
+        Ok(self.get_setting(DISABLED_KEY).await?.as_deref() == Some("true"))
+    }
+
+    pub async fn set_disabled(&self, disabled: bool) -> Result<()> {
+        self.set_setting(DISABLED_KEY, if disabled { "true" } else { "false" })
             .await
     }
 

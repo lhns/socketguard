@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState {
         config: tokio::sync::RwLock::new(config.clone()),
+        config_path: Some(config_file::config_path()),
         db,
         engine: tokio::sync::RwLock::new(engine),
         firewall_lock: tokio::sync::Mutex::new(()),
@@ -157,8 +158,7 @@ async fn shutdown_signal() {
 
 /// Load config before tracing is initialized, so we can't use tracing macros here.
 fn load_config_sync() -> DaemonConfig {
-    let config_path =
-        std::env::var("SOCKETGUARD_CONFIG").unwrap_or_else(|_| "socketguard.json".to_string());
+    let config_path = config_file::config_path().display().to_string();
     if let Ok(content) = std::fs::read_to_string(&config_path) {
         match serde_json::from_str(&content) {
             Ok(config) => {

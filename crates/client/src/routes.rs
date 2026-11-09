@@ -75,6 +75,7 @@ routes! {
     EXPORT: GET "/api/export",
     APPLY: POST "/api/apply",
     DISABLE: POST "/api/disable",
+    ENABLE: POST "/api/enable",
 }
 
 #[cfg(test)]
@@ -92,7 +93,7 @@ mod tests {
 
     #[test]
     fn route_constants_match_the_table() {
-        assert_eq!(CLIENT_ROUTES.len(), 34);
+        assert_eq!(CLIENT_ROUTES.len(), 35);
         assert!(CLIENT_ROUTES
             .iter()
             .any(|(m, p)| *m == Method::PUT && *p == "/api/settings/protect-host"));

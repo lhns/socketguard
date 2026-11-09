@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 socketguard-client = { path = "../../crates/client" }
+socketguard-core = { path = "../../crates/core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }

@@ -1176,6 +1176,32 @@ async fn disable_removes_rules_and_addresses() {
 }
 
 #[tokio::test]
+async fn disabled_stays_off_across_reconciles_and_startup_until_enabled() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    h.engine().await.disable(&h.state).await.unwrap();
+    assert!(h.state.db.disabled().await.unwrap());
+    h.clear_calls();
+
+    // New apps are still tracked, but nothing is applied or added.
+    h.set_sockets(vec![
+        listener("nginx", 80, Protocol::Tcp),
+        listener("redis", 6379, Protocol::Tcp),
+    ]);
+    h.nets["ygg"].set_prefix("300:9:9:9::");
+    h.reconcile().await;
+    h.engine().await.startup_reconcile(&h.state).await;
+    assert_eq!(h.apps().await.len(), 2);
+    assert!(h.fw_calls.lock().unwrap().is_empty(), "no Apply");
+    assert!(net_adds(&h).is_empty());
+
+    h.engine().await.enable(&h.state).await.unwrap();
+    assert!(!h.state.db.disabled().await.unwrap());
+    assert_eq!(applied(&h.fw_calls).len(), 1);
+    assert_eq!(net_adds(&h).len(), 2);
+}
+
+#[tokio::test]
 async fn startup_reapplies_the_ruleset_and_restores_missing_addresses() {
     let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;

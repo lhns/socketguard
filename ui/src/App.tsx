@@ -1,140 +1,101 @@
-import { useState, useEffect, useCallback, useRef } from "react";
-import {
-  listSockets, onSocketsChanged, onDaemonConnected, startDaemon, initSSE,
-  ManagedSocket, AclGroupResponse, SocketGroupResponse,
-} from "./api";
-import AppTree from "./components/AppTree";
-import SocketDetail from "./components/SocketDetail";
-import Settings from "./components/Settings";
+import { useState } from "react";
+import { api, toDaemonError } from "./api";
+import { errorText } from "./lib";
+import ActivityPage from "./pages/ActivityPage";
+import AppsPage from "./pages/AppsPage";
+import PeersPage from "./pages/PeersPage";
+import SettingsPage from "./pages/SettingsPage";
+import { useDaemonEvents, useStatus } from "./queries";
 
-function App() {
-  const [sockets, setSockets] = useState<ManagedSocket[]>([]);
-  const [aclGroups, setAclGroups] = useState<AclGroupResponse[]>([]);
-  const [socketGroups, setSocketGroups] = useState<SocketGroupResponse[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+type Page = "apps" | "peers" | "activity" | "settings";
+const PAGES: { id: Page; label: string }[] = [
+  { id: "apps", label: "Apps" },
+  { id: "peers", label: "Peers" },
+  { id: "activity", label: "Activity" },
+  { id: "settings", label: "Settings" },
+];
+
+function ConnectionBanner({ error }: { error: unknown }) {
   const [starting, setStarting] = useState(false);
-  const [selectedSocket, setSelectedSocket] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
-  const lastJson = useRef("");
-  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [startError, setStartError] = useState<string | null>(null);
+  const err = toDaemonError(error);
+  const hint = (err.details as { hint?: string } | undefined)?.hint;
 
-  const refresh = useCallback(async () => {
-    try {
-      const resp = await listSockets();
-      setError(null);
-      const json = JSON.stringify(resp);
-      if (json !== lastJson.current) {
-        lastJson.current = json;
-        setSockets(resp.sockets);
-        setAclGroups(resp.acl_groups);
-        setSocketGroups(resp.socket_groups);
-      }
-      setStarting(false);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (error) {
-      retryTimer.current = setTimeout(() => refresh(), 5000);
-      return () => {
-        if (retryTimer.current) clearTimeout(retryTimer.current);
-      };
-    }
-  }, [error, refresh]);
-
-  useEffect(() => {
-    initSSE().catch(console.error);
-    refresh();
-    const unlistens: (() => void)[] = [];
-    onSocketsChanged(() => refresh()).then((fn) => unlistens.push(fn));
-    onDaemonConnected(() => refresh()).then((fn) => unlistens.push(fn));
-    return () => unlistens.forEach((fn) => fn());
-  }, [refresh]);
-
-  const handleStartDaemon = async () => {
+  const start = async () => {
     setStarting(true);
+    setStartError(null);
     try {
-      await startDaemon();
+      await api.startDaemon();
     } catch (e) {
+      setStartError(errorText(e));
+    } finally {
       setStarting(false);
-      setError(String(e));
     }
   };
 
-  if (loading) return <div className="loading">Loading...</div>;
+  return (
+    <div className="error-banner banner" role="alert">
+      <div>
+        <strong>{err.code === "connection" ? "Cannot reach the daemon." : "Daemon error."}</strong> {err.message}
+        {hint && <div>{hint}</div>}
+        {startError && <div>{startError}</div>}
+      </div>
+      {err.code === "connection" && (
+        <button className="btn btn-primary btn-sm" onClick={start} disabled={starting}>
+          {starting ? "Starting…" : "Start daemon"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  useDaemonEvents();
+  const status = useStatus();
+  const [page, setPage] = useState<Page>("apps");
+  const [appsSearch, setAppsSearch] = useState("");
+
+  const showApp = (search: string) => {
+    setAppsSearch(search);
+    setPage("apps");
+  };
+  const pending = status.data?.counts.pending_apps ?? 0;
 
   return (
     <>
       <header className="header">
         <div className="header-inner">
           <h1>
-            <span className="logo">S</span>
+            <span className="logo" aria-hidden="true">S</span>
             SocketGuard
           </h1>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            {selectedSocket && (
+          <nav className="nav" aria-label="Main">
+            {PAGES.map((p) => (
               <button
-                className="btn btn-sm btn-ghost"
-                onClick={() => setSelectedSocket(null)}
+                key={p.id}
+                className={`nav-btn${page === p.id ? " active" : ""}`}
+                aria-current={page === p.id ? "page" : undefined}
+                onClick={() => setPage(p.id)}
               >
-                &larr; Back
+                {p.label}
+                {p.id === "apps" && pending > 0 && <span className="nav-count" aria-label={`${pending} pending`}>{pending}</span>}
               </button>
-            )}
-            <button
-              className="btn btn-sm btn-ghost"
-              onClick={() => { setShowSettings(!showSettings); setSelectedSocket(null); }}
-              title="Settings"
-              style={{ fontSize: 16, padding: "4px 8px" }}
-            >
-              {showSettings ? "x" : "\u2699"}
-            </button>
-          </div>
+            ))}
+          </nav>
         </div>
       </header>
-
       <main className="content">
-        {error && (
-          <div className="error-banner" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16 }}>
-            <span>Cannot connect to daemon: {error}</span>
-            <button className="btn btn-primary btn-sm" onClick={handleStartDaemon} disabled={starting}>
-              {starting ? "Starting..." : "Start Daemon"}
-            </button>
+        {status.error && <ConnectionBanner error={status.error} />}
+        {status.data?.disabled && (
+          <div className="error-banner banner" role="status">
+            Enforcement is off: no firewall rules are applied. Turn it on in Settings.
           </div>
         )}
-
-        {showSettings ? (
-          <Settings />
-        ) : selectedSocket ? (
-          <SocketDetail
-            socketId={selectedSocket}
-            aclGroups={aclGroups}
-            onBack={() => setSelectedSocket(null)}
-          />
-        ) : sockets.length === 0 && !error ? (
-          <div className="card">
-            <div className="empty">
-              <div className="empty-icon">~</div>
-              <p>No sockets detected yet.</p>
-              <p style={{ fontSize: 12, marginTop: 4 }}>The daemon will discover listening sockets automatically.</p>
-            </div>
-          </div>
-        ) : (
-          <AppTree
-            sockets={sockets}
-            aclGroups={aclGroups}
-            socketGroups={socketGroups}
-            onRefresh={refresh}
-            onSelectSocket={(id) => setSelectedSocket(id)}
-          />
-        )}
+        {page === "apps" && <AppsPage key={appsSearch} initialSearch={appsSearch} />}
+        {page === "peers" && <PeersPage />}
+        {page === "activity" && <ActivityPage />}
+        {page === "settings" && <SettingsPage onShowApp={showApp} />}
       </main>
     </>
   );
 }
-
-export default App;

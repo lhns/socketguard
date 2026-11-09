@@ -17,6 +17,6 @@
 
 It prints PASS/FAIL per step, removes its containers and network, and exits non-zero on failure.
 
-The CLI is a stub until the API v1 lands (redesign phase 6), so the script creates the peer and
-the grant with a small Python helper (`sgdb`) that writes the daemon's SQLite database; the daemon
-picks the change up on its next reconcile pass. Phase 6 switches this back to the CLI.
+The test drives the daemon through the `socketguard` CLI (`peers add`, `grant`, `revoke`, `activity --blocked`,
+`disable`/`enable`), so it covers the API v1 and the CLI as well. The disabled latch is checked against the
+running daemon (a reconcile pass must not undo `disable`) and across a daemon restart.

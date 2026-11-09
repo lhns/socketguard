@@ -45,6 +45,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0035](0035-test-strategy-and-ci.md) | Test Strategy and CI | Accepted |
 | [0036](0036-future-directions.md) | Future Directions: WireGuard, mTLS Gateway, IPv4 | Accepted |
 | [0037](0037-pluggable-networks-and-onion-backend.md) | Pluggable Networks and the Onion Backend | Accepted |
+| [0038](0038-disabled-latch-and-persisted-networks.md) | Disabled Latch and Persisted Networks | Accepted |
 
 ## Format
 

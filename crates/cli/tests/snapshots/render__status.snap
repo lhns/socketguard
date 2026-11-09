@@ -1,0 +1,15 @@
+---
+source: crates/cli/tests/render.rs
+expression: "render::status(&s)"
+---
+socketguard daemon 0.1.0
+enforcement   on
+protect-host  eth0
+apps          2 (1 pending), 3 addresses
+peers         1, groups 1, grants 3
+
+Networks
+  ID     KIND       INTERFACE  STATUS           NOTE
+  local  local      lo         up               this machine only, grants do not apply
+  ygg    yggdrasil  ygg0       up
+  lan    lan        eth0       down: no prefix

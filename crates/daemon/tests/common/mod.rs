@@ -5,9 +5,9 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
-use socketguard_core::config::{BackendConfig, BackendInstanceConfig, DaemonConfig};
+use socketguard_core::config::DaemonConfig;
 use socketguard_core::{ListeningSocket, Protocol};
-use socketguard_daemon::engine::{ActiveBackend, Engine};
+use socketguard_daemon::engine::Engine;
 use socketguard_daemon::test_support::*;
 use socketguard_daemon::{api, AppState};
 use std::collections::HashMap;
@@ -47,77 +47,18 @@ impl Daemon {
     /// Networks `local` (lo), `lan` (eth0) and `ygg` (ygg0), and an `nginx` on tcp 80
     /// already reconciled into an app.
     pub async fn new() -> Self {
-        let fw_calls = Arc::new(Mutex::new(Vec::new()));
-        let fw = Arc::new(MockFirewall::new(fw_calls));
-        let net = MockNetworkInterface::new(Arc::new(Mutex::new(Vec::new())));
-        let monitor = MockSocketMonitor::new(vec![listener("nginx", 80)]);
-        let sockets = monitor.sockets.clone();
+        Self::new_at(None).await
+    }
 
-        let mut backends = HashMap::new();
-        let mut configs = Vec::new();
-        for (id, config, mock) in [
-            (
-                "local",
-                BackendConfig::Ula {
-                    interface: "lo".into(),
-                },
-                MockIpv6Backend::new("fd00:1:2:3::", 128, "lo"),
-            ),
-            (
-                "lan",
-                BackendConfig::Slaac {
-                    interface: "eth0".into(),
-                    prefix: None,
-                },
-                {
-                    let m = MockIpv6Backend::new("2001:db8:1:2::", 128, "eth0");
-                    m.set_prefix("2001:db8:1:2::");
-                    m
-                },
-            ),
-            (
-                "ygg",
-                BackendConfig::Yggdrasil {
-                    interface: "ygg0".into(),
-                    admin_endpoint: None,
-                },
-                {
-                    let m = MockIpv6Backend::new("300:1:2:3::", 128, "ygg0");
-                    m.set_prefix("300:1:2:3::");
-                    m
-                },
-            ),
-        ] {
-            let cfg = BackendInstanceConfig {
-                id: id.to_string(),
-                backend: config,
-            };
-            backends.insert(
-                id.to_string(),
-                ActiveBackend {
-                    config: cfg.clone(),
-                    backend: Box::new(mock),
-                },
-            );
-            configs.push(cfg);
-        }
-        let ids = configs.iter().map(|c| c.id.clone()).collect();
-        let engine =
-            Engine::new_injectable(Box::new(monitor), fw.clone(), Arc::new(net), backends, ids);
-        let state = test_app_state(
-            engine,
-            DaemonConfig {
-                backends: configs,
-                ..DaemonConfig::default()
-            },
-        )
-        .await;
-        let app = api::router(state.clone());
+    /// [`Daemon::new`] with a config file that network changes are saved to.
+    pub async fn new_at(config_path: Option<std::path::PathBuf>) -> Self {
+        let std = standard_daemon(vec![listener("nginx", 80)], config_path).await;
+        let app = api::router(std.state.clone());
         let d = Self {
-            state,
+            state: std.state,
             app,
-            sockets,
-            fw,
+            sockets: std.sockets,
+            fw: std.fw,
         };
         d.reconcile().await;
         d

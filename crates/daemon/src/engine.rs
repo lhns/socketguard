@@ -303,6 +303,9 @@ impl Engine {
     /// caller holds the firewall lock. With `only_if_changed`, an unchanged ruleset is
     /// not re-sent (except every `REAPPLY_EVERY` passes).
     async fn apply_locked(&self, state: &AppState, only_if_changed: bool) -> anyhow::Result<()> {
+        if state.db.disabled().await? {
+            return Ok(());
+        }
         let snapshot = self.gather_snapshot(state).await?;
         let (desired, warnings) = ruleset::build_with_warnings(&snapshot);
 
@@ -452,7 +455,10 @@ impl Engine {
     }
 
     /// Remove the firewall rules and every SocketGuard address (`--disable`, uninstall).
+    /// Sets the `disabled` latch first, so no pass puts them back; [`Engine::enable`]
+    /// clears it.
     pub async fn disable(&self, state: &AppState) -> anyhow::Result<()> {
+        state.db.set_disabled(true).await?;
         let _lock = state.firewall_lock.lock().await;
         *self.last_applied.lock().unwrap() = None;
         let ifaces = self
@@ -466,7 +472,17 @@ impl Engine {
             self.firewall.clone(),
             self.network.clone(),
         )
-        .await
+        .await?;
+        self.emit(state, DaemonEvent::SettingsChanged);
+        Ok(())
+    }
+
+    /// Clear the `disabled` latch and put the rules and addresses back.
+    pub async fn enable(&self, state: &AppState) -> anyhow::Result<()> {
+        state.db.set_disabled(false).await?;
+        self.apply_and_ensure(state).await?;
+        self.emit(state, DaemonEvent::SettingsChanged);
+        Ok(())
     }
 
     // ─── Networks: add and remove ────────────────────────────────────────────
@@ -897,7 +913,9 @@ impl Engine {
         // ensure-present pass adds them after the next successful apply.
         self.remove_from_interface(moves.iter().map(|(i, old, _)| (i.clone(), *old)).collect())
             .await;
-        if self.apply_firewall(state).await.is_ok() {
+        // Disabled: the apply was a no-op, and nothing may put addresses back.
+        let applied = self.apply_firewall(state).await.is_ok();
+        if applied && !state.db.disabled().await.unwrap_or(false) {
             for (iface, _, new) in moves {
                 if let Err(e) = self.network.add_address(&iface, new, ADDRESS_PREFIX_LEN) {
                     warn!("Failed to add {new} to {iface}: {e}");
@@ -912,6 +930,9 @@ impl Engine {
     /// Does nothing while the last ruleset apply failed: an address no scope covers would
     /// be exposed.
     async fn ensure_addresses_present(&self, state: &AppState) {
+        if state.db.disabled().await.unwrap_or(false) {
+            return;
+        }
         if self.apply_failed.load(Ordering::Relaxed) {
             debug!("Not adding addresses: the firewall ruleset is not in place");
             return;
@@ -1992,8 +2013,9 @@ pub fn plan_addresses(mode: AddressMode, ports: &[PortRef], existing: &[&Address
     }
 }
 
-/// Remove the firewall rules and every SocketGuard address in the DB. Needs only the
-/// database and the network-to-interface map, so `--disable` works without an engine.
+/// Set the `disabled` latch, then remove the firewall rules and every SocketGuard address
+/// in the DB. Needs only the database and the network-to-interface map, so `--disable`
+/// works without an engine.
 /// Addresses of a network that is no longer configured cannot be located and are left.
 pub async fn disable_all(
     db: &Database,
@@ -2001,6 +2023,7 @@ pub async fn disable_all(
     firewall: Arc<dyn Firewall>,
     network: Arc<dyn NetworkInterface>,
 ) -> anyhow::Result<()> {
+    db.set_disabled(true).await?;
     let mut addrs: Vec<(String, Ipv6Addr)> = Vec::new();
     for a in db.list_addresses().await? {
         let Some(ip) = a.locator.ipv6() else {

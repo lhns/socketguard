@@ -429,10 +429,16 @@ impl Client {
         self.call(&routes::APPLY, &[], None, json(req)).await
     }
 
-    /// Remove all firewall rules and addresses (needs `confirm`).
+    /// Remove all firewall rules and addresses (needs `confirm`) and keep them off, also
+    /// across restarts, until [`Client::enable`].
     pub async fn disable(&self, confirm: bool) -> Result<()> {
         self.call_unit(&routes::DISABLE, &[], json(&DisableRequest { confirm }))
             .await
+    }
+
+    /// Clear `disable` and put the rules and addresses back.
+    pub async fn enable(&self) -> Result<()> {
+        self.call_unit(&routes::ENABLE, &[], None).await
     }
 }
 

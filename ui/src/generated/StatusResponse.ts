@@ -9,4 +9,8 @@ export type StatusResponse = { version: string, networks: Array<Network>,
 /**
  * Interfaces under whole-host protection.
  */
-protect_host_interfaces: Array<string>, counts: Counts, };
+protect_host_interfaces: Array<string>, 
+/**
+ * Enforcement is switched off (`disable`): no rules, no addresses, until `enable`.
+ */
+disabled: boolean, counts: Counts, };

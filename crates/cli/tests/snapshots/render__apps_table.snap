@@ -1,0 +1,9 @@
+---
+source: crates/cli/tests/render.rs
+expression: "render::apps(&[nginx(), redis()])"
+---
+ID        NAME          PORTS                       STATE     ADDRESSES
+5c0d1f2a  nginx         80/tcp, 443/tcp, 8125/udp*  reviewed  3
+9e8d7c6b  redis-server  6379/tcp                    pending   0
+
+* not listening now

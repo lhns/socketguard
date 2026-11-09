@@ -12,11 +12,8 @@ export default tseslint.config(
     languageOptions: { globals: { ...globals.browser } },
     plugins: { "react-hooks": reactHooks },
     rules: {
-      // Only the classic hook rules. The v7 "compiler" rules (set-state-in-effect etc.) and
-      // exhaustive-deps flag the existing load-on-mount pattern in ~6 components; revisit
-      // when those components are rewritten.
       "react-hooks/rules-of-hooks": "error",
-      "react-hooks/exhaustive-deps": "off",
+      "react-hooks/exhaustive-deps": "error",
     },
   },
   {

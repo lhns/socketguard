@@ -105,6 +105,7 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::GET, "/api/export"),
     (Method::POST, "/api/apply"),
     (Method::POST, "/api/disable"),
+    (Method::POST, "/api/enable"),
 ];
 
 type Shared = Arc<AppState>;
@@ -147,6 +148,7 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("GET", "/api/export") => get(export_get),
         ("POST", "/api/apply") => post(apply_post),
         ("POST", "/api/disable") => post(disable_post),
+        ("POST", "/api/enable") => post(enable_post),
         _ => unreachable!("route {method} {path} has no handler"),
     }
 }
@@ -329,6 +331,7 @@ async fn status(State(state): State<Shared>) -> ApiResult<Json<StatusResponse>> 
         version: env!("CARGO_PKG_VERSION").to_string(),
         networks: engine.networks(),
         protect_host_interfaces: engine.settings(&state).await?.protect_host_interfaces,
+        disabled: state.db.disabled().await?,
         counts: Counts {
             apps: apps.len() as u32,
             pending_apps,
@@ -594,6 +597,7 @@ async fn network_create(
         backend: req.backend,
     };
     let network = state.engine.write().await.add_network(&state, inst).await?;
+    persist_networks(&state).await;
     Ok((StatusCode::CREATED, Json(network)).into_response())
 }
 
@@ -607,7 +611,26 @@ async fn network_delete(
         .await
         .remove_network(&state, &id)
         .await?;
+    persist_networks(&state).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Save the network list to the config file so it survives a restart. The change is
+/// already live, so a failure is logged rather than failing the request.
+async fn persist_networks(state: &AppState) {
+    let Some(path) = &state.config_path else {
+        return;
+    };
+    let config = state.config.read().await.clone();
+    let path = path.clone();
+    let result =
+        tokio::task::spawn_blocking(move || crate::config_file::persist_backends(&path, &config))
+            .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("Networks not saved to the config file: {e:#}"),
+        Err(e) => tracing::warn!("Saving the config file failed: {e}"),
+    }
 }
 
 // ─── Settings ────────────────────────────────────────────────────────────────
@@ -722,5 +745,10 @@ async fn disable_post(
         ));
     }
     state.engine.read().await.disable(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn enable_post(State(state): State<Shared>) -> ApiResult<StatusCode> {
+    state.engine.read().await.enable(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }

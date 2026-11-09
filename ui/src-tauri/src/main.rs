@@ -7,226 +7,170 @@ use tauri::Emitter;
 
 // ======== Data commands ========
 //
-// The model changed (ADR 0027) and API v1 is in place (redesign phase 6), but the UI is
-// rewritten against the client crate in phase 7b. Until then the
-// commands stay registered so the frontend's invoke() calls resolve; they all fail.
+// Thin wrappers over `socketguard_client::Client` (ADR 0033): one command per API call the
+// UI needs. Errors reach the frontend as `{code, message, details}`.
 
-const NOT_AVAILABLE: &str = "not available until the UI is rewritten (redesign phase 7b)";
+use serde::Serialize;
+use socketguard_client::{Client, Error as ClientError, GrantQuery};
+use socketguard_core::api_types::{
+    NewPeer, ProtectHostRequest, ProtectHostResponse, StatusResponse,
+};
+use socketguard_core::{
+    ActivityQuery, ActivityRecord, App, AppDetail, Credential, GrantView, Network, NewCredential,
+    NewGrant, Peer, PeerGroup, Settings,
+};
 
-#[tauri::command]
-async fn list_sockets() -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+/// Error shape the frontend branches on. API errors keep the daemon's code
+/// (`confirmation_required`, `protect_host_refused`, ...); `connection` means the daemon
+/// could not be reached.
+#[derive(Debug, Serialize)]
+struct UiError {
+    code: String,
+    message: String,
+    details: Option<serde_json::Value>,
+}
+
+const ACCESS_HINT: &str = if cfg!(windows) {
+    "Make sure the daemon is running and your account is in the local group 'SocketGuard Users'."
+} else {
+    "Make sure the daemon is running and your user is in the 'socketguard' group."
+};
+
+impl From<ClientError> for UiError {
+    fn from(e: ClientError) -> Self {
+        match e {
+            ClientError::Connect { endpoint, source } => UiError {
+                code: "connection".into(),
+                message: format!("Cannot reach the daemon at {endpoint}: {source}"),
+                details: Some(serde_json::json!({ "endpoint": endpoint, "hint": ACCESS_HINT })),
+            },
+            ClientError::Api {
+                code,
+                message,
+                details,
+                ..
+            } => UiError {
+                code,
+                message,
+                details,
+            },
+            ClientError::Protocol(m) => UiError {
+                code: "protocol".into(),
+                message: m,
+                details: None,
+            },
+        }
+    }
+}
+
+type CmdResult<T> = Result<T, UiError>;
+
+fn client() -> Client {
+    Client::from_env()
 }
 
 #[tauri::command]
-async fn get_socket(id: String) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn status() -> CmdResult<StatusResponse> {
+    Ok(client().status().await?)
 }
 
 #[tauri::command]
-async fn allow_ip(
-    socket_id: String,
-    ip: String,
-    label: Option<String>,
-) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn list_apps() -> CmdResult<Vec<App>> {
+    Ok(client().list_apps(false).await?)
 }
 
 #[tauri::command]
-async fn remove_acl_entry(socket_id: String, entry_id: i64) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn get_app(id: String) -> CmdResult<AppDetail> {
+    Ok(client().get_app(&id).await?)
 }
 
 #[tauri::command]
-async fn set_policy(socket_id: String, policy: String) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn review_app(id: String, reviewed: bool) -> CmdResult<AppDetail> {
+    Ok(client().review_app(&id, reviewed).await?)
 }
 
 #[tauri::command]
-async fn set_backend_policy(
-    socket_id: String,
-    backend_id: String,
-    policy: String,
-) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn list_peers() -> CmdResult<Vec<Peer>> {
+    Ok(client().list_peers().await?)
 }
 
 #[tauri::command]
-async fn allow_backend_ip(
-    socket_id: String,
-    backend_id: String,
-    ip: String,
-    label: Option<String>,
-) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn create_peer(req: NewPeer) -> CmdResult<Peer> {
+    Ok(client().create_peer(&req).await?)
 }
 
 #[tauri::command]
-async fn list_acl_groups() -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn add_credential(peer_id: String, req: NewCredential) -> CmdResult<Credential> {
+    Ok(client().add_credential(&peer_id, &req).await?)
 }
 
 #[tauri::command]
-async fn create_acl_group(label: String) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn remove_credential(peer_id: String, credential_id: String) -> CmdResult<()> {
+    Ok(client().remove_credential(&peer_id, &credential_id).await?)
 }
 
 #[tauri::command]
-async fn get_acl_group(id: String) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn delete_peer(id: String) -> CmdResult<()> {
+    Ok(client().delete_peer(&id).await?)
 }
 
 #[tauri::command]
-async fn update_acl_group(
-    id: String,
-    label: Option<String>,
-    policy: Option<String>,
-) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn list_groups() -> CmdResult<Vec<PeerGroup>> {
+    Ok(client().list_groups().await?)
 }
 
 #[tauri::command]
-async fn delete_acl_group(id: String) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn list_grants() -> CmdResult<Vec<GrantView>> {
+    Ok(client().list_grants(&GrantQuery::default()).await?)
 }
 
 #[tauri::command]
-async fn add_to_acl_group(
-    group_id: String,
-    socket_ids: Vec<String>,
-) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn create_grant(req: NewGrant) -> CmdResult<GrantView> {
+    Ok(client().create_grant(&req).await?)
 }
 
 #[tauri::command]
-async fn remove_from_acl_group(
-    group_id: String,
-    socket_id: String,
-) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn delete_grant(id: String) -> CmdResult<()> {
+    Ok(client().delete_grant(&id).await?)
 }
 
 #[tauri::command]
-async fn add_acl_group_entry(
-    group_id: String,
-    backend_id: String,
-    ip: String,
-    label: Option<String>,
-) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn list_networks() -> CmdResult<Vec<Network>> {
+    Ok(client().list_networks().await?)
 }
 
 #[tauri::command]
-async fn remove_acl_group_entry(
-    group_id: String,
-    entry_id: i64,
-) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn get_settings() -> CmdResult<Settings> {
+    Ok(client().get_settings().await?)
 }
 
 #[tauri::command]
-async fn list_socket_groups() -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn set_protect_host(req: ProtectHostRequest) -> CmdResult<ProtectHostResponse> {
+    Ok(client().set_protect_host(&req).await?)
 }
 
 #[tauri::command]
-async fn create_socket_group(label: String, app_name: String) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn activity(query: ActivityQuery) -> CmdResult<Vec<ActivityRecord>> {
+    Ok(client().activity(&query).await?)
 }
 
 #[tauri::command]
-async fn update_socket_group(id: String, label: String) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn enable() -> CmdResult<()> {
+    Ok(client().enable().await?)
 }
 
 #[tauri::command]
-async fn delete_socket_group(id: String) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
-}
-
-#[tauri::command]
-async fn add_socket_to_socket_group(
-    group_id: String,
-    socket_ids: Vec<String>,
-) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
-}
-
-#[tauri::command]
-async fn remove_socket_from_socket_group(
-    group_id: String,
-    socket_id: String,
-) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
-}
-
-#[tauri::command]
-async fn set_socket_group_address_policy(
-    group_id: String,
-    backend_id: String,
-    policy: String,
-) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
-}
-
-#[tauri::command]
-async fn add_socket_group_acl_entry(
-    group_id: String,
-    backend_id: String,
-    ip: String,
-    label: Option<String>,
-) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
-}
-
-#[tauri::command]
-async fn remove_socket_group_acl_entry(
-    group_id: String,
-    entry_id: i64,
-) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
-}
-
-#[tauri::command]
-async fn set_socket_group_acl_group(
-    group_id: String,
-    acl_group_id: Option<String>,
-) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
-}
-
-#[tauri::command]
-async fn get_config() -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
-}
-
-#[tauri::command]
-async fn update_config(config: serde_json::Value) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
-}
-
-#[tauri::command]
-async fn list_interfaces() -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
-}
-
-#[tauri::command]
-async fn list_backend_instances() -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
-}
-
-#[tauri::command]
-async fn add_backend(req: serde_json::Value) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
-}
-
-#[tauri::command]
-async fn remove_backend(id: String) -> Result<serde_json::Value, String> {
-    Err(NOT_AVAILABLE.into())
+async fn disable(confirm: bool) -> CmdResult<()> {
+    Ok(client().disable(confirm).await?)
 }
 
 #[tauri::command]
 async fn subscribe_events(app: tauri::AppHandle) -> Result<(), String> {
+    // One bridge per process: a frontend reload calls this again.
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(());
+    }
     tokio::spawn(async move {
         loop {
             match connect_sse(&app).await {
@@ -299,41 +243,25 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
-            list_sockets,
-            get_socket,
-            allow_ip,
-            remove_acl_entry,
-            set_policy,
-            set_backend_policy,
-            allow_backend_ip,
-            // ACL groups (ADR 0018)
-            list_acl_groups,
-            create_acl_group,
-            get_acl_group,
-            update_acl_group,
-            delete_acl_group,
-            add_to_acl_group,
-            remove_from_acl_group,
-            add_acl_group_entry,
-            remove_acl_group_entry,
-            // Socket groups (ADR 0018)
-            list_socket_groups,
-            create_socket_group,
-            update_socket_group,
-            delete_socket_group,
-            add_socket_to_socket_group,
-            remove_socket_from_socket_group,
-            set_socket_group_address_policy,
-            add_socket_group_acl_entry,
-            remove_socket_group_acl_entry,
-            set_socket_group_acl_group,
-            // Config, backends, events
-            get_config,
-            update_config,
-            list_interfaces,
-            list_backend_instances,
-            add_backend,
-            remove_backend,
+            status,
+            list_apps,
+            get_app,
+            review_app,
+            list_peers,
+            create_peer,
+            add_credential,
+            remove_credential,
+            delete_peer,
+            list_groups,
+            list_grants,
+            create_grant,
+            delete_grant,
+            list_networks,
+            get_settings,
+            set_protect_host,
+            activity,
+            enable,
+            disable,
             subscribe_events,
             start_daemon,
         ])
