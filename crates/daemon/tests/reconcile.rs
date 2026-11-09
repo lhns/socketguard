@@ -248,6 +248,8 @@ fn listener(name: &str, port: u16, protocol: Protocol) -> ListeningSocket {
         bind_address: IpAddr::V6("::".parse().unwrap()),
         exe_path: Some(format!("/usr/bin/{name}")),
         cmdline: Some(vec![name.to_string()]),
+        uid: Some("1000".into()),
+        foreign_mntns: false,
     }
 }
 
@@ -264,6 +266,8 @@ fn script(interpreter: &str, script: &str, port: u16) -> ListeningSocket {
             script.to_string(),
             "--serve".into(),
         ]),
+        uid: Some("1000".into()),
+        foreign_mntns: false,
     }
 }
 
@@ -1809,4 +1813,50 @@ async fn a_network_that_cannot_initialise_is_down_not_fatal() {
         addr,
         "fd3e:1eec:520:582e::".parse().unwrap()
     ));
+}
+
+// ─── App identity (ADR 0027 amendment) ───────────────────────────────────────
+
+#[tokio::test]
+async fn identity_is_per_user_and_never_shared_with_forgeries() {
+    let mut other_user = listener("nginx", 8080, Protocol::Tcp);
+    other_user.uid = Some("1001".into());
+    let mut foreign = listener("nginx", 8081, Protocol::Tcp);
+    foreign.foreign_mntns = true;
+    let mut no_exe = listener("nginx", 8082, Protocol::Tcp);
+    no_exe.exe_path = None;
+    let mut inline = script("node", "/srv/trusted/app.js", 8083);
+    inline.cmdline = Some(
+        ["node", "--eval=1", "/srv/trusted/app.js"]
+            .map(String::from)
+            .to_vec(),
+    );
+    let h = Harness::new(
+        vec![local()],
+        vec![
+            listener("nginx", 80, Protocol::Tcp),
+            other_user,
+            foreign,
+            no_exe,
+            script("node", "/srv/trusted/app.js", 3000),
+            inline,
+        ],
+    )
+    .await;
+    h.reconcile().await;
+
+    let apps = h.apps().await;
+    assert_eq!(apps.len(), 6, "{apps:?}");
+    let notes: Vec<_> = apps
+        .iter()
+        .filter_map(|a| a.identity_note.clone())
+        .collect();
+    assert!(notes.contains(&"foreign mount namespace".to_string()));
+    assert!(notes.contains(&"no executable path".to_string()));
+    assert!(notes.contains(&"inline code".to_string()));
+    let trusted = apps
+        .iter()
+        .find(|a| a.interpreter_arg.as_deref() == Some("/srv/trusted/app.js"))
+        .unwrap();
+    assert_eq!(trusted.ports.len(), 1, "the inline process did not join it");
 }

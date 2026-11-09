@@ -21,9 +21,9 @@ use chrono::Utc;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
 use socketguard_core::{
     app_identity, grant_reach, new_id, normalize_credential, ActivityKind, ActivityQuery,
-    ActivityRecord, Address, AddressId, AddressMode, App, AppDetail, AppId, Credential,
-    CredentialError, Grant, GrantView, Locator, Network, NetworkKind, NewCredential, NewGrant,
-    Peer, PeerGroup, PortRef, PortSet, Protocol, Settings, Subject,
+    ActivityRecord, Address, AddressId, AddressMode, App, AppDetail, AppId, AppIdentity,
+    Credential, CredentialError, Grant, GrantView, Locator, Network, NetworkKind, NewCredential,
+    NewGrant, Peer, PeerGroup, PortRef, PortSet, Protocol, Settings, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
@@ -821,6 +821,7 @@ impl Engine {
             process_name: String,
             exe_path: Option<String>,
             interpreter_arg: Option<String>,
+            identity_note: Option<String>,
             ports: BTreeSet<PortRef>,
         }
         let mut live: BTreeMap<AppId, Live> = BTreeMap::new();
@@ -829,11 +830,12 @@ impl Engine {
             if !config.process_filter.matches(&ls.process_name) {
                 continue;
             }
-            let (id, name, interpreter_arg) = app_identity(
-                &ls.process_name,
-                ls.exe_path.as_deref(),
-                ls.cmdline.as_deref(),
-            );
+            let AppIdentity {
+                id,
+                name,
+                interpreter_arg,
+                note,
+            } = app_identity(ls);
             let port_ref = PortRef {
                 port: ls.port,
                 proto: ls.protocol,
@@ -850,6 +852,7 @@ impl Engine {
                     process_name: ls.process_name.clone(),
                     exe_path: ls.exe_path.clone(),
                     interpreter_arg,
+                    identity_note: note,
                     ports: BTreeSet::new(),
                 })
                 .ports
@@ -881,6 +884,7 @@ impl Engine {
                     process_name: l.process_name.clone(),
                     exe_path: l.exe_path.clone(),
                     interpreter_arg: l.interpreter_arg.clone(),
+                    identity_note: l.identity_note.clone(),
                     reviewed: false,
                     first_seen: now,
                     last_seen: now,
@@ -2363,6 +2367,7 @@ mod tests {
             process_name: "a".into(),
             exe_path: None,
             interpreter_arg: None,
+            identity_note: None,
             reviewed: false,
             first_seen: now,
             last_seen: now,

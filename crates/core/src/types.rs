@@ -42,6 +42,13 @@ pub struct ListeningSocket {
     pub exe_path: Option<String>,
     /// Command line arguments, argv[0] first (if available)
     pub cmdline: Option<Vec<String>>,
+    /// Owning user: the uid on Unix, the owner SID string on Windows (if available).
+    #[serde(default)]
+    pub uid: Option<String>,
+    /// The process lives in another mount namespace than the daemon (Linux), so its
+    /// `exe_path` may not name the file the host sees there.
+    #[serde(default)]
+    pub foreign_mntns: bool,
 }
 
 /// Network backend type

@@ -339,8 +339,7 @@ pub fn check_protect_host(
         if !exposed {
             continue;
         }
-        let (app_id, _, _) =
-            app_identity(&l.process_name, l.exe_path.as_deref(), l.cmdline.as_deref());
+        let app_id = app_identity(l).id;
         let allowed = ruleset.rules.iter().any(|r| {
             r.port == l.port
                 && r.proto == l.protocol
@@ -439,6 +438,7 @@ mod tests {
             process_name: id.into(),
             exe_path: None,
             interpreter_arg: None,
+            identity_note: None,
             reviewed: true,
             first_seen: Utc::now(),
             last_seen: Utc::now(),
@@ -859,6 +859,8 @@ mod tests {
             bind_address: ip(bind),
             exe_path: Some(format!("/usr/sbin/{name}")),
             cmdline: None,
+            uid: Some("0".into()),
+            foreign_mntns: false,
         }
     }
 
@@ -871,7 +873,7 @@ mod tests {
 
     /// An sshd app, as the guard identifies it, with an address on the LAN network.
     fn sshd_snap(grants: Vec<Grant>) -> Snapshot {
-        let (id, _, _) = app_identity("sshd", Some("/usr/sbin/sshd"), None);
+        let id = app_identity(&listener("sshd", 22, "::")).id;
         let mut a = app(&id, &[22], vec![]);
         a.addresses = vec![address("ad", &id, "lan", "2001:db8:1:2::22", PortSet::All)];
         Snapshot {
@@ -959,7 +961,7 @@ mod tests {
 
     #[test]
     fn lockout_rule_bound_to_another_interface_does_not_help() {
-        let (id, _, _) = app_identity("sshd", Some("/usr/sbin/sshd"), None);
+        let id = app_identity(&listener("sshd", 22, "::")).id;
         let mut a = app(&id, &[22], vec![]);
         a.addresses = vec![address("ad", &id, "ygg", "300:1:2:3::22", PortSet::All)];
         let s = Snapshot {

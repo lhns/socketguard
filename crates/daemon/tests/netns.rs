@@ -315,6 +315,7 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
             process_name: "python3".into(),
             exe_path: None,
             interpreter_arg: None,
+            identity_note: None,
             reviewed: true,
             first_seen: now,
             last_seen: now,
