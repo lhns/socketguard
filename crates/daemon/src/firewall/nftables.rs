@@ -189,6 +189,7 @@ fn run_nft(args: &[&str], stdin: Option<&str>) -> Result<std::process::Output> {
     Ok(child.wait_with_output()?)
 }
 
+#[derive(Default)]
 pub struct NftablesFirewall;
 
 impl NftablesFirewall {
@@ -290,7 +291,7 @@ mod tests {
     fn counter_names_round_trip() {
         for id in [
             "managed",
-            "s:0af:ygg:80:tcp:ygg:ygg0",
+            "a:ay1:80:tcp:g2:ygg0",
             "host:eth0.100",
             "a-b_c é",
         ] {

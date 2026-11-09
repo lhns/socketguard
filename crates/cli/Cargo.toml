@@ -6,10 +6,6 @@ edition.workspace = true
 [dependencies]
 socketguard-core = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
 reqwest = { version = "0.12", features = ["json"] }
 tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 anyhow = { workspace = true }
-tabled = "0.17"

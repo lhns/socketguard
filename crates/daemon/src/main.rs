@@ -130,8 +130,14 @@ async fn disable(config: &DaemonConfig) -> Result<()> {
         .init();
     let db = state::Database::new(&config.db_path).await?;
     db.migrate().await?;
+    let interfaces = config
+        .backends
+        .iter()
+        .map(|b| (b.id.clone(), b.backend.interface().to_string()))
+        .collect();
     engine::disable_all(
         &db,
+        &interfaces,
         Arc::from(firewall::create_firewall()),
         Arc::from(network::create_network_interface()),
     )

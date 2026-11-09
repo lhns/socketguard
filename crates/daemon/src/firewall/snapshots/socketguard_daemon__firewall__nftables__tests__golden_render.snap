@@ -3,14 +3,14 @@ source: crates/daemon/src/firewall/nftables.rs
 expression: render(&golden_ruleset())
 ---
 table inet socketguard {
-	counter g.3asg1.3aula.3a53.3audp { }
+	counter a.3aal1.3a53.3audp.3ag1 { }
+	counter a.3aav4.3a22.3atcp.3ag3 { }
+	counter a.3aay1.3a8080.3atcp.3ag1 { }
+	counter a.3aay1.3a8080.3atcp.3ag2.3aygg0 { }
 	counter host.3aeth0 { }
 	counter host.3awlan0 { }
 	counter managed { }
 	counter overlay.3aygg0 { }
-	counter s.3a0af.3aygg.3a8080.3atcp { }
-	counter s.3a0af.3aygg.3a8080.3atcp.3aygg.3aygg0 { }
-	counter s.3ab1.3av4.3a22.3atcp { }
 	chain input {
 		type filter hook input priority 0; policy accept;
 		# always allowed
@@ -23,10 +23,10 @@ table inet socketguard {
 		meta nfproto ipv6 udp sport 547 udp dport 546 accept
 		meta nfproto ipv4 udp sport 67 udp dport 68 accept
 		# rules
-		ip6 daddr fd00::9 udp dport 53 counter name "g.3asg1.3aula.3a53.3audp" accept
-		ip6 saddr { fd00::10/128, fd00:5::/32 } ip6 daddr 301::1 tcp dport 8080 counter name "s.3a0af.3aygg.3a8080.3atcp" accept
-		iifname "ygg0" ip6 saddr { 200:1::5/128 } ip6 daddr 301::1 tcp dport 8080 counter name "s.3a0af.3aygg.3a8080.3atcp.3aygg.3aygg0" accept
-		ip saddr { 198.51.100.0/24 } ip daddr 192.0.2.9 tcp dport 22 counter name "s.3ab1.3av4.3a22.3atcp" accept
+		ip6 daddr fd00::9 udp dport 53 counter name "a.3aal1.3a53.3audp.3ag1" accept
+		ip6 saddr { fd00::10/128, fd00:5::/32 } ip6 daddr 301::1 tcp dport 8080 counter name "a.3aay1.3a8080.3atcp.3ag1" accept
+		iifname "ygg0" ip6 saddr { 200:1::5/128 } ip6 daddr 301::1 tcp dport 8080 counter name "a.3aay1.3a8080.3atcp.3ag2.3aygg0" accept
+		ip saddr { 198.51.100.0/24 } ip daddr 192.0.2.9 tcp dport 22 counter name "a.3aav4.3a22.3atcp.3ag3" accept
 		# scopes
 		ip6 daddr { fd00::1, 301::1 } limit rate 10/second burst 20 packets log group 7 prefix "sg:managed"
 		ip6 daddr { fd00::1, 301::1 } counter name "managed" drop

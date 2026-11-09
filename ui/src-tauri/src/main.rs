@@ -1,9 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use futures_util::StreamExt;
-use socketguard_core::api_types::*;
-use socketguard_core::config::BackendInstanceConfig;
-use socketguard_core::Policy;
+use socketguard_core::api_types::ApiError;
 use std::path::Path;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
@@ -88,72 +86,40 @@ async fn check_response(resp: reqwest::Response) -> Result<(), String> {
     }
 }
 
-// ======== Socket commands ========
+// ======== Data commands ========
+//
+// The model changed (ADR 0027) and API v1 has not landed yet (redesign phase 6). The
+// commands stay registered so the frontend's invoke() calls resolve; they all fail.
+
+const NOT_AVAILABLE: &str = "not available until the API v1 lands";
 
 #[tauri::command]
-async fn list_sockets() -> Result<SocketListResponse, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/sockets", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+async fn list_sockets() -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn get_socket(id: String) -> Result<SocketDetailResponse, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/sockets/{id}", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+async fn get_socket(id: String) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn allow_ip(socket_id: String, ip: String, label: Option<String>) -> Result<(), String> {
-    let req = AllowIpRequest {
-        allowed_ip: ip,
-        label,
-    };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/sockets/{socket_id}/acl/allow", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+async fn allow_ip(
+    socket_id: String,
+    ip: String,
+    label: Option<String>,
+) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn remove_acl_entry(socket_id: String, entry_id: i64) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!(
-                "{}/api/sockets/{socket_id}/acl/{entry_id}",
-                api_base()
-            ))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
+async fn remove_acl_entry(socket_id: String, entry_id: i64) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn set_policy(socket_id: String, policy: String) -> Result<(), String> {
-    let policy: Policy = policy.parse().map_err(|e: String| e)?;
-    let req = UpdatePolicyRequest { policy };
-    let resp = authed_request(|token| {
-        client()
-            .put(format!("{}/api/sockets/{socket_id}/policy", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+async fn set_policy(socket_id: String, policy: String) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
@@ -161,20 +127,8 @@ async fn set_backend_policy(
     socket_id: String,
     backend_id: String,
     policy: String,
-) -> Result<(), String> {
-    let policy: Policy = policy.parse().map_err(|e: String| e)?;
-    let req = UpdatePolicyRequest { policy };
-    let resp = authed_request(|token| {
-        client()
-            .put(format!(
-                "{}/api/sockets/{socket_id}/backends/{backend_id}/policy",
-                api_base()
-            ))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
@@ -183,64 +137,23 @@ async fn allow_backend_ip(
     backend_id: String,
     ip: String,
     label: Option<String>,
-) -> Result<(), String> {
-    let req = AllowIpRequest {
-        allowed_ip: ip,
-        label,
-    };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!(
-                "{}/api/sockets/{socket_id}/backends/{backend_id}/acl/allow",
-                api_base()
-            ))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
-}
-
-// ======== ACL Group commands (ADR 0018) ========
-
-#[tauri::command]
-async fn list_acl_groups() -> Result<Vec<AclGroupResponse>, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/acl-groups", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn create_acl_group(label: String) -> Result<AclGroupResponse, String> {
-    let req = CreateAclGroupRequest { label };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/acl-groups", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    if resp.status().is_success() {
-        resp.json().await.map_err(|e| e.to_string())
-    } else {
-        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
-        Err(err.error)
-    }
+async fn list_acl_groups() -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn get_acl_group(id: String) -> Result<AclGroupResponse, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/acl-groups/{id}", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+async fn create_acl_group(label: String) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
+}
+
+#[tauri::command]
+async fn get_acl_group(id: String) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
@@ -248,58 +161,29 @@ async fn update_acl_group(
     id: String,
     label: Option<String>,
     policy: Option<String>,
-) -> Result<(), String> {
-    let policy = match policy {
-        Some(p) => Some(p.parse::<Policy>().map_err(|e: String| e)?),
-        None => None,
-    };
-    let req = UpdateAclGroupRequest { label, policy };
-    let resp = authed_request(|token| {
-        client()
-            .put(format!("{}/api/acl-groups/{id}", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn delete_acl_group(id: String) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!("{}/api/acl-groups/{id}", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
+async fn delete_acl_group(id: String) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn add_to_acl_group(group_id: String, socket_ids: Vec<String>) -> Result<(), String> {
-    let req = AddToGroupRequest { socket_ids };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/acl-groups/{group_id}/members", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+async fn add_to_acl_group(
+    group_id: String,
+    socket_ids: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn remove_from_acl_group(group_id: String, socket_id: String) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!(
-                "{}/api/acl-groups/{group_id}/members/{socket_id}",
-                api_base()
-            ))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
+async fn remove_from_acl_group(
+    group_id: String,
+    socket_id: String,
+) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
@@ -308,155 +192,61 @@ async fn add_acl_group_entry(
     backend_id: String,
     ip: String,
     label: Option<String>,
-) -> Result<(), String> {
-    let req = AddAclGroupEntryRequest {
-        backend_id,
-        allowed_ip: ip,
-        label,
-    };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/acl-groups/{group_id}/acl", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn remove_acl_group_entry(group_id: String, entry_id: i64) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!(
-                "{}/api/acl-groups/{group_id}/acl/{entry_id}",
-                api_base()
-            ))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
-}
-
-// ======== Socket Group commands (ADR 0018) ========
-
-#[tauri::command]
-async fn list_socket_groups() -> Result<Vec<SocketGroupResponse>, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/socket-groups", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+async fn remove_acl_group_entry(
+    group_id: String,
+    entry_id: i64,
+) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn create_socket_group(
-    label: String,
-    app_name: String,
-) -> Result<SocketGroupResponse, String> {
-    let req = CreateSocketGroupRequest { label, app_name };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/socket-groups", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    if resp.status().is_success() {
-        resp.json().await.map_err(|e| e.to_string())
-    } else {
-        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
-        Err(err.error)
-    }
+async fn list_socket_groups() -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn update_socket_group(id: String, label: String) -> Result<(), String> {
-    #[derive(serde::Serialize)]
-    struct Req {
-        label: Option<String>,
-    }
-    let req = Req { label: Some(label) };
-    let resp = authed_request(|token| {
-        client()
-            .put(format!("{}/api/socket-groups/{id}", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+async fn create_socket_group(label: String, app_name: String) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn delete_socket_group(id: String) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!("{}/api/socket-groups/{id}", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
+async fn update_socket_group(id: String, label: String) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
+}
+
+#[tauri::command]
+async fn delete_socket_group(id: String) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
 async fn add_socket_to_socket_group(
     group_id: String,
     socket_ids: Vec<String>,
-) -> Result<(), String> {
-    let req = AddToGroupRequest { socket_ids };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!(
-                "{}/api/socket-groups/{group_id}/members",
-                api_base()
-            ))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
 async fn remove_socket_from_socket_group(
     group_id: String,
     socket_id: String,
-) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!(
-                "{}/api/socket-groups/{group_id}/members/{socket_id}",
-                api_base()
-            ))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
+) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
-
-// ======== Socket Group address policy & ACL ========
 
 #[tauri::command]
 async fn set_socket_group_address_policy(
     group_id: String,
     backend_id: String,
     policy: String,
-) -> Result<(), String> {
-    let policy: Policy = policy.parse().map_err(|e: String| e)?;
-    let req = UpdatePolicyRequest { policy };
-    let resp = authed_request(|token| {
-        client()
-            .put(format!(
-                "{}/api/socket-groups/{group_id}/backends/{backend_id}/policy",
-                api_base()
-            ))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
@@ -465,136 +255,54 @@ async fn add_socket_group_acl_entry(
     backend_id: String,
     ip: String,
     label: Option<String>,
-) -> Result<(), String> {
-    let req = AllowIpRequest {
-        allowed_ip: ip,
-        label,
-    };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!(
-                "{}/api/socket-groups/{group_id}/backends/{backend_id}/acl",
-                api_base()
-            ))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn remove_socket_group_acl_entry(group_id: String, entry_id: i64) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!(
-                "{}/api/socket-groups/{group_id}/acl/{entry_id}",
-                api_base()
-            ))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
+async fn remove_socket_group_acl_entry(
+    group_id: String,
+    entry_id: i64,
+) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
-
-// ======== Socket Group ACL Group (ADR 0020) ========
 
 #[tauri::command]
 async fn set_socket_group_acl_group(
     group_id: String,
     acl_group_id: Option<String>,
-) -> Result<(), String> {
-    #[derive(serde::Serialize)]
-    struct Req {
-        acl_group_id: Option<String>,
-    }
-    let req = Req { acl_group_id };
-    let resp = authed_request(|token| {
-        client()
-            .put(format!(
-                "{}/api/socket-groups/{group_id}/acl-group",
-                api_base()
-            ))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
-}
-
-// ======== Config, Backends, Interfaces, Events, Daemon ========
-
-#[tauri::command]
-async fn get_config() -> Result<ConfigResponse, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/config", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn update_config(config: UpdateConfigRequest) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .put(format!("{}/api/config", api_base()))
-            .bearer_auth(token)
-            .json(&config)
-    })
-    .await?;
-    check_response(resp).await
+async fn get_config() -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn list_interfaces() -> Result<InterfacesResponse, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/interfaces", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+async fn update_config(config: serde_json::Value) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn list_backend_instances() -> Result<BackendsResponse, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/backends", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+async fn list_interfaces() -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn add_backend(req: AddBackendRequest) -> Result<BackendInstanceConfig, String> {
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/backends", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    if resp.status().is_success() {
-        resp.json().await.map_err(|e| e.to_string())
-    } else {
-        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
-        Err(err.error)
-    }
+async fn list_backend_instances() -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]
-async fn remove_backend(id: String) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!("{}/api/backends/{id}", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
+async fn add_backend(req: serde_json::Value) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
+}
+
+#[tauri::command]
+async fn remove_backend(id: String) -> Result<serde_json::Value, String> {
+    Err(NOT_AVAILABLE.into())
 }
 
 #[tauri::command]

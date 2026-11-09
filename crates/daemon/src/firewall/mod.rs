@@ -103,7 +103,7 @@ pub(crate) fn golden_ruleset() -> DesiredRuleset {
         ],
         rules: vec![
             rule(
-                "g:sg1:ula:53:udp",
+                "a:al1:53:udp:g1",
                 None,
                 "fd00::9",
                 53,
@@ -111,7 +111,7 @@ pub(crate) fn golden_ruleset() -> DesiredRuleset {
                 Sources::Any,
             ),
             rule(
-                "s:0af:ygg:8080:tcp",
+                "a:ay1:8080:tcp:g1",
                 None,
                 "301::1",
                 8080,
@@ -122,7 +122,7 @@ pub(crate) fn golden_ruleset() -> DesiredRuleset {
                 ]),
             ),
             rule(
-                "s:0af:ygg:8080:tcp:ygg:ygg0",
+                "a:ay1:8080:tcp:g2:ygg0",
                 Some("ygg0"),
                 "301::1",
                 8080,
@@ -130,7 +130,7 @@ pub(crate) fn golden_ruleset() -> DesiredRuleset {
                 Sources::Nets(vec!["200:1::5/128".parse().unwrap()]),
             ),
             rule(
-                "s:b1:v4:22:tcp",
+                "a:av4:22:tcp:g3",
                 None,
                 "192.0.2.9",
                 22,

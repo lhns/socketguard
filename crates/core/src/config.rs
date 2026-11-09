@@ -79,12 +79,35 @@ impl BackendConfig {
     }
 }
 
-/// A backend instance with a stable ID
+/// A backend instance with a stable ID. On input the `id` is optional and defaults to
+/// [`BackendConfig::default_id`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RawBackendInstance")]
 pub struct BackendInstanceConfig {
     pub id: String,
     #[serde(flatten)]
     pub backend: BackendConfig,
+}
+
+#[derive(Deserialize)]
+struct RawBackendInstance {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(flatten)]
+    backend: BackendConfig,
+}
+
+impl From<RawBackendInstance> for BackendInstanceConfig {
+    fn from(raw: RawBackendInstance) -> Self {
+        let id = raw
+            .id
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| raw.backend.default_id());
+        Self {
+            id,
+            backend: raw.backend,
+        }
+    }
 }
 
 /// Process filter mode
@@ -342,12 +365,6 @@ impl<'de> Deserialize<'de> for DaemonConfig {
                     serde_json::from_value(val).map_err(serde::de::Error::custom)?;
                 result.push(inst);
             }
-            // Fill in missing IDs
-            for inst in &mut result {
-                if inst.id.is_empty() {
-                    inst.id = inst.backend.default_id();
-                }
-            }
             result
         } else {
             // Single backend (object or string) or empty → wrap in vec
@@ -394,6 +411,25 @@ fn default_log_level() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_id_is_optional_on_input() {
+        let config: DaemonConfig =
+            serde_json::from_str(r#"{"backends":[{"type":"ula"}]}"#).unwrap();
+        assert_eq!(config.backends.len(), 1);
+        assert_eq!(config.backends[0].id, "ula");
+
+        let config: DaemonConfig = serde_json::from_str(
+            r#"{"backends":[{"type":"slaac","interface":"eth0"},{"id":"mine","type":"dhcpv6","interface":"eth1"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(config.backends[0].id, "slaac-eth0");
+        assert_eq!(config.backends[1].id, "mine");
+
+        let inst: BackendInstanceConfig =
+            serde_json::from_str(r#"{"type":"yggdrasil","interface":"ygg0"}"#).unwrap();
+        assert_eq!(inst.id, "yggdrasil");
+    }
 
     #[test]
     fn default_config_has_sane_values() {

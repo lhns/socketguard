@@ -1,72 +1,247 @@
-// Scenarios are being rewritten for the new model; allow the old test style meanwhile.
-#![allow(clippy::len_zero, clippy::await_holding_lock)]
+//! Engine scenarios against the model of ADR 0027: discovery, address layouts, grants and
+//! the ruleset they produce, with mock firewall, interfaces, monitor and networks.
 
 use socketguard_core::config::{
     BackendConfig, BackendInstanceConfig, DaemonConfig, FilterMode, ProcessFilter,
 };
+use socketguard_core::ListeningSocket;
 use socketguard_core::{
-    socket_id, BackendType, ListeningSocket, ManagedSocket, Policy, Protocol, SocketAddress,
+    ActivityKind, ActivityQuery, AddressMode, App, CredentialKind, NetworkStatus, NewCredential,
+    NewGrant, PortRef, PortSet, Protocol, Reach, Subject,
 };
-use socketguard_daemon::engine::Engine;
-use socketguard_daemon::firewall::{ScopeMatch, Sources};
+use socketguard_daemon::api::DaemonEvent;
+use socketguard_daemon::engine::{
+    ActiveBackend, Engine, EngineError, GrantFilter, ProtectHostError,
+};
+use socketguard_daemon::firewall::{DropEvent, ScopeMatch, Sources};
 use socketguard_daemon::test_support::*;
+use socketguard_daemon::AppState;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
+use tokio::sync::{broadcast, RwLockReadGuard};
 
-/// Helper: build a DaemonConfig with one ULA-like backend.
-fn single_backend_config() -> DaemonConfig {
-    DaemonConfig {
-        backends: vec![BackendInstanceConfig {
-            id: "mock-ula".to_string(),
-            backend: BackendConfig::Ula {
-                interface: "lo".to_string(),
-            },
-        }],
-        ..DaemonConfig::default()
+const KEY: &str = "ba83a2e554a8a087cebdb3f053468cd3ff915b5dd94bf11b7a5fc2e36f13158b";
+/// The node address that KEY derives.
+const KEY_ADDR: &str = "200:8af8:ba35:56ae:bef0:6284:981f:5972/128";
+
+// ─── Harness ─────────────────────────────────────────────────────────────────
+
+/// A network of the harness: its config and the mock that allocates for it.
+struct Net {
+    id: &'static str,
+    config: BackendConfig,
+    mock: MockIpv6Backend,
+}
+
+/// Local (ULA) network on `lo`: no prefix, grants have no effect.
+fn local() -> Net {
+    Net {
+        id: "local",
+        config: BackendConfig::Ula {
+            interface: "lo".into(),
+        },
+        mock: MockIpv6Backend::new("fd00:1:2:3::", 128, "lo"),
     }
 }
 
-/// Helper: build a test engine with mock deps and a single mock backend.
-fn build_test_engine(
-    monitor: MockSocketMonitor,
-    fw_calls: Arc<Mutex<Vec<FirewallCall>>>,
-    net_calls: Arc<Mutex<Vec<NetworkCall>>>,
-) -> Engine {
-    let firewall = Arc::new(MockFirewall::new(fw_calls));
-    let network = Arc::new(MockNetworkInterface::new(net_calls));
-
-    let mock_backend = MockIpv6Backend::new("fd00::", 128, "lo");
-    let mut backends = HashMap::new();
-    backends.insert(
-        "mock-ula".to_string(),
-        socketguard_daemon::engine::ActiveBackend {
-            config: BackendInstanceConfig {
-                id: "mock-ula".to_string(),
-                backend: BackendConfig::Ula {
-                    interface: "lo".to_string(),
-                },
-            },
-            backend: Box::new(mock_backend),
+/// LAN network on `eth0` with a /64.
+fn lan() -> Net {
+    let mock = MockIpv6Backend::new("2001:db8:1:2::", 128, "eth0");
+    mock.set_prefix("2001:db8:1:2::");
+    Net {
+        id: "lan",
+        config: BackendConfig::Slaac {
+            interface: "eth0".into(),
+            prefix: None,
         },
-    );
-
-    Engine::new_injectable(
-        Box::new(monitor),
-        firewall,
-        network,
-        backends,
-        vec!["mock-ula".to_string()],
-    )
+        mock,
+    }
 }
 
-/// `Sources::Nets` with exactly one network.
-fn only_source(net: &str) -> Sources {
-    Sources::Nets(vec![net.parse().unwrap()])
+/// Yggdrasil network on `ygg0`.
+fn ygg() -> Net {
+    let mock = MockIpv6Backend::new("300:1:2:3::", 128, "ygg0");
+    mock.set_prefix("300:1:2:3::");
+    Net {
+        id: "ygg",
+        config: BackendConfig::Yggdrasil {
+            interface: "ygg0".into(),
+            admin_endpoint: None,
+        },
+        mock,
+    }
 }
 
-/// Helper: create a listening socket.
-fn listening_socket(name: &str, port: u16, protocol: Protocol) -> ListeningSocket {
+struct Harness {
+    state: Arc<AppState>,
+    fw: Arc<MockFirewall>,
+    fw_calls: Arc<Mutex<Vec<FirewallCall>>>,
+    net: MockNetworkInterface,
+    net_calls: Arc<Mutex<Vec<NetworkCall>>>,
+    sockets: Arc<Mutex<Vec<ListeningSocket>>>,
+    nets: HashMap<&'static str, MockIpv6Backend>,
+}
+
+impl Harness {
+    async fn new(nets: Vec<Net>, sockets: Vec<ListeningSocket>) -> Self {
+        Self::with_filter(nets, sockets, ProcessFilter::default()).await
+    }
+
+    async fn with_filter(
+        nets: Vec<Net>,
+        sockets: Vec<ListeningSocket>,
+        process_filter: ProcessFilter,
+    ) -> Self {
+        let fw_calls = Arc::new(Mutex::new(Vec::new()));
+        let net_calls = Arc::new(Mutex::new(Vec::new()));
+        let fw = Arc::new(MockFirewall::new(fw_calls.clone()));
+        let net = MockNetworkInterface::new(net_calls.clone());
+        let monitor = MockSocketMonitor::new(sockets);
+        let socket_handle = monitor.sockets.clone();
+
+        let mut backends = HashMap::new();
+        let mut configs = Vec::new();
+        let mut mocks = HashMap::new();
+        for n in nets {
+            let cfg = BackendInstanceConfig {
+                id: n.id.to_string(),
+                backend: n.config,
+            };
+            mocks.insert(n.id, n.mock.clone());
+            backends.insert(
+                n.id.to_string(),
+                ActiveBackend {
+                    config: cfg.clone(),
+                    backend: Box::new(n.mock),
+                },
+            );
+            configs.push(cfg);
+        }
+        let ids = configs.iter().map(|c| c.id.clone()).collect();
+        let engine = Engine::new_injectable(
+            Box::new(monitor),
+            fw.clone(),
+            Arc::new(net.clone()),
+            backends,
+            ids,
+        );
+        let state = test_app_state(
+            engine,
+            DaemonConfig {
+                backends: configs,
+                process_filter,
+                ..DaemonConfig::default()
+            },
+        )
+        .await;
+        Self {
+            state,
+            fw,
+            fw_calls,
+            net,
+            net_calls,
+            sockets: socket_handle,
+            nets: mocks,
+        }
+    }
+
+    async fn reconcile(&self) {
+        let mut engine = self.state.engine.write().await;
+        engine.reconcile(&self.state).await.unwrap();
+    }
+
+    async fn engine(&self) -> RwLockReadGuard<'_, Engine> {
+        self.state.engine.read().await
+    }
+
+    fn set_sockets(&self, sockets: Vec<ListeningSocket>) {
+        *self.sockets.lock().unwrap() = sockets;
+    }
+
+    fn clear_calls(&self) {
+        self.fw_calls.lock().unwrap().clear();
+        self.net_calls.lock().unwrap().clear();
+    }
+
+    async fn apps(&self) -> Vec<App> {
+        self.state.db.list_apps().await.unwrap()
+    }
+
+    /// The only app.
+    async fn app(&self) -> App {
+        let apps = self.apps().await;
+        assert_eq!(apps.len(), 1, "expected exactly one app: {apps:?}");
+        apps.into_iter().next().unwrap()
+    }
+
+    /// The address of `app` on `network` (the only one).
+    fn addr_on(app: &App, network: &str) -> Ipv6Addr {
+        let found: Vec<_> = app
+            .addresses
+            .iter()
+            .filter(|a| a.network_id == network)
+            .collect();
+        assert_eq!(found.len(), 1, "one address on {network}: {found:?}");
+        found[0].locator.ipv6().unwrap()
+    }
+
+    /// The last ruleset applied to the firewall.
+    fn last_ruleset(&self) -> socketguard_daemon::firewall::DesiredRuleset {
+        applied(&self.fw_calls)
+            .pop()
+            .expect("a ruleset was applied")
+    }
+
+    async fn peer(&self, label: &str, kind: CredentialKind, value: &str) -> String {
+        self.engine()
+            .await
+            .create_peer(
+                &self.state,
+                label,
+                &[NewCredential {
+                    kind,
+                    value: value.into(),
+                    label: None,
+                }],
+            )
+            .await
+            .unwrap()
+            .id
+    }
+
+    async fn grant(&self, app_id: &str, subject: Subject) -> socketguard_core::GrantView {
+        self.engine()
+            .await
+            .create_grant(
+                &self.state,
+                &NewGrant {
+                    app_id: app_id.into(),
+                    port: None,
+                    network_id: None,
+                    subject,
+                    confirm_open: true,
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn activity(&self, kind: ActivityKind) -> Vec<socketguard_core::ActivityRecord> {
+        self.state
+            .db
+            .list_activity(&ActivityQuery {
+                kind: Some(kind),
+                limit: Some(100),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+    }
+}
+
+fn listener(name: &str, port: u16, protocol: Protocol) -> ListeningSocket {
     ListeningSocket {
         pid: 1000,
         process_name: name.to_string(),
@@ -74,1385 +249,1096 @@ fn listening_socket(name: &str, port: u16, protocol: Protocol) -> ListeningSocke
         protocol,
         bind_address: IpAddr::V6("::".parse().unwrap()),
         exe_path: Some(format!("/usr/bin/{name}")),
-        cmdline: Some(name.to_string()),
+        cmdline: Some(vec![name.to_string()]),
     }
 }
 
-// ─── Test 1: New socket provisioning ─────────────────────────────────────────
-
-#[tokio::test]
-async fn new_socket_gets_address_and_firewall() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let monitor = MockSocketMonitor::new(vec![listening_socket("nginx", 80, Protocol::Tcp)]);
-
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls.clone());
-    let config = single_backend_config();
-    let state = test_app_state(engine, config).await;
-
-    // Run reconcile
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    // DB should have the socket with an address
-    let sockets = state.db.list_sockets().await.unwrap();
-    assert_eq!(sockets.len(), 1);
-    assert_eq!(sockets[0].process_name, "nginx");
-    assert_eq!(sockets[0].port, 80);
-    assert_eq!(sockets[0].addresses.len(), 1);
-    assert_eq!(sockets[0].addresses[0].backend_id, "mock-ula");
-
-    // MockNetwork should have received add_address
-    let net = net_calls.lock().unwrap();
-    assert_eq!(net.len(), 1);
-    assert!(
-        matches!(&net[0], NetworkCall::AddAddress { iface, prefix, .. } if iface == "lo" && *prefix == 128)
-    );
-
-    // One ruleset: closed with no ACL has no rule, but the address is in the managed
-    // scope, i.e. denied (not "inactive").
-    let fw = applied(&fw_calls);
-    assert_eq!(fw.len(), 1);
-    assert!(fw[0].rules.is_empty());
-    assert_eq!(fw[0].scopes.len(), 1);
-    assert_eq!(fw[0].scopes[0].id, "managed");
-    let ScopeMatch::Destinations(dsts) = &fw[0].scopes[0].matcher else {
-        panic!("managed scope matches destinations");
-    };
-    assert_eq!(dsts, &vec![IpAddr::V6(sockets[0].addresses[0].address)]);
-}
-
-// ─── Test 2: Closed policy with ACL entries ──────────────────────────────────
-
-#[tokio::test]
-async fn closed_policy_with_acl_applies_allowed_ips() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let monitor = MockSocketMonitor::new(vec![listening_socket("nginx", 80, Protocol::Tcp)]);
-
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls.clone());
-    let config = single_backend_config();
-    let state = test_app_state(engine, config).await;
-
-    // First reconcile: provisions the socket
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    // Add an ACL entry
-    let sockets = state.db.list_sockets().await.unwrap();
-    let socket = &sockets[0];
-    state
-        .db
-        .add_acl_entry(&socket.id, "mock-ula", "fd00::100", Some("peer1"))
-        .await
-        .unwrap();
-
-    // Clear call logs
-    fw_calls.lock().unwrap().clear();
-    net_calls.lock().unwrap().clear();
-
-    // Second reconcile: should apply ACL with allowed IP
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    let fw = applied(&fw_calls);
-    assert_eq!(fw.len(), 1);
-    assert_eq!(fw[0].rules.len(), 1);
-    assert_eq!(fw[0].rules[0].port, 80);
-    assert_eq!(fw[0].rules[0].sources, only_source("fd00::100/128"));
-}
-
-// ─── Test 3: Open policy ─────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn open_policy_removes_acl() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let monitor = MockSocketMonitor::new(vec![listening_socket("nginx", 80, Protocol::Tcp)]);
-
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls.clone());
-    let config = single_backend_config();
-    let state = test_app_state(engine, config).await;
-
-    // First reconcile: provisions the socket (closed by default)
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    // Change policy to open
-    let sockets = state.db.list_sockets().await.unwrap();
-    let socket = &sockets[0];
-    state
-        .db
-        .update_address_policy(&socket.id, "mock-ula", Policy::Open)
-        .await
-        .unwrap();
-
-    // Clear call logs
-    fw_calls.lock().unwrap().clear();
-
-    // Second reconcile
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    let fw = applied(&fw_calls);
-    assert_eq!(fw.len(), 1);
-    assert_eq!(fw[0].rules.len(), 1);
-    assert_eq!(fw[0].rules[0].sources, Sources::Any);
-    // The address stays inside the managed scope; the rule is what lets traffic through.
-    assert_eq!(fw[0].scopes[0].id, "managed");
-}
-
-// ─── Test 4: Policy change closed→open ───────────────────────────────────────
-
-#[tokio::test]
-async fn policy_change_closed_to_open_updates_firewall() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let monitor = MockSocketMonitor::new(vec![listening_socket("nginx", 80, Protocol::Tcp)]);
-
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls.clone());
-    let config = single_backend_config();
-    let state = test_app_state(engine, config).await;
-
-    // Reconcile 1: new socket, closed with no ACL: denied by the managed scope
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    let sockets = state.db.list_sockets().await.unwrap();
-    let socket = &sockets[0];
-
-    // Verify initial state is closed
-    assert_eq!(socket.addresses[0].policy, Policy::Closed);
-
-    // Change to open
-    state
-        .db
-        .update_address_policy(&socket.id, "mock-ula", Policy::Open)
-        .await
-        .unwrap();
-
-    fw_calls.lock().unwrap().clear();
-
-    // Reconcile 2: open policy gives an any-source rule
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    let fw = applied(&fw_calls);
-    assert_eq!(fw.len(), 1);
-    assert_eq!(fw[0].rules.len(), 1);
-    assert_eq!(fw[0].rules[0].sources, Sources::Any);
-}
-
-// ─── Test 5: Stale socket cleanup ────────────────────────────────────────────
-
-#[tokio::test]
-async fn stale_socket_gets_cleaned_up() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    // Monitor returns empty — the socket is gone
-    let monitor = MockSocketMonitor::new(vec![]);
-
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls.clone());
-    let config = single_backend_config();
-    let state = test_app_state(engine, config).await;
-
-    // Pre-populate DB with a stale socket (old last_seen)
-    let stale_time = chrono::Utc::now() - chrono::Duration::seconds(3600);
-    let addr = SocketAddress {
-        backend_id: "mock-ula".to_string(),
-        backend_type: BackendType::Ula,
-        address: "fd00::99".parse().unwrap(),
-        interface: "lo".to_string(),
-        prefix_len: 128,
-        policy: Policy::Closed,
-    };
-    let socket = ManagedSocket {
-        id: "tcp:stale-proc:8080".to_string(),
-        pid: 999,
-        process_name: "stale-proc".to_string(),
-        port: 8080,
+fn script(interpreter: &str, script: &str, port: u16) -> ListeningSocket {
+    ListeningSocket {
+        pid: 2000 + port as u32,
+        process_name: interpreter.to_string(),
+        port,
         protocol: Protocol::Tcp,
-        addresses: vec![addr.clone()],
-        policy: Policy::Closed,
-        exe_path: None,
-        cmdline: None,
-        first_seen: stale_time,
-        last_seen: stale_time,
-        acl_group_id: None,
-        socket_group_ids: vec![],
-    };
-    state.db.upsert_socket(&socket).await.unwrap();
-    state
-        .db
-        .upsert_socket_address(&socket.id, &addr)
-        .await
-        .unwrap();
-
-    // Reconcile: socket not in monitor + stale last_seen → cleanup
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
+        bind_address: IpAddr::V6("::".parse().unwrap()),
+        exe_path: Some(format!("/usr/bin/{interpreter}")),
+        cmdline: Some(vec![
+            interpreter.to_string(),
+            script.to_string(),
+            "--serve".into(),
+        ]),
     }
-
-    // Socket should be removed from DB
-    let sockets = state.db.list_sockets().await.unwrap();
-    assert!(sockets.is_empty());
-
-    // The last applied ruleset no longer mentions the address
-    let fw = applied(&fw_calls);
-    assert!(fw.last().unwrap().scopes.is_empty());
-    assert!(fw.last().unwrap().rules.is_empty());
-
-    // Network should have address removed
-    let net = net_calls.lock().unwrap();
-    assert!(net.iter().any(|c| matches!(c, NetworkCall::RemoveAddress { addr, .. } if *addr == "fd00::99".parse::<Ipv6Addr>().unwrap())));
 }
 
-// ─── Test 6: Multi-backend provisioning ──────────────────────────────────────
+fn tcp(port: u16) -> PortRef {
+    PortRef {
+        port,
+        proto: Protocol::Tcp,
+    }
+}
+
+fn drain(rx: &mut broadcast::Receiver<DaemonEvent>) -> Vec<DaemonEvent> {
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        out.push(ev);
+    }
+    out
+}
+
+fn net_adds(h: &Harness) -> Vec<(String, Ipv6Addr)> {
+    h.net_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|c| match c {
+            NetworkCall::AddAddress {
+                iface,
+                addr,
+                prefix,
+            } => {
+                assert_eq!(*prefix, 128);
+                Some((iface.clone(), *addr))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+// ─── Discovery ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn multi_backend_provisions_multiple_addresses() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
+async fn discovery_creates_a_pending_app_with_an_address_on_every_network() {
+    let h = Harness::new(
+        vec![local(), lan(), ygg()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    let mut events = h.state.events.subscribe();
+    h.reconcile().await;
 
-    let monitor = MockSocketMonitor::new(vec![listening_socket("nginx", 80, Protocol::Tcp)]);
+    let app = h.app().await;
+    assert_eq!(app.name, "nginx");
+    assert!(!app.reviewed, "a new app is pending");
+    assert_eq!(app.ports.len(), 1);
+    assert!((app.ports[0].port, app.ports[0].listening) == (80, true));
+    assert_eq!(app.addresses.len(), 3);
+    assert!(app.addresses.iter().all(|a| a.ports == PortSet::All));
+    let nets: Vec<_> = app
+        .addresses
+        .iter()
+        .map(|a| a.network_id.as_str())
+        .collect();
+    assert!(["local", "lan", "ygg"].iter().all(|n| nets.contains(n)));
 
-    let firewall = Arc::new(MockFirewall::new(fw_calls.clone()));
-    let network = Arc::new(MockNetworkInterface::new(net_calls.clone()));
+    // Addresses are on their interfaces, each from its network's prefix.
+    let adds = net_adds(&h);
+    assert_eq!(adds.len(), 3);
+    let ygg_addr = Harness::addr_on(&app, "ygg");
+    assert!(adds.contains(&("ygg0".to_string(), ygg_addr)));
+    assert!(ygg_addr.to_string().starts_with("300:1:2:3:"));
+    assert!(Harness::addr_on(&app, "lan")
+        .to_string()
+        .starts_with("2001:db8:1:2:"));
 
-    let mock_ula = MockIpv6Backend::new("fd00::", 128, "lo");
-    let mock_slaac = MockIpv6Backend::new("2001:db8::", 64, "eth0");
-
-    let mut backends = HashMap::new();
-    backends.insert(
-        "mock-ula".to_string(),
-        socketguard_daemon::engine::ActiveBackend {
-            config: BackendInstanceConfig {
-                id: "mock-ula".to_string(),
-                backend: BackendConfig::Ula {
-                    interface: "lo".to_string(),
-                },
-            },
-            backend: Box::new(mock_ula),
-        },
-    );
-    backends.insert(
-        "mock-slaac".to_string(),
-        socketguard_daemon::engine::ActiveBackend {
-            config: BackendInstanceConfig {
-                id: "mock-slaac".to_string(),
-                backend: BackendConfig::Ula {
-                    interface: "eth0".to_string(),
-                },
-            },
-            backend: Box::new(mock_slaac),
-        },
-    );
-
-    let engine = Engine::new_injectable(
-        Box::new(monitor),
-        firewall,
-        network,
-        backends,
-        vec!["mock-ula".to_string(), "mock-slaac".to_string()],
-    );
-
-    let config = DaemonConfig {
-        backends: vec![
-            BackendInstanceConfig {
-                id: "mock-ula".to_string(),
-                backend: BackendConfig::Ula {
-                    interface: "lo".to_string(),
-                },
-            },
-            BackendInstanceConfig {
-                id: "mock-slaac".to_string(),
-                backend: BackendConfig::Ula {
-                    interface: "eth0".to_string(),
-                },
-            },
-        ],
-        ..DaemonConfig::default()
-    };
-    let state = test_app_state(engine, config).await;
-
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    let sockets = state.db.list_sockets().await.unwrap();
-    assert_eq!(sockets.len(), 1);
-    assert_eq!(sockets[0].addresses.len(), 2);
-
-    // Each address was added to its interface
-    let net = net_calls.lock().unwrap();
-    assert_eq!(net.len(), 2);
-
-    // One ruleset covering both addresses in the managed scope, no rules (closed)
-    let fw = applied(&fw_calls);
+    // One ruleset: nothing is granted, so no rules, but every address is denied by the
+    // managed scope and the Yggdrasil interface has its overlay scope.
+    let fw = applied(&h.fw_calls);
     assert_eq!(fw.len(), 1);
     assert!(fw[0].rules.is_empty());
+    let scope_ids: Vec<_> = fw[0].scopes.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(scope_ids, ["managed", "overlay:ygg0"]);
     let ScopeMatch::Destinations(dsts) = &fw[0].scopes[0].matcher else {
         panic!("managed scope matches destinations");
     };
-    assert_eq!(dsts.len(), 2);
-}
+    assert_eq!(dsts.len(), 3);
+    assert!(dsts.contains(&IpAddr::V6(ygg_addr)));
 
-// ─── Test 7: ACL group inheritance ───────────────────────────────────────────
+    // Activity and events tell the frontends.
+    let found = h.activity(ActivityKind::AppDiscovered).await;
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].app_id.as_deref(), Some(app.id.as_str()));
+    let evs = drain(&mut events);
+    assert!(evs.contains(&DaemonEvent::AppDiscovered(app.id.clone())));
+    assert!(evs.contains(&DaemonEvent::AppsChanged));
+    assert!(evs.contains(&DaemonEvent::Activity));
+}
 
 #[tokio::test]
-async fn acl_group_inheritance_applies_group_acl() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let monitor = MockSocketMonitor::new(vec![listening_socket("nginx", 80, Protocol::Tcp)]);
-
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls.clone());
-    let config = single_backend_config();
-    let state = test_app_state(engine, config).await;
-
-    // Reconcile to provision the socket
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    let sockets = state.db.list_sockets().await.unwrap();
-    let socket = &sockets[0];
-
-    // Create ACL group with an entry
-    let group = state.db.create_acl_group("webservers").await.unwrap();
-    state
-        .db
-        .add_acl_group_entry(&group.id, "mock-ula", "fd00::200", Some("trusted"))
-        .await
-        .unwrap();
-
-    // Add socket to group and set policy to Group
-    state
-        .db
-        .add_to_acl_group(&group.id, &socket.id)
-        .await
-        .unwrap();
-    state
-        .db
-        .update_address_policy(&socket.id, "mock-ula", Policy::Group)
-        .await
-        .unwrap();
-
-    fw_calls.lock().unwrap().clear();
-
-    // Reconcile: should resolve Group → Closed (group default) and apply group's ACL
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    let fw = applied(&fw_calls);
-    assert_eq!(
-        fw.last().unwrap().rules[0].sources,
-        only_source("fd00::200/128")
+async fn reconcile_is_idempotent() {
+    let h = Harness::new(
+        vec![local(), ygg()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    h.clear_calls();
+    h.reconcile().await;
+    assert!(
+        applied(&h.fw_calls).is_empty(),
+        "an unchanged ruleset is not re-sent"
     );
+    assert!(h.net_calls.lock().unwrap().is_empty());
+    assert_eq!(h.app().await.addresses.len(), 2);
+    assert_eq!(h.activity(ActivityKind::AppDiscovered).await.len(), 1);
 }
 
-// ─── Test 8: Process filter ──────────────────────────────────────────────────
+#[tokio::test]
+async fn interpreter_apps_are_split_by_script() {
+    let h = Harness::new(
+        vec![local()],
+        vec![
+            script("python3", "/srv/a/server.py", 8000),
+            script("python3", "/srv/b/worker.py", 8001),
+            // The same script on a second port is the same app.
+            script("python3", "/srv/a/server.py", 8002),
+            listener("nginx", 80, Protocol::Tcp),
+        ],
+    )
+    .await;
+    h.reconcile().await;
+
+    let apps = h.apps().await;
+    assert_eq!(apps.len(), 3);
+    let server = apps.iter().find(|a| a.name == "server.py").unwrap();
+    let ports: Vec<u16> = server.ports.iter().map(|p| p.port).collect();
+    assert_eq!(ports, [8000, 8002]);
+    assert_eq!(server.interpreter_arg.as_deref(), Some("/srv/a/server.py"));
+    assert!(apps
+        .iter()
+        .any(|a| a.name == "worker.py" && a.ports.len() == 1));
+    assert!(apps.iter().any(|a| a.name == "nginx"));
+    // Each app has its own address.
+    let all: std::collections::HashSet<_> = apps
+        .iter()
+        .flat_map(|a| a.addresses.iter().map(|x| x.locator.ipv6().unwrap()))
+        .collect();
+    assert_eq!(all.len(), 3);
+}
 
 #[tokio::test]
 async fn process_filter_ignores_non_matching() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let monitor = MockSocketMonitor::new(vec![
-        listening_socket("nginx", 80, Protocol::Tcp),
-        listening_socket("sshd", 22, Protocol::Tcp),
-    ]);
-
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls.clone());
-    let config = DaemonConfig {
-        backends: vec![BackendInstanceConfig {
-            id: "mock-ula".to_string(),
-            backend: BackendConfig::Ula {
-                interface: "lo".to_string(),
-            },
-        }],
-        process_filter: ProcessFilter {
-            mode: FilterMode::Allowlist,
-            patterns: vec!["nginx".to_string()],
-        },
-        ..DaemonConfig::default()
-    };
-    let state = test_app_state(engine, config).await;
-
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    // Only nginx should be provisioned
-    let sockets = state.db.list_sockets().await.unwrap();
-    assert_eq!(sockets.len(), 1);
-    assert_eq!(sockets[0].process_name, "nginx");
-}
-
-// ─── Test 9: Startup reconcile ───────────────────────────────────────────────
-
-#[tokio::test]
-async fn startup_reconcile_restores_state() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let monitor = MockSocketMonitor::new(vec![]);
-
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls.clone());
-    let config = single_backend_config();
-    let state = test_app_state(engine, config).await;
-
-    // Pre-populate DB with a socket that has an ACL entry (simulating previous run)
-    let addr = SocketAddress {
-        backend_id: "mock-ula".to_string(),
-        backend_type: BackendType::Ula,
-        address: "fd00::42".parse().unwrap(),
-        interface: "lo".to_string(),
-        prefix_len: 128,
-        policy: Policy::Closed,
-    };
-    let socket = ManagedSocket {
-        id: "tcp:nginx:80".to_string(),
-        pid: 1000,
-        process_name: "nginx".to_string(),
-        port: 80,
-        protocol: Protocol::Tcp,
-        addresses: vec![addr.clone()],
-        policy: Policy::Closed,
-        exe_path: None,
-        cmdline: None,
-        first_seen: chrono::Utc::now(),
-        last_seen: chrono::Utc::now(),
-        acl_group_id: None,
-        socket_group_ids: vec![],
-    };
-    state.db.upsert_socket(&socket).await.unwrap();
-    state
-        .db
-        .upsert_socket_address(&socket.id, &addr)
-        .await
-        .unwrap();
-    state
-        .db
-        .add_acl_entry(&socket.id, "mock-ula", "fd00::100", Some("peer1"))
-        .await
-        .unwrap();
-
-    // Run startup reconcile
-    {
-        let engine = state.engine.read().await;
-        engine.startup_reconcile(&state).await;
-    }
-
-    // Startup applies the desired state straight away: no cleanup or disable first
-    // (the frozen ruleset is replaced atomically, ADR 0026/0029).
-    let fw = fw_calls.lock().unwrap();
-    assert_eq!(fw.len(), 1);
-    let FirewallCall::Apply(rs) = &fw[0] else {
-        panic!("startup must apply, not flush: {:?}", fw[0]);
-    };
-    assert_eq!(rs.rules[0].sources, only_source("fd00::100/128"));
-
-    // Should have re-added the address
-    let net = net_calls.lock().unwrap();
-    assert!(net.iter().any(|c| matches!(c, NetworkCall::AddAddress { addr, .. } if *addr == "fd00::42".parse::<Ipv6Addr>().unwrap())));
-}
-
-// ─── Test 10: Shutdown freezes state ─────────────────────────────────────────
-
-#[tokio::test]
-async fn shutdown_removes_nothing() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let monitor = MockSocketMonitor::new(vec![]);
-
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls.clone());
-    let config = single_backend_config();
-    let state = test_app_state(engine, config).await;
-
-    // Pre-populate DB with two sockets
-    for (name, port, ip_suffix) in [("nginx", 80u16, "42"), ("redis", 6379u16, "43")] {
-        let addr = SocketAddress {
-            backend_id: "mock-ula".to_string(),
-            backend_type: BackendType::Ula,
-            address: format!("fd00::{ip_suffix}").parse().unwrap(),
-            interface: "lo".to_string(),
-            prefix_len: 128,
-            policy: Policy::Closed,
-        };
-        let socket = ManagedSocket {
-            id: format!("tcp:{name}:{port}"),
-            pid: 1000,
-            process_name: name.to_string(),
-            port,
-            protocol: Protocol::Tcp,
-            addresses: vec![addr.clone()],
-            policy: Policy::Closed,
-            exe_path: None,
-            cmdline: None,
-            first_seen: chrono::Utc::now(),
-            last_seen: chrono::Utc::now(),
-            acl_group_id: None,
-            socket_group_ids: vec![],
-        };
-        state.db.upsert_socket(&socket).await.unwrap();
-        state
-            .db
-            .upsert_socket_address(&socket.id, &addr)
-            .await
-            .unwrap();
-    }
-
-    {
-        let engine = state.engine.read().await;
-        engine.shutdown().await;
-    }
-
-    // Rules and addresses stay (ADR 0026): no firewall call, no address removal.
-    assert!(fw_calls.lock().unwrap().is_empty());
-    assert!(net_calls.lock().unwrap().is_empty());
-}
-
-// ─── Test 10b: disable removes everything ────────────────────────────────────
-
-#[tokio::test]
-async fn disable_removes_rules_and_addresses() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let engine = build_test_engine(
-        MockSocketMonitor::new(vec![]),
-        fw_calls.clone(),
-        net_calls.clone(),
-    );
-    let state = test_app_state(engine, single_backend_config()).await;
-
-    for (name, port, ip_suffix) in [("nginx", 80u16, "42"), ("redis", 6379u16, "43")] {
-        let addr = SocketAddress {
-            backend_id: "mock-ula".to_string(),
-            backend_type: BackendType::Ula,
-            address: format!("fd00::{ip_suffix}").parse().unwrap(),
-            interface: "lo".to_string(),
-            prefix_len: 128,
-            policy: Policy::Closed,
-        };
-        let socket = ManagedSocket {
-            id: format!("tcp:{name}:{port}"),
-            pid: 1000,
-            process_name: name.to_string(),
-            port,
-            protocol: Protocol::Tcp,
-            addresses: vec![addr.clone()],
-            policy: Policy::Closed,
-            exe_path: None,
-            cmdline: None,
-            first_seen: chrono::Utc::now(),
-            last_seen: chrono::Utc::now(),
-            acl_group_id: None,
-            socket_group_ids: vec![],
-        };
-        state.db.upsert_socket(&socket).await.unwrap();
-        state
-            .db
-            .upsert_socket_address(&socket.id, &addr)
-            .await
-            .unwrap();
-    }
-    // A socket group address counts too.
-    let group = state.db.create_socket_group("web", "nginx").await.unwrap();
-    state
-        .db
-        .upsert_socket_group_address(&socketguard_core::SocketGroupAddress {
-            group_id: group.id,
-            backend_id: "mock-ula".into(),
-            address: "fd00::44".parse().unwrap(),
-            interface: "lo".into(),
-            prefix_len: 128,
-            policy: Policy::Closed,
-        })
-        .await
-        .unwrap();
-
-    {
-        let engine = state.engine.read().await;
-        engine.disable(&state).await.unwrap();
-    }
-
-    assert_eq!(*fw_calls.lock().unwrap(), vec![FirewallCall::Disable]);
-    let net = net_calls.lock().unwrap();
-    let removed: Vec<_> = net
-        .iter()
-        .filter_map(|c| match c {
-            NetworkCall::RemoveAddress { addr, .. } => Some(*addr),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(removed.len(), 3);
-    assert!(removed.contains(&"fd00::44".parse().unwrap()));
-}
-
-// ─── Test 11: Error resilience — add_address fails for one backend ────────
-
-#[tokio::test]
-async fn error_resilience_partial_backend_failure() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let monitor = MockSocketMonitor::new(vec![listening_socket("nginx", 80, Protocol::Tcp)]);
-
-    let firewall = Arc::new(MockFirewall::new(fw_calls.clone()));
-    // FailingNetworkInterface fails add_address on "eth0" but succeeds on "lo"
-    let network = Arc::new(FailingNetworkInterface::new(net_calls.clone(), "eth0"));
-
-    let mock_ula = MockIpv6Backend::new("fd00::", 128, "lo");
-    let mock_slaac = MockIpv6Backend::new("2001:db8::", 64, "eth0");
-
-    let mut backends = HashMap::new();
-    backends.insert(
-        "mock-ula".to_string(),
-        socketguard_daemon::engine::ActiveBackend {
-            config: BackendInstanceConfig {
-                id: "mock-ula".to_string(),
-                backend: BackendConfig::Ula {
-                    interface: "lo".to_string(),
-                },
-            },
-            backend: Box::new(mock_ula),
-        },
-    );
-    backends.insert(
-        "mock-slaac".to_string(),
-        socketguard_daemon::engine::ActiveBackend {
-            config: BackendInstanceConfig {
-                id: "mock-slaac".to_string(),
-                backend: BackendConfig::Ula {
-                    interface: "eth0".to_string(),
-                },
-            },
-            backend: Box::new(mock_slaac),
-        },
-    );
-
-    let engine = Engine::new_injectable(
-        Box::new(monitor),
-        firewall,
-        network,
-        backends,
-        vec!["mock-ula".to_string(), "mock-slaac".to_string()],
-    );
-
-    let config = DaemonConfig {
-        backends: vec![
-            BackendInstanceConfig {
-                id: "mock-ula".to_string(),
-                backend: BackendConfig::Ula {
-                    interface: "lo".to_string(),
-                },
-            },
-            BackendInstanceConfig {
-                id: "mock-slaac".to_string(),
-                backend: BackendConfig::Ula {
-                    interface: "eth0".to_string(),
-                },
-            },
+    let h = Harness::with_filter(
+        vec![local()],
+        vec![
+            listener("nginx", 80, Protocol::Tcp),
+            listener("svchost", 135, Protocol::Tcp),
         ],
-        ..DaemonConfig::default()
-    };
-    let state = test_app_state(engine, config).await;
-
-    // Reconcile should succeed overall even though eth0 add_address fails
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    // DB should still have the socket with both addresses allocated
-    let sockets = state.db.list_sockets().await.unwrap();
-    assert_eq!(sockets.len(), 1);
-    assert_eq!(
-        sockets[0].addresses.len(),
-        2,
-        "both addresses should be in DB even if one failed to add"
-    );
-
-    // Network mock should have attempted both add_address calls
-    let net = net_calls.lock().unwrap();
-    let add_count = net
-        .iter()
-        .filter(|c| matches!(c, NetworkCall::AddAddress { .. }))
-        .count();
-    assert_eq!(add_count, 2, "both add_address should have been attempted");
-
-    // The ruleset covers both addresses regardless: the failed one is simply not on the
-    // interface yet, so it is unreachable, and the scope is ready when it appears.
-    let fw = applied(&fw_calls);
-    assert_eq!(fw.len(), 1);
-    let ScopeMatch::Destinations(dsts) = &fw[0].scopes[0].matcher else {
-        panic!("managed scope matches destinations");
-    };
-    assert_eq!(dsts.len(), 2);
-}
-
-// ─── Test 11b: no ruleset in place, no addresses ─────────────────────────
-
-#[tokio::test]
-async fn failed_apply_keeps_addresses_off_interfaces() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-    let firewall = Arc::new(MockFirewall::new(fw_calls.clone()));
-    firewall.set_failing(true);
-    let monitor = MockSocketMonitor::new(vec![listening_socket("nginx", 80, Protocol::Tcp)]);
-    let mut backends = HashMap::new();
-    backends.insert(
-        "mock-ula".to_string(),
-        socketguard_daemon::engine::ActiveBackend {
-            config: BackendInstanceConfig {
-                id: "mock-ula".to_string(),
-                backend: BackendConfig::Ula {
-                    interface: "lo".to_string(),
-                },
-            },
-            backend: Box::new(MockIpv6Backend::new("fd00::", 128, "lo")),
-        },
-    );
-    let engine = Engine::new_injectable(
-        Box::new(monitor),
-        firewall.clone(),
-        Arc::new(MockNetworkInterface::new(net_calls.clone())),
-        backends,
-        vec!["mock-ula".to_string()],
-    );
-    let state = test_app_state(engine, single_backend_config()).await;
-
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-    assert!(
-        net_calls.lock().unwrap().is_empty(),
-        "an address nothing denies must not be added"
-    );
-
-    // Once the firewall works again the next pass applies and adds the address.
-    firewall.set_failing(false);
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-    assert_eq!(net_calls.lock().unwrap().len(), 1);
-}
-
-// ─── Test 12: Backend add/remove ─────────────────────────────────────────
-
-#[tokio::test]
-async fn backend_add_and_remove() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let monitor = MockSocketMonitor::new(vec![listening_socket("nginx", 80, Protocol::Tcp)]);
-
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls.clone());
-    let config = single_backend_config();
-    let state = test_app_state(engine, config).await;
-
-    // First reconcile: provisions nginx with mock-ula backend
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    let sockets = state.db.list_sockets().await.unwrap();
-    assert_eq!(sockets[0].addresses.len(), 1);
-    assert_eq!(sockets[0].addresses[0].backend_id, "mock-ula");
-
-    fw_calls.lock().unwrap().clear();
-    net_calls.lock().unwrap().clear();
-
-    // Add a new backend directly (bypassing check_config_change which calls create_backend)
-    let new_inst = BackendInstanceConfig {
-        id: "mock-slaac".to_string(),
-        backend: BackendConfig::Ula {
-            interface: "eth0".to_string(),
-        },
-    };
-    {
-        let mut engine = state.engine.write().await;
-        engine.add_backend_instance(&state, &new_inst).await;
-    }
-
-    let sockets = state.db.list_sockets().await.unwrap();
-    assert_eq!(
-        sockets[0].addresses.len(),
-        2,
-        "new backend should have allocated an address"
-    );
-
-    // Network should have added the new address on eth0
-    let net = net_calls.lock().unwrap();
-    assert!(net
-        .iter()
-        .any(|c| matches!(c, NetworkCall::AddAddress { iface, .. } if iface == "eth0")));
-    drop(net);
-
-    net_calls.lock().unwrap().clear();
-
-    // Remove the original backend
-    {
-        let mut engine = state.engine.write().await;
-        engine.remove_backend_instance(&state, "mock-ula").await;
-    }
-
-    let sockets = state.db.list_sockets().await.unwrap();
-    assert_eq!(
-        sockets[0].addresses.len(),
-        1,
-        "removed backend's address should be gone"
-    );
-    assert_eq!(sockets[0].addresses[0].backend_id, "mock-slaac");
-
-    // Network should have removed the old address from lo
-    let net = net_calls.lock().unwrap();
-    assert!(net
-        .iter()
-        .any(|c| matches!(c, NetworkCall::RemoveAddress { iface, .. } if iface == "lo")));
-}
-
-// ─── Test 13: Socket group provisioning + ACL ────────────────────────────
-
-#[tokio::test]
-async fn socket_group_provisioning_and_acl() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let monitor = MockSocketMonitor::new(vec![
-        listening_socket("nginx", 80, Protocol::Tcp),
-        listening_socket("nginx", 443, Protocol::Tcp),
-    ]);
-
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls.clone());
-    let config = single_backend_config();
-    let state = test_app_state(engine, config).await;
-
-    // Reconcile: provisions both sockets
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    let sockets = state.db.list_sockets().await.unwrap();
-    assert_eq!(sockets.len(), 2);
-
-    // Create a socket group and add both members
-    let group = state.db.create_socket_group("web", "nginx").await.unwrap();
-    state
-        .db
-        .add_socket_to_group(&group.id, &sockets[0].id)
-        .await
-        .unwrap();
-    state
-        .db
-        .add_socket_to_group(&group.id, &sockets[1].id)
-        .await
-        .unwrap();
-
-    net_calls.lock().unwrap().clear();
-
-    // Reconcile again: ensure_socket_group_addresses should allocate addresses for the group
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    // Socket group should have an address allocated
-    let sg_addrs = state
-        .db
-        .get_socket_group_addresses(&group.id)
-        .await
-        .unwrap();
-    assert_eq!(
-        sg_addrs.len(),
-        1,
-        "group should have one address from mock-ula backend"
-    );
-    assert_eq!(sg_addrs[0].backend_id, "mock-ula");
-
-    // Network should have added the group address
-    let net = net_calls.lock().unwrap();
-    assert!(net
-        .iter()
-        .any(|c| matches!(c, NetworkCall::AddAddress { .. })));
-
-    // Add an ACL entry to the socket group
-    state
-        .db
-        .add_socket_group_acl_entry(&group.id, "mock-ula", "fd00::300", Some("trusted"))
-        .await
-        .unwrap();
-
-    fw_calls.lock().unwrap().clear();
-
-    // Apply socket group ACL
-    {
-        let engine = state.engine.read().await;
-        engine
-            .apply_socket_group_acl(&state, &group.id)
-            .await
-            .unwrap();
-    }
-
-    // One rule per member (443 and 80) for the group's address, with the ACL source
-    let fw = applied(&fw_calls);
-    let rs = fw.last().unwrap();
-    let group_rules: Vec<_> = rs.rules.iter().filter(|r| r.id.starts_with("g:")).collect();
-    let mut ports: Vec<_> = group_rules.iter().map(|r| r.port).collect();
-    ports.sort();
-    assert_eq!(ports, [80, 443]);
-    assert!(group_rules
-        .iter()
-        .all(|r| r.dst == IpAddr::V6(sg_addrs[0].address)
-            && r.sources == only_source("fd00::300/128")));
-}
-
-// ─── Test 14: Idempotency — reconcile 3x with no state changes ──────────
-
-#[tokio::test]
-async fn idempotent_reconcile_no_duplicate_calls() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let monitor = MockSocketMonitor::new(vec![listening_socket("nginx", 80, Protocol::Tcp)]);
-
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls.clone());
-    let config = single_backend_config();
-    let state = test_app_state(engine, config).await;
-
-    // Reconcile 1: provisions socket
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    let sockets_after_1 = state.db.list_sockets().await.unwrap();
-    assert_eq!(sockets_after_1.len(), 1);
-    assert_eq!(sockets_after_1[0].addresses.len(), 1);
-
-    // Record initial call counts
-    let initial_net_count = net_calls.lock().unwrap().len(); // 1 add_address
-    let initial_fw_count = fw_calls.lock().unwrap().len(); // 1 ruleset
-
-    // Reconcile 2 and 3: no new sockets, same state
-    for _ in 0..2 {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    // DB should still have exactly 1 socket with 1 address
-    let sockets_after_3 = state.db.list_sockets().await.unwrap();
-    assert_eq!(sockets_after_3.len(), 1);
-    assert_eq!(sockets_after_3[0].addresses.len(), 1);
-
-    // Network add_address should NOT have grown — existing sockets don't get re-added
-    let final_net_count = net_calls.lock().unwrap().len();
-    assert_eq!(
-        final_net_count, initial_net_count,
-        "no new add_address calls on idempotent reconciles"
-    );
-
-    // An unchanged ruleset is not re-sent.
-    let final_fw_count = fw_calls.lock().unwrap().len();
-    assert_eq!(
-        final_fw_count, initial_fw_count,
-        "unchanged state must not re-apply the ruleset"
-    );
-}
-
-// ─── Test 15: PID change — same process/port, different PID ──────────────
-
-#[tokio::test]
-async fn pid_change_updates_metadata_not_duplicated() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let monitor = MockSocketMonitor::new(vec![listening_socket("nginx", 80, Protocol::Tcp)]);
-
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls.clone());
-    let config = single_backend_config();
-    let state = test_app_state(engine, config).await;
-
-    // Reconcile 1: provisions nginx PID 1000
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    let sockets = state.db.list_sockets().await.unwrap();
-    assert_eq!(sockets.len(), 1);
-    assert_eq!(sockets[0].pid, 1000);
-    let original_addr = sockets[0].addresses[0].address;
-    let original_id = sockets[0].id.clone();
-
-    // The socket_id is deterministic based on (process_name, port, protocol),
-    // so a new PID with same name/port maps to the same socket ID.
-    let expected_id = socket_id("nginx", 80, Protocol::Tcp);
-    assert_eq!(
-        original_id, expected_id,
-        "socket ID should be based on name/port/proto, not PID"
-    );
-
-    // Manually update the DB socket's PID to simulate what would happen
-    // if monitor returned a different PID — the reconcile logic uses get_socket(sid)
-    // which matches on socket_id, then updates pid/process_name/exe_path/cmdline.
-    // Since we can't change the mock monitor's output, verify the identity property:
-    // running reconcile again with same monitor output doesn't create a duplicate.
-
-    net_calls.lock().unwrap().clear();
-
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    let sockets = state.db.list_sockets().await.unwrap();
-    assert_eq!(
-        sockets.len(),
-        1,
-        "same process/port should not create a duplicate socket"
-    );
-    assert_eq!(sockets[0].id, original_id);
-    assert_eq!(
-        sockets[0].addresses[0].address, original_addr,
-        "address should be stable across reconciles"
-    );
-
-    // No new add_address calls — the socket already exists
-    let net = net_calls.lock().unwrap();
-    assert!(
-        net.is_empty(),
-        "existing socket should not trigger new add_address"
-    );
-}
-
-// ─── Test 16: Event emission on socket changes ──────────────────────────
-
-#[tokio::test]
-async fn event_emission_on_new_and_stale_sockets() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-
-    let monitor = MockSocketMonitor::new(vec![listening_socket("nginx", 80, Protocol::Tcp)]);
-
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls.clone());
-    let config = single_backend_config();
-    let state = test_app_state(engine, config).await;
-
-    // Subscribe to events BEFORE reconcile
-    let mut rx = state.events.subscribe();
-
-    // Reconcile 1: new socket detected → should emit SocketsChanged
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    // Check event was emitted
-    let event = rx.try_recv();
-    assert!(
-        event.is_ok(),
-        "SocketsChanged event should be emitted when new sockets are provisioned"
-    );
-
-    // Reconcile 2: no changes → no event expected
-    // Drain any remaining events first
-    while rx.try_recv().is_ok() {}
-
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    let event2 = rx.try_recv();
-    assert!(
-        event2.is_err(),
-        "no event should be emitted when nothing changed"
-    );
-
-    // Now create a stale socket and reconcile to trigger cleanup → event
-    let stale_time = chrono::Utc::now() - chrono::Duration::seconds(3600);
-    let addr = SocketAddress {
-        backend_id: "mock-ula".to_string(),
-        backend_type: BackendType::Ula,
-        address: "fd00::99".parse().unwrap(),
-        interface: "lo".to_string(),
-        prefix_len: 128,
-        policy: Policy::Closed,
-    };
-    let stale_socket = ManagedSocket {
-        id: "tcp:stale:9999".to_string(),
-        pid: 9999,
-        process_name: "stale".to_string(),
-        port: 9999,
-        protocol: Protocol::Tcp,
-        addresses: vec![addr.clone()],
-        policy: Policy::Closed,
-        exe_path: None,
-        cmdline: None,
-        first_seen: stale_time,
-        last_seen: stale_time,
-        acl_group_id: None,
-        socket_group_ids: vec![],
-    };
-    state.db.upsert_socket(&stale_socket).await.unwrap();
-    state
-        .db
-        .upsert_socket_address(&stale_socket.id, &addr)
-        .await
-        .unwrap();
-
-    // Drain events
-    while rx.try_recv().is_ok() {}
-
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-
-    let event3 = rx.try_recv();
-    assert!(
-        event3.is_ok(),
-        "SocketsChanged event should be emitted when stale sockets are cleaned up"
-    );
-}
-
-// ─── Phase 3: address stability ──────────────────────────────────────────────
-
-/// Engine with one prefix-tracking mock backend ("ygg0") that tests can steer through
-/// the returned handles.
-struct PrefixHarness {
-    state: Arc<socketguard_daemon::AppState>,
-    backend: MockIpv6Backend,
-    net: MockNetworkInterface,
-    fw_calls: Arc<Mutex<Vec<FirewallCall>>>,
-}
-
-async fn prefix_harness(sockets: Vec<ListeningSocket>) -> PrefixHarness {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net = MockNetworkInterface::new(Arc::new(Mutex::new(Vec::new())));
-    let backend = MockIpv6Backend::new("300:1:2:3::", 128, "ygg0");
-    backend.set_prefix("300:1:2:3::");
-    let monitor = MockSocketMonitor::new(sockets);
-
-    let cfg = BackendInstanceConfig {
-        id: "ygg".to_string(),
-        backend: BackendConfig::Yggdrasil {
-            interface: "ygg0".to_string(),
-            admin_endpoint: None,
-        },
-    };
-    let mut backends = HashMap::new();
-    backends.insert(
-        "ygg".to_string(),
-        socketguard_daemon::engine::ActiveBackend {
-            config: cfg.clone(),
-            backend: Box::new(backend.clone()),
-        },
-    );
-    let engine = Engine::new_injectable(
-        Box::new(monitor),
-        Arc::new(MockFirewall::new(fw_calls.clone())),
-        Arc::new(net.clone()),
-        backends,
-        vec!["ygg".to_string()],
-    );
-    let state = test_app_state(
-        engine,
-        DaemonConfig {
-            backends: vec![cfg],
-            ..DaemonConfig::default()
+        ProcessFilter {
+            mode: FilterMode::Denylist,
+            patterns: vec!["svchost*".into()],
         },
     )
     .await;
-    PrefixHarness {
-        state,
-        backend,
-        net,
-        fw_calls,
-    }
-}
-
-impl PrefixHarness {
-    async fn reconcile(&self) {
-        let mut engine = self.state.engine.write().await;
-        engine.reconcile(&self.state).await.unwrap();
-    }
-}
-
-fn addr(s: &str) -> Ipv6Addr {
-    s.parse().unwrap()
+    h.reconcile().await;
+    assert_eq!(h.app().await.name, "nginx");
 }
 
 #[tokio::test]
-async fn prefix_change_rehomes_socket_address_keeping_iid() {
-    let h = prefix_harness(vec![listening_socket("nginx", 80, Protocol::Tcp)]).await;
+async fn a_returning_app_keeps_its_identity_across_pids_and_restarts() {
+    let h = Harness::new(vec![local()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
+    let first = h.app().await;
 
-    let sockets = h.state.db.list_sockets().await.unwrap();
-    let sid = sockets[0].id.clone();
-    let old = sockets[0].addresses[0].address;
-    assert_eq!(old, addr("300:1:2:3::1"));
-    assert!(h.net.addresses("ygg0").contains(&old));
-    h.state
-        .db
-        .update_address_policy(&sid, "ygg", Policy::Open)
+    let mut moved = listener("nginx", 80, Protocol::Tcp);
+    moved.pid = 4242;
+    h.set_sockets(vec![moved]);
+    h.reconcile().await;
+    assert_eq!(h.app().await.id, first.id);
+
+    // It stops: the record, its address and its grants stay (ADR 0027).
+    h.set_sockets(vec![]);
+    h.reconcile().await;
+    let stopped = h.app().await;
+    assert!(!stopped.ports[0].listening);
+    assert_eq!(stopped.addresses, first.addresses);
+    h.set_sockets(vec![listener("nginx", 80, Protocol::Tcp)]);
+    h.reconcile().await;
+    assert!(h.app().await.ports[0].listening);
+    assert_eq!(h.activity(ActivityKind::AppDiscovered).await.len(), 1);
+}
+
+#[tokio::test]
+async fn an_upgraded_binary_is_still_the_same_app() {
+    let h = Harness::new(vec![local()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let mut upgraded = listener("nginx", 80, Protocol::Tcp);
+    // The monitor strips " (deleted)" before the engine sees the path.
+    upgraded.exe_path = Some("/usr/bin/nginx".into());
+    h.set_sockets(vec![upgraded]);
+    h.reconcile().await;
+    assert_eq!(h.apps().await.len(), 1);
+}
+
+// ─── Address layouts ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn per_port_mode_gives_each_port_its_own_address() {
+    let h = Harness::new(
+        vec![ygg()],
+        vec![
+            listener("nginx", 80, Protocol::Tcp),
+            listener("nginx", 443, Protocol::Tcp),
+        ],
+    )
+    .await;
+    h.engine()
+        .await
+        .set_address_mode(&h.state, AddressMode::PerPort)
         .await
         .unwrap();
-    h.fw_calls.lock().unwrap().clear();
-
-    h.backend.set_prefix("300:9:9:9::");
     h.reconcile().await;
 
-    let new = h.state.db.list_sockets().await.unwrap()[0].addresses[0].address;
-    assert_eq!(new, addr("300:9:9:9::1"), "same interface ID, new prefix");
-    let on_iface = h.net.addresses("ygg0");
-    assert!(on_iface.contains(&new));
-    assert!(!on_iface.contains(&old));
+    let app = h.app().await;
+    assert_eq!(app.addresses.len(), 2);
+    let mut served: Vec<_> = app.addresses.iter().map(|a| a.ports.clone()).collect();
+    served.sort_by_key(|p| format!("{p:?}"));
+    assert_eq!(
+        served,
+        [PortSet::Only(vec![tcp(443)]), PortSet::Only(vec![tcp(80)])]
+    );
+    assert_eq!(net_adds(&h).len(), 2);
 
-    // The ruleset follows the address: open rule and managed scope now name the new one.
-    let fw = applied(&h.fw_calls);
-    let last = fw.last().unwrap();
-    assert_eq!(last.rules.len(), 1);
-    assert_eq!(last.rules[0].dst, IpAddr::V6(new));
-    let ScopeMatch::Destinations(dsts) = &last.scopes[0].matcher else {
-        panic!("managed scope matches destinations");
-    };
-    assert_eq!(dsts, &vec![IpAddr::V6(new)]);
+    // A port that appears later gets its own address; the others stay.
+    let before: Vec<_> = app.addresses.iter().map(|a| a.id.clone()).collect();
+    h.set_sockets(vec![
+        listener("nginx", 80, Protocol::Tcp),
+        listener("nginx", 443, Protocol::Tcp),
+        listener("nginx", 8080, Protocol::Tcp),
+    ]);
+    h.reconcile().await;
+    let app = h.app().await;
+    assert_eq!(app.addresses.len(), 3);
+    assert!(before
+        .iter()
+        .all(|id| app.addresses.iter().any(|a| a.id == *id)));
+    assert!(app
+        .addresses
+        .iter()
+        .any(|a| a.ports == PortSet::Only(vec![tcp(8080)])));
+
+    // Switching back affects new apps and ports only.
+    h.engine()
+        .await
+        .set_address_mode(&h.state, AddressMode::PerApp)
+        .await
+        .unwrap();
+    h.reconcile().await;
+    assert_eq!(h.app().await.addresses.len(), 3);
 }
 
 #[tokio::test]
-async fn prefix_change_rehomes_socket_group_address() {
-    let h = prefix_harness(vec![
-        listening_socket("nginx", 80, Protocol::Tcp),
-        listening_socket("nginx", 443, Protocol::Tcp),
-    ])
+async fn per_app_mode_keeps_one_address_when_ports_appear() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    h.set_sockets(vec![
+        listener("nginx", 80, Protocol::Tcp),
+        listener("nginx", 443, Protocol::Tcp),
+    ]);
+    h.reconcile().await;
+    let app = h.app().await;
+    assert_eq!(app.ports.len(), 2);
+    assert_eq!(app.addresses.len(), 1);
+}
+
+#[tokio::test]
+async fn split_and_merge() {
+    let h = Harness::new(
+        vec![ygg()],
+        vec![
+            listener("nginx", 80, Protocol::Tcp),
+            listener("nginx", 443, Protocol::Tcp),
+        ],
+    )
     .await;
     h.reconcile().await;
-    let sockets = h.state.db.list_sockets().await.unwrap();
-    let group = h
-        .state
-        .db
-        .create_socket_group("web", "nginx")
+    let app = h.app().await;
+    let all_addr = app.addresses[0].clone();
+    h.grant(&app.id, Subject::Anyone).await;
+
+    // Split 443 onto its own address.
+    let mut events = h.state.events.subscribe();
+    let split = h
+        .engine()
+        .await
+        .split(&h.state, &app.id, "ygg", tcp(443))
         .await
         .unwrap();
-    for s in &sockets {
-        h.state
-            .db
-            .add_socket_to_group(&group.id, &s.id)
-            .await
-            .unwrap();
-    }
-    h.reconcile().await;
-    let old = h
-        .state
-        .db
-        .get_socket_group_addresses(&group.id)
-        .await
-        .unwrap()[0]
-        .address;
-    assert!(h.net.addresses("ygg0").contains(&old));
+    assert_eq!(split.ports, PortSet::Only(vec![tcp(443)]));
+    assert!(drain(&mut events).contains(&DaemonEvent::AppsChanged));
+    let split_ip = split.locator.ipv6().unwrap();
+    assert!(h.net.addresses("ygg0").contains(&split_ip));
+    assert_eq!(h.app().await.addresses.len(), 2);
 
-    h.backend.set_prefix("300:9:9:9::");
+    // The "all" address no longer serves 443; the new one serves only 443.
+    let rs = h.last_ruleset();
+    let by_dst = |ip: Ipv6Addr| -> Vec<u16> {
+        rs.rules
+            .iter()
+            .filter(|r| r.dst == IpAddr::V6(ip))
+            .map(|r| r.port)
+            .collect()
+    };
+    assert_eq!(by_dst(all_addr.locator.ipv6().unwrap()), [80]);
+    assert_eq!(by_dst(split_ip), [443]);
+
+    // Splitting again, or an unknown port, is refused.
+    let e = h
+        .engine()
+        .await
+        .split(&h.state, &app.id, "ygg", tcp(443))
+        .await;
+    assert!(matches!(e, Err(EngineError::Conflict(_))), "{e:?}");
+    let e = h
+        .engine()
+        .await
+        .split(&h.state, &app.id, "ygg", tcp(1))
+        .await;
+    assert!(matches!(e, Err(EngineError::Invalid(_))));
+    let e = h
+        .engine()
+        .await
+        .split(&h.state, &app.id, "nope", tcp(80))
+        .await;
+    assert!(matches!(e, Err(EngineError::NotFound(_))));
+
+    // Merge them back: one address, serving everything; the other leaves the interface.
+    let merged = h
+        .engine()
+        .await
+        .merge(
+            &h.state,
+            &app.id,
+            "ygg",
+            &[all_addr.id.clone(), split.id.clone()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(merged.id, all_addr.id);
+    assert_eq!(merged.ports, PortSet::All);
+    let app = h.app().await;
+    assert_eq!(app.addresses.len(), 1);
+    assert!(!h.net.addresses("ygg0").contains(&split_ip));
+    let rs = h.last_ruleset();
+    let mut ports: Vec<u16> = rs.rules.iter().map(|r| r.port).collect();
+    ports.sort();
+    assert_eq!(ports, [80, 443]);
+    assert!(rs
+        .rules
+        .iter()
+        .all(|r| r.dst == all_addr.locator.ipv6().map(IpAddr::V6).unwrap()));
+
+    // Merging needs two distinct addresses.
+    let e = h
+        .engine()
+        .await
+        .merge(&h.state, &app.id, "ygg", std::slice::from_ref(&all_addr.id))
+        .await;
+    assert!(matches!(e, Err(EngineError::Invalid(_))));
+}
+
+#[tokio::test]
+async fn allocation_is_retried_until_it_succeeds() {
+    let ygg = ygg();
+    let h = Harness::new(
+        vec![local(), ygg],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.nets["ygg"].set_failing(true);
     h.reconcile().await;
 
-    let new = h
-        .state
-        .db
-        .get_socket_group_addresses(&group.id)
-        .await
-        .unwrap()[0]
-        .address;
-    assert_eq!(socketguard_daemon::backend::iid_of(new), 3);
-    assert!(socketguard_daemon::backend::same_prefix64(
-        new,
-        addr("300:9:9:9::")
+    // The app exists and has the addresses that worked.
+    let app = h.app().await;
+    assert_eq!(app.addresses.len(), 1);
+    assert_eq!(app.addresses[0].network_id, "local");
+
+    h.nets["ygg"].set_failing(false);
+    h.reconcile().await;
+    let app = h.app().await;
+    assert_eq!(app.addresses.len(), 2);
+    let ygg_addr = Harness::addr_on(&app, "ygg");
+    assert!(h.net.addresses("ygg0").contains(&ygg_addr));
+    assert!(applied(&h.fw_calls).last().unwrap().scopes.iter().any(
+        |s| matches!(&s.matcher, ScopeMatch::Destinations(d) if d.contains(&IpAddr::V6(ygg_addr)))
     ));
-    assert!(h.net.addresses("ygg0").contains(&new));
-    assert!(!h.net.addresses("ygg0").contains(&old));
+}
+
+// ─── Grants and rules ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_grant_to_a_yggdrasil_key_peer_gives_a_rule_with_iif() {
+    let h = Harness::new(
+        vec![local(), lan(), ygg()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let peer = h
+        .peer("b", CredentialKind::YggKey, &KEY.to_uppercase())
+        .await;
+    let view = h.grant(&app.id, Subject::Peer(peer)).await;
+
+    // Verified on Yggdrasil, not reachable on the LAN; Local takes no grants.
+    let reach: HashMap<_, _> = view
+        .reach
+        .iter()
+        .map(|r| (r.network_id.as_str(), r.reach))
+        .collect();
+    assert_eq!(reach.len(), 2);
+    assert_eq!(reach["ygg"], Reach::Verified);
+    assert_eq!(reach["lan"], Reach::NotReachable);
+
+    let rs = h.last_ruleset();
+    assert_eq!(rs.rules.len(), 1);
+    let r = &rs.rules[0];
+    assert_eq!(r.iif.as_deref(), Some("ygg0"));
+    assert_eq!(r.dst, IpAddr::V6(Harness::addr_on(&app, "ygg")));
+    assert_eq!(r.port, 80);
+    assert_eq!(r.sources, Sources::Nets(vec![KEY_ADDR.parse().unwrap()]));
+    assert!(r.id.starts_with(&format!(
+        "a:{}:80:tcp:{}",
+        app.addresses
+            .iter()
+            .find(|a| a.network_id == "ygg")
+            .unwrap()
+            .id,
+        view.grant.id
+    )));
+
+    // The grant is visible through the queries, with reach.
+    let detail = h.engine().await.get_app(&h.state, &app.id).await.unwrap();
+    assert_eq!(detail.grants.len(), 1);
+    assert_eq!(detail.grants[0].reach, view.reach);
+    let by_peer = h
+        .engine()
+        .await
+        .list_grants(
+            &h.state,
+            GrantFilter {
+                peer_id: Some(match &view.grant.subject {
+                    Subject::Peer(p) => p.clone(),
+                    _ => unreachable!(),
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_peer.len(), 1);
+    assert_eq!(h.activity(ActivityKind::GrantAdded).await.len(), 1);
+}
+
+#[tokio::test]
+async fn an_ip_suffix_peer_follows_a_prefix_change() {
+    let h = Harness::new(
+        vec![local(), lan()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let peer = h.peer("nas", CredentialKind::IpSuffix, "::a:b/64").await;
+    h.grant(&app.id, Subject::Peer(peer)).await;
+
+    let rs = h.last_ruleset();
+    assert_eq!(rs.rules.len(), 1);
+    assert_eq!(rs.rules[0].iif, None, "IP-only: no interface binding");
+    assert_eq!(
+        rs.rules[0].sources,
+        Sources::Nets(vec!["2001:db8:1:2::a:b/128".parse().unwrap()])
+    );
+    let old = Harness::addr_on(&app, "lan");
+
+    // The router hands out a new /64.
+    h.nets["lan"].set_prefix("2001:db8:9:9::");
+    h.reconcile().await;
+
+    let app = h.app().await;
+    let new = Harness::addr_on(&app, "lan");
+    assert_ne!(new, old);
+    assert!(new.to_string().starts_with("2001:db8:9:9:"));
+    assert_eq!(
+        socketguard_daemon::backend::iid_of(new),
+        socketguard_daemon::backend::iid_of(old),
+        "same interface ID, new prefix"
+    );
+    assert!(h.net.addresses("eth0").contains(&new));
+    assert!(!h.net.addresses("eth0").contains(&old));
+    let rs = h.last_ruleset();
+    assert_eq!(rs.rules.len(), 1);
+    assert_eq!(rs.rules[0].dst, IpAddr::V6(new));
+    assert_eq!(
+        rs.rules[0].sources,
+        Sources::Nets(vec!["2001:db8:9:9::a:b/128".parse().unwrap()])
+    );
+}
+
+#[tokio::test]
+async fn a_key_peer_with_no_yggdrasil_network_is_not_reachable() {
+    let h = Harness::new(vec![lan()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let peer = h.peer("b", CredentialKind::YggKey, KEY).await;
+    let view = h.grant(&app.id, Subject::Peer(peer)).await;
+    assert_eq!(view.reach.len(), 1);
+    assert_eq!(view.reach[0].network_id, "lan");
+    assert_eq!(view.reach[0].reach, Reach::NotReachable);
+    assert!(h.last_ruleset().rules.is_empty());
+}
+
+#[tokio::test]
+async fn a_grant_to_anyone_needs_confirmation_and_local_grants_are_rejected() {
+    let h = Harness::new(
+        vec![local(), lan(), ygg()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let grant = |subject, network: Option<&str>, confirm| NewGrant {
+        app_id: app.id.clone(),
+        port: None,
+        network_id: network.map(str::to_string),
+        subject,
+        confirm_open: confirm,
+    };
+
+    let e = h
+        .engine()
+        .await
+        .create_grant(&h.state, &grant(Subject::Anyone, None, false))
+        .await;
+    assert!(matches!(e, Err(EngineError::ConfirmationRequired)), "{e:?}");
+    assert!(h.state.db.list_grants().await.unwrap().is_empty());
+
+    let e = h
+        .engine()
+        .await
+        .create_grant(&h.state, &grant(Subject::Anyone, Some("local"), true))
+        .await;
+    assert!(matches!(e, Err(EngineError::LocalNetwork)), "{e:?}");
+    assert_eq!(
+        EngineError::LocalNetwork.to_string(),
+        "Local is this machine only"
+    );
+
+    let view = h
+        .engine()
+        .await
+        .create_grant(&h.state, &grant(Subject::Anyone, None, true))
+        .await
+        .unwrap();
+    assert!(view.reach.iter().all(|r| r.reach == Reach::Open));
+    let rs = h.last_ruleset();
+    assert_eq!(rs.rules.len(), 2, "lan and ygg, not local");
+    assert!(rs
+        .rules
+        .iter()
+        .all(|r| r.sources == Sources::Any && r.iif.is_none()));
+
+    // Duplicates and unknown references are refused.
+    let e = h
+        .engine()
+        .await
+        .create_grant(&h.state, &grant(Subject::Anyone, None, true))
+        .await;
+    assert!(matches!(e, Err(EngineError::Conflict(_))));
+    let e = h
+        .engine()
+        .await
+        .create_grant(&h.state, &grant(Subject::Peer("nobody".into()), None, true))
+        .await;
+    assert!(matches!(e, Err(EngineError::NotFound(_))));
+    let e = h
+        .engine()
+        .await
+        .create_grant(
+            &h.state,
+            &NewGrant {
+                port: Some(tcp(9)),
+                ..grant(Subject::Anyone, None, true)
+            },
+        )
+        .await;
+    assert!(matches!(e, Err(EngineError::Invalid(_))));
+}
+
+#[tokio::test]
+async fn deleting_a_peer_removes_its_rules() {
+    let h = Harness::new(
+        vec![lan(), ygg()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let a = h.peer("a", CredentialKind::YggKey, KEY).await;
+    let b = h.peer("b", CredentialKind::Ip, "fd00:5a::2").await;
+    h.grant(&app.id, Subject::Peer(a.clone())).await;
+    h.grant(&app.id, Subject::Peer(b)).await;
+    assert_eq!(h.last_ruleset().rules.len(), 2);
+
+    let mut events = h.state.events.subscribe();
+    h.engine().await.delete_peer(&h.state, &a).await.unwrap();
+    let rs = h.last_ruleset();
+    assert_eq!(rs.rules.len(), 1, "only the other peer's rule remains");
+    assert_eq!(rs.rules[0].iif, None);
+    assert_eq!(h.state.db.list_grants().await.unwrap().len(), 1);
+    let evs = drain(&mut events);
+    assert!(evs.contains(&DaemonEvent::PeersChanged) && evs.contains(&DaemonEvent::GrantsChanged));
+    assert_eq!(h.activity(ActivityKind::PeerRemoved).await.len(), 1);
+    let e = h.engine().await.delete_peer(&h.state, &a).await;
+    assert!(matches!(e, Err(EngineError::NotFound(_))));
+}
+
+#[tokio::test]
+async fn groups_grant_to_all_members_and_deleting_one_removes_the_rules() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let a = h.peer("a", CredentialKind::YggKey, KEY).await;
+    let b = h.peer("b", CredentialKind::YggAddr, "200:1::5").await;
+    let engine = h.engine().await;
+    let group = engine
+        .create_group(&h.state, "family", std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    drop(engine);
+    h.grant(&app.id, Subject::Group(group.id.clone())).await;
+    assert_eq!(
+        h.last_ruleset().rules[0].sources,
+        Sources::Nets(vec![KEY_ADDR.parse().unwrap()])
+    );
+
+    h.engine()
+        .await
+        .set_group_members(&h.state, &group.id, &[a.clone(), b.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        h.last_ruleset().rules[0].sources,
+        Sources::Nets(vec![
+            "200:1::5/128".parse().unwrap(),
+            KEY_ADDR.parse().unwrap()
+        ])
+    );
+    let peer = h.engine().await.get_peer(&h.state, &b).await.unwrap();
+    assert_eq!(peer.groups, vec![group.id.clone()]);
+
+    h.engine()
+        .await
+        .set_group_members(&h.state, &group.id, std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.last_ruleset().rules[0].sources,
+        Sources::Nets(vec![KEY_ADDR.parse().unwrap()])
+    );
+
+    h.engine()
+        .await
+        .delete_group(&h.state, &group.id)
+        .await
+        .unwrap();
+    assert!(h.last_ruleset().rules.is_empty());
+    assert!(h.state.db.list_grants().await.unwrap().is_empty());
+    assert!(
+        h.engine().await.get_peer(&h.state, &a).await.is_ok(),
+        "members stay"
+    );
+}
+
+#[tokio::test]
+async fn peers_validate_and_stay_unique() {
+    let h = Harness::new(vec![ygg()], vec![]).await;
+    let engine = h.engine().await;
+    let cred = |kind, value: &str| NewCredential {
+        kind,
+        value: value.into(),
+        label: None,
+    };
+    let e = engine
+        .create_peer(&h.state, "v4", &[cred(CredentialKind::Ip, "192.168.1.5")])
+        .await;
+    assert!(
+        matches!(&e, Err(EngineError::Invalid(m)) if m.contains("IPv4")),
+        "{e:?}"
+    );
+    let e = engine.create_peer(&h.state, "  ", &[]).await;
+    assert!(matches!(e, Err(EngineError::Invalid(_))));
+    let e = engine
+        .create_peer(
+            &h.state,
+            "dup",
+            &[
+                cred(CredentialKind::YggKey, KEY),
+                cred(CredentialKind::YggKey, &KEY.to_uppercase()),
+            ],
+        )
+        .await;
+    assert!(matches!(e, Err(EngineError::Invalid(_))), "{e:?}");
+
+    // 200::/7 in an Ip credential is normalized.
+    let p = engine
+        .create_peer(&h.state, "n", &[cred(CredentialKind::Ip, "300:1:2:3::5")])
+        .await
+        .unwrap();
+    assert_eq!(p.credentials[0].kind, CredentialKind::YggAddr);
+
+    // Credentials and labels are unique across peers.
+    let e = engine
+        .create_peer(
+            &h.state,
+            "other",
+            &[cred(CredentialKind::YggAddr, "300:1:2:3::5")],
+        )
+        .await;
+    assert!(
+        matches!(&e, Err(EngineError::Conflict(m)) if m.contains("already belongs to peer n")),
+        "{e:?}"
+    );
+    let e = engine.create_peer(&h.state, "n", &[]).await;
+    assert!(matches!(e, Err(EngineError::Conflict(_))));
+    assert!(engine.list_peers(&h.state).await.unwrap().len() == 1);
+
+    // Add, rename, remove.
+    let c = engine
+        .add_credential(&h.state, &p.id, &cred(CredentialKind::YggKey, KEY))
+        .await
+        .unwrap();
+    let renamed = engine
+        .update_peer_label(&h.state, &p.id, "laptop")
+        .await
+        .unwrap();
+    assert_eq!(
+        (renamed.label.as_str(), renamed.credentials.len()),
+        ("laptop", 2)
+    );
+    engine
+        .remove_credential(&h.state, &p.id, &c.id)
+        .await
+        .unwrap();
+    let e = engine.remove_credential(&h.state, &p.id, &c.id).await;
+    assert!(matches!(e, Err(EngineError::NotFound(_))));
+    assert_eq!(
+        engine
+            .get_peer(&h.state, &p.id)
+            .await
+            .unwrap()
+            .credentials
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn review_and_delete_app() {
+    let h = Harness::new(
+        vec![lan(), ygg()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    let app = h.app().await;
+    assert_eq!(
+        h.engine()
+            .await
+            .list_apps(&h.state, true)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    h.engine()
+        .await
+        .review_app(&h.state, &app.id, true)
+        .await
+        .unwrap();
+    assert!(h
+        .engine()
+        .await
+        .list_apps(&h.state, true)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(h.app().await.reviewed);
+    let e = h.engine().await.review_app(&h.state, "nope", true).await;
+    assert!(matches!(e, Err(EngineError::NotFound(_))));
+
+    h.grant(&app.id, Subject::Anyone).await;
+    h.clear_calls();
+    h.engine()
+        .await
+        .delete_app(&h.state, &app.id)
+        .await
+        .unwrap();
+    assert!(h.apps().await.is_empty());
+    assert!(h.state.db.list_grants().await.unwrap().is_empty());
+    assert!(h.net.addresses("eth0").is_empty() && h.net.addresses("ygg0").is_empty());
+    // The addresses left the interfaces before the ruleset stopped covering them.
+    let net = h.net_calls.lock().unwrap().len();
+    assert_eq!(net, 2);
+    let rs = h.last_ruleset();
+    assert!(rs.rules.is_empty());
+    assert!(!rs.scopes.iter().any(|s| s.id == "managed"));
+    assert_eq!(h.activity(ActivityKind::AppRemoved).await.len(), 1);
+
+    // It reappears as pending when it listens again.
+    h.reconcile().await;
+    let again = h.app().await;
+    assert!(!again.reviewed);
+    assert_eq!(again.id, app.id);
+}
+
+// ─── Observability ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_drop_event_produces_blocked_activity() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.engine().await.startup_reconcile(&h.state).await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let dst = Harness::addr_on(&app, "ygg");
+
+    let src: IpAddr = "200:5a::77".parse().unwrap();
+    let long_ago = SystemTime::now() - Duration::from_secs(300);
+    let drop_event = |at, src| DropEvent {
+        at,
+        src,
+        dst: IpAddr::V6(dst),
+        port: Some(80),
+        proto: Some(Protocol::Tcp),
+        iif: Some("ygg0".into()),
+        scope_id: Some("managed".into()),
+    };
+    for _ in 0..3 {
+        assert!(h.fw.emit_drop(drop_event(long_ago, src)));
+    }
+    h.fw.emit_drop(drop_event(long_ago, "200:5a::88".parse().unwrap()));
+    let mut events = h.state.events.subscribe();
+    h.reconcile().await;
+
+    let blocked = h.activity(ActivityKind::Blocked).await;
+    assert_eq!(blocked.len(), 2, "aggregated per source: {blocked:?}");
+    let rec = blocked.iter().find(|r| r.src == Some(src)).unwrap();
+    assert_eq!(rec.count, 3);
+    assert_eq!(rec.app_id.as_deref(), Some(app.id.as_str()));
+    assert_eq!(rec.network_id.as_deref(), Some("ygg"));
+    assert_eq!((rec.port, rec.proto), (Some(80), Some(Protocol::Tcp)));
+    assert!(drain(&mut events).contains(&DaemonEvent::Activity));
+
+    // Flushed once: nothing is written twice.
+    h.reconcile().await;
+    assert_eq!(h.activity(ActivityKind::Blocked).await.len(), 2);
+}
+
+// ─── Lifecycle: freeze, disable, restore ─────────────────────────────────────
+
+#[tokio::test]
+async fn shutdown_removes_nothing() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let app = h.app().await;
+    h.clear_calls();
+    h.engine().await.shutdown().await;
+    assert!(
+        h.fw_calls.lock().unwrap().is_empty(),
+        "no Disable, no flush"
+    );
+    assert!(h.net_calls.lock().unwrap().is_empty());
+    assert!(h
+        .net
+        .addresses("ygg0")
+        .contains(&Harness::addr_on(&app, "ygg")));
+}
+
+#[tokio::test]
+async fn disable_removes_rules_and_addresses() {
+    let h = Harness::new(
+        vec![local(), ygg()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    assert_eq!(
+        h.net.addresses("lo").len() + h.net.addresses("ygg0").len(),
+        2
+    );
+    h.clear_calls();
+
+    h.engine().await.disable(&h.state).await.unwrap();
+
+    assert!(h.net.addresses("lo").is_empty() && h.net.addresses("ygg0").is_empty());
+    let calls = h.fw_calls.lock().unwrap().clone();
+    assert_eq!(calls, vec![FirewallCall::Disable]);
+    // The model stays: re-enabling is a daemon start away.
+    assert_eq!(h.app().await.addresses.len(), 2);
+}
+
+#[tokio::test]
+async fn startup_reapplies_the_ruleset_and_restores_missing_addresses() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let app = h.app().await;
+    h.grant(&app.id, Subject::Anyone).await;
+    let a = Harness::addr_on(&app, "ygg");
+    h.net.drop_address("ygg0", a);
+    h.clear_calls();
+
+    h.engine().await.startup_reconcile(&h.state).await;
+
+    let fw = applied(&h.fw_calls);
+    assert_eq!(fw.len(), 1, "the ruleset is replaced, never flushed");
+    assert_eq!(fw[0].rules.len(), 1);
+    assert!(h.net.addresses("ygg0").contains(&a));
+}
+
+#[tokio::test]
+async fn failed_apply_keeps_addresses_off_interfaces() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.fw.set_failing(true);
+    h.reconcile().await;
+    assert!(net_adds(&h).is_empty(), "nothing would deny the address");
+    assert_eq!(h.app().await.addresses.len(), 1, "but it is recorded");
+
+    h.fw.set_failing(false);
+    h.reconcile().await;
+    assert_eq!(net_adds(&h).len(), 1);
 }
 
 #[tokio::test]
 async fn missing_address_is_re_added() {
-    let h = prefix_harness(vec![listening_socket("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
-    let sid = h.state.db.list_sockets().await.unwrap()[0].id.clone();
-    let a = h.state.db.list_sockets().await.unwrap()[0].addresses[0].address;
-    // Closed addresses are on the interface too (denied by the ruleset, not absent).
+    let a = Harness::addr_on(&h.app().await, "ygg");
     h.net.drop_address("ygg0", a);
     h.reconcile().await;
     assert!(
         h.net.addresses("ygg0").contains(&a),
         "closed address is restored"
     );
-
-    h.state
-        .db
-        .update_address_policy(&sid, "ygg", Policy::Open)
-        .await
-        .unwrap();
-    h.net.drop_address("ygg0", a);
-    h.reconcile().await;
-    assert!(
-        h.net.addresses("ygg0").contains(&a),
-        "open address is restored"
-    );
 }
 
 #[tokio::test]
 async fn missing_interface_is_skipped_then_recovers() {
-    let h = prefix_harness(vec![listening_socket("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
-    let sid = h.state.db.list_sockets().await.unwrap()[0].id.clone();
-    h.state
-        .db
-        .update_address_policy(&sid, "ygg", Policy::Open)
-        .await
-        .unwrap();
-    let a = h.state.db.list_sockets().await.unwrap()[0].addresses[0].address;
+    let a = Harness::addr_on(&h.app().await, "ygg");
 
     // Yggdrasil is down: the tun is gone. Reconcile must not fail.
     h.net.set_interface_missing("ygg0", true);
     h.reconcile().await;
     assert!(h.net.addresses("ygg0").is_empty());
 
-    // Yggdrasil is back with a fresh tun.
     h.net.set_interface_missing("ygg0", false);
     h.reconcile().await;
     assert!(h.net.addresses("ygg0").contains(&a));
 }
+
+#[tokio::test]
+async fn prefix_change_rehomes_keeping_the_interface_id() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let app = h.app().await;
+    h.grant(&app.id, Subject::Anyone).await;
+    let old = Harness::addr_on(&app, "ygg");
+    assert_eq!(old, "300:1:2:3::1".parse::<Ipv6Addr>().unwrap());
+
+    h.nets["ygg"].set_prefix("300:9:9:9::");
+    h.reconcile().await;
+
+    let new = Harness::addr_on(&h.app().await, "ygg");
+    assert_eq!(new, "300:9:9:9::1".parse::<Ipv6Addr>().unwrap());
+    assert!(h.net.addresses("ygg0").contains(&new));
+    assert!(!h.net.addresses("ygg0").contains(&old));
+    // The ruleset follows the address.
+    let rs = h.last_ruleset();
+    assert_eq!(rs.rules.len(), 1);
+    assert_eq!(rs.rules[0].dst, IpAddr::V6(new));
+    let ScopeMatch::Destinations(dsts) = &rs.scopes[0].matcher else {
+        panic!("managed scope matches destinations");
+    };
+    assert_eq!(dsts, &vec![IpAddr::V6(new)]);
+}
+
+// ─── Networks ────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn networks_report_kind_status_and_prefix() {
+    let h = Harness::new(vec![local(), lan(), ygg()], vec![]).await;
+    let nets = h.engine().await.networks();
+    let by_id: HashMap<_, _> = nets.iter().map(|n| (n.id.as_str(), n)).collect();
+    assert_eq!(by_id["local"].kind, socketguard_core::NetworkKind::Local);
+    assert!(!by_id["local"].grants_apply);
+    assert!(by_id["lan"].grants_apply && by_id["ygg"].grants_apply);
+    assert_eq!(by_id["ygg"].interface.as_deref(), Some("ygg0"));
+    assert_eq!(by_id["ygg"].prefix, Some("300:1:2:3::".parse().unwrap()));
+    assert_eq!(by_id["local"].prefix, None);
+    assert!(nets.iter().all(|n| n.status == NetworkStatus::Up));
+}
+
+#[tokio::test]
+async fn adding_and_removing_a_network() {
+    let h = Harness::new(vec![local()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let app = h.app().await;
+    assert_eq!(app.addresses.len(), 1);
+
+    let inst = BackendInstanceConfig {
+        id: "ygg".into(),
+        backend: BackendConfig::Yggdrasil {
+            interface: "ygg0".into(),
+            admin_endpoint: None,
+        },
+    };
+    // The new network brings its own allocator (a mock stands in for yggdrasilctl).
+    {
+        let mut engine = h.state.engine.write().await;
+        let mock = ygg().mock;
+        engine
+            .add_backend_instance_with(&h.state, &inst, Box::new(mock))
+            .await;
+    }
+    let app = h.app().await;
+    assert_eq!(app.addresses.len(), 2);
+    let ygg_addr = Harness::addr_on(&app, "ygg");
+    assert!(h.net.addresses("ygg0").contains(&ygg_addr));
+    assert!(h
+        .last_ruleset()
+        .scopes
+        .iter()
+        .any(|s| s.id == "overlay:ygg0"));
+
+    // A grant tied to that network goes with it.
+    h.engine()
+        .await
+        .create_grant(
+            &h.state,
+            &NewGrant {
+                app_id: app.id.clone(),
+                port: None,
+                network_id: Some("ygg".into()),
+                subject: Subject::Anyone,
+                confirm_open: true,
+            },
+        )
+        .await
+        .unwrap();
+    {
+        let mut engine = h.state.engine.write().await;
+        engine.remove_backend_instance(&h.state, "ygg").await;
+    }
+    assert!(h.net.addresses("ygg0").is_empty());
+    assert_eq!(h.app().await.addresses.len(), 1);
+    assert!(h.state.db.list_grants().await.unwrap().is_empty());
+    assert!(!h
+        .last_ruleset()
+        .scopes
+        .iter()
+        .any(|s| s.id == "overlay:ygg0"));
+}
+
+// ─── Persistence and whole-host protection ───────────────────────────────────
 
 #[tokio::test]
 async fn ula_global_id_survives_restart() {
@@ -1486,57 +1372,44 @@ async fn ula_global_id_survives_restart() {
     );
 
     drop(db);
-    let _ = std::fs::remove_file(&path);
-}
-
-// ─── Whole-host protection and the lockout guard ─────────────────────────────
-
-fn sshd_listener() -> ListeningSocket {
-    listening_socket("sshd", 22, Protocol::Tcp)
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
 }
 
 #[tokio::test]
 async fn protect_host_is_refused_when_it_would_lock_out_sshd() {
-    use socketguard_daemon::engine::ProtectHostError;
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let net_calls = Arc::new(Mutex::new(Vec::new()));
-    let monitor = MockSocketMonitor::new(vec![sshd_listener()]);
-    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls);
-    let state = test_app_state(engine, single_backend_config()).await;
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-    fw_calls.lock().unwrap().clear();
+    let h = Harness::new(vec![lan()], vec![listener("sshd", 22, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    h.clear_calls();
 
-    // sshd is closed with no grant: refused, nothing stored, nothing applied.
-    let err = {
-        let engine = state.engine.read().await;
-        engine
-            .set_protect_host(&state, vec!["eth0".into()], false)
-            .await
-            .unwrap_err()
-    };
+    // sshd has no grant: refused, nothing stored, nothing applied.
+    let err = h
+        .engine()
+        .await
+        .set_protect_host(&h.state, vec!["eth0".into()], false)
+        .await
+        .unwrap_err();
     assert!(matches!(&err, ProtectHostError::Lockout(r) if r.len() == 1 && r[0].port == 22));
-    assert!(state
+    assert!(h
+        .state
         .db
         .get_setting("protect_host_interfaces")
         .await
         .unwrap()
         .is_none());
-    assert!(fw_calls.lock().unwrap().is_empty());
+    assert!(h.fw_calls.lock().unwrap().is_empty());
 
     // Force overrides, reports the risk, stores the setting and applies the scope.
-    let risks = {
-        let engine = state.engine.read().await;
-        engine
-            .set_protect_host(&state, vec!["eth0".into()], true)
-            .await
-            .unwrap()
-    };
+    let risks = h
+        .engine()
+        .await
+        .set_protect_host(&h.state, vec!["eth0".into()], true)
+        .await
+        .unwrap();
     assert_eq!(risks.len(), 1);
     assert_eq!(
-        state
+        h.state
             .db
             .get_setting("protect_host_interfaces")
             .await
@@ -1544,42 +1417,65 @@ async fn protect_host_is_refused_when_it_would_lock_out_sshd() {
             .as_deref(),
         Some(r#"["eth0"]"#)
     );
-    let rs = applied(&fw_calls).pop().unwrap();
-    assert!(rs.scopes.iter().any(|s| s.id == "host:eth0"));
+    assert!(h.last_ruleset().scopes.iter().any(|s| s.id == "host:eth0"));
+    assert_eq!(
+        h.engine()
+            .await
+            .settings(&h.state)
+            .await
+            .unwrap()
+            .protect_host_interfaces,
+        ["eth0"]
+    );
+    assert_eq!(h.activity(ActivityKind::ProtectHostChanged).await.len(), 1);
 
     // An empty list switches it off again, without any check.
-    {
-        let engine = state.engine.read().await;
-        engine
-            .set_protect_host(&state, vec![], false)
-            .await
-            .unwrap();
-    }
-    let rs = applied(&fw_calls).pop().unwrap();
-    assert!(!rs.scopes.iter().any(|s| s.id == "host:eth0"));
+    h.engine()
+        .await
+        .set_protect_host(&h.state, vec![], false)
+        .await
+        .unwrap();
+    assert!(!h.last_ruleset().scopes.iter().any(|s| s.id == "host:eth0"));
 }
 
 #[tokio::test]
 async fn protect_host_is_allowed_once_sshd_is_granted() {
-    let fw_calls = Arc::new(Mutex::new(Vec::new()));
-    let monitor = MockSocketMonitor::new(vec![sshd_listener()]);
-    let engine = build_test_engine(monitor, fw_calls, Arc::new(Mutex::new(Vec::new())));
-    let state = test_app_state(engine, single_backend_config()).await;
-    {
-        let mut engine = state.engine.write().await;
-        engine.reconcile(&state).await.unwrap();
-    }
-    let sid = state.db.list_sockets().await.unwrap()[0].id.clone();
-    state
-        .db
-        .update_address_policy(&sid, "mock-ula", Policy::Open)
-        .await
-        .unwrap();
+    let h = Harness::new(vec![lan()], vec![listener("sshd", 22, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let app = h.app().await;
 
-    let engine = state.engine.read().await;
-    let risks = engine
-        .set_protect_host(&state, vec!["lo".into()], false)
+    // A peer that is not identified on a LAN (a key) does not clear the risk ...
+    let key_peer = h.peer("k", CredentialKind::YggKey, KEY).await;
+    h.grant(&app.id, Subject::Peer(key_peer)).await;
+    let r = h
+        .engine()
+        .await
+        .set_protect_host(&h.state, vec!["eth0".into()], false)
+        .await;
+    assert!(matches!(r, Err(ProtectHostError::Lockout(_))));
+
+    // ... an IP-identified peer does.
+    let admin = h.peer("admin", CredentialKind::Ip, "fd00:5a::2").await;
+    h.grant(&app.id, Subject::Peer(admin)).await;
+    let risks = h
+        .engine()
+        .await
+        .set_protect_host(&h.state, vec!["eth0".into()], false)
         .await
         .unwrap();
     assert!(risks.is_empty());
+}
+
+#[tokio::test]
+async fn protect_host_is_allowed_by_a_grant_to_anyone() {
+    let h = Harness::new(vec![lan()], vec![listener("sshd", 22, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let app = h.app().await;
+    h.grant(&app.id, Subject::Anyone).await;
+    assert!(h
+        .engine()
+        .await
+        .set_protect_host(&h.state, vec!["eth0".into()], false)
+        .await
+        .is_ok());
 }

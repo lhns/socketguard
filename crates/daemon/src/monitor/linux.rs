@@ -1,6 +1,6 @@
 use super::SocketMonitor;
 use anyhow::Result;
-use socketguard_core::{ListeningSocket, Protocol};
+use socketguard_core::{normalize_exe_path, ListeningSocket, Platform, Protocol};
 use std::net::{IpAddr, Ipv6Addr};
 
 pub struct LinuxSocketMonitor;
@@ -102,11 +102,22 @@ fn parse_hex_addr(hex: &str) -> Option<IpAddr> {
     }
 }
 
+/// Split /proc/pid/cmdline (NUL-terminated arguments) into argv.
+fn parse_cmdline(raw: &[u8]) -> Vec<String> {
+    let raw = raw.strip_suffix(&[0]).unwrap_or(raw);
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    raw.split(|b| *b == 0)
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .collect()
+}
+
 struct ProcInfo {
     pid: u32,
     name: String,
     exe_path: Option<String>,
-    cmdline: Option<String>,
+    cmdline: Option<Vec<String>>,
 }
 
 fn find_pid_by_inode(inode: u64) -> ProcInfo {
@@ -127,15 +138,17 @@ fn find_pid_by_inode(inode: u64) -> ProcInfo {
                                         .trim()
                                         .to_string();
 
+                                // A binary replaced by an upgrade shows as "... (deleted)".
                                 let exe_path = std::fs::read_link(format!("/proc/{pid}/exe"))
                                     .ok()
-                                    .map(|p| p.to_string_lossy().to_string());
+                                    .map(|p| {
+                                        normalize_exe_path(&p.to_string_lossy(), Platform::Linux)
+                                    });
 
-                                let cmdline =
-                                    std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-                                        .ok()
-                                        .map(|s| s.replace('\0', " ").trim().to_string())
-                                        .filter(|s| !s.is_empty());
+                                let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
+                                    .ok()
+                                    .map(|raw| parse_cmdline(&raw))
+                                    .filter(|args| !args.is_empty());
 
                                 return ProcInfo {
                                     pid,
@@ -155,5 +168,22 @@ fn find_pid_by_inode(inode: u64) -> ProcInfo {
         name: "unknown".to_string(),
         exe_path: None,
         cmdline: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cmdline_is_split_on_nul() {
+        assert_eq!(
+            parse_cmdline(b"python3\0-m\0http.server\08080\0"),
+            ["python3", "-m", "http.server", "8080"]
+        );
+        // An empty argument in the middle survives; a trailing NUL does not add one.
+        assert_eq!(parse_cmdline(b"a\0\0b\0"), ["a", "", "b"]);
+        assert!(parse_cmdline(b"").is_empty());
+        assert!(parse_cmdline(b"\0").is_empty());
     }
 }

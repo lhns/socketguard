@@ -1,6 +1,6 @@
 use crate::backend::yggdrasil::{NodeInfo, YggdrasilNode};
 use crate::backend::{with_prefix64, Ipv6Backend, Prefix};
-use crate::firewall::{DesiredRuleset, Firewall};
+use crate::firewall::{DesiredRuleset, DropEvent, DropSink, Firewall};
 use crate::monitor::SocketMonitor;
 use crate::network::NetworkInterface;
 use crate::AppState;
@@ -25,6 +25,7 @@ pub enum FirewallCall {
 pub struct MockFirewall {
     pub calls: Arc<Mutex<Vec<FirewallCall>>>,
     fail_apply: AtomicBool,
+    drop_sink: Mutex<Option<DropSink>>,
 }
 
 impl MockFirewall {
@@ -32,6 +33,19 @@ impl MockFirewall {
         Self {
             calls,
             fail_apply: AtomicBool::new(false),
+            drop_sink: Mutex::new(None),
+        }
+    }
+
+    /// Deliver a drop event to the engine, as the platform would. Returns false if the
+    /// engine has not subscribed (yet).
+    pub fn emit_drop(&self, ev: DropEvent) -> bool {
+        match self.drop_sink.lock().unwrap().as_ref() {
+            Some(sink) => {
+                sink(ev);
+                true
+            }
+            None => false,
         }
     }
 
@@ -68,6 +82,11 @@ impl Firewall for MockFirewall {
 
     fn disable(&self) -> Result<()> {
         self.calls.lock().unwrap().push(FirewallCall::Disable);
+        Ok(())
+    }
+
+    fn subscribe_drops(&self, sink: DropSink) -> Result<()> {
+        *self.drop_sink.lock().unwrap() = Some(sink);
         Ok(())
     }
 }
@@ -213,6 +232,7 @@ struct MockBackendInner {
     counter: u64,
     base: Ipv6Addr,
     prefix: Option<Prefix>,
+    failing: bool,
 }
 
 impl MockIpv6Backend {
@@ -222,6 +242,7 @@ impl MockIpv6Backend {
                 counter: 1,
                 base: prefix.parse().unwrap(),
                 prefix: None,
+                failing: false,
             })),
             prefix_len,
             interface: interface.to_string(),
@@ -230,6 +251,11 @@ impl MockIpv6Backend {
 
     pub fn interface(&self) -> &str {
         &self.interface
+    }
+
+    /// Make `allocate` fail (e.g. Yggdrasil is down).
+    pub fn set_failing(&self, failing: bool) {
+        self.inner.lock().unwrap().failing = failing;
     }
 
     /// Start (or change) reporting a /64 prefix; later allocations use it.
@@ -248,6 +274,9 @@ impl Ipv6Backend for MockIpv6Backend {
 
     fn allocate(&self, iid: Option<u64>) -> Result<AllocatedAddress> {
         let mut inner = self.inner.lock().unwrap();
+        if inner.failing {
+            anyhow::bail!("simulated allocation failure");
+        }
         let n = iid.unwrap_or_else(|| {
             let n = inner.counter;
             inner.counter += 1;

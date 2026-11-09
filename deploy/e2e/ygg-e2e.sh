@@ -59,11 +59,10 @@ pass "build node image"
 docker run --rm -v "$HOST_ROOT":/work -w /work \
   -v sg-cargo-registry:/usr/local/cargo/registry -v sg-target:/work/target \
   -e CARGO_PROFILE_DEV_DEBUG=0 -e CARGO_PROFILE_TEST_DEBUG=0 \
-  rust:1-bookworm cargo build -p socketguard-daemon -p socketguard-cli \
-  || { fail "build daemon and CLI"; exit 1; }
-pass "build daemon and CLI"
+  rust:1-bookworm cargo build -p socketguard-daemon \
+  || { fail "build daemon"; exit 1; }
+pass "build daemon"
 DAEMON=/target/debug/socketguard-daemon
-CLI=/target/debug/socketguard-cli
 
 # ── Nodes ────────────────────────────────────────────────────────────────────
 docker network create "$NET" >/dev/null || { fail "create network"; exit 1; }
@@ -104,19 +103,52 @@ docker exec -i "$NODE_A" sh -c 'cat > /etc/sg.json' <<JSON
   "backends": [{"id": "ygg", "type": "yggdrasil", "interface": "ygg0", "admin_endpoint": "$SOCK"}]
 }
 JSON
+
+# The CLI is a stub until the API v1 lands, so the test drives the model through the
+# database: `sgdb addr` prints the listener's Yggdrasil address, `sgdb grant KEY` adds a peer
+# with that Yggdrasil key plus a grant to the listener's app, `sgdb revoke` deletes the
+# grants. The daemon picks the change up on its next reconcile pass.
+docker exec -i "$NODE_A" sh -c 'cat > /usr/local/bin/sgdb && chmod +x /usr/local/bin/sgdb' <<PY
+#!/usr/bin/env python3
+import datetime, sqlite3, sys, uuid
+PORT = $PORT
+c = sqlite3.connect("/var/lib/sg.db", timeout=10)
+c.execute("PRAGMA foreign_keys = ON")
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+cmd = sys.argv[1]
+if cmd == "addr":
+    row = c.execute(
+        "SELECT a.locator FROM addresses a JOIN app_ports p ON p.app_id = a.app_id "
+        "WHERE p.port = ? AND a.network_id = 'ygg'", (PORT,)).fetchone()
+    if not row:
+        sys.exit(1)
+    print(row[0])
+elif cmd == "grant":
+    app = c.execute("SELECT app_id FROM app_ports WHERE port = ?", (PORT,)).fetchone()[0]
+    peer = str(uuid.uuid4())
+    c.execute("INSERT INTO peers (id, label, created_at) VALUES (?, 'node-b', ?)", (peer, now))
+    c.execute("INSERT INTO peer_credentials (id, peer_id, kind, value) VALUES (?, ?, 'ygg_key', ?)",
+              (str(uuid.uuid4()), peer, sys.argv[2].lower()))
+    c.execute("INSERT INTO grants (id, app_id, subject_kind, subject_id, created_at) "
+              "VALUES (?, ?, 'peer', ?, ?)", (str(uuid.uuid4()), app, peer, now))
+elif cmd == "revoke":
+    c.execute("DELETE FROM grants")
+else:
+    sys.exit(2)
+c.commit()
+PY
 daemon_start
 
 # ── Allocation ───────────────────────────────────────────────────────────────
-# The listener's socket, its address, and whether that address is inside A's subnet.
-sock_id()   { A "$CLI" --json list | jq -re '.sockets[] | select(.port == '"$PORT"') | .id'; }
-sock_addr() { A "$CLI" --json list | jq -re '.sockets[] | select(.port == '"$PORT"') | .addresses[0].address'; }
+# The listener's address, and whether that address is inside A's subnet.
+sock_addr() { A sgdb addr; }
 in_subnet() { A python3 -c 'import ipaddress,sys; sys.exit(0 if ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv[2]) else 1)' "$1" "$2"; }
 on_ygg0()   { A ip -6 -j addr show dev ygg0 | jq -e --arg a "$1" '[.[].addr_info[].local] | index($a)' >/dev/null; }
 
 step "daemon detected the listener" retry 40 sock_addr || exit 1
-SID="$(sock_id)"
 ADDR="$(sock_addr)"
-echo "      socket $SID got $ADDR"
+echo "      the listener got $ADDR"
+B_KEY="$(B yggdrasilctl -json -endpoint "$SOCK" getSelf | jq -r .key)"
 step "address is inside A's 3xx::/64 subnet" in_subnet "$ADDR" "$SUBNET"
 step "address is configured on ygg0" retry 10 on_ygg0 "$ADDR"
 
@@ -130,12 +162,12 @@ table_exists() { A nft list table inet socketguard >/dev/null; }
 step "B reaches A over Yggdrasil (ping, always allowed)" retry 90 ping_node_from_b || exit 1
 step "the daemon installed the nftables table" table_exists
 
-# Secure by default: the policy is closed, so the allocated address is denied.
-step "closed: B cannot fetch the allocated address" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
+# Secure by default: nothing is granted, so the allocated address is denied.
+step "closed by default: B cannot fetch the allocated address" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
 step "closed address is still configured on ygg0" on_ygg0 "$ADDR"
 
-step "open the socket via the CLI" A "$CLI" policy "$SID" open
-step "open: B can fetch from the new address" retry 30 fetch_from_b
+step "grant the listener to a peer holding B's Yggdrasil key" A sgdb grant "$B_KEY"
+step "granted: B can fetch from the new address" retry 30 fetch_from_b
 
 # The listener is bound to ::, so it also answers on A's own node address; the overlay
 # scope denies that because no grant covers it.
@@ -154,17 +186,17 @@ step "the overlay scope still covers the new tun" sh -c "! docker exec $NODE_B c
 step "stop the daemon" daemon_stop
 step "stopped: the table stays" table_exists
 step "stopped: the address stays on ygg0" on_ygg0 "$ADDR"
-step "stopped: open stays open" fetch_from_b
+step "stopped: the grant stays in force" fetch_from_b
 step "stopped: the node address stays closed" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
 
 # A restart is not an outage and replaces the ruleset instead of flushing it.
 daemon_start
 step "restarted: daemon is up" retry 20 daemon_running
-step "restarted: open stays open" fetch_from_b
-step "close the socket via the CLI" retry 30 A "$CLI" policy "$SID" closed
-step "closed: B cannot fetch" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
+step "restarted: the grant stays in force" fetch_from_b
+step "revoke the grant" A sgdb revoke
+step "revoked: B cannot fetch" retry 30 sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
 step "stop the daemon again" daemon_stop
-step "stopped: closed stays closed" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
+step "stopped: revoked stays closed" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
 step "stopped: the table stays" table_exists
 
 # ── Disable ──────────────────────────────────────────────────────────────────

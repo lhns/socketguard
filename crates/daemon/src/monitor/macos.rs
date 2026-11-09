@@ -29,6 +29,23 @@ impl SocketMonitor for MacosSocketMonitor {
         let stdout = String::from_utf8_lossy(&output.stdout);
         parse_lsof_output(&stdout, Protocol::Udp, &exe_map, &mut sockets);
 
+        // Command lines (and a better executable path) from sysinfo.
+        let pids: Vec<u32> = sockets
+            .iter()
+            .map(|s| s.pid)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        let details = super::procinfo::lookup(&pids);
+        for s in &mut sockets {
+            if let Some(d) = details.get(&s.pid) {
+                s.cmdline = d.cmdline.clone();
+                if d.exe_path.is_some() {
+                    s.exe_path = d.exe_path.clone();
+                }
+            }
+        }
+
         Ok(sockets)
     }
 }

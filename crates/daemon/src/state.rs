@@ -1,21 +1,205 @@
-use anyhow::Result;
+//! SQLite persistence, schema v1 (ADR 0027): apps, ports, addresses, peers, credentials,
+//! groups, grants, settings and activity. Versioned with `PRAGMA user_version`; a database
+//! from before the redesign is renamed out of the way, never migrated.
+
+use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use socketguard_core::{
-    AclEntry, AclGroup, ManagedSocket, Policy, SocketAddress, SocketGroup, SocketGroupAclEntry,
-    SocketGroupAddress,
+    ActivityKind, ActivityQuery, ActivityRecord, Address, AddressMode, App, AppPort, Credential,
+    CredentialKind, Grant, Locator, Peer, PeerGroup, PortRef, PortSet, Protocol, Settings, Subject,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use sqlx::{Connection, Row, SqliteConnection};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv6Addr};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use tracing::{info, warn};
+
+pub const SCHEMA_VERSION: i64 = 1;
+
+/// Settings keys.
+pub const PROTECT_HOST_KEY: &str = "protect_host_interfaces";
+pub const ADDRESS_MODE_KEY: &str = "address_mode";
+const ULA_GLOBAL_ID_KEY: &str = "ula_global_id";
+
+/// Activity retention: whichever limit trims more.
+pub const ACTIVITY_MAX_AGE_DAYS: i64 = 30;
+pub const ACTIVITY_MAX_ROWS: i64 = 10_000;
+
+const SCHEMA: &str = r#"
+CREATE TABLE apps (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    process_name TEXT NOT NULL,
+    exe_path TEXT,
+    interpreter_arg TEXT,
+    reviewed INTEGER NOT NULL DEFAULT 0,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+);
+CREATE TABLE app_ports (
+    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    port INTEGER NOT NULL,
+    proto TEXT NOT NULL,
+    listening INTEGER NOT NULL,
+    last_seen TEXT NOT NULL,
+    PRIMARY KEY (app_id, port, proto)
+);
+CREATE TABLE addresses (
+    id TEXT PRIMARY KEY,
+    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    network_id TEXT NOT NULL,
+    ports TEXT NOT NULL,
+    locator_kind TEXT NOT NULL,
+    locator TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX addresses_app ON addresses(app_id);
+CREATE TABLE peers (
+    id TEXT PRIMARY KEY,
+    label TEXT UNIQUE NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE peer_credentials (
+    id TEXT PRIMARY KEY,
+    peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    value TEXT NOT NULL,
+    label TEXT,
+    UNIQUE (kind, value)
+);
+CREATE TABLE peer_groups (
+    id TEXT PRIMARY KEY,
+    label TEXT UNIQUE NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE peer_group_members (
+    group_id TEXT NOT NULL REFERENCES peer_groups(id) ON DELETE CASCADE,
+    peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, peer_id)
+);
+CREATE TABLE grants (
+    id TEXT PRIMARY KEY,
+    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    port INTEGER,
+    proto TEXT,
+    network_id TEXT,
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX grants_app ON grants(app_id);
+CREATE TABLE settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    app_id TEXT,
+    peer_id TEXT,
+    network_id TEXT,
+    src TEXT,
+    port INTEGER,
+    proto TEXT,
+    count INTEGER NOT NULL DEFAULT 1,
+    message TEXT NOT NULL
+);
+CREATE INDEX activity_at ON activity(at);
+"#;
 
 pub struct Database {
     pool: SqlitePool,
 }
 
+fn ts(dt: DateTime<Utc>) -> String {
+    // Fixed width, so text comparison orders like time.
+    dt.to_rfc3339_opts(SecondsFormat::Micros, true)
+}
+
+fn parse_ts(s: &str) -> Result<DateTime<Utc>> {
+    Ok(DateTime::parse_from_rfc3339(s)
+        .with_context(|| format!("bad timestamp {s:?}"))?
+        .with_timezone(&Utc))
+}
+
+fn to_port(v: i64) -> Result<u16> {
+    u16::try_from(v).with_context(|| format!("bad port {v}"))
+}
+
+/// Whether `err` is a violated UNIQUE constraint (a duplicate label or credential).
+pub fn is_unique_violation(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| {
+        matches!(e.downcast_ref::<sqlx::Error>(),
+            Some(sqlx::Error::Database(d)) if d.is_unique_violation())
+    })
+}
+
+/// A database from before schema v1: `user_version` 0 with a `sockets` table.
+async fn is_pre_v1(path: &Path) -> bool {
+    let opts = SqliteConnectOptions::new().filename(path);
+    let Ok(mut conn) = SqliteConnection::connect_with(&opts).await else {
+        return false; // not a database we can open; the normal open reports it
+    };
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut conn)
+        .await
+        .unwrap_or(-1);
+    let sockets: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sockets'",
+    )
+    .fetch_one(&mut conn)
+    .await
+    .unwrap_or(0);
+    // Close before any rename: Windows refuses to move a file with an open handle.
+    let _ = conn.close().await;
+    version == 0 && sockets > 0
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// Move a pre-v1 database (and its WAL files) to `<db>.pre-v1`, or the first free
+/// `<db>.pre-v1.N`. Returns the new path of the database file.
+fn archive_pre_v1(path: &Path) -> Result<PathBuf> {
+    let mut target = with_suffix(path, ".pre-v1");
+    let mut n = 1;
+    while target.exists() {
+        target = with_suffix(path, &format!(".pre-v1.{n}"));
+        n += 1;
+    }
+    std::fs::rename(path, &target)
+        .with_context(|| format!("cannot move old database {}", path.display()))?;
+    for side in ["-wal", "-shm"] {
+        let from = with_suffix(path, side);
+        if from.exists() {
+            std::fs::rename(&from, with_suffix(&target, side))
+                .with_context(|| format!("cannot move {}", from.display()))?;
+        }
+    }
+    Ok(target)
+}
+
 impl Database {
+    /// Open (creating if needed) the database at `path`. A pre-v1 file is renamed first.
+    /// Call [`Database::migrate`] next.
     pub async fn new(path: &str) -> Result<Self> {
+        if path != ":memory:" && Path::new(path).exists() && is_pre_v1(Path::new(path)).await {
+            let moved = archive_pre_v1(Path::new(path))?;
+            warn!(
+                "{path} is from before schema v1 and is not migrated; moved to {}",
+                moved.display()
+            );
+        }
         // sqlx maps ":memory:" to a uniquely named shared-cache in-memory DB, so every
         // pooled connection sees the same data (covered by memory_pool_tests).
-        let options = SqliteConnectOptions::from_str(&format!("sqlite:{path}?mode=rwc"))?;
+        let options =
+            SqliteConnectOptions::from_str(&format!("sqlite:{path}?mode=rwc"))?.foreign_keys(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(options)
@@ -23,1216 +207,26 @@ impl Database {
         Ok(Self { pool })
     }
 
+    /// Create the schema on a fresh database; refuse one from a newer daemon.
     pub async fn migrate(&self) -> Result<()> {
-        // Enable foreign key enforcement (required for ON DELETE CASCADE)
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&self.pool)
+        let mut tx = self.pool.begin().await?;
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut *tx)
             .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS sockets (
-                id TEXT PRIMARY KEY,
-                pid INTEGER NOT NULL,
-                process_name TEXT NOT NULL,
-                port INTEGER NOT NULL,
-                protocol TEXT NOT NULL,
-                policy TEXT NOT NULL DEFAULT 'closed',
-                exe_path TEXT,
-                cmdline TEXT,
-                first_seen TEXT NOT NULL,
-                last_seen TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS socket_addresses (
-                socket_id TEXT NOT NULL REFERENCES sockets(id) ON DELETE CASCADE,
-                backend_id TEXT NOT NULL,
-                backend_type TEXT NOT NULL,
-                address TEXT NOT NULL,
-                interface TEXT NOT NULL,
-                prefix_len INTEGER NOT NULL DEFAULT 128,
-                keypair_id TEXT,
-                policy TEXT NOT NULL DEFAULT 'closed',
-                PRIMARY KEY (socket_id, backend_id)
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS acl_entries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                socket_id TEXT NOT NULL,
-                backend_id TEXT NOT NULL,
-                allowed_ip TEXT NOT NULL,
-                label TEXT,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (socket_id, backend_id) REFERENCES socket_addresses(socket_id, backend_id) ON DELETE CASCADE
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS keypairs (
-                id TEXT PRIMARY KEY,
-                public_key BLOB NOT NULL,
-                private_key_encrypted BLOB NOT NULL,
-                derived_ipv6 TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Migration: if old sockets table has assigned_ipv6 column, migrate data
-        self.migrate_from_single_backend().await?;
-
-        // Migration: ADR 0017 — per-backend policy and ACL
-        self.migrate_per_backend_policy_acl().await?;
-
-        // Migration: ADR 0018 — ACL groups, socket groups, remove disabled
-        self.migrate_add_groups().await?;
-
-        // Migration: many-to-many socket group membership (junction table)
-        self.migrate_socket_group_junction().await?;
-
-        Ok(())
-    }
-
-    /// Migrate from single-backend schema (assigned_ipv6/backend/keypair_id on sockets table)
-    /// to multi-backend schema (socket_addresses table).
-    async fn migrate_from_single_backend(&self) -> Result<()> {
-        // Check if old columns exist
-        let has_old_columns = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM pragma_table_info('sockets') WHERE name = 'assigned_ipv6'",
-        )
-        .fetch_one(&self.pool)
-        .await?
-            > 0;
-
-        if !has_old_columns {
-            return Ok(());
-        }
-
-        tracing::info!("Migrating from single-backend to multi-backend schema...");
-
-        // Copy existing data to socket_addresses
-        sqlx::query(
-            r#"
-            INSERT OR IGNORE INTO socket_addresses (socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id)
-            SELECT id, backend, backend, assigned_ipv6, '', 128, keypair_id
-            FROM sockets
-            WHERE assigned_ipv6 IS NOT NULL AND assigned_ipv6 != ''
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // SQLite doesn't support DROP COLUMN before 3.35.0, so recreate the table
-        sqlx::query("ALTER TABLE sockets RENAME TO sockets_old")
-            .execute(&self.pool)
-            .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE sockets (
-                id TEXT PRIMARY KEY,
-                pid INTEGER NOT NULL,
-                process_name TEXT NOT NULL,
-                port INTEGER NOT NULL,
-                protocol TEXT NOT NULL,
-                policy TEXT NOT NULL DEFAULT 'closed',
-                exe_path TEXT,
-                cmdline TEXT,
-                first_seen TEXT NOT NULL,
-                last_seen TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO sockets (id, pid, process_name, port, protocol, policy, exe_path, cmdline, first_seen, last_seen)
-            SELECT id, pid, process_name, port, protocol, policy, exe_path, cmdline, first_seen, last_seen
-            FROM sockets_old
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query("DROP TABLE sockets_old")
-            .execute(&self.pool)
-            .await?;
-
-        tracing::info!("Migration complete");
-        Ok(())
-    }
-
-    /// Migrate to per-backend policy and ACL (ADR 0017).
-    ///
-    /// 1. Add `policy` column to `socket_addresses` (if missing), copy from `sockets.policy`.
-    /// 2. Add `backend_id` column to `acl_entries` (if missing), duplicate entries per backend.
-    async fn migrate_per_backend_policy_acl(&self) -> Result<()> {
-        // Check if socket_addresses already has a policy column
-        let has_addr_policy = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM pragma_table_info('socket_addresses') WHERE name = 'policy'",
-        )
-        .fetch_one(&self.pool)
-        .await?
-            > 0;
-
-        if has_addr_policy {
-            // Already migrated — check if acl_entries needs backend_id
-            let has_acl_backend = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM pragma_table_info('acl_entries') WHERE name = 'backend_id'",
-            )
-            .fetch_one(&self.pool)
-            .await?
-                > 0;
-
-            if has_acl_backend {
-                return Ok(()); // Fully migrated
+        match version {
+            0 => {
+                sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
+                sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
+                    .execute(&mut *tx)
+                    .await?;
+                info!("Created database schema v{SCHEMA_VERSION}");
+            }
+            SCHEMA_VERSION => {}
+            v => {
+                bail!("database schema v{v} is newer than this daemon supports (v{SCHEMA_VERSION})")
             }
         }
-
-        tracing::info!("Migrating to per-backend policy and ACL (ADR 0017)...");
-
-        // Step 1: Add policy column to socket_addresses
-        if !has_addr_policy {
-            sqlx::query(
-                "ALTER TABLE socket_addresses ADD COLUMN policy TEXT NOT NULL DEFAULT 'closed'",
-            )
-            .execute(&self.pool)
-            .await?;
-
-            // Copy existing socket-level policy to each address
-            sqlx::query(
-                r#"
-                UPDATE socket_addresses SET policy = (
-                    SELECT policy FROM sockets WHERE sockets.id = socket_addresses.socket_id
-                )
-                "#,
-            )
-            .execute(&self.pool)
-            .await?;
-        }
-
-        // Step 2: Add backend_id to acl_entries by recreating the table
-        let has_acl_backend = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM pragma_table_info('acl_entries') WHERE name = 'backend_id'",
-        )
-        .fetch_one(&self.pool)
-        .await?
-            > 0;
-
-        if !has_acl_backend {
-            sqlx::query("ALTER TABLE acl_entries RENAME TO acl_entries_old")
-                .execute(&self.pool)
-                .await?;
-
-            sqlx::query(
-                r#"
-                CREATE TABLE acl_entries (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    socket_id TEXT NOT NULL,
-                    backend_id TEXT NOT NULL,
-                    allowed_ip TEXT NOT NULL,
-                    label TEXT,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY (socket_id, backend_id) REFERENCES socket_addresses(socket_id, backend_id) ON DELETE CASCADE
-                )
-                "#,
-            )
-            .execute(&self.pool)
-            .await?;
-
-            // Duplicate each old ACL entry for every backend the socket has
-            sqlx::query(
-                r#"
-                INSERT INTO acl_entries (socket_id, backend_id, allowed_ip, label, created_at)
-                SELECT ao.socket_id, sa.backend_id, ao.allowed_ip, ao.label, ao.created_at
-                FROM acl_entries_old ao
-                JOIN socket_addresses sa ON ao.socket_id = sa.socket_id
-                "#,
-            )
-            .execute(&self.pool)
-            .await?;
-
-            sqlx::query("DROP TABLE acl_entries_old")
-                .execute(&self.pool)
-                .await?;
-        }
-
-        tracing::info!("Per-backend policy/ACL migration complete");
-        Ok(())
-    }
-
-    /// ADR 0018 migration: create group tables, migrate disabled→closed, add group columns.
-    async fn migrate_add_groups(&self) -> Result<()> {
-        // Check if already migrated by looking for acl_groups table
-        let has_acl_groups = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='acl_groups'",
-        )
-        .fetch_one(&self.pool)
-        .await?
-            > 0;
-
-        if has_acl_groups {
-            return Ok(());
-        }
-
-        tracing::info!("Migrating to ACL groups, socket groups (ADR 0018)...");
-
-        // Create ACL group tables
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS acl_groups (
-                id TEXT PRIMARY KEY,
-                label TEXT NOT NULL,
-                policy TEXT NOT NULL DEFAULT 'closed',
-                created_at TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS acl_group_members (
-                group_id TEXT NOT NULL REFERENCES acl_groups(id) ON DELETE CASCADE,
-                socket_id TEXT NOT NULL REFERENCES sockets(id) ON DELETE CASCADE,
-                PRIMARY KEY (group_id, socket_id)
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // A socket can only be in one ACL group
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_acl_group_member_socket ON acl_group_members(socket_id)",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS acl_group_entries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                group_id TEXT NOT NULL REFERENCES acl_groups(id) ON DELETE CASCADE,
-                backend_id TEXT NOT NULL,
-                allowed_ip TEXT NOT NULL,
-                label TEXT,
-                created_at TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Create socket group tables
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS socket_groups (
-                id TEXT PRIMARY KEY,
-                label TEXT NOT NULL,
-                app_name TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Add socket_group_id column to sockets
-        let has_sg_col = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM pragma_table_info('sockets') WHERE name = 'socket_group_id'",
-        )
-        .fetch_one(&self.pool)
-        .await?
-            > 0;
-
-        if !has_sg_col {
-            sqlx::query(
-                "ALTER TABLE sockets ADD COLUMN socket_group_id TEXT REFERENCES socket_groups(id) ON DELETE SET NULL",
-            )
-            .execute(&self.pool)
-            .await?;
-        }
-
-        // Socket group addresses (shared IPv6 per backend)
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS socket_group_addresses (
-                group_id TEXT NOT NULL REFERENCES socket_groups(id) ON DELETE CASCADE,
-                backend_id TEXT NOT NULL,
-                address TEXT NOT NULL,
-                interface TEXT NOT NULL,
-                prefix_len INTEGER NOT NULL,
-                keypair_id TEXT,
-                PRIMARY KEY (group_id, backend_id)
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Add policy column to socket_group_addresses
-        let has_sg_policy_col = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM pragma_table_info('socket_group_addresses') WHERE name = 'policy'",
-        )
-        .fetch_one(&self.pool)
-        .await?
-            > 0;
-
-        if !has_sg_policy_col {
-            sqlx::query(
-                "ALTER TABLE socket_group_addresses ADD COLUMN policy TEXT NOT NULL DEFAULT 'closed'",
-            )
-            .execute(&self.pool)
-            .await?;
-        }
-
-        // Add acl_group_id column to socket_groups (ADR 0020)
-        let has_sg_acl_group_col = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM pragma_table_info('socket_groups') WHERE name = 'acl_group_id'",
-        )
-        .fetch_one(&self.pool)
-        .await?
-            > 0;
-
-        if !has_sg_acl_group_col {
-            sqlx::query(
-                "ALTER TABLE socket_groups ADD COLUMN acl_group_id TEXT REFERENCES acl_groups(id) ON DELETE SET NULL",
-            )
-            .execute(&self.pool)
-            .await?;
-        }
-
-        // ACL entries for socket group addresses
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS socket_group_acl_entries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                group_id TEXT NOT NULL REFERENCES socket_groups(id) ON DELETE CASCADE,
-                backend_id TEXT NOT NULL,
-                allowed_ip TEXT NOT NULL,
-                label TEXT,
-                created_at TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Migrate disabled → closed (ADR 0018: closed+no ACL = inactive)
-        sqlx::query("UPDATE socket_addresses SET policy = 'closed' WHERE policy = 'disabled'")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("UPDATE sockets SET policy = 'closed' WHERE policy = 'disabled'")
-            .execute(&self.pool)
-            .await?;
-
-        tracing::info!("ADR 0018 migration complete");
-        Ok(())
-    }
-
-    /// Migrate from single FK `sockets.socket_group_id` to many-to-many
-    /// `socket_group_members` junction table.
-    async fn migrate_socket_group_junction(&self) -> Result<()> {
-        let has_junction = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='socket_group_members'",
-        )
-        .fetch_one(&self.pool)
-        .await?
-            > 0;
-
-        if has_junction {
-            return Ok(());
-        }
-
-        tracing::info!("Migrating socket group membership to many-to-many junction table...");
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS socket_group_members (
-                group_id TEXT NOT NULL REFERENCES socket_groups(id) ON DELETE CASCADE,
-                socket_id TEXT NOT NULL,
-                PRIMARY KEY (group_id, socket_id)
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Migrate existing data from sockets.socket_group_id
-        let has_sg_col = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM pragma_table_info('sockets') WHERE name = 'socket_group_id'",
-        )
-        .fetch_one(&self.pool)
-        .await?
-            > 0;
-
-        if has_sg_col {
-            sqlx::query(
-                r#"
-                INSERT OR IGNORE INTO socket_group_members (group_id, socket_id)
-                SELECT socket_group_id, id FROM sockets WHERE socket_group_id IS NOT NULL
-                "#,
-            )
-            .execute(&self.pool)
-            .await?;
-        }
-
-        tracing::info!("Socket group junction migration complete");
-        Ok(())
-    }
-
-    // ======== Socket CRUD ========
-
-    pub async fn upsert_socket(&self, socket: &ManagedSocket) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO sockets (id, pid, process_name, port, protocol, policy, exe_path, cmdline, first_seen, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                pid = excluded.pid,
-                process_name = excluded.process_name,
-                exe_path = excluded.exe_path,
-                cmdline = excluded.cmdline,
-                last_seen = excluded.last_seen
-            "#,
-        )
-        .bind(&socket.id)
-        .bind(socket.pid as i64)
-        .bind(&socket.process_name)
-        .bind(socket.port as i64)
-        .bind(socket.protocol.to_string())
-        .bind(socket.policy.to_string())
-        .bind(&socket.exe_path)
-        .bind(&socket.cmdline)
-        .bind(socket.first_seen.to_rfc3339())
-        .bind(socket.last_seen.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
-
-    /// Save or update a socket address for a specific backend instance.
-    pub async fn upsert_socket_address(&self, socket_id: &str, addr: &SocketAddress) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO socket_addresses (socket_id, backend_id, backend_type, address, interface, prefix_len, policy)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(socket_id, backend_id) DO UPDATE SET
-                address = excluded.address,
-                interface = excluded.interface,
-                prefix_len = excluded.prefix_len,
-                policy = excluded.policy
-            "#,
-        )
-        .bind(socket_id)
-        .bind(&addr.backend_id)
-        .bind(addr.backend_type.to_string())
-        .bind(addr.address.to_string())
-        .bind(&addr.interface)
-        .bind(addr.prefix_len as i64)
-        .bind(addr.policy.to_string())
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
-
-    /// Get all addresses for a socket.
-    pub async fn get_socket_addresses(&self, socket_id: &str) -> Result<Vec<SocketAddress>> {
-        let rows = sqlx::query_as::<_, SocketAddressRow>(
-            "SELECT backend_id, backend_type, address, interface, prefix_len, policy FROM socket_addresses WHERE socket_id = ?",
-        )
-        .bind(socket_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        rows.into_iter().map(|r| r.try_into()).collect()
-    }
-
-    /// Delete all addresses for a specific backend instance across all sockets.
-    pub async fn delete_addresses_by_backend(
-        &self,
-        backend_id: &str,
-    ) -> Result<Vec<(String, SocketAddress)>> {
-        // First fetch them so we can return them for cleanup
-        let rows = sqlx::query_as::<_, SocketAddressRowWithSocket>(
-            "SELECT socket_id, backend_id, backend_type, address, interface, prefix_len, policy FROM socket_addresses WHERE backend_id = ?",
-        )
-        .bind(backend_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        let result: Result<Vec<(String, SocketAddress)>> = rows
-            .into_iter()
-            .map(|r| {
-                let socket_id = r.socket_id.clone();
-                let addr: SocketAddress = r.try_into()?;
-                Ok((socket_id, addr))
-            })
-            .collect();
-        let result = result?;
-
-        sqlx::query("DELETE FROM socket_addresses WHERE backend_id = ?")
-            .bind(backend_id)
-            .execute(&self.pool)
-            .await?;
-
-        Ok(result)
-    }
-
-    /// Delete a specific socket address.
-    pub async fn delete_socket_address(&self, socket_id: &str, backend_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM socket_addresses WHERE socket_id = ? AND backend_id = ?")
-            .bind(socket_id)
-            .bind(backend_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    /// Update the policy of a specific socket address (per-backend).
-    pub async fn update_address_policy(
-        &self,
-        socket_id: &str,
-        backend_id: &str,
-        policy: Policy,
-    ) -> Result<()> {
-        sqlx::query(
-            "UPDATE socket_addresses SET policy = ? WHERE socket_id = ? AND backend_id = ?",
-        )
-        .bind(policy.to_string())
-        .bind(socket_id)
-        .bind(backend_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Update the default policy on the socket (used when adding new backends).
-    pub async fn update_default_policy(&self, id: &str, policy: Policy) -> Result<()> {
-        sqlx::query("UPDATE sockets SET policy = ? WHERE id = ?")
-            .bind(policy.to_string())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    /// Update policy on ALL addresses for a socket (fan-out).
-    pub async fn update_policy_all_backends(&self, socket_id: &str, policy: Policy) -> Result<()> {
-        sqlx::query("UPDATE socket_addresses SET policy = ? WHERE socket_id = ?")
-            .bind(policy.to_string())
-            .bind(socket_id)
-            .execute(&self.pool)
-            .await?;
-        // Also update the default policy
-        self.update_default_policy(socket_id, policy).await?;
-        Ok(())
-    }
-
-    pub async fn list_sockets(&self) -> Result<Vec<ManagedSocket>> {
-        let rows = sqlx::query_as::<_, SocketRow>("SELECT * FROM sockets ORDER BY last_seen DESC")
-            .fetch_all(&self.pool)
-            .await?;
-
-        // Fetch all addresses and group by socket_id
-        let addr_rows = sqlx::query_as::<_, SocketAddressRowWithSocket>(
-            "SELECT socket_id, backend_id, backend_type, address, interface, prefix_len, policy FROM socket_addresses",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut addr_map: HashMap<String, Vec<SocketAddress>> = HashMap::new();
-        for row in addr_rows {
-            let socket_id = row.socket_id.clone();
-            let addr: SocketAddress = row.try_into()?;
-            addr_map.entry(socket_id).or_default().push(addr);
-        }
-
-        // Fetch ACL group memberships
-        let membership_rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT socket_id, group_id FROM acl_group_members",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let mut group_map: HashMap<String, String> = HashMap::new();
-        for (socket_id, group_id) in membership_rows {
-            group_map.insert(socket_id, group_id);
-        }
-
-        // Fetch socket group memberships (many-to-many)
-        let sg_membership_rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT socket_id, group_id FROM socket_group_members",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let mut sg_map: HashMap<String, Vec<String>> = HashMap::new();
-        for (socket_id, group_id) in sg_membership_rows {
-            sg_map.entry(socket_id).or_default().push(group_id);
-        }
-
-        rows.into_iter()
-            .map(|r| {
-                let addresses = addr_map.remove(&r.id).unwrap_or_default();
-                let acl_group_id = group_map.remove(&r.id);
-                let socket_group_ids = sg_map.remove(&r.id).unwrap_or_default();
-                r.into_managed_socket(addresses, acl_group_id, socket_group_ids)
-            })
-            .collect()
-    }
-
-    pub async fn get_socket(&self, id: &str) -> Result<Option<ManagedSocket>> {
-        let row = sqlx::query_as::<_, SocketRow>("SELECT * FROM sockets WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
-
-        match row {
-            Some(r) => {
-                let addresses = self.get_socket_addresses(id).await?;
-                let acl_group_id = self.get_acl_group_for_socket(id).await?;
-                let socket_group_ids = self.get_socket_group_ids_for_socket(id).await?;
-                Ok(Some(r.into_managed_socket(
-                    addresses,
-                    acl_group_id,
-                    socket_group_ids,
-                )?))
-            }
-            None => Ok(None),
-        }
-    }
-
-    pub async fn delete_socket(&self, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM sockets WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    // ======== ACL Entries (per-socket) ========
-
-    /// Get ACL entries for a specific socket+backend pair.
-    pub async fn get_acl_for_backend(
-        &self,
-        socket_id: &str,
-        backend_id: &str,
-    ) -> Result<Vec<AclEntry>> {
-        let rows = sqlx::query_as::<_, AclRow>(
-            "SELECT * FROM acl_entries WHERE socket_id = ? AND backend_id = ? ORDER BY created_at",
-        )
-        .bind(socket_id)
-        .bind(backend_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        rows.into_iter().map(|r| r.try_into()).collect()
-    }
-
-    /// Get all ACL entries for a socket (across all backends).
-    pub async fn get_acl(&self, socket_id: &str) -> Result<Vec<AclEntry>> {
-        let rows = sqlx::query_as::<_, AclRow>(
-            "SELECT * FROM acl_entries WHERE socket_id = ? ORDER BY backend_id, created_at",
-        )
-        .bind(socket_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        rows.into_iter().map(|r| r.try_into()).collect()
-    }
-
-    /// Add an ACL entry for a specific backend.
-    pub async fn add_acl_entry(
-        &self,
-        socket_id: &str,
-        backend_id: &str,
-        allowed_ip: &str,
-        label: Option<&str>,
-    ) -> Result<AclEntry> {
-        // Defense-in-depth: validate that it's a valid IPv6 address
-        allowed_ip
-            .parse::<std::net::Ipv6Addr>()
-            .map_err(|e| anyhow::anyhow!("invalid IPv6 address '{}': {}", allowed_ip, e))?;
-
-        let now = chrono::Utc::now();
-        let result = sqlx::query(
-            "INSERT INTO acl_entries (socket_id, backend_id, allowed_ip, label, created_at) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(socket_id)
-        .bind(backend_id)
-        .bind(allowed_ip)
-        .bind(label)
-        .bind(now.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
-
-        Ok(AclEntry {
-            id: result.last_insert_rowid(),
-            socket_id: socket_id.to_string(),
-            backend_id: backend_id.to_string(),
-            allowed_ip: allowed_ip.to_string(),
-            label: label.map(|s| s.to_string()),
-            created_at: now,
-        })
-    }
-
-    /// Add an ACL entry to ALL backends for a socket (fan-out).
-    pub async fn add_acl_entry_all_backends(
-        &self,
-        socket_id: &str,
-        allowed_ip: &str,
-        label: Option<&str>,
-    ) -> Result<Vec<AclEntry>> {
-        let addresses = self.get_socket_addresses(socket_id).await?;
-        let mut entries = Vec::new();
-        for addr in &addresses {
-            let entry = self
-                .add_acl_entry(socket_id, &addr.backend_id, allowed_ip, label)
-                .await?;
-            entries.push(entry);
-        }
-        Ok(entries)
-    }
-
-    pub async fn delete_acl_entry(&self, entry_id: i64) -> Result<()> {
-        sqlx::query("DELETE FROM acl_entries WHERE id = ?")
-            .bind(entry_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    // ======== ACL Groups (ADR 0018) ========
-
-    pub async fn create_acl_group(&self, label: &str) -> Result<AclGroup> {
-        let id = uuid::Uuid::new_v4().to_string();
-        let now = chrono::Utc::now();
-        sqlx::query(
-            "INSERT INTO acl_groups (id, label, policy, created_at) VALUES (?, ?, 'closed', ?)",
-        )
-        .bind(&id)
-        .bind(label)
-        .bind(now.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
-
-        Ok(AclGroup {
-            id,
-            label: label.to_string(),
-            policy: Policy::Closed,
-            created_at: now,
-        })
-    }
-
-    pub async fn get_acl_group(&self, id: &str) -> Result<Option<AclGroup>> {
-        let row = sqlx::query_as::<_, AclGroupRow>("SELECT * FROM acl_groups WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
-        match row {
-            Some(r) => Ok(Some(r.try_into()?)),
-            None => Ok(None),
-        }
-    }
-
-    pub async fn list_acl_groups(&self) -> Result<Vec<AclGroup>> {
-        let rows = sqlx::query_as::<_, AclGroupRow>("SELECT * FROM acl_groups ORDER BY label")
-            .fetch_all(&self.pool)
-            .await?;
-        rows.into_iter().map(|r| r.try_into()).collect()
-    }
-
-    pub async fn update_acl_group(
-        &self,
-        id: &str,
-        label: Option<&str>,
-        policy: Option<Policy>,
-    ) -> Result<()> {
-        if let Some(label) = label {
-            sqlx::query("UPDATE acl_groups SET label = ? WHERE id = ?")
-                .bind(label)
-                .bind(id)
-                .execute(&self.pool)
-                .await?;
-        }
-        if let Some(policy) = policy {
-            sqlx::query("UPDATE acl_groups SET policy = ? WHERE id = ?")
-                .bind(policy.to_string())
-                .bind(id)
-                .execute(&self.pool)
-                .await?;
-        }
-        Ok(())
-    }
-
-    pub async fn delete_acl_group(&self, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM acl_groups WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    // ACL group members
-
-    pub async fn add_to_acl_group(&self, group_id: &str, socket_id: &str) -> Result<()> {
-        sqlx::query("INSERT OR REPLACE INTO acl_group_members (group_id, socket_id) VALUES (?, ?)")
-            .bind(group_id)
-            .bind(socket_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn remove_from_acl_group(&self, group_id: &str, socket_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM acl_group_members WHERE group_id = ? AND socket_id = ?")
-            .bind(group_id)
-            .bind(socket_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_acl_group_for_socket(&self, socket_id: &str) -> Result<Option<String>> {
-        let row = sqlx::query_scalar::<_, String>(
-            "SELECT group_id FROM acl_group_members WHERE socket_id = ?",
-        )
-        .bind(socket_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row)
-    }
-
-    pub async fn get_acl_group_members(&self, group_id: &str) -> Result<Vec<String>> {
-        let rows = sqlx::query_scalar::<_, String>(
-            "SELECT socket_id FROM acl_group_members WHERE group_id = ?",
-        )
-        .bind(group_id)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows)
-    }
-
-    // ACL group entries
-
-    pub async fn add_acl_group_entry(
-        &self,
-        group_id: &str,
-        backend_id: &str,
-        allowed_ip: &str,
-        label: Option<&str>,
-    ) -> Result<AclEntry> {
-        allowed_ip
-            .parse::<std::net::Ipv6Addr>()
-            .map_err(|e| anyhow::anyhow!("invalid IPv6 address '{}': {}", allowed_ip, e))?;
-
-        let now = chrono::Utc::now();
-        let result = sqlx::query(
-            "INSERT INTO acl_group_entries (group_id, backend_id, allowed_ip, label, created_at) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(group_id)
-        .bind(backend_id)
-        .bind(allowed_ip)
-        .bind(label)
-        .bind(now.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
-
-        Ok(AclEntry {
-            id: result.last_insert_rowid(),
-            socket_id: group_id.to_string(),
-            backend_id: backend_id.to_string(),
-            allowed_ip: allowed_ip.to_string(),
-            label: label.map(|s| s.to_string()),
-            created_at: now,
-        })
-    }
-
-    pub async fn remove_acl_group_entry(&self, entry_id: i64) -> Result<()> {
-        sqlx::query("DELETE FROM acl_group_entries WHERE id = ?")
-            .bind(entry_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_acl_group_entries(&self, group_id: &str) -> Result<Vec<AclEntry>> {
-        let rows = sqlx::query_as::<_, AclGroupEntryRow>(
-            "SELECT * FROM acl_group_entries WHERE group_id = ? ORDER BY backend_id, created_at",
-        )
-        .bind(group_id)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(|r| r.try_into()).collect()
-    }
-
-    /// Get group ACL entries for a specific backend.
-    pub async fn get_acl_group_entries_for_backend(
-        &self,
-        group_id: &str,
-        backend_id: &str,
-    ) -> Result<Vec<AclEntry>> {
-        let rows = sqlx::query_as::<_, AclGroupEntryRow>(
-            "SELECT * FROM acl_group_entries WHERE group_id = ? AND backend_id = ? ORDER BY created_at",
-        )
-        .bind(group_id)
-        .bind(backend_id)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(|r| r.try_into()).collect()
-    }
-
-    // ======== Socket Groups (ADR 0018) ========
-
-    pub async fn create_socket_group(&self, label: &str, app_name: &str) -> Result<SocketGroup> {
-        let id = uuid::Uuid::new_v4().to_string();
-        let now = chrono::Utc::now();
-        sqlx::query(
-            "INSERT INTO socket_groups (id, label, app_name, created_at) VALUES (?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(label)
-        .bind(app_name)
-        .bind(now.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
-
-        Ok(SocketGroup {
-            id,
-            label: label.to_string(),
-            app_name: app_name.to_string(),
-            acl_group_id: None,
-            created_at: now,
-        })
-    }
-
-    pub async fn get_socket_group(&self, id: &str) -> Result<Option<SocketGroup>> {
-        let row = sqlx::query_as::<_, SocketGroupRow>("SELECT * FROM socket_groups WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
-        match row {
-            Some(r) => Ok(Some(r.try_into()?)),
-            None => Ok(None),
-        }
-    }
-
-    pub async fn list_socket_groups(&self) -> Result<Vec<SocketGroup>> {
-        let rows = sqlx::query_as::<_, SocketGroupRow>(
-            "SELECT * FROM socket_groups ORDER BY app_name, label",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(|r| r.try_into()).collect()
-    }
-
-    pub async fn update_socket_group(&self, id: &str, label: &str) -> Result<()> {
-        sqlx::query("UPDATE socket_groups SET label = ? WHERE id = ?")
-            .bind(label)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn delete_socket_group(&self, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM socket_groups WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn add_socket_to_group(&self, group_id: &str, socket_id: &str) -> Result<()> {
-        sqlx::query(
-            "INSERT OR IGNORE INTO socket_group_members (group_id, socket_id) VALUES (?, ?)",
-        )
-        .bind(group_id)
-        .bind(socket_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn remove_socket_from_group(&self, group_id: &str, socket_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM socket_group_members WHERE group_id = ? AND socket_id = ?")
-            .bind(group_id)
-            .bind(socket_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_socket_group_members(&self, group_id: &str) -> Result<Vec<String>> {
-        let rows = sqlx::query_scalar::<_, String>(
-            "SELECT socket_id FROM socket_group_members WHERE group_id = ?",
-        )
-        .bind(group_id)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows)
-    }
-
-    pub async fn get_socket_group_ids_for_socket(&self, socket_id: &str) -> Result<Vec<String>> {
-        let rows = sqlx::query_scalar::<_, String>(
-            "SELECT group_id FROM socket_group_members WHERE socket_id = ?",
-        )
-        .bind(socket_id)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows)
-    }
-
-    // Socket group addresses
-
-    pub async fn upsert_socket_group_address(&self, addr: &SocketGroupAddress) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO socket_group_addresses (group_id, backend_id, address, interface, prefix_len, policy)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(group_id, backend_id) DO UPDATE SET
-                address = excluded.address,
-                interface = excluded.interface,
-                prefix_len = excluded.prefix_len
-            "#,
-        )
-        .bind(&addr.group_id)
-        .bind(&addr.backend_id)
-        .bind(addr.address.to_string())
-        .bind(&addr.interface)
-        .bind(addr.prefix_len as i64)
-        .bind(addr.policy.to_string())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn get_socket_group_addresses(
-        &self,
-        group_id: &str,
-    ) -> Result<Vec<SocketGroupAddress>> {
-        let rows = sqlx::query_as::<_, SocketGroupAddressRow>(
-            "SELECT * FROM socket_group_addresses WHERE group_id = ?",
-        )
-        .bind(group_id)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(|r| r.try_into()).collect()
-    }
-
-    // Socket group address policy & ACL
-
-    pub async fn set_socket_group_address_policy(
-        &self,
-        group_id: &str,
-        backend_id: &str,
-        policy: &str,
-    ) -> Result<()> {
-        sqlx::query(
-            "UPDATE socket_group_addresses SET policy = ? WHERE group_id = ? AND backend_id = ?",
-        )
-        .bind(policy)
-        .bind(group_id)
-        .bind(backend_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn add_socket_group_acl_entry(
-        &self,
-        group_id: &str,
-        backend_id: &str,
-        ip: &str,
-        label: Option<&str>,
-    ) -> Result<SocketGroupAclEntry> {
-        ip.parse::<std::net::Ipv6Addr>()
-            .map_err(|e| anyhow::anyhow!("invalid IPv6 address '{}': {}", ip, e))?;
-
-        let now = chrono::Utc::now();
-        let result = sqlx::query(
-            "INSERT INTO socket_group_acl_entries (group_id, backend_id, allowed_ip, label, created_at) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(group_id)
-        .bind(backend_id)
-        .bind(ip)
-        .bind(label)
-        .bind(now.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
-
-        Ok(SocketGroupAclEntry {
-            id: result.last_insert_rowid(),
-            group_id: group_id.to_string(),
-            backend_id: backend_id.to_string(),
-            allowed_ip: ip.to_string(),
-            label: label.map(|s| s.to_string()),
-            created_at: now,
-        })
-    }
-
-    pub async fn remove_socket_group_acl_entry(&self, entry_id: i64) -> Result<()> {
-        sqlx::query("DELETE FROM socket_group_acl_entries WHERE id = ?")
-            .bind(entry_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_socket_group_acl_entries(
-        &self,
-        group_id: &str,
-    ) -> Result<Vec<SocketGroupAclEntry>> {
-        let rows = sqlx::query_as::<_, SocketGroupAclEntryRow>(
-            "SELECT * FROM socket_group_acl_entries WHERE group_id = ? ORDER BY backend_id, created_at",
-        )
-        .bind(group_id)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(|r| r.try_into()).collect()
-    }
-
-    // ======== Socket Group ACL Group (ADR 0020) ========
-
-    pub async fn set_socket_group_acl_group(
-        &self,
-        group_id: &str,
-        acl_group_id: Option<&str>,
-    ) -> Result<()> {
-        sqlx::query("UPDATE socket_groups SET acl_group_id = ? WHERE id = ?")
-            .bind(acl_group_id)
-            .bind(group_id)
-            .execute(&self.pool)
-            .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1249,7 +243,8 @@ impl Database {
 
     pub async fn set_setting(&self, key: &str, value: &str) -> Result<()> {
         sqlx::query(
-            "INSERT INTO settings (key, value) VALUES (?, ?)              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO settings (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         )
         .bind(key)
         .bind(value)
@@ -1261,118 +256,869 @@ impl Database {
     /// The installation's ULA global ID (40 bits), generated and stored on first use so
     /// ULA addresses stay in the same /48 across restarts.
     pub async fn ula_global_id(&self) -> Result<[u8; 5]> {
-        const KEY: &str = "ula_global_id";
-        if let Some(stored) = self.get_setting(KEY).await? {
+        if let Some(stored) = self.get_setting(ULA_GLOBAL_ID_KEY).await? {
             if let Some(id) = parse_global_id(&stored) {
                 return Ok(id);
             }
-            tracing::warn!("Invalid stored ULA global ID {stored:?}, generating a new one");
+            warn!("Invalid stored ULA global ID {stored:?}, generating a new one");
         }
         let id = crate::backend::ula::UlaBackend::random_global_id();
         let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
-        self.set_setting(KEY, &hex).await?;
+        self.set_setting(ULA_GLOBAL_ID_KEY, &hex).await?;
         Ok(id)
     }
 
-    // ======== Misc ========
-
-    pub async fn stale_sockets(
-        &self,
-        before: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Vec<ManagedSocket>> {
-        let rows = sqlx::query_as::<_, SocketRow>("SELECT * FROM sockets WHERE last_seen < ?")
-            .bind(before.to_rfc3339())
-            .fetch_all(&self.pool)
-            .await?;
-
-        let mut result = Vec::new();
-        for r in rows {
-            let addresses = self.get_socket_addresses(&r.id).await?;
-            let acl_group_id = self.get_acl_group_for_socket(&r.id).await?;
-            let socket_group_ids = self.get_socket_group_ids_for_socket(&r.id).await?;
-            result.push(r.into_managed_socket(addresses, acl_group_id, socket_group_ids)?);
-        }
-        Ok(result)
+    /// Interfaces under whole-host protection; absent or invalid means off.
+    pub async fn protect_host(&self) -> Result<Vec<String>> {
+        Ok(parse_protect_host(
+            self.get_setting(PROTECT_HOST_KEY).await?.as_deref(),
+        ))
     }
 
-    /// Resolve the effective policy for a socket address.
-    /// Returns (effective_policy, source) where source is "address", "group", or "default".
-    pub async fn resolve_effective_policy(
-        &self,
-        socket_id: &str,
-        backend_id: &str,
-    ) -> Result<(Policy, String)> {
-        // Get the address policy
-        let addrs = self.get_socket_addresses(socket_id).await?;
-        let addr = addrs.iter().find(|a| a.backend_id == backend_id);
-        let addr_policy = addr.map(|a| a.policy).unwrap_or(Policy::Closed);
-
-        match addr_policy {
-            Policy::Group => {
-                // Look up ACL group
-                if let Some(group_id) = self.get_acl_group_for_socket(socket_id).await? {
-                    if let Some(group) = self.get_acl_group(&group_id).await? {
-                        return Ok((group.policy, "group".to_string()));
-                    }
-                }
-                // Not in a group — treat as closed with no ACL = inactive
-                Ok((Policy::Closed, "default".to_string()))
-            }
-            other => Ok((other, "address".to_string())),
-        }
+    pub async fn set_protect_host(&self, interfaces: &[String]) -> Result<()> {
+        self.set_setting(PROTECT_HOST_KEY, &serde_json::to_string(interfaces)?)
+            .await
     }
-}
 
-// ======== Row types ========
+    pub async fn address_mode(&self) -> Result<AddressMode> {
+        Ok(self
+            .get_setting(ADDRESS_MODE_KEY)
+            .await?
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default())
+    }
 
-#[derive(sqlx::FromRow)]
-struct SocketRow {
-    id: String,
-    pid: i64,
-    process_name: String,
-    port: i64,
-    protocol: String,
-    policy: String,
-    exe_path: Option<String>,
-    cmdline: Option<String>,
-    first_seen: String,
-    last_seen: String,
-    // Legacy column — kept for DB compat; membership now in socket_group_members table
-    #[allow(dead_code)]
-    socket_group_id: Option<String>,
-}
+    pub async fn set_address_mode(&self, mode: AddressMode) -> Result<()> {
+        self.set_setting(ADDRESS_MODE_KEY, mode.as_str()).await
+    }
 
-impl SocketRow {
-    fn into_managed_socket(
-        self,
-        addresses: Vec<SocketAddress>,
-        acl_group_id: Option<String>,
-        socket_group_ids: Vec<String>,
-    ) -> Result<ManagedSocket> {
-        Ok(ManagedSocket {
-            id: self.id,
-            pid: self.pid as u32,
-            process_name: self.process_name,
-            port: self.port as u16,
-            protocol: self
-                .protocol
-                .parse()
-                .map_err(|e: String| anyhow::anyhow!(e))?,
-            addresses,
-            policy: self
-                .policy
-                .parse()
-                .map_err(|e: String| anyhow::anyhow!(e))?,
-            exe_path: self.exe_path,
-            cmdline: self.cmdline,
-            first_seen: chrono::DateTime::parse_from_rfc3339(&self.first_seen)?
-                .with_timezone(&chrono::Utc),
-            last_seen: chrono::DateTime::parse_from_rfc3339(&self.last_seen)?
-                .with_timezone(&chrono::Utc),
-            acl_group_id,
-            socket_group_ids,
+    pub async fn settings(&self) -> Result<Settings> {
+        Ok(Settings {
+            address_mode: self.address_mode().await?,
+            protect_host_interfaces: self.protect_host().await?,
         })
     }
+
+    // ======== Apps ========
+
+    pub async fn insert_app(&self, app: &App) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO apps (id, name, process_name, exe_path, interpreter_arg, reviewed, \
+             first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&app.id)
+        .bind(&app.name)
+        .bind(&app.process_name)
+        .bind(&app.exe_path)
+        .bind(&app.interpreter_arg)
+        .bind(app.reviewed)
+        .bind(ts(app.first_seen))
+        .bind(ts(app.last_seen))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Record another sighting of a known app.
+    pub async fn touch_app(
+        &self,
+        id: &str,
+        process_name: &str,
+        exe_path: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        sqlx::query("UPDATE apps SET process_name = ?, exe_path = ?, last_seen = ? WHERE id = ?")
+            .bind(process_name)
+            .bind(exe_path)
+            .bind(ts(now))
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Returns false when the app does not exist.
+    pub async fn set_reviewed(&self, id: &str, reviewed: bool) -> Result<bool> {
+        let r = sqlx::query("UPDATE apps SET reviewed = ? WHERE id = ?")
+            .bind(reviewed)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    /// Delete an app; its ports, addresses and grants go with it. False if unknown.
+    pub async fn delete_app(&self, id: &str) -> Result<bool> {
+        let r = sqlx::query("DELETE FROM apps WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn get_app(&self, id: &str) -> Result<Option<App>> {
+        Ok(self.load_apps(Some(id)).await?.into_iter().next())
+    }
+
+    pub async fn list_apps(&self) -> Result<Vec<App>> {
+        self.load_apps(None).await
+    }
+
+    async fn load_apps(&self, only: Option<&str>) -> Result<Vec<App>> {
+        let rows = match only {
+            Some(id) => {
+                sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, reviewed, first_seen, last_seen FROM apps WHERE id = ?")
+                    .bind(id)
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+            None => {
+                sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, reviewed, first_seen, last_seen FROM apps ORDER BY name, id")
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+        };
+        let mut apps = Vec::with_capacity(rows.len());
+        for r in rows {
+            apps.push(App {
+                id: r.get("id"),
+                name: r.get("name"),
+                process_name: r.get("process_name"),
+                exe_path: r.get("exe_path"),
+                interpreter_arg: r.get("interpreter_arg"),
+                reviewed: r.get("reviewed"),
+                first_seen: parse_ts(r.get("first_seen"))?,
+                last_seen: parse_ts(r.get("last_seen"))?,
+                ports: Vec::new(),
+                addresses: Vec::new(),
+            });
+        }
+        let mut ports = self.load_ports(only).await?;
+        let mut addresses = self.load_addresses(only).await?;
+        for app in &mut apps {
+            app.ports = ports.remove(&app.id).unwrap_or_default();
+            app.addresses = addresses.remove(&app.id).unwrap_or_default();
+        }
+        Ok(apps)
+    }
+
+    // ======== App ports ========
+
+    async fn load_ports(&self, only: Option<&str>) -> Result<HashMap<String, Vec<AppPort>>> {
+        let rows = sqlx::query(
+            "SELECT app_id, port, proto, listening, last_seen FROM app_ports \
+             WHERE (?1 IS NULL OR app_id = ?1) ORDER BY port, proto",
+        )
+        .bind(only)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out: HashMap<String, Vec<AppPort>> = HashMap::new();
+        for r in rows {
+            out.entry(r.get("app_id")).or_default().push(AppPort {
+                port: to_port(r.get("port"))?,
+                proto: r
+                    .get::<String, _>("proto")
+                    .parse()
+                    .map_err(anyhow::Error::msg)?,
+                listening: r.get("listening"),
+                last_seen: parse_ts(r.get("last_seen"))?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Record which ports an app listens on now: those in `live` become listening (and
+    /// are created when new), every other known port stops listening. Returns the ports
+    /// seen for the first time.
+    pub async fn sync_app_ports(
+        &self,
+        app_id: &str,
+        live: &[PortRef],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<PortRef>> {
+        let mut tx = self.pool.begin().await?;
+        let known: Vec<(i64, String)> =
+            sqlx::query_as("SELECT port, proto FROM app_ports WHERE app_id = ?")
+                .bind(app_id)
+                .fetch_all(&mut *tx)
+                .await?;
+        let known: Vec<PortRef> = known
+            .into_iter()
+            .map(|(p, pr)| {
+                Ok(PortRef {
+                    port: to_port(p)?,
+                    proto: pr.parse().map_err(anyhow::Error::msg)?,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let mut new_ports = Vec::new();
+        for p in live {
+            if !known.contains(p) {
+                new_ports.push(*p);
+            }
+            sqlx::query(
+                "INSERT INTO app_ports (app_id, port, proto, listening, last_seen) \
+                 VALUES (?, ?, ?, 1, ?) ON CONFLICT(app_id, port, proto) \
+                 DO UPDATE SET listening = 1, last_seen = excluded.last_seen",
+            )
+            .bind(app_id)
+            .bind(p.port)
+            .bind(p.proto.to_string())
+            .bind(ts(now))
+            .execute(&mut *tx)
+            .await?;
+        }
+        for k in known.iter().filter(|k| !live.contains(k)) {
+            sqlx::query(
+                "UPDATE app_ports SET listening = 0 WHERE app_id = ? AND port = ? AND proto = ?",
+            )
+            .bind(app_id)
+            .bind(k.port)
+            .bind(k.proto.to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(new_ports)
+    }
+
+    // ======== Addresses ========
+
+    pub async fn insert_address(&self, a: &Address) -> Result<()> {
+        let (kind, locator) = match &a.locator {
+            Locator::Ipv6 { addr } => ("ipv6", addr.to_string()),
+            Locator::Onion { hostname } => ("onion", hostname.clone()),
+        };
+        sqlx::query(
+            "INSERT INTO addresses (id, app_id, network_id, ports, locator_kind, locator, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&a.id)
+        .bind(&a.app_id)
+        .bind(&a.network_id)
+        .bind(encode_ports(&a.ports)?)
+        .bind(kind)
+        .bind(locator)
+        .bind(ts(a.created_at))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_address(&self, id: &str) -> Result<Option<Address>> {
+        let rows = sqlx::query(ADDRESS_SELECT_ONE)
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().next().map(address_from_row).transpose()
+    }
+
+    pub async fn list_addresses(&self) -> Result<Vec<Address>> {
+        Ok(self
+            .load_addresses(None)
+            .await?
+            .into_values()
+            .flatten()
+            .collect())
+    }
+
+    async fn load_addresses(&self, only: Option<&str>) -> Result<HashMap<String, Vec<Address>>> {
+        let rows = sqlx::query(
+            "SELECT id, app_id, network_id, ports, locator_kind, locator, created_at \
+             FROM addresses WHERE (?1 IS NULL OR app_id = ?1) ORDER BY created_at, id",
+        )
+        .bind(only)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out: HashMap<String, Vec<Address>> = HashMap::new();
+        for r in rows {
+            let a = address_from_row(r)?;
+            out.entry(a.app_id.clone()).or_default().push(a);
+        }
+        Ok(out)
+    }
+
+    pub async fn update_address_ports(&self, id: &str, ports: &PortSet) -> Result<bool> {
+        let r = sqlx::query("UPDATE addresses SET ports = ? WHERE id = ?")
+            .bind(encode_ports(ports)?)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn update_address_ipv6(&self, id: &str, addr: Ipv6Addr) -> Result<bool> {
+        let r = sqlx::query("UPDATE addresses SET locator_kind = 'ipv6', locator = ? WHERE id = ?")
+            .bind(addr.to_string())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn delete_address(&self, id: &str) -> Result<bool> {
+        let r = sqlx::query("DELETE FROM addresses WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    /// Delete every address of a network, returning them (the caller takes them off the
+    /// interface).
+    pub async fn delete_addresses_by_network(&self, network_id: &str) -> Result<Vec<Address>> {
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query(
+            "SELECT id, app_id, network_id, ports, locator_kind, locator, created_at \
+             FROM addresses WHERE network_id = ?",
+        )
+        .bind(network_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let addrs = rows
+            .into_iter()
+            .map(address_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        sqlx::query("DELETE FROM addresses WHERE network_id = ?")
+            .bind(network_id)
+            .execute(&mut *tx)
+            .await?;
+        // A grant tied to the network cannot apply any more.
+        sqlx::query("DELETE FROM grants WHERE network_id = ?")
+            .bind(network_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(addrs)
+    }
+
+    // ======== Peers ========
+
+    /// Insert a peer with its credentials in one transaction.
+    pub async fn insert_peer(&self, peer: &Peer) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT INTO peers (id, label, created_at) VALUES (?, ?, ?)")
+            .bind(&peer.id)
+            .bind(&peer.label)
+            .bind(ts(peer.created_at))
+            .execute(&mut *tx)
+            .await?;
+        for c in &peer.credentials {
+            insert_credential(&mut tx, &peer.id, c).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn get_peer(&self, id: &str) -> Result<Option<Peer>> {
+        Ok(self.load_peers(Some(id)).await?.into_iter().next())
+    }
+
+    pub async fn list_peers(&self) -> Result<Vec<Peer>> {
+        self.load_peers(None).await
+    }
+
+    async fn load_peers(&self, only: Option<&str>) -> Result<Vec<Peer>> {
+        let rows = sqlx::query(
+            "SELECT id, label, created_at FROM peers WHERE (?1 IS NULL OR id = ?1) ORDER BY label",
+        )
+        .bind(only)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut peers = Vec::with_capacity(rows.len());
+        for r in rows {
+            peers.push(Peer {
+                id: r.get("id"),
+                label: r.get("label"),
+                credentials: Vec::new(),
+                groups: Vec::new(),
+                created_at: parse_ts(r.get("created_at"))?,
+            });
+        }
+        let creds = sqlx::query(
+            "SELECT id, peer_id, kind, value, label FROM peer_credentials \
+             WHERE (?1 IS NULL OR peer_id = ?1) ORDER BY rowid",
+        )
+        .bind(only)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut by_peer: HashMap<String, Vec<Credential>> = HashMap::new();
+        for r in creds {
+            by_peer
+                .entry(r.get("peer_id"))
+                .or_default()
+                .push(Credential {
+                    id: r.get("id"),
+                    kind: r
+                        .get::<String, _>("kind")
+                        .parse()
+                        .map_err(anyhow::Error::msg)?,
+                    value: r.get("value"),
+                    label: r.get("label"),
+                });
+        }
+        let members = sqlx::query(
+            "SELECT group_id, peer_id FROM peer_group_members \
+             WHERE (?1 IS NULL OR peer_id = ?1) ORDER BY group_id",
+        )
+        .bind(only)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+        for r in members {
+            groups
+                .entry(r.get("peer_id"))
+                .or_default()
+                .push(r.get("group_id"));
+        }
+        for p in &mut peers {
+            p.credentials = by_peer.remove(&p.id).unwrap_or_default();
+            p.groups = groups.remove(&p.id).unwrap_or_default();
+        }
+        Ok(peers)
+    }
+
+    pub async fn rename_peer(&self, id: &str, label: &str) -> Result<bool> {
+        let r = sqlx::query("UPDATE peers SET label = ? WHERE id = ?")
+            .bind(label)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    /// Delete a peer with its credentials, memberships and the grants naming it.
+    pub async fn delete_peer(&self, id: &str) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM grants WHERE subject_kind = 'peer' AND subject_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        let r = sqlx::query("DELETE FROM peers WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn add_credential(&self, peer_id: &str, c: &Credential) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        insert_credential(&mut tx, peer_id, c).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn remove_credential(&self, peer_id: &str, cred_id: &str) -> Result<bool> {
+        let r = sqlx::query("DELETE FROM peer_credentials WHERE id = ? AND peer_id = ?")
+            .bind(cred_id)
+            .bind(peer_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    /// The peer that holds a credential, if any.
+    pub async fn find_credential_owner(
+        &self,
+        kind: CredentialKind,
+        value: &str,
+    ) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT peer_id FROM peer_credentials WHERE kind = ? AND value = ?")
+                .bind(kind.as_str())
+                .bind(value)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    // ======== Peer groups ========
+
+    pub async fn insert_group(&self, g: &PeerGroup) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT INTO peer_groups (id, label, created_at) VALUES (?, ?, ?)")
+            .bind(&g.id)
+            .bind(&g.label)
+            .bind(ts(g.created_at))
+            .execute(&mut *tx)
+            .await?;
+        for m in &g.members {
+            sqlx::query("INSERT INTO peer_group_members (group_id, peer_id) VALUES (?, ?)")
+                .bind(&g.id)
+                .bind(m)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn get_group(&self, id: &str) -> Result<Option<PeerGroup>> {
+        Ok(self.load_groups(Some(id)).await?.into_iter().next())
+    }
+
+    pub async fn list_groups(&self) -> Result<Vec<PeerGroup>> {
+        self.load_groups(None).await
+    }
+
+    async fn load_groups(&self, only: Option<&str>) -> Result<Vec<PeerGroup>> {
+        let rows = sqlx::query(
+            "SELECT id, label, created_at FROM peer_groups WHERE (?1 IS NULL OR id = ?1) ORDER BY label",
+        )
+        .bind(only)
+        .fetch_all(&self.pool)
+        .await?;
+        let members = sqlx::query(
+            "SELECT group_id, peer_id FROM peer_group_members \
+             WHERE (?1 IS NULL OR group_id = ?1) ORDER BY peer_id",
+        )
+        .bind(only)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut by_group: HashMap<String, Vec<String>> = HashMap::new();
+        for r in members {
+            by_group
+                .entry(r.get("group_id"))
+                .or_default()
+                .push(r.get("peer_id"));
+        }
+        let mut groups = Vec::with_capacity(rows.len());
+        for r in rows {
+            let id: String = r.get("id");
+            groups.push(PeerGroup {
+                members: by_group.remove(&id).unwrap_or_default(),
+                id,
+                label: r.get("label"),
+                created_at: parse_ts(r.get("created_at"))?,
+            });
+        }
+        Ok(groups)
+    }
+
+    pub async fn rename_group(&self, id: &str, label: &str) -> Result<bool> {
+        let r = sqlx::query("UPDATE peer_groups SET label = ? WHERE id = ?")
+            .bind(label)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    /// Delete a group with its memberships and the grants naming it.
+    pub async fn delete_group(&self, id: &str) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM grants WHERE subject_kind = 'group' AND subject_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        let r = sqlx::query("DELETE FROM peer_groups WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    /// Replace a group's members.
+    pub async fn set_group_members(&self, id: &str, members: &[String]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM peer_group_members WHERE group_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        for m in members {
+            sqlx::query(
+                "INSERT OR IGNORE INTO peer_group_members (group_id, peer_id) VALUES (?, ?)",
+            )
+            .bind(id)
+            .bind(m)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    // ======== Grants ========
+
+    pub async fn insert_grant(&self, g: &Grant) -> Result<()> {
+        let (kind, subject_id) = match &g.subject {
+            Subject::Peer(id) => ("peer", Some(id.as_str())),
+            Subject::Group(id) => ("group", Some(id.as_str())),
+            Subject::Anyone => ("anyone", None),
+        };
+        sqlx::query(
+            "INSERT INTO grants (id, app_id, port, proto, network_id, subject_kind, subject_id, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&g.id)
+        .bind(&g.app_id)
+        .bind(g.port.map(|p| p.port))
+        .bind(g.port.map(|p| p.proto.to_string()))
+        .bind(&g.network_id)
+        .bind(kind)
+        .bind(subject_id)
+        .bind(ts(g.created_at))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_grant(&self, id: &str) -> Result<Option<Grant>> {
+        let rows = sqlx::query(&format!("{GRANT_SELECT} WHERE id = ?"))
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().next().map(grant_from_row).transpose()
+    }
+
+    pub async fn list_grants(&self) -> Result<Vec<Grant>> {
+        sqlx::query(&format!("{GRANT_SELECT} ORDER BY created_at, id"))
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(grant_from_row)
+            .collect()
+    }
+
+    pub async fn delete_grant(&self, id: &str) -> Result<bool> {
+        let r = sqlx::query("DELETE FROM grants WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    // ======== Activity ========
+
+    /// Append records, then prune by the retention limits.
+    pub async fn insert_activity(&self, records: &[NewActivity]) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for r in records {
+            sqlx::query(
+                "INSERT INTO activity (at, kind, app_id, peer_id, network_id, src, port, proto, count, message) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(ts(r.at))
+            .bind(r.kind.as_str())
+            .bind(&r.app_id)
+            .bind(&r.peer_id)
+            .bind(&r.network_id)
+            .bind(r.src.map(|s| s.to_string()))
+            .bind(r.port)
+            .bind(r.proto.map(|p| p.to_string()))
+            .bind(r.count)
+            .bind(&r.message)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        self.prune_activity(Duration::days(ACTIVITY_MAX_AGE_DAYS), ACTIVITY_MAX_ROWS)
+            .await?;
+        Ok(())
+    }
+
+    /// Delete activity older than `max_age`, then everything but the newest `max_rows`.
+    pub async fn prune_activity(&self, max_age: Duration, max_rows: i64) -> Result<()> {
+        sqlx::query("DELETE FROM activity WHERE at < ?")
+            .bind(ts(Utc::now() - max_age))
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "DELETE FROM activity WHERE id NOT IN (SELECT id FROM activity ORDER BY id DESC LIMIT ?)",
+        )
+        .bind(max_rows)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Activity matching `q`, newest first.
+    pub async fn list_activity(&self, q: &ActivityQuery) -> Result<Vec<ActivityRecord>> {
+        let rows = sqlx::query(
+            "SELECT id, at, kind, app_id, peer_id, network_id, src, port, proto, count, message \
+             FROM activity \
+             WHERE (?1 IS NULL OR at >= ?1) AND (?2 IS NULL OR kind = ?2) \
+               AND (?3 IS NULL OR app_id = ?3) AND (?4 IS NULL OR peer_id = ?4) \
+               AND (?5 IS NULL OR id < ?5) \
+             ORDER BY id DESC LIMIT ?6",
+        )
+        .bind(q.since.map(ts))
+        .bind(q.kind.map(|k| k.as_str()))
+        .bind(&q.app_id)
+        .bind(&q.peer_id)
+        .bind(q.before)
+        .bind(i64::from(q.limit.unwrap_or(100)))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(activity_from_row).collect()
+    }
+}
+
+/// An activity record before it gets an id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewActivity {
+    pub at: DateTime<Utc>,
+    pub kind: ActivityKind,
+    pub app_id: Option<String>,
+    pub peer_id: Option<String>,
+    pub network_id: Option<String>,
+    pub src: Option<IpAddr>,
+    pub port: Option<u16>,
+    pub proto: Option<Protocol>,
+    pub count: u32,
+    pub message: String,
+}
+
+impl NewActivity {
+    pub fn new(kind: ActivityKind, message: impl Into<String>) -> Self {
+        Self {
+            at: Utc::now(),
+            kind,
+            app_id: None,
+            peer_id: None,
+            network_id: None,
+            src: None,
+            port: None,
+            proto: None,
+            count: 1,
+            message: message.into(),
+        }
+    }
+
+    pub fn app(mut self, id: &str) -> Self {
+        self.app_id = Some(id.to_string());
+        self
+    }
+
+    pub fn peer(mut self, id: &str) -> Self {
+        self.peer_id = Some(id.to_string());
+        self
+    }
+}
+
+const ADDRESS_SELECT_ONE: &str = "SELECT id, app_id, network_id, ports, locator_kind, locator, \
+     created_at FROM addresses WHERE id = ?";
+
+const GRANT_SELECT: &str = "SELECT id, app_id, port, proto, network_id, subject_kind, subject_id, \
+     created_at FROM grants";
+
+async fn insert_credential(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    peer_id: &str,
+    c: &Credential,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO peer_credentials (id, peer_id, kind, value, label) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&c.id)
+    .bind(peer_id)
+    .bind(c.kind.as_str())
+    .bind(&c.value)
+    .bind(&c.label)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn encode_ports(p: &PortSet) -> Result<String> {
+    Ok(match p {
+        PortSet::All => "all".to_string(),
+        PortSet::Only(list) => serde_json::to_string(list)?,
+    })
+}
+
+fn decode_ports(s: &str) -> Result<PortSet> {
+    if s == "all" {
+        Ok(PortSet::All)
+    } else {
+        Ok(PortSet::Only(serde_json::from_str(s)?))
+    }
+}
+
+fn address_from_row(r: sqlx::sqlite::SqliteRow) -> Result<Address> {
+    let locator: String = r.get("locator");
+    let locator = match r.get::<String, _>("locator_kind").as_str() {
+        "ipv6" => Locator::Ipv6 {
+            addr: locator.parse().context("bad IPv6 locator")?,
+        },
+        "onion" => Locator::Onion { hostname: locator },
+        other => bail!("unknown locator kind {other:?}"),
+    };
+    Ok(Address {
+        id: r.get("id"),
+        app_id: r.get("app_id"),
+        network_id: r.get("network_id"),
+        ports: decode_ports(r.get("ports"))?,
+        locator,
+        created_at: parse_ts(r.get("created_at"))?,
+    })
+}
+
+fn grant_from_row(r: sqlx::sqlite::SqliteRow) -> Result<Grant> {
+    let port: Option<i64> = r.get("port");
+    let proto: Option<String> = r.get("proto");
+    let port = match (port, proto) {
+        (Some(p), Some(pr)) => Some(PortRef {
+            port: to_port(p)?,
+            proto: pr.parse().map_err(anyhow::Error::msg)?,
+        }),
+        _ => None,
+    };
+    let subject_id: Option<String> = r.get("subject_id");
+    let subject = match (r.get::<String, _>("subject_kind").as_str(), subject_id) {
+        ("peer", Some(id)) => Subject::Peer(id),
+        ("group", Some(id)) => Subject::Group(id),
+        ("anyone", _) => Subject::Anyone,
+        (k, _) => bail!("bad grant subject {k:?}"),
+    };
+    Ok(Grant {
+        id: r.get("id"),
+        app_id: r.get("app_id"),
+        port,
+        network_id: r.get("network_id"),
+        subject,
+        created_at: parse_ts(r.get("created_at"))?,
+    })
+}
+
+fn activity_from_row(r: sqlx::sqlite::SqliteRow) -> Result<ActivityRecord> {
+    let src: Option<String> = r.get("src");
+    let port: Option<i64> = r.get("port");
+    let proto: Option<String> = r.get("proto");
+    Ok(ActivityRecord {
+        id: r.get("id"),
+        at: parse_ts(r.get("at"))?,
+        kind: r
+            .get::<String, _>("kind")
+            .parse()
+            .map_err(anyhow::Error::msg)?,
+        app_id: r.get("app_id"),
+        peer_id: r.get("peer_id"),
+        network_id: r.get("network_id"),
+        src: src.map(|s| s.parse()).transpose()?,
+        port: port.map(to_port).transpose()?,
+        proto: proto
+            .map(|p| p.parse().map_err(anyhow::Error::msg))
+            .transpose()?,
+        count: u32::try_from(r.get::<i64, _>("count")).unwrap_or(1),
+        message: r.get("message"),
+    })
+}
+
+/// Parse the stored `protect_host_interfaces` value; absent or invalid means off.
+pub fn parse_protect_host(value: Option<&str>) -> Vec<String> {
+    let mut v: Vec<String> = value
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    v.retain(|s| !s.trim().is_empty());
+    v.sort();
+    v.dedup();
+    v
 }
 
 fn parse_global_id(hex: &str) -> Option<[u8; 5]> {
@@ -1386,760 +1132,589 @@ fn parse_global_id(hex: &str) -> Option<[u8; 5]> {
     Some(id)
 }
 
-#[derive(sqlx::FromRow)]
-struct SocketAddressRow {
-    backend_id: String,
-    backend_type: String,
-    address: String,
-    interface: String,
-    prefix_len: i64,
-    policy: String,
-}
-
-impl TryFrom<SocketAddressRow> for SocketAddress {
-    type Error = anyhow::Error;
-
-    fn try_from(row: SocketAddressRow) -> Result<Self> {
-        Ok(SocketAddress {
-            backend_id: row.backend_id,
-            backend_type: row
-                .backend_type
-                .parse()
-                .map_err(|e: String| anyhow::anyhow!(e))?,
-            address: row.address.parse()?,
-            interface: row.interface,
-            prefix_len: row.prefix_len as u8,
-            policy: row.policy.parse().map_err(|e: String| anyhow::anyhow!(e))?,
-        })
-    }
-}
-
-#[derive(sqlx::FromRow)]
-struct SocketAddressRowWithSocket {
-    socket_id: String,
-    backend_id: String,
-    backend_type: String,
-    address: String,
-    interface: String,
-    prefix_len: i64,
-    policy: String,
-}
-
-impl TryFrom<SocketAddressRowWithSocket> for SocketAddress {
-    type Error = anyhow::Error;
-
-    fn try_from(row: SocketAddressRowWithSocket) -> Result<Self> {
-        Ok(SocketAddress {
-            backend_id: row.backend_id,
-            backend_type: row
-                .backend_type
-                .parse()
-                .map_err(|e: String| anyhow::anyhow!(e))?,
-            address: row.address.parse()?,
-            interface: row.interface,
-            prefix_len: row.prefix_len as u8,
-            policy: row.policy.parse().map_err(|e: String| anyhow::anyhow!(e))?,
-        })
-    }
-}
-
-#[derive(sqlx::FromRow)]
-struct AclRow {
-    id: i64,
-    socket_id: String,
-    backend_id: String,
-    allowed_ip: String,
-    label: Option<String>,
-    created_at: String,
-}
-
-impl TryFrom<AclRow> for AclEntry {
-    type Error = anyhow::Error;
-
-    fn try_from(row: AclRow) -> Result<Self> {
-        Ok(AclEntry {
-            id: row.id,
-            socket_id: row.socket_id,
-            backend_id: row.backend_id,
-            allowed_ip: row.allowed_ip,
-            label: row.label,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?
-                .with_timezone(&chrono::Utc),
-        })
-    }
-}
-
-#[derive(sqlx::FromRow)]
-struct AclGroupRow {
-    id: String,
-    label: String,
-    policy: String,
-    created_at: String,
-}
-
-impl TryFrom<AclGroupRow> for AclGroup {
-    type Error = anyhow::Error;
-
-    fn try_from(row: AclGroupRow) -> Result<Self> {
-        Ok(AclGroup {
-            id: row.id,
-            label: row.label,
-            policy: row.policy.parse().map_err(|e: String| anyhow::anyhow!(e))?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?
-                .with_timezone(&chrono::Utc),
-        })
-    }
-}
-
-#[derive(sqlx::FromRow)]
-struct AclGroupEntryRow {
-    id: i64,
-    group_id: String,
-    backend_id: String,
-    allowed_ip: String,
-    label: Option<String>,
-    created_at: String,
-}
-
-impl TryFrom<AclGroupEntryRow> for AclEntry {
-    type Error = anyhow::Error;
-
-    fn try_from(row: AclGroupEntryRow) -> Result<Self> {
-        Ok(AclEntry {
-            id: row.id,
-            socket_id: row.group_id, // reuse socket_id field for group_id
-            backend_id: row.backend_id,
-            allowed_ip: row.allowed_ip,
-            label: row.label,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?
-                .with_timezone(&chrono::Utc),
-        })
-    }
-}
-
-#[derive(sqlx::FromRow)]
-struct SocketGroupRow {
-    id: String,
-    label: String,
-    app_name: String,
-    acl_group_id: Option<String>,
-    created_at: String,
-}
-
-impl TryFrom<SocketGroupRow> for SocketGroup {
-    type Error = anyhow::Error;
-
-    fn try_from(row: SocketGroupRow) -> Result<Self> {
-        Ok(SocketGroup {
-            id: row.id,
-            label: row.label,
-            app_name: row.app_name,
-            acl_group_id: row.acl_group_id,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?
-                .with_timezone(&chrono::Utc),
-        })
-    }
-}
-
-#[derive(sqlx::FromRow)]
-struct SocketGroupAddressRow {
-    group_id: String,
-    backend_id: String,
-    address: String,
-    interface: String,
-    prefix_len: i64,
-    policy: String,
-}
-
-impl TryFrom<SocketGroupAddressRow> for SocketGroupAddress {
-    type Error = anyhow::Error;
-
-    fn try_from(row: SocketGroupAddressRow) -> Result<Self> {
-        Ok(SocketGroupAddress {
-            group_id: row.group_id,
-            backend_id: row.backend_id,
-            address: row.address.parse()?,
-            interface: row.interface,
-            prefix_len: row.prefix_len as u8,
-            policy: row.policy.parse().map_err(|e: String| anyhow::anyhow!(e))?,
-        })
-    }
-}
-
-#[derive(sqlx::FromRow)]
-struct SocketGroupAclEntryRow {
-    id: i64,
-    group_id: String,
-    backend_id: String,
-    allowed_ip: String,
-    label: Option<String>,
-    created_at: String,
-}
-
-impl TryFrom<SocketGroupAclEntryRow> for SocketGroupAclEntry {
-    type Error = anyhow::Error;
-
-    fn try_from(row: SocketGroupAclEntryRow) -> Result<Self> {
-        Ok(SocketGroupAclEntry {
-            id: row.id,
-            group_id: row.group_id,
-            backend_id: row.backend_id,
-            allowed_ip: row.allowed_ip,
-            label: row.label,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?
-                .with_timezone(&chrono::Utc),
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use socketguard_core::{BackendType, Protocol};
+    use socketguard_core::new_id;
 
-    async fn test_db() -> Database {
+    async fn db() -> Database {
         let db = Database::new(":memory:").await.unwrap();
         db.migrate().await.unwrap();
         db
     }
 
-    fn test_socket(id: &str, name: &str, port: u16) -> ManagedSocket {
-        ManagedSocket {
-            id: id.to_string(),
-            pid: 1234,
-            process_name: name.to_string(),
-            port,
-            protocol: Protocol::Tcp,
-            addresses: vec![SocketAddress {
-                backend_id: "ula".to_string(),
-                backend_type: BackendType::Ula,
-                address: "fd00::1".parse().unwrap(),
-                interface: "lo".to_string(),
-                prefix_len: 128,
-                policy: Policy::Closed,
-            }],
-            policy: Policy::Closed,
-            exe_path: None,
-            cmdline: None,
-            first_seen: chrono::Utc::now(),
-            last_seen: chrono::Utc::now(),
-            acl_group_id: None,
-            socket_group_ids: vec![],
+    fn now() -> DateTime<Utc> {
+        Utc::now()
+    }
+
+    fn app(id: &str) -> App {
+        App {
+            id: id.into(),
+            name: format!("app-{id}"),
+            process_name: "proc".into(),
+            exe_path: Some("/usr/bin/proc".into()),
+            interpreter_arg: None,
+            reviewed: false,
+            first_seen: now(),
+            last_seen: now(),
+            ports: vec![],
+            addresses: vec![],
         }
     }
 
-    async fn insert_test_socket(db: &Database, id: &str, name: &str, port: u16) -> ManagedSocket {
-        let socket = test_socket(id, name, port);
-        db.upsert_socket(&socket).await.unwrap();
-        for addr in &socket.addresses {
-            db.upsert_socket_address(&socket.id, addr).await.unwrap();
-        }
-        socket
-    }
-
-    #[tokio::test]
-    async fn upsert_and_get_socket() {
-        let db = test_db().await;
-        let socket = insert_test_socket(&db, "abc123", "nginx", 80).await;
-
-        let retrieved = db.get_socket("abc123").await.unwrap().unwrap();
-        assert_eq!(retrieved.id, "abc123");
-        assert_eq!(retrieved.process_name, "nginx");
-        assert_eq!(retrieved.port, 80);
-        assert_eq!(retrieved.protocol, Protocol::Tcp);
-        assert_eq!(retrieved.policy, Policy::Closed);
-        assert_eq!(retrieved.addresses.len(), 1);
-        assert_eq!(retrieved.addresses[0].address, socket.addresses[0].address);
-        assert_eq!(retrieved.addresses[0].backend_id, "ula");
-        assert_eq!(retrieved.addresses[0].policy, Policy::Closed);
-    }
-
-    #[tokio::test]
-    async fn get_nonexistent_socket_returns_none() {
-        let db = test_db().await;
-        let result = db.get_socket("nonexistent").await.unwrap();
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn upsert_updates_pid_on_conflict() {
-        let db = test_db().await;
-        let mut socket = test_socket("abc123", "nginx", 80);
-        db.upsert_socket(&socket).await.unwrap();
-        for addr in &socket.addresses {
-            db.upsert_socket_address(&socket.id, addr).await.unwrap();
-        }
-
-        socket.pid = 5678;
-        socket.last_seen = chrono::Utc::now();
-        db.upsert_socket(&socket).await.unwrap();
-
-        let retrieved = db.get_socket("abc123").await.unwrap().unwrap();
-        assert_eq!(retrieved.pid, 5678);
-        assert_eq!(retrieved.policy, Policy::Closed);
-    }
-
-    #[tokio::test]
-    async fn list_sockets_returns_all() {
-        let db = test_db().await;
-        insert_test_socket(&db, "id1", "nginx", 80).await;
-        insert_test_socket(&db, "id2", "sshd", 22).await;
-
-        let sockets = db.list_sockets().await.unwrap();
-        assert_eq!(sockets.len(), 2);
-        for s in &sockets {
-            assert!(!s.addresses.is_empty());
+    fn address(app_id: &str, net: &str, a: &str) -> Address {
+        Address {
+            id: new_id(),
+            app_id: app_id.into(),
+            network_id: net.into(),
+            ports: PortSet::All,
+            locator: Locator::Ipv6 {
+                addr: a.parse().unwrap(),
+            },
+            created_at: now(),
         }
     }
 
-    #[tokio::test]
-    async fn delete_socket() {
-        let db = test_db().await;
-        insert_test_socket(&db, "abc123", "nginx", 80).await;
-        db.delete_socket("abc123").await.unwrap();
-
-        let result = db.get_socket("abc123").await.unwrap();
-        assert!(result.is_none());
-
-        // Addresses should be cascade deleted
-        let addrs = db.get_socket_addresses("abc123").await.unwrap();
-        assert!(addrs.is_empty());
-    }
-
-    #[tokio::test]
-    async fn update_address_policy() {
-        let db = test_db().await;
-        insert_test_socket(&db, "abc123", "nginx", 80).await;
-
-        db.update_address_policy("abc123", "ula", Policy::Open)
-            .await
-            .unwrap();
-        let socket = db.get_socket("abc123").await.unwrap().unwrap();
-        assert_eq!(socket.addresses[0].policy, Policy::Open);
-
-        db.update_address_policy("abc123", "ula", Policy::Group)
-            .await
-            .unwrap();
-        let socket = db.get_socket("abc123").await.unwrap().unwrap();
-        assert_eq!(socket.addresses[0].policy, Policy::Group);
-    }
-
-    #[tokio::test]
-    async fn update_policy_all_backends() {
-        let db = test_db().await;
-        let socket = test_socket("multi1", "nginx", 80);
-        db.upsert_socket(&socket).await.unwrap();
-
-        let addr1 = SocketAddress {
-            backend_id: "ula".to_string(),
-            backend_type: BackendType::Ula,
-            address: "fd00::1".parse().unwrap(),
-            interface: "lo".to_string(),
-            prefix_len: 128,
-            policy: Policy::Closed,
-        };
-        let addr2 = SocketAddress {
-            backend_id: "slaac-Ethernet".to_string(),
-            backend_type: BackendType::Slaac,
-            address: "2001:db8::1".parse().unwrap(),
-            interface: "Ethernet".to_string(),
-            prefix_len: 64,
-            policy: Policy::Closed,
-        };
-        db.upsert_socket_address("multi1", &addr1).await.unwrap();
-        db.upsert_socket_address("multi1", &addr2).await.unwrap();
-
-        db.update_policy_all_backends("multi1", Policy::Open)
-            .await
-            .unwrap();
-
-        let retrieved = db.get_socket("multi1").await.unwrap().unwrap();
-        assert_eq!(retrieved.policy, Policy::Open); // default policy updated
-        for a in &retrieved.addresses {
-            assert_eq!(a.policy, Policy::Open);
+    fn peer(label: &str, creds: &[(CredentialKind, &str)]) -> Peer {
+        Peer {
+            id: new_id(),
+            label: label.into(),
+            credentials: creds
+                .iter()
+                .map(|(k, v)| Credential {
+                    id: new_id(),
+                    kind: *k,
+                    value: (*v).into(),
+                    label: None,
+                })
+                .collect(),
+            groups: vec![],
+            created_at: now(),
         }
     }
 
-    #[tokio::test]
-    async fn acl_crud_per_backend() {
-        let db = test_db().await;
-        insert_test_socket(&db, "abc123", "nginx", 80).await;
-
-        let entry = db
-            .add_acl_entry("abc123", "ula", "fd00::100", Some("laptop"))
-            .await
-            .unwrap();
-        assert_eq!(entry.allowed_ip, "fd00::100");
-        assert_eq!(entry.backend_id, "ula");
-        assert_eq!(entry.label, Some("laptop".to_string()));
-
-        let acl = db.get_acl_for_backend("abc123", "ula").await.unwrap();
-        assert_eq!(acl.len(), 1);
-
-        // Different backend has no entries
-        let acl_other = db.get_acl_for_backend("abc123", "slaac").await.unwrap();
-        assert_eq!(acl_other.len(), 0);
-
-        db.delete_acl_entry(entry.id).await.unwrap();
-        let acl = db.get_acl_for_backend("abc123", "ula").await.unwrap();
-        assert_eq!(acl.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn acl_fan_out_all_backends() {
-        let db = test_db().await;
-        let socket = test_socket("multi1", "nginx", 80);
-        db.upsert_socket(&socket).await.unwrap();
-
-        let addr1 = SocketAddress {
-            backend_id: "ula".to_string(),
-            backend_type: BackendType::Ula,
-            address: "fd00::1".parse().unwrap(),
-            interface: "lo".to_string(),
-            prefix_len: 128,
-            policy: Policy::Closed,
-        };
-        let addr2 = SocketAddress {
-            backend_id: "slaac-Ethernet".to_string(),
-            backend_type: BackendType::Slaac,
-            address: "2001:db8::1".parse().unwrap(),
-            interface: "Ethernet".to_string(),
-            prefix_len: 64,
-            policy: Policy::Closed,
-        };
-        db.upsert_socket_address("multi1", &addr1).await.unwrap();
-        db.upsert_socket_address("multi1", &addr2).await.unwrap();
-
-        let entries = db
-            .add_acl_entry_all_backends("multi1", "fd00::100", Some("peer"))
-            .await
-            .unwrap();
-        assert_eq!(entries.len(), 2);
-
-        // Each backend should have one entry
-        let acl_ula = db.get_acl_for_backend("multi1", "ula").await.unwrap();
-        assert_eq!(acl_ula.len(), 1);
-        let acl_slaac = db
-            .get_acl_for_backend("multi1", "slaac-Ethernet")
-            .await
-            .unwrap();
-        assert_eq!(acl_slaac.len(), 1);
-
-        // get_acl returns all
-        let all = db.get_acl("multi1").await.unwrap();
-        assert_eq!(all.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn acl_rejects_invalid_ipv6() {
-        let db = test_db().await;
-        insert_test_socket(&db, "abc123", "nginx", 80).await;
-        let result = db.add_acl_entry("abc123", "ula", "not-an-ip", None).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn stale_sockets() {
-        let db = test_db().await;
-        let mut socket = test_socket("old_one", "old", 9999);
-        socket.last_seen = chrono::Utc::now() - chrono::Duration::seconds(60);
-        db.upsert_socket(&socket).await.unwrap();
-
-        let mut fresh = test_socket("new_one", "fresh", 8888);
-        fresh.last_seen = chrono::Utc::now();
-        db.upsert_socket(&fresh).await.unwrap();
-
-        let threshold = chrono::Utc::now() - chrono::Duration::seconds(30);
-        let stale = db.stale_sockets(threshold).await.unwrap();
-        assert_eq!(stale.len(), 1);
-        assert_eq!(stale[0].id, "old_one");
-    }
-
-    #[tokio::test]
-    async fn cascade_delete_removes_acl() {
-        let db = test_db().await;
-        insert_test_socket(&db, "abc123", "nginx", 80).await;
-        db.add_acl_entry("abc123", "ula", "fd00::1", None)
-            .await
-            .unwrap();
-        db.add_acl_entry("abc123", "ula", "fd00::2", None)
-            .await
-            .unwrap();
-
-        db.delete_socket("abc123").await.unwrap();
-        let acl = db.get_acl("abc123").await.unwrap();
-        assert_eq!(acl.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn settings_roundtrip() {
-        let db = test_db().await;
-        assert_eq!(db.get_setting("k").await.unwrap(), None);
-        db.set_setting("k", "a").await.unwrap();
-        db.set_setting("k", "b").await.unwrap();
-        assert_eq!(db.get_setting("k").await.unwrap().as_deref(), Some("b"));
-    }
-
-    #[tokio::test]
-    async fn ula_global_id_is_stable() {
-        let db = test_db().await;
-        let first = db.ula_global_id().await.unwrap();
-        assert_eq!(db.ula_global_id().await.unwrap(), first);
-    }
-
-    #[tokio::test]
-    async fn socket_preserves_exe_path_and_cmdline() {
-        let db = test_db().await;
-        let mut socket = test_socket("abc123", "nginx", 80);
-        socket.exe_path = Some("/usr/sbin/nginx".to_string());
-        socket.cmdline = Some("nginx -g daemon off;".to_string());
-        db.upsert_socket(&socket).await.unwrap();
-        for addr in &socket.addresses {
-            db.upsert_socket_address(&socket.id, addr).await.unwrap();
+    fn grant(app_id: &str, subject: Subject) -> Grant {
+        Grant {
+            id: new_id(),
+            app_id: app_id.into(),
+            port: Some(PortRef {
+                port: 80,
+                proto: Protocol::Tcp,
+            }),
+            network_id: None,
+            subject,
+            created_at: now(),
         }
+    }
 
-        let retrieved = db.get_socket("abc123").await.unwrap().unwrap();
-        assert_eq!(retrieved.exe_path, Some("/usr/sbin/nginx".to_string()));
-        assert_eq!(retrieved.cmdline, Some("nginx -g daemon off;".to_string()));
+    async fn count(db: &Database, table: &str) -> i64 {
+        sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
-    async fn multi_address_socket() {
-        let db = test_db().await;
-        let socket = test_socket("multi1", "nginx", 80);
-        db.upsert_socket(&socket).await.unwrap();
-
-        let addr1 = SocketAddress {
-            backend_id: "ula".to_string(),
-            backend_type: BackendType::Ula,
-            address: "fd00::1".parse().unwrap(),
-            interface: "lo".to_string(),
-            prefix_len: 128,
-            policy: Policy::Closed,
-        };
-        let addr2 = SocketAddress {
-            backend_id: "slaac-Ethernet".to_string(),
-            backend_type: BackendType::Slaac,
-            address: "2001:db8::1".parse().unwrap(),
-            interface: "Ethernet".to_string(),
-            prefix_len: 64,
-            policy: Policy::Open,
-        };
-
-        db.upsert_socket_address("multi1", &addr1).await.unwrap();
-        db.upsert_socket_address("multi1", &addr2).await.unwrap();
-
-        let retrieved = db.get_socket("multi1").await.unwrap().unwrap();
-        assert_eq!(retrieved.addresses.len(), 2);
-        // Verify per-address policies
-        let ula = retrieved
-            .addresses
-            .iter()
-            .find(|a| a.backend_id == "ula")
-            .unwrap();
-        let slaac = retrieved
-            .addresses
-            .iter()
-            .find(|a| a.backend_id == "slaac-Ethernet")
-            .unwrap();
-        assert_eq!(ula.policy, Policy::Closed);
-        assert_eq!(slaac.policy, Policy::Open);
-    }
-
-    #[tokio::test]
-    async fn delete_addresses_by_backend() {
-        let db = test_db().await;
-        insert_test_socket(&db, "s1", "nginx", 80).await;
-        insert_test_socket(&db, "s2", "sshd", 22).await;
-
-        // Both sockets have "ula" backend address
-        let deleted = db.delete_addresses_by_backend("ula").await.unwrap();
-        assert_eq!(deleted.len(), 2);
-
-        let s1 = db.get_socket("s1").await.unwrap().unwrap();
-        assert!(s1.addresses.is_empty());
-    }
-
-    #[tokio::test]
-    async fn delete_address_cascades_acl() {
-        let db = test_db().await;
-        insert_test_socket(&db, "abc123", "nginx", 80).await;
-        db.add_acl_entry("abc123", "ula", "fd00::100", None)
+    async fn schema_v1_is_created_once() {
+        let db = db().await;
+        let v: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&db.pool)
             .await
             .unwrap();
-
-        db.delete_socket_address("abc123", "ula").await.unwrap();
-
-        let acl = db.get_acl_for_backend("abc123", "ula").await.unwrap();
-        assert_eq!(acl.len(), 0);
-    }
-
-    // ADR 0018 tests
-
-    #[tokio::test]
-    async fn acl_group_crud() {
-        let db = test_db().await;
-
-        let group = db.create_acl_group("Web Servers").await.unwrap();
-        assert_eq!(group.label, "Web Servers");
-        assert_eq!(group.policy, Policy::Closed);
-
-        let fetched = db.get_acl_group(&group.id).await.unwrap().unwrap();
-        assert_eq!(fetched.label, "Web Servers");
-
-        db.update_acl_group(&group.id, Some("HTTP Servers"), Some(Policy::Open))
-            .await
-            .unwrap();
-        let updated = db.get_acl_group(&group.id).await.unwrap().unwrap();
-        assert_eq!(updated.label, "HTTP Servers");
-        assert_eq!(updated.policy, Policy::Open);
-
-        let groups = db.list_acl_groups().await.unwrap();
-        assert_eq!(groups.len(), 1);
-
-        db.delete_acl_group(&group.id).await.unwrap();
-        assert!(db.get_acl_group(&group.id).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn acl_group_membership() {
-        let db = test_db().await;
-        insert_test_socket(&db, "s1", "nginx", 80).await;
-        insert_test_socket(&db, "s2", "nginx", 443).await;
-
-        let group = db.create_acl_group("Web").await.unwrap();
-        db.add_to_acl_group(&group.id, "s1").await.unwrap();
-        db.add_to_acl_group(&group.id, "s2").await.unwrap();
-
-        let members = db.get_acl_group_members(&group.id).await.unwrap();
-        assert_eq!(members.len(), 2);
-
+        assert_eq!(v, SCHEMA_VERSION);
+        let mut tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        tables.sort();
         assert_eq!(
-            db.get_acl_group_for_socket("s1").await.unwrap(),
-            Some(group.id.clone())
+            tables,
+            [
+                "activity",
+                "addresses",
+                "app_ports",
+                "apps",
+                "grants",
+                "peer_credentials",
+                "peer_group_members",
+                "peer_groups",
+                "peers",
+                "settings"
+            ]
         );
-
-        db.remove_from_acl_group(&group.id, "s1").await.unwrap();
-        let members = db.get_acl_group_members(&group.id).await.unwrap();
-        assert_eq!(members.len(), 1);
+        db.migrate().await.expect("migrate is idempotent");
     }
 
     #[tokio::test]
-    async fn acl_group_entries() {
-        let db = test_db().await;
-        let group = db.create_acl_group("Test").await.unwrap();
-
-        let entry = db
-            .add_acl_group_entry(&group.id, "ula", "fd00::100", Some("peer"))
+    async fn newer_schema_is_refused() {
+        let db = db().await;
+        sqlx::query("PRAGMA user_version = 99")
+            .execute(&db.pool)
             .await
             .unwrap();
-        assert_eq!(entry.allowed_ip, "fd00::100");
-
-        let entries = db.get_acl_group_entries(&group.id).await.unwrap();
-        assert_eq!(entries.len(), 1);
-
-        let by_backend = db
-            .get_acl_group_entries_for_backend(&group.id, "ula")
-            .await
-            .unwrap();
-        assert_eq!(by_backend.len(), 1);
-
-        db.remove_acl_group_entry(entry.id).await.unwrap();
-        let entries = db.get_acl_group_entries(&group.id).await.unwrap();
-        assert_eq!(entries.len(), 0);
+        assert!(db.migrate().await.is_err());
     }
 
     #[tokio::test]
-    async fn socket_group_crud() {
-        let db = test_db().await;
-        insert_test_socket(&db, "s1", "myapp", 20).await;
-        insert_test_socket(&db, "s2", "myapp", 21).await;
+    async fn foreign_keys_are_on_for_every_connection() {
+        let db = db().await;
+        let mut conns = Vec::new();
+        for _ in 0..4 {
+            conns.push(db.pool.acquire().await.unwrap());
+        }
+        for c in &mut conns {
+            let on: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+                .fetch_one(&mut **c)
+                .await
+                .unwrap();
+            assert_eq!(on, 1);
+        }
+        // And they are enforced: no address for an unknown app.
+        assert!(db
+            .insert_address(&address("nope", "n", "fd00::1"))
+            .await
+            .is_err());
+    }
 
-        let group = db.create_socket_group("Group A", "myapp").await.unwrap();
-        assert_eq!(group.label, "Group A");
-        assert_eq!(group.app_name, "myapp");
+    fn temp_db_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("sg-state-{tag}-{}.db", new_id()))
+    }
 
-        db.add_socket_to_group(&group.id, "s1").await.unwrap();
-        db.add_socket_to_group(&group.id, "s2").await.unwrap();
-
-        let members = db.get_socket_group_members(&group.id).await.unwrap();
-        assert_eq!(members.len(), 2);
-
-        let s1 = db.get_socket("s1").await.unwrap().unwrap();
-        assert!(s1.socket_group_ids.contains(&group.id));
-
-        // Many-to-many: s1 can be in a second group
-        let group2 = db.create_socket_group("Group B", "myapp").await.unwrap();
-        db.add_socket_to_group(&group2.id, "s1").await.unwrap();
-        let s1 = db.get_socket("s1").await.unwrap().unwrap();
-        assert_eq!(s1.socket_group_ids.len(), 2);
-        assert!(s1.socket_group_ids.contains(&group.id));
-        assert!(s1.socket_group_ids.contains(&group2.id));
-
-        // Remove from first group — should still be in second
-        db.remove_socket_from_group(&group.id, "s1").await.unwrap();
-        let s1 = db.get_socket("s1").await.unwrap().unwrap();
-        assert_eq!(s1.socket_group_ids, vec![group2.id.clone()]);
-
-        let groups = db.list_socket_groups().await.unwrap();
-        assert_eq!(groups.len(), 2);
-
-        db.delete_socket_group(&group.id).await.unwrap();
-        db.delete_socket_group(&group2.id).await.unwrap();
-        let groups = db.list_socket_groups().await.unwrap();
-        assert_eq!(groups.len(), 0);
+    async fn make_old_db(path: &Path) {
+        let opts = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true);
+        let mut conn = SqliteConnection::connect_with(&opts).await.unwrap();
+        sqlx::query("CREATE TABLE sockets (id TEXT PRIMARY KEY)")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sockets VALUES ('old')")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        conn.close().await.unwrap();
     }
 
     #[tokio::test]
-    async fn resolve_effective_policy_direct() {
-        let db = test_db().await;
-        insert_test_socket(&db, "s1", "nginx", 80).await;
+    async fn pre_v1_database_is_renamed_not_migrated() {
+        let path = temp_db_path("prev1");
+        make_old_db(&path).await;
+        let archived = with_suffix(&path, ".pre-v1");
+        // A leftover WAL file moves along with it.
+        std::fs::write(with_suffix(&path, "-wal"), b"").unwrap();
 
-        let (policy, source) = db.resolve_effective_policy("s1", "ula").await.unwrap();
-        assert_eq!(policy, Policy::Closed);
-        assert_eq!(source, "address");
-
-        db.update_address_policy("s1", "ula", Policy::Open)
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(archived.exists(), "old database kept as .pre-v1");
+        assert!(with_suffix(&archived, "-wal").exists());
+        assert!(!with_suffix(&path, "-wal").exists());
+        // The fresh database is v1 and has none of the old data.
+        let old_table: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name = 'sockets'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(old_table, 0);
+        assert_eq!(count(&db, "apps").await, 0);
+        let kept = SqliteConnectOptions::new().filename(&archived);
+        let mut c = SqliteConnection::connect_with(&kept).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sockets")
+            .fetch_one(&mut c)
             .await
             .unwrap();
-        let (policy, source) = db.resolve_effective_policy("s1", "ula").await.unwrap();
-        assert_eq!(policy, Policy::Open);
-        assert_eq!(source, "address");
+        assert_eq!(n, 1);
+        c.close().await.unwrap();
+        db.pool.close().await;
+
+        // Reopening a v1 database leaves it alone.
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        db.pool.close().await;
+
+        // A second old database does not overwrite the first archive.
+        let _ = std::fs::remove_file(&path);
+        make_old_db(&path).await;
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(with_suffix(&path, ".pre-v1.1").exists());
+        db.pool.close().await;
+        for suffix in ["", ".pre-v1", ".pre-v1.1", "-wal", "-shm", ".pre-v1-wal"] {
+            let _ = std::fs::remove_file(with_suffix(&path, suffix));
+        }
     }
 
     #[tokio::test]
-    async fn resolve_effective_policy_group() {
-        let db = test_db().await;
-        insert_test_socket(&db, "s1", "nginx", 80).await;
-
-        let group = db.create_acl_group("Web").await.unwrap();
-        db.update_acl_group(&group.id, None, Some(Policy::Open))
-            .await
-            .unwrap();
-        db.add_to_acl_group(&group.id, "s1").await.unwrap();
-
-        db.update_address_policy("s1", "ula", Policy::Group)
-            .await
-            .unwrap();
-
-        let (policy, source) = db.resolve_effective_policy("s1", "ula").await.unwrap();
-        assert_eq!(policy, Policy::Open);
-        assert_eq!(source, "group");
+    async fn an_empty_or_v1_file_is_not_archived() {
+        let path = temp_db_path("v1");
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        db.insert_app(&app("a1")).await.unwrap();
+        drop(db);
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(db.get_app("a1").await.unwrap().is_some());
+        assert!(!with_suffix(&path, ".pre-v1").exists());
+        db.pool.close().await;
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(with_suffix(&path, suffix));
+        }
     }
 
     #[tokio::test]
-    async fn resolve_effective_policy_group_no_membership() {
-        let db = test_db().await;
-        insert_test_socket(&db, "s1", "nginx", 80).await;
+    async fn app_ports_sync_tracks_listening() {
+        let db = db().await;
+        db.insert_app(&app("a1")).await.unwrap();
+        let p80 = PortRef {
+            port: 80,
+            proto: Protocol::Tcp,
+        };
+        let p53 = PortRef {
+            port: 53,
+            proto: Protocol::Udp,
+        };
+        let new = db.sync_app_ports("a1", &[p80, p53], now()).await.unwrap();
+        assert_eq!(new.len(), 2);
+        let new = db.sync_app_ports("a1", &[p80], now()).await.unwrap();
+        assert!(new.is_empty());
+        let got = db.get_app("a1").await.unwrap().unwrap();
+        let listening: Vec<_> = got.ports.iter().map(|p| (p.port, p.listening)).collect();
+        assert_eq!(listening, [(53, false), (80, true)]);
+        let new = db.sync_app_ports("a1", &[p80, p53], now()).await.unwrap();
+        assert!(new.is_empty(), "a returning port is not new");
+    }
 
-        db.update_address_policy("s1", "ula", Policy::Group)
+    #[tokio::test]
+    async fn address_roundtrip_and_updates() {
+        let db = db().await;
+        db.insert_app(&app("a1")).await.unwrap();
+        let mut a = address("a1", "ygg", "300:1:2:3::5");
+        a.ports = PortSet::Only(vec![PortRef {
+            port: 8080,
+            proto: Protocol::Tcp,
+        }]);
+        db.insert_address(&a).await.unwrap();
+        assert_eq!(db.get_address(&a.id).await.unwrap().unwrap(), {
+            let mut b = a.clone();
+            b.created_at = db.get_address(&a.id).await.unwrap().unwrap().created_at;
+            b
+        });
+        db.update_address_ports(&a.id, &PortSet::All).await.unwrap();
+        db.update_address_ipv6(&a.id, "300:9::5".parse().unwrap())
+            .await
+            .unwrap();
+        let got = db.get_address(&a.id).await.unwrap().unwrap();
+        assert_eq!(got.ports, PortSet::All);
+        assert_eq!(got.locator.ipv6(), Some("300:9::5".parse().unwrap()));
+        assert_eq!(db.get_app("a1").await.unwrap().unwrap().addresses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_peer_deletes_its_grants_and_memberships() {
+        let db = db().await;
+        db.insert_app(&app("a1")).await.unwrap();
+        let p = peer("laptop", &[(CredentialKind::Ip, "fd00::5/128")]);
+        let other = peer("phone", &[(CredentialKind::Ip, "fd00::6/128")]);
+        db.insert_peer(&p).await.unwrap();
+        db.insert_peer(&other).await.unwrap();
+        let g = PeerGroup {
+            id: new_id(),
+            label: "family".into(),
+            members: vec![p.id.clone(), other.id.clone()],
+            created_at: now(),
+        };
+        db.insert_group(&g).await.unwrap();
+        db.insert_grant(&grant("a1", Subject::Peer(p.id.clone())))
+            .await
+            .unwrap();
+        db.insert_grant(&grant("a1", Subject::Peer(other.id.clone())))
+            .await
+            .unwrap();
+        db.insert_grant(&grant("a1", Subject::Group(g.id.clone())))
+            .await
+            .unwrap();
+        db.insert_grant(&grant("a1", Subject::Anyone))
             .await
             .unwrap();
 
-        // Not in any group → defaults to closed
-        let (policy, source) = db.resolve_effective_policy("s1", "ula").await.unwrap();
-        assert_eq!(policy, Policy::Closed);
-        assert_eq!(source, "default");
+        assert!(db.delete_peer(&p.id).await.unwrap());
+        assert_eq!(
+            count(&db, "peer_credentials").await,
+            1,
+            "credentials cascade"
+        );
+        assert_eq!(
+            count(&db, "peer_group_members").await,
+            1,
+            "memberships cascade"
+        );
+        let subjects: Vec<_> = db
+            .list_grants()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|g| g.subject)
+            .collect();
+        assert_eq!(subjects.len(), 3, "only the deleted peer's grant is gone");
+        assert!(!subjects.contains(&Subject::Peer(p.id.clone())));
+        assert_eq!(
+            db.get_group(&g.id).await.unwrap().unwrap().members,
+            vec![other.id.clone()]
+        );
+        assert!(!db.delete_peer(&p.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_group_deletes_its_grants_but_not_members() {
+        let db = db().await;
+        db.insert_app(&app("a1")).await.unwrap();
+        let p = peer("laptop", &[]);
+        db.insert_peer(&p).await.unwrap();
+        let g = PeerGroup {
+            id: new_id(),
+            label: "g".into(),
+            members: vec![p.id.clone()],
+            created_at: now(),
+        };
+        db.insert_group(&g).await.unwrap();
+        db.insert_grant(&grant("a1", Subject::Group(g.id.clone())))
+            .await
+            .unwrap();
+        db.insert_grant(&grant("a1", Subject::Peer(p.id.clone())))
+            .await
+            .unwrap();
+        assert!(db.delete_group(&g.id).await.unwrap());
+        assert_eq!(db.list_grants().await.unwrap().len(), 1);
+        assert_eq!(count(&db, "peer_group_members").await, 0);
+        assert!(db.get_peer(&p.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn deleting_an_app_cascades() {
+        let db = db().await;
+        db.insert_app(&app("a1")).await.unwrap();
+        db.insert_app(&app("a2")).await.unwrap();
+        for id in ["a1", "a2"] {
+            db.sync_app_ports(
+                id,
+                &[PortRef {
+                    port: 80,
+                    proto: Protocol::Tcp,
+                }],
+                now(),
+            )
+            .await
+            .unwrap();
+            db.insert_address(&address(
+                id,
+                "n",
+                &format!("fd00::{}", id.len() + id.as_bytes()[1] as usize),
+            ))
+            .await
+            .unwrap();
+            db.insert_grant(&grant(id, Subject::Anyone)).await.unwrap();
+        }
+        assert!(db.delete_app("a1").await.unwrap());
+        assert_eq!(count(&db, "app_ports").await, 1);
+        assert_eq!(count(&db, "addresses").await, 1);
+        assert_eq!(count(&db, "grants").await, 1);
+    }
+
+    #[tokio::test]
+    async fn credentials_are_unique_across_peers() {
+        let db = db().await;
+        let a = peer("a", &[(CredentialKind::Ip, "fd00::5/128")]);
+        db.insert_peer(&a).await.unwrap();
+        let b = peer("b", &[(CredentialKind::Ip, "fd00::5/128")]);
+        let err = db.insert_peer(&b).await.unwrap_err();
+        assert!(is_unique_violation(&err));
+        assert!(
+            db.get_peer(&b.id).await.unwrap().is_none(),
+            "insert is atomic"
+        );
+        // Same value under another kind is a different credential.
+        db.add_credential(
+            &a.id,
+            &Credential {
+                id: new_id(),
+                kind: CredentialKind::IpSuffix,
+                value: "fd00::5/128".into(),
+                label: None,
+            },
+        )
+        .await
+        .unwrap();
+        // Labels are unique too.
+        assert!(is_unique_violation(
+            &db.insert_peer(&peer("a", &[])).await.unwrap_err()
+        ));
+        assert_eq!(
+            db.find_credential_owner(CredentialKind::Ip, "fd00::5/128")
+                .await
+                .unwrap(),
+            Some(a.id.clone())
+        );
+        let cid = db.get_peer(&a.id).await.unwrap().unwrap().credentials[0]
+            .id
+            .clone();
+        assert!(db.remove_credential(&a.id, &cid).await.unwrap());
+        assert!(!db.remove_credential(&a.id, &cid).await.unwrap());
+    }
+
+    fn act(kind: ActivityKind, at: DateTime<Utc>) -> NewActivity {
+        let mut a = NewActivity::new(kind, "x");
+        a.at = at;
+        a
+    }
+
+    #[tokio::test]
+    async fn activity_retention_by_age_and_rows() {
+        let db = db().await;
+        db.insert_activity(&[
+            act(ActivityKind::PeerAdded, now() - Duration::days(31)),
+            act(ActivityKind::PeerAdded, now() - Duration::days(29)),
+        ])
+        .await
+        .unwrap();
+        // Insert prunes: the 31-day-old row is gone.
+        assert_eq!(count(&db, "activity").await, 1);
+
+        let batch: Vec<_> = (0..30).map(|_| act(ActivityKind::Blocked, now())).collect();
+        db.insert_activity(&batch).await.unwrap();
+        assert_eq!(count(&db, "activity").await, 31);
+        db.prune_activity(Duration::days(30), 10).await.unwrap();
+        assert_eq!(count(&db, "activity").await, 10);
+        let kept = db
+            .list_activity(&ActivityQuery {
+                limit: Some(100),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(kept.len(), 10);
+        assert!(
+            kept.iter().all(|r| r.kind == ActivityKind::Blocked),
+            "newest rows kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_query_filters_and_pages() {
+        let db = db().await;
+        let mut blocked = NewActivity::new(ActivityKind::Blocked, "drop");
+        blocked.app_id = Some("a1".into());
+        blocked.src = Some("fd00::5".parse().unwrap());
+        blocked.port = Some(80);
+        blocked.proto = Some(Protocol::Tcp);
+        blocked.count = 7;
+        db.insert_activity(&[
+            blocked,
+            NewActivity::new(ActivityKind::GrantAdded, "g")
+                .app("a1")
+                .peer("p1"),
+            NewActivity::new(ActivityKind::GrantAdded, "g2").app("a2"),
+        ])
+        .await
+        .unwrap();
+        let all = db.list_activity(&ActivityQuery::default()).await.unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(all[0].id > all[1].id, "newest first");
+        let b = db
+            .list_activity(&ActivityQuery {
+                kind: Some(ActivityKind::Blocked),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(
+            (b[0].count, b[0].port, b[0].src),
+            (7, Some(80), Some("fd00::5".parse().unwrap()))
+        );
+        let a1 = db
+            .list_activity(&ActivityQuery {
+                app_id: Some("a1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(a1.len(), 2);
+        let p1 = db
+            .list_activity(&ActivityQuery {
+                peer_id: Some("p1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(p1.len(), 1);
+        let page = db
+            .list_activity(&ActivityQuery {
+                limit: Some(1),
+                before: Some(all[0].id),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page[0].id, all[1].id);
+        let future = db
+            .list_activity(&ActivityQuery {
+                since: Some(now() + Duration::hours(1)),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(future.is_empty());
+    }
+
+    #[tokio::test]
+    async fn settings_and_ula_global_id() {
+        let db = db().await;
+        assert_eq!(
+            db.settings().await.unwrap(),
+            Settings {
+                address_mode: AddressMode::PerApp,
+                protect_host_interfaces: vec![]
+            }
+        );
+        db.set_address_mode(AddressMode::PerPort).await.unwrap();
+        db.set_protect_host(&["eth0".into()]).await.unwrap();
+        let s = db.settings().await.unwrap();
+        assert_eq!(s.address_mode, AddressMode::PerPort);
+        assert_eq!(s.protect_host_interfaces, ["eth0"]);
+        let id = db.ula_global_id().await.unwrap();
+        assert_eq!(db.ula_global_id().await.unwrap(), id);
+        assert!(parse_global_id("zz").is_none());
+        assert_eq!(parse_protect_host(Some(r#"["b","a","a",""]"#)), ["a", "b"]);
+        assert!(parse_protect_host(Some("not json")).is_empty());
+    }
+
+    #[tokio::test]
+    async fn grant_roundtrip_and_network_cleanup() {
+        let db = db().await;
+        db.insert_app(&app("a1")).await.unwrap();
+        db.insert_address(&address("a1", "ygg", "300:1::5"))
+            .await
+            .unwrap();
+        db.insert_address(&address("a1", "lan", "2001:db8::5"))
+            .await
+            .unwrap();
+        let mut g = grant("a1", Subject::Anyone);
+        g.network_id = Some("ygg".into());
+        db.insert_grant(&g).await.unwrap();
+        let mut whole = grant("a1", Subject::Anyone);
+        whole.port = None;
+        db.insert_grant(&whole).await.unwrap();
+        let got = db.get_grant(&g.id).await.unwrap().unwrap();
+        assert_eq!((got.port, got.network_id.as_deref()), (g.port, Some("ygg")));
+        assert_eq!(db.get_grant(&whole.id).await.unwrap().unwrap().port, None);
+
+        let removed = db.delete_addresses_by_network("ygg").await.unwrap();
+        assert_eq!(removed.len(), 1);
+        let left = db.list_grants().await.unwrap();
+        assert_eq!(left.len(), 1, "a grant tied to the removed network goes");
+        assert_eq!(db.list_addresses().await.unwrap().len(), 1);
     }
 }
 

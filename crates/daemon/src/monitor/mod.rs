@@ -5,6 +5,8 @@ use socketguard_core::ListeningSocket;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(not(target_os = "linux"))]
+mod procinfo;
 #[cfg(target_os = "windows")]
 mod windows;
 

@@ -1,6 +1,6 @@
 use super::SocketMonitor;
 use anyhow::Result;
-use socketguard_core::{ListeningSocket, Protocol};
+use socketguard_core::{normalize_exe_path, ListeningSocket, Platform, Protocol};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use windows::Win32::NetworkManagement::IpHelper::{
@@ -30,12 +30,26 @@ impl SocketMonitor for WindowsSocketMonitor {
             .into_iter()
             .collect();
         let process_map = resolve_processes(&unique_pids);
+        let details = super::procinfo::lookup(&unique_pids);
 
         // Fill in process info
         for socket in &mut sockets {
             if let Some(info) = process_map.get(&socket.pid) {
                 socket.process_name = info.name.clone();
-                socket.exe_path = info.exe_path.clone();
+                // Paths are case-insensitive: one spelling per app identity.
+                socket.exe_path = info
+                    .exe_path
+                    .as_deref()
+                    .map(|p| normalize_exe_path(p, Platform::Windows));
+            }
+            if let Some(d) = details.get(&socket.pid) {
+                socket.cmdline = d.cmdline.clone();
+                if socket.exe_path.is_none() {
+                    socket.exe_path = d
+                        .exe_path
+                        .as_deref()
+                        .map(|p| normalize_exe_path(p, Platform::Windows));
+                }
             }
         }
 
@@ -327,7 +341,7 @@ fn resolve_processes(pids: &[u32]) -> HashMap<u32, ProcessInfo> {
     // For any PIDs we couldn't resolve, try tasklist as batch fallback
     let unresolved: Vec<u32> = pids
         .iter()
-        .filter(|pid| map.get(pid).map_or(true, |info| info.name == "unknown"))
+        .filter(|pid| map.get(pid).is_none_or(|info| info.name == "unknown"))
         .copied()
         .collect();
 

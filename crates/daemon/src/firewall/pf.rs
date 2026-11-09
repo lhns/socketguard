@@ -120,6 +120,7 @@ fn check_active() -> Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
 pub struct PfFirewall;
 
 impl PfFirewall {

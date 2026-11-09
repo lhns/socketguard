@@ -1,12 +1,3 @@
-// Pre-existing style lints, allowed so CI can run `clippy -D warnings`; the model/engine code
-// they sit in is being replaced (see redesign plan).
-#![allow(
-    clippy::new_without_default,
-    clippy::needless_range_loop,
-    clippy::type_complexity,
-    clippy::unnecessary_map_or
-)]
-
 pub mod api;
 pub mod auth;
 pub mod backend;

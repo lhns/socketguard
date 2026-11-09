@@ -1,279 +1,199 @@
 //! The ruleset producer (ADR 0029): a pure function from a [`Snapshot`] of the daemon's
 //! state to the [`DesiredRuleset`] that every platform backend renders and applies whole.
-//! It is the only place that resolves policy (open, closed, ACL, ACL group) into rules.
+//! It is the only place that turns grants into rules.
 //!
 //! The lockout guard for whole-host protection (ADR 0026) lives here too, since it asks
 //! "would the ruleset built with this setting still let remote admin in".
 
 use crate::firewall::{DesiredRuleset, Families, Rule, Scope, ScopeKind, ScopeMatch, Sources};
-use ipnet::{IpNet, Ipv6Net};
+use ipnet::IpNet;
 use socketguard_core::{
-    AclEntry, AclGroup, BackendType, ListeningSocket, ManagedSocket, Policy, Protocol, SocketGroup,
-    SocketGroupAclEntry, SocketGroupAddress,
+    app_identity, credential_source, App, Credential, Grant, ListeningSocket, Network, NetworkKind,
+    Peer, PeerGroup, PortRef, PortSet, Protocol, Subject,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
 use tracing::warn;
 
-/// Settings key holding the JSON array of interface names under whole-host protection.
-pub const PROTECT_HOST_KEY: &str = "protect_host_interfaces";
+pub use crate::state::PROTECT_HOST_KEY;
 
-/// Everything the producer needs, gathered from the DB and config.
+/// Everything the producer needs, gathered from the DB and the active networks.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
-    pub sockets: Vec<SocketSnapshot>,
-    pub acl_groups: Vec<AclGroupSnapshot>,
-    pub socket_groups: Vec<SocketGroupSnapshot>,
-    /// Active backend instances.
-    pub backends: Vec<BackendInfo>,
+    /// Apps with their ports and addresses.
+    pub apps: Vec<App>,
+    pub networks: Vec<Network>,
+    pub peers: Vec<Peer>,
+    pub groups: Vec<PeerGroup>,
+    pub grants: Vec<Grant>,
     /// Interfaces under whole-host protection.
     pub protect_host: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SocketSnapshot {
-    /// Carries the addresses (with their policy) and `acl_group_id`.
-    pub socket: ManagedSocket,
-    /// The socket's own ACL entries, all backends.
-    pub acl: Vec<AclEntry>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AclGroupSnapshot {
-    pub group: AclGroup,
-    pub entries: Vec<AclEntry>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SocketGroupSnapshot {
-    pub group: SocketGroup,
-    /// (port, protocol) of each member socket.
-    pub members: Vec<(u16, Protocol)>,
-    pub addresses: Vec<SocketGroupAddress>,
-    pub acl: Vec<SocketGroupAclEntry>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BackendInfo {
-    pub id: String,
-    pub backend_type: BackendType,
-    pub interface: String,
-}
-
-/// Parse the stored `protect_host_interfaces` value; absent or invalid means off.
-pub fn parse_protect_host(value: Option<&str>) -> Vec<String> {
-    let mut v: Vec<String> = value
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
-    v.retain(|s| !s.trim().is_empty());
-    v.sort();
-    v.dedup();
-    v
-}
-
-/// What an address's policy resolves to, before interface binding.
-enum Resolved {
-    Open,
-    Nets(Vec<IpNet>),
-}
-
-/// Parse an ACL source: a bare address or a CIDR.
-fn parse_source(s: &str) -> Option<IpNet> {
-    s.parse::<IpNet>()
-        .ok()
-        .or_else(|| s.parse::<IpAddr>().ok().map(IpNet::from))
-}
-
-fn nets<'a>(entries: impl Iterator<Item = &'a str>) -> Resolved {
-    Resolved::Nets(
-        entries
-            .filter_map(|s| {
-                let n = parse_source(s);
-                if n.is_none() {
-                    warn!("Ignoring unparseable ACL source {s:?}");
-                }
-                n
-            })
-            .collect(),
-    )
-}
-
-/// Resolve one address's policy. A group policy resolves through the ACL group;
-/// a missing group (or a group whose own policy is group) means closed with no ACL.
-fn resolve(
-    policy: Policy,
-    backend_id: &str,
-    own: Vec<(&str, &str)>,
-    acl_group_id: Option<&str>,
-    acl_groups: &[AclGroupSnapshot],
-) -> Resolved {
-    let own_nets = |entries: Vec<(&str, &str)>| {
-        nets(
-            entries
-                .into_iter()
-                .filter(|(b, _)| *b == backend_id)
-                .map(|(_, ip)| ip),
-        )
-    };
-    match policy {
-        Policy::Open => Resolved::Open,
-        Policy::Closed => own_nets(own),
-        Policy::Group => {
-            let group = acl_group_id.and_then(|id| acl_groups.iter().find(|g| g.group.id == id));
-            match group {
-                Some(g) => match g.group.policy {
-                    Policy::Open => Resolved::Open,
-                    Policy::Closed => own_nets(
-                        g.entries
-                            .iter()
-                            .map(|e| (e.backend_id.as_str(), e.allowed_ip.as_str()))
-                            .collect(),
-                    ),
-                    Policy::Group => Resolved::Nets(Vec::new()),
-                },
-                None => Resolved::Nets(Vec::new()),
-            }
-        }
-    }
-}
-
-/// Whether a network lies inside the Yggdrasil range `200::/7`.
-fn in_ygg_range(net: &IpNet) -> bool {
-    let ygg: Ipv6Net = "200::/7".parse().unwrap();
-    match net {
-        IpNet::V6(n) => ygg.contains(n),
-        IpNet::V4(_) => false,
-    }
 }
 
 fn sorted_unique<T: Ord>(v: impl IntoIterator<Item = T>) -> Vec<T> {
     v.into_iter().collect::<BTreeSet<_>>().into_iter().collect()
 }
 
-struct Builder {
-    ygg_ifaces: Vec<String>,
-    rules: BTreeMap<String, Rule>,
-    warnings: BTreeSet<String>,
+/// The ports an address serves: its `Only` list, or for `All` every app port that no
+/// `Only` address on the same network claims.
+fn served_ports(app: &App, address: &socketguard_core::Address) -> BTreeSet<PortRef> {
+    match &address.ports {
+        PortSet::Only(list) => list.iter().copied().collect(),
+        PortSet::All => {
+            let claimed: BTreeSet<PortRef> = app
+                .addresses
+                .iter()
+                .filter(|a| a.network_id == address.network_id)
+                .filter_map(|a| match &a.ports {
+                    PortSet::Only(list) => Some(list.iter().copied()),
+                    PortSet::All => None,
+                })
+                .flatten()
+                .collect();
+            app.ports
+                .iter()
+                .map(|p| PortRef {
+                    port: p.port,
+                    proto: p.proto,
+                })
+                .filter(|p| !claimed.contains(p))
+                .collect()
+        }
+    }
 }
 
-impl Builder {
-    /// Emit the rules for one (destination, port, proto) with resolved sources. Sources
-    /// inside `200::/7` are only trusted on a Yggdrasil interface (ADR 0028).
-    fn emit(&mut self, base_id: String, dst: IpAddr, port: u16, proto: Protocol, r: Resolved) {
-        let mut push = |id: String, iif: Option<String>, sources: Sources| {
-            self.rules.insert(
-                id.clone(),
-                Rule {
-                    id,
-                    iif,
-                    dst,
-                    port,
-                    proto,
-                    sources,
-                },
-            );
-        };
-        match r {
-            Resolved::Open => push(base_id, None, Sources::Any),
-            Resolved::Nets(all) => {
-                // A source of the other family can never match this destination.
-                let (ygg, rest): (Vec<IpNet>, Vec<IpNet>) = all
-                    .into_iter()
-                    .filter(|n| n.addr().is_ipv4() == dst.is_ipv4())
-                    .partition(in_ygg_range);
-                let (ygg, rest) = (sorted_unique(ygg), sorted_unique(rest));
-                if !rest.is_empty() {
-                    push(base_id.clone(), None, Sources::Nets(rest));
-                }
-                if ygg.is_empty() {
-                    return;
-                }
-                if self.ygg_ifaces.is_empty() {
-                    self.warnings.insert(format!(
-                        "Dropping 200::/7 sources for {base_id}: no Yggdrasil backend is configured"
-                    ));
-                }
-                for iface in self.ygg_ifaces.clone() {
-                    push(
-                        format!("{base_id}:ygg:{iface}"),
-                        Some(iface),
-                        Sources::Nets(ygg.clone()),
-                    );
-                }
-            }
-        }
+/// The credentials of a grant's peers (all members of a group); empty for Anyone.
+fn subject_credentials<'a>(
+    snap: &'a Snapshot,
+    peers: &HashMap<&'a str, &'a Peer>,
+    subject: &Subject,
+) -> Vec<&'a Credential> {
+    match subject {
+        Subject::Anyone => Vec::new(),
+        Subject::Peer(id) => peers
+            .get(id.as_str())
+            .map(|p| p.credentials.iter().collect())
+            .unwrap_or_default(),
+        Subject::Group(id) => snap
+            .groups
+            .iter()
+            .find(|g| &g.id == id)
+            .map(|g| {
+                g.members
+                    .iter()
+                    .filter_map(|m| peers.get(m.as_str()))
+                    .flat_map(|p| p.credentials.iter())
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
 /// Build the desired ruleset, also returning warnings the caller may want to log.
+///
+/// - Managed scope: every IP locator of every app, so an address is denied from the
+///   moment it exists.
+/// - An overlay scope per Yggdrasil network, a whole-host scope per protected interface
+///   (IPv6 only: no grant can name an IPv4 address yet, so an IPv4 whole-host scope would
+///   be unremediable).
+/// - Rules: for each IP address, each port it serves, each grant that applies, the
+///   sources of the subject's credentials that are reachable on the address's network,
+///   merged per interface binding. Yggdrasil sources are bound to the network's
+///   interface (ADR 0028). Anyone gives `Sources::Any`.
+///
+/// Rule ids are `a:<address>:<port>:<proto>:<grant>`, plus `:<interface>` for the rule
+/// bound to an interface. Unique, and stable while the grant and address live.
 pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
+    let networks: HashMap<&str, &Network> =
+        snap.networks.iter().map(|n| (n.id.as_str(), n)).collect();
+    let peers: HashMap<&str, &Peer> = snap.peers.iter().map(|p| (p.id.as_str(), p)).collect();
     let ygg_ifaces = sorted_unique(
-        snap.backends
+        snap.networks
             .iter()
-            .filter(|b| b.backend_type == BackendType::Yggdrasil)
-            .map(|b| b.interface.clone()),
+            .filter(|n| n.kind == NetworkKind::Yggdrasil)
+            .filter_map(|n| n.interface.clone()),
     );
-    let mut b = Builder {
-        ygg_ifaces: ygg_ifaces.clone(),
-        rules: BTreeMap::new(),
-        warnings: BTreeSet::new(),
-    };
+
+    let mut rules: BTreeMap<String, Rule> = BTreeMap::new();
+    let mut warnings: BTreeSet<String> = BTreeSet::new();
     let mut managed: BTreeSet<IpAddr> = BTreeSet::new();
 
-    for s in &snap.sockets {
-        let sock = &s.socket;
-        for addr in &sock.addresses {
-            managed.insert(IpAddr::V6(addr.address));
-            let own = s
-                .acl
-                .iter()
-                .map(|e| (e.backend_id.as_str(), e.allowed_ip.as_str()))
-                .collect();
-            let resolved = resolve(
-                addr.policy,
-                &addr.backend_id,
-                own,
-                sock.acl_group_id.as_deref(),
-                &snap.acl_groups,
-            );
-            b.emit(
-                format!(
-                    "s:{}:{}:{}:{}",
-                    sock.id, addr.backend_id, sock.port, sock.protocol
-                ),
-                IpAddr::V6(addr.address),
-                sock.port,
-                sock.protocol,
-                resolved,
-            );
-        }
-    }
-
-    for g in &snap.socket_groups {
-        let members = sorted_unique(g.members.iter().map(|(p, pr)| (*p, pr.to_string())));
-        for addr in &g.addresses {
-            managed.insert(IpAddr::V6(addr.address));
-            for (port, proto_name) in &members {
-                let proto: Protocol = proto_name.parse().expect("round-trips Display");
-                let own = g
-                    .acl
+    for app in &snap.apps {
+        for address in &app.addresses {
+            let Some(addr) = address.locator.ipv6() else {
+                continue; // not an IP locator: enforced elsewhere (ADR 0037)
+            };
+            let dst = IpAddr::V6(addr);
+            managed.insert(dst);
+            let Some(network) = networks.get(address.network_id.as_str()) else {
+                continue;
+            };
+            if !network.grants_apply {
+                continue;
+            }
+            let served = served_ports(app, address);
+            for grant in snap.grants.iter().filter(|g| {
+                g.app_id == app.id
+                    && g.network_id
+                        .as_deref()
+                        .is_none_or(|n| n == address.network_id)
+            }) {
+                let creds = subject_credentials(snap, &peers, &grant.subject);
+                // Sources per interface binding; the same for every port of this grant.
+                let mut bound: BTreeMap<Option<String>, Vec<IpNet>> = BTreeMap::new();
+                if grant.subject != Subject::Anyone {
+                    for c in creds {
+                        let Some(net) = credential_source(c, network) else {
+                            continue;
+                        };
+                        let iif = if network.kind == NetworkKind::Yggdrasil {
+                            match &network.interface {
+                                Some(i) => Some(i.clone()),
+                                None => {
+                                    warnings.insert(format!(
+                                        "Network {} has no interface; skipping its Yggdrasil sources",
+                                        network.id
+                                    ));
+                                    continue;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        bound.entry(iif).or_default().push(net);
+                    }
+                }
+                for port in served
                     .iter()
-                    .map(|e| (e.backend_id.as_str(), e.allowed_ip.as_str()))
-                    .collect();
-                let resolved = resolve(
-                    addr.policy,
-                    &addr.backend_id,
-                    own,
-                    g.group.acl_group_id.as_deref(),
-                    &snap.acl_groups,
-                );
-                b.emit(
-                    format!("g:{}:{}:{port}:{proto}", g.group.id, addr.backend_id),
-                    IpAddr::V6(addr.address),
-                    *port,
-                    proto,
-                    resolved,
-                );
+                    .filter(|p| grant.port.is_none_or(|gp| gp == **p))
+                {
+                    let base =
+                        format!("a:{}:{}:{}:{}", address.id, port.port, port.proto, grant.id);
+                    let mut push = |id: String, iif: Option<String>, sources: Sources| {
+                        rules.insert(
+                            id.clone(),
+                            Rule {
+                                id,
+                                iif,
+                                dst,
+                                port: port.port,
+                                proto: port.proto,
+                                sources,
+                            },
+                        );
+                    };
+                    if grant.subject == Subject::Anyone {
+                        push(base, None, Sources::Any);
+                        continue;
+                    }
+                    for (iif, nets) in &bound {
+                        let id = match iif {
+                            Some(i) => format!("{base}:{i}"),
+                            None => base.clone(),
+                        };
+                        push(id, iif.clone(), Sources::Nets(sorted_unique(nets.clone())));
+                    }
+                }
             }
         }
     }
@@ -302,8 +222,6 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
         scopes.push(Scope {
             id: format!("host:{iface}"),
             kind: ScopeKind::WholeHost,
-            // IPv6 only: no grant can target an IPv4 address yet, so an IPv4 whole-host
-            // scope would cut off the host's IPv4 services with no way to re-allow them.
             matcher: ScopeMatch::Interface {
                 name: iface,
                 families: Families::V6,
@@ -314,9 +232,9 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
     (
         DesiredRuleset {
             scopes,
-            rules: b.rules.into_values().collect(),
+            rules: rules.into_values().collect(),
         },
-        b.warnings.into_iter().collect(),
+        warnings.into_iter().collect(),
     )
 }
 
@@ -365,7 +283,9 @@ fn is_remote_admin(l: &ListeningSocket) -> bool {
 
 /// Check that protecting `interfaces` would not lock out remote administration. A
 /// listener is at risk when it is bound to a wildcard or to an address of those
-/// interfaces and no rule in the would-be ruleset admits any source for it on them.
+/// interfaces and no rule in the would-be ruleset admits any source to its app on them:
+/// that is, no grant reaches it from a reachable credential, or from Anyone, through an
+/// address on a protected interface.
 pub fn check_protect_host(
     snap: &Snapshot,
     listeners: &[ListeningSocket],
@@ -388,17 +308,21 @@ pub fn check_protect_host(
     // the managed addresses the snapshot places on it.
     let names: BTreeSet<&str> = interfaces.iter().map(|i| i.name.as_str()).collect();
     let mut on_iface: BTreeSet<IpAddr> = interfaces.iter().flat_map(|i| i.addrs.clone()).collect();
-    for s in &snap.sockets {
-        for a in &s.socket.addresses {
-            if names.contains(a.interface.as_str()) {
-                on_iface.insert(IpAddr::V6(a.address));
-            }
-        }
-    }
-    for g in &snap.socket_groups {
-        for a in &g.addresses {
-            if names.contains(a.interface.as_str()) {
-                on_iface.insert(IpAddr::V6(a.address));
+    let mut app_of_dst: HashMap<IpAddr, &str> = HashMap::new();
+    for app in &snap.apps {
+        for a in &app.addresses {
+            let Some(addr) = a.locator.ipv6() else {
+                continue;
+            };
+            app_of_dst.insert(IpAddr::V6(addr), app.id.as_str());
+            let on_names = snap
+                .networks
+                .iter()
+                .find(|n| n.id == a.network_id)
+                .and_then(|n| n.interface.as_deref())
+                .is_some_and(|i| names.contains(i));
+            if on_names {
+                on_iface.insert(IpAddr::V6(addr));
             }
         }
     }
@@ -413,12 +337,15 @@ pub fn check_protect_host(
         if !exposed {
             continue;
         }
+        let (app_id, _, _) =
+            app_identity(&l.process_name, l.exe_path.as_deref(), l.cmdline.as_deref());
         let allowed = ruleset.rules.iter().any(|r| {
             r.port == l.port
                 && r.proto == l.protocol
                 && (ip.is_unspecified() || r.dst == ip)
                 && on_iface.contains(&r.dst)
                 && on_protected(&r.iif)
+                && app_of_dst.get(&r.dst) == Some(&app_id.as_str())
         });
         if !allowed {
             risks.insert((l.port, l.protocol.to_string(), l.process_name.clone(), ip));
@@ -442,76 +369,125 @@ pub fn check_protect_host(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use socketguard_core::SocketAddress;
+    use chrono::Utc;
+    use socketguard_core::{Address, AppPort, CredentialKind, Locator, NetworkStatus, Reach};
+
+    const KEY: &str = "ba83a2e554a8a087cebdb3f053468cd3ff915b5dd94bf11b7a5fc2e36f13158b";
+    const KEY_ADDR: &str = "200:8af8:ba35:56ae:bef0:6284:981f:5972/128";
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
     }
 
-    fn sock(id: &str, port: u16, addrs: Vec<SocketAddress>) -> SocketSnapshot {
-        SocketSnapshot {
-            socket: ManagedSocket {
-                id: id.into(),
-                pid: 1,
-                process_name: "app".into(),
-                port,
-                protocol: Protocol::Tcp,
-                addresses: addrs,
-                policy: Policy::Closed,
-                exe_path: None,
-                cmdline: None,
-                first_seen: chrono::Utc::now(),
-                last_seen: chrono::Utc::now(),
-                acl_group_id: None,
-                socket_group_ids: vec![],
+    fn tcp(port: u16) -> PortRef {
+        PortRef {
+            port,
+            proto: Protocol::Tcp,
+        }
+    }
+
+    fn network(id: &str, kind: NetworkKind, iface: &str, prefix: Option<&str>) -> Network {
+        Network {
+            id: id.into(),
+            kind,
+            name: id.into(),
+            interface: Some(iface.into()),
+            grants_apply: kind != NetworkKind::Local,
+            status: NetworkStatus::Up,
+            prefix: prefix.map(|p| p.parse().unwrap()),
+        }
+    }
+
+    fn local() -> Network {
+        network("local", NetworkKind::Local, "lo", None)
+    }
+    fn lan() -> Network {
+        network("lan", NetworkKind::Lan, "eth0", Some("2001:db8:1:2::"))
+    }
+    fn ygg() -> Network {
+        network("ygg", NetworkKind::Yggdrasil, "ygg0", Some("300:1:2:3::"))
+    }
+
+    fn address(id: &str, app: &str, net: &str, addr: &str, ports: PortSet) -> Address {
+        Address {
+            id: id.into(),
+            app_id: app.into(),
+            network_id: net.into(),
+            ports,
+            locator: Locator::Ipv6 {
+                addr: addr.parse().unwrap(),
             },
-            acl: vec![],
+            created_at: Utc::now(),
         }
     }
 
-    fn saddr(backend: &str, bt: BackendType, a: &str, iface: &str, p: Policy) -> SocketAddress {
-        SocketAddress {
-            backend_id: backend.into(),
-            backend_type: bt,
-            address: a.parse().unwrap(),
-            interface: iface.into(),
-            prefix_len: 128,
-            policy: p,
+    fn app(id: &str, ports: &[u16], addresses: Vec<Address>) -> App {
+        App {
+            id: id.into(),
+            name: id.into(),
+            process_name: id.into(),
+            exe_path: None,
+            interpreter_arg: None,
+            reviewed: true,
+            first_seen: Utc::now(),
+            last_seen: Utc::now(),
+            ports: ports
+                .iter()
+                .map(|p| AppPort {
+                    port: *p,
+                    proto: Protocol::Tcp,
+                    listening: true,
+                    last_seen: Utc::now(),
+                })
+                .collect(),
+            addresses,
         }
     }
 
-    fn acl(sid: &str, backend: &str, src: &str) -> AclEntry {
-        AclEntry {
-            id: 0,
-            socket_id: sid.into(),
-            backend_id: backend.into(),
-            allowed_ip: src.into(),
-            label: None,
-            created_at: chrono::Utc::now(),
+    fn peer(id: &str, creds: &[(CredentialKind, &str)]) -> Peer {
+        Peer {
+            id: id.into(),
+            label: id.into(),
+            credentials: creds
+                .iter()
+                .enumerate()
+                .map(|(i, (k, v))| Credential {
+                    id: format!("{id}-c{i}"),
+                    kind: *k,
+                    value: (*v).into(),
+                    label: None,
+                })
+                .collect(),
+            groups: vec![],
+            created_at: Utc::now(),
         }
     }
 
-    fn ula_snap(policy: Policy) -> Snapshot {
+    fn grant(id: &str, app: &str, subject: Subject) -> Grant {
+        Grant {
+            id: id.into(),
+            app_id: app.into(),
+            port: None,
+            network_id: None,
+            subject,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// One app "web" on 8080 with an address on every network; no grants yet.
+    fn base() -> Snapshot {
         Snapshot {
-            sockets: vec![sock(
-                "a",
-                80,
-                vec![saddr("ula", BackendType::Ula, "fd00::1", "lo", policy)],
+            apps: vec![app(
+                "web",
+                &[8080],
+                vec![
+                    address("al", "web", "local", "fd00::1", PortSet::All),
+                    address("an", "web", "lan", "2001:db8:1:2::100", PortSet::All),
+                    address("ay", "web", "ygg", "300:1:2:3::100", PortSet::All),
+                ],
             )],
-            backends: vec![BackendInfo {
-                id: "ula".into(),
-                backend_type: BackendType::Ula,
-                interface: "lo".into(),
-            }],
+            networks: vec![local(), lan(), ygg()],
             ..Snapshot::default()
-        }
-    }
-
-    fn ygg_backend() -> BackendInfo {
-        BackendInfo {
-            id: "ygg".into(),
-            backend_type: BackendType::Yggdrasil,
-            interface: "ygg0".into(),
         }
     }
 
@@ -528,284 +504,268 @@ mod tests {
         }
     }
 
-    #[test]
-    fn open_gives_any_source() {
-        let rs = build(&ula_snap(Policy::Open));
-        assert_eq!(rs.rules.len(), 1);
-        assert_eq!(rs.rules[0].id, "s:a:ula:80:tcp");
-        assert_eq!(rs.rules[0].sources, Sources::Any);
-        assert_eq!(rs.rules[0].iif, None);
-        assert_eq!(managed(&rs), vec![ip("fd00::1")]);
+    fn ids(rs: &DesiredRuleset) -> Vec<&str> {
+        rs.rules.iter().map(|r| r.id.as_str()).collect()
     }
 
     #[test]
-    fn closed_without_acl_is_denied_not_inactive() {
-        let rs = build(&ula_snap(Policy::Closed));
+    fn no_grants_means_no_rules_but_every_address_is_managed() {
+        let rs = build(&base());
         assert!(rs.rules.is_empty());
-        assert_eq!(managed(&rs), vec![ip("fd00::1")]);
+        assert_eq!(
+            managed(&rs),
+            vec![ip("fd00::1"), ip("2001:db8:1:2::100"), ip("300:1:2:3::100")]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+        let scope_ids: Vec<_> = rs.scopes.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(scope_ids, ["managed", "overlay:ygg0"]);
     }
 
     #[test]
-    fn closed_with_acl_allows_listed_sources() {
-        let mut s = ula_snap(Policy::Closed);
-        s.sockets[0].acl = vec![
-            acl("a", "ula", "fd00::20"),
-            acl("a", "ula", "fd00::10"),
-            acl("a", "other", "fd00::99"),
-            acl("a", "ula", "fd00::10"),
-            acl("a", "ula", "fd00:5::/32"),
-            acl("a", "ula", "garbage"),
-        ];
+    fn anyone_is_open_on_every_network_that_takes_grants() {
+        let mut s = base();
+        s.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
-        assert_eq!(rs.rules.len(), 1);
-        assert_eq!(
-            rs.rules[0].sources,
-            Sources::Nets(vec![
-                "fd00::10/128".parse().unwrap(),
-                "fd00::20/128".parse().unwrap(),
-                "fd00:5::/32".parse().unwrap(),
-            ])
-        );
-    }
-
-    fn with_acl_group(policy: Policy, entries: &[&str]) -> Snapshot {
-        let mut s = ula_snap(Policy::Group);
-        s.sockets[0].socket.acl_group_id = Some("grp".into());
-        s.acl_groups = vec![AclGroupSnapshot {
-            group: AclGroup {
-                id: "grp".into(),
-                label: "g".into(),
-                policy,
-                created_at: chrono::Utc::now(),
-            },
-            entries: entries.iter().map(|e| acl("", "ula", e)).collect(),
-        }];
-        s
-    }
-
-    #[test]
-    fn group_policy_resolves_through_acl_group() {
-        let rs = build(&with_acl_group(Policy::Closed, &["fd00::7"]));
-        assert_eq!(
-            rs.rules[0].sources,
-            Sources::Nets(vec!["fd00::7/128".parse().unwrap()])
-        );
-        let rs = build(&with_acl_group(Policy::Open, &[]));
-        assert_eq!(rs.rules[0].sources, Sources::Any);
-        // A group that itself says "group" and an empty group allow nothing.
-        assert!(build(&with_acl_group(Policy::Group, &["fd00::7"]))
+        assert_eq!(ids(&rs), ["a:an:8080:tcp:g", "a:ay:8080:tcp:g"]);
+        assert!(rs
             .rules
-            .is_empty());
-        assert!(build(&with_acl_group(Policy::Closed, &[])).rules.is_empty());
+            .iter()
+            .all(|r| r.sources == Sources::Any && r.iif.is_none()));
+        // Local is this machine only: no rule for it, though its address is managed.
+        assert!(managed(&rs).contains(&ip("fd00::1")));
     }
 
     #[test]
-    fn missing_acl_group_means_closed() {
-        let mut s = with_acl_group(Policy::Open, &[]);
-        s.sockets[0].socket.acl_group_id = None;
+    fn ygg_key_peer_gets_an_interface_bound_rule() {
+        let mut s = base();
+        s.peers = vec![peer("b", &[(CredentialKind::YggKey, KEY)])];
+        s.grants = vec![grant("g", "web", Subject::Peer("b".into()))];
         let rs = build(&s);
-        assert!(rs.rules.is_empty());
-        assert_eq!(managed(&rs).len(), 1);
-        s.sockets[0].socket.acl_group_id = Some("gone".into());
-        assert!(build(&s).rules.is_empty());
-    }
-
-    fn socket_group(policy: Policy) -> Snapshot {
-        let mut s = Snapshot {
-            backends: vec![BackendInfo {
-                id: "ula".into(),
-                backend_type: BackendType::Ula,
-                interface: "lo".into(),
-            }],
-            ..Snapshot::default()
-        };
-        s.socket_groups = vec![SocketGroupSnapshot {
-            group: SocketGroup {
-                id: "sg1".into(),
-                label: "web".into(),
-                app_name: "web".into(),
-                acl_group_id: None,
-                created_at: chrono::Utc::now(),
-            },
-            members: vec![
-                (443, Protocol::Tcp),
-                (80, Protocol::Tcp),
-                (80, Protocol::Tcp),
-                (53, Protocol::Udp),
-            ],
-            addresses: vec![SocketGroupAddress {
-                group_id: "sg1".into(),
-                backend_id: "ula".into(),
-                address: "fd00::9".parse().unwrap(),
-                interface: "lo".into(),
-                prefix_len: 128,
-                policy,
-            }],
-            acl: vec![SocketGroupAclEntry {
-                id: 1,
-                group_id: "sg1".into(),
-                backend_id: "ula".into(),
-                allowed_ip: "fd00::5".into(),
-                label: None,
-                created_at: chrono::Utc::now(),
-            }],
-        }];
-        s
+        // Not reachable on the LAN, verified on Yggdrasil.
+        assert_eq!(ids(&rs), ["a:ay:8080:tcp:g:ygg0"]);
+        let r = &rs.rules[0];
+        assert_eq!(r.iif.as_deref(), Some("ygg0"));
+        assert_eq!(r.dst, ip("300:1:2:3::100"));
+        assert_eq!(r.sources, Sources::Nets(vec![KEY_ADDR.parse().unwrap()]));
     }
 
     #[test]
-    fn socket_group_emits_one_rule_per_member() {
-        let rs = build(&socket_group(Policy::Closed));
-        let ids: Vec<_> = rs.rules.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            ["g:sg1:ula:443:tcp", "g:sg1:ula:53:udp", "g:sg1:ula:80:tcp"]
-        );
-        assert!(rs.rules.iter().all(|r| r.dst == ip("fd00::9")));
-        assert_eq!(managed(&rs), vec![ip("fd00::9")]);
-
-        let rs = build(&socket_group(Policy::Open));
-        assert!(rs.rules.iter().all(|r| r.sources == Sources::Any));
-    }
-
-    #[test]
-    fn socket_group_group_policy_uses_linked_acl_group() {
-        let mut s = socket_group(Policy::Group);
-        assert!(build(&s).rules.is_empty());
-        s.socket_groups[0].group.acl_group_id = Some("grp".into());
-        s.acl_groups = vec![AclGroupSnapshot {
-            group: AclGroup {
-                id: "grp".into(),
-                label: "g".into(),
-                policy: Policy::Closed,
-                created_at: chrono::Utc::now(),
-            },
-            entries: vec![acl("", "ula", "fd00::77")],
-        }];
+    fn lan_ip_peer_gets_an_unbound_rule_only_on_the_lan() {
+        let mut s = base();
+        s.peers = vec![peer("p", &[(CredentialKind::Ip, "fd00:5a::2/128")])];
+        s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
         let rs = build(&s);
-        assert_eq!(rs.rules.len(), 3);
-        assert_eq!(
-            rs.rules[0].sources,
-            Sources::Nets(vec!["fd00::77/128".parse().unwrap()])
-        );
+        assert_eq!(ids(&rs), ["a:an:8080:tcp:g"]);
+        assert_eq!(rs.rules[0].iif, None);
+        assert_eq!(rs.rules[0].dst, ip("2001:db8:1:2::100"));
     }
 
-    fn ygg_snap() -> Snapshot {
-        let mut s = Snapshot {
-            sockets: vec![sock(
-                "w",
-                8080,
-                vec![saddr(
-                    "ygg",
-                    BackendType::Yggdrasil,
-                    "301::1",
-                    "ygg0",
-                    Policy::Closed,
-                )],
-            )],
-            backends: vec![ygg_backend()],
-            ..Snapshot::default()
-        };
-        s.sockets[0].acl = vec![
-            acl("w", "ygg", "200:1::5"),
-            acl("w", "ygg", "300:2:3:4::/64"),
-            acl("w", "ygg", "fd00::5"),
+    #[test]
+    fn credentials_merge_per_binding_and_split_across_bindings() {
+        let mut s = base();
+        s.grants = vec![grant("g", "web", Subject::Group("grp".into()))];
+        s.peers = vec![
+            peer(
+                "b",
+                &[
+                    (CredentialKind::YggKey, KEY),
+                    (CredentialKind::YggSubnet, "300:7:7:7::/64"),
+                    (CredentialKind::Ip, "fd00::9/128"),
+                ],
+            ),
+            peer("c", &[(CredentialKind::YggAddr, "200:1::5")]),
         ];
-        s
-    }
-
-    #[test]
-    fn ygg_sources_are_bound_to_the_ygg_interface() {
-        let rs = build(&ygg_snap());
-        assert_eq!(rs.rules.len(), 2);
-        let plain = &rs.rules[0];
-        assert_eq!(plain.id, "s:w:ygg:8080:tcp");
-        assert_eq!(plain.iif, None);
+        s.groups = vec![PeerGroup {
+            id: "grp".into(),
+            label: "grp".into(),
+            members: vec!["c".into(), "b".into()],
+            created_at: Utc::now(),
+        }];
+        let rs = build(&s);
+        assert_eq!(ids(&rs), ["a:an:8080:tcp:g", "a:ay:8080:tcp:g:ygg0"]);
+        let ygg_rule = &rs.rules[1];
         assert_eq!(
-            plain.sources,
-            Sources::Nets(vec!["fd00::5/128".parse().unwrap()])
-        );
-        let bound = &rs.rules[1];
-        assert_eq!(bound.id, "s:w:ygg:8080:tcp:ygg:ygg0");
-        assert_eq!(bound.iif.as_deref(), Some("ygg0"));
-        assert_eq!(
-            bound.sources,
+            ygg_rule.sources,
             Sources::Nets(vec![
                 "200:1::5/128".parse().unwrap(),
-                "300:2:3:4::/64".parse().unwrap()
+                KEY_ADDR.parse().unwrap(),
+                "300:7:7:7::/64".parse().unwrap(),
             ])
         );
+        let lan_rule = &rs.rules[0];
+        assert_eq!(
+            lan_rule.sources,
+            Sources::Nets(vec!["fd00::9/128".parse().unwrap()])
+        );
+        let unique: BTreeSet<_> = ids(&rs).into_iter().collect();
+        assert_eq!(unique.len(), rs.rules.len());
     }
 
     #[test]
-    fn ygg_sources_without_ygg_backend_are_dropped() {
-        let mut s = ygg_snap();
-        s.backends.clear();
-        let (rs, warnings) = build_with_warnings(&s);
-        assert_eq!(rs.rules.len(), 1);
-        assert_eq!(rs.rules[0].iif, None);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("no Yggdrasil backend"));
-        // Only 200::/7 sources: no rule at all.
-        s.sockets[0].acl = vec![acl("w", "ygg", "200:1::5")];
+    fn ip_suffix_follows_the_networks_prefix() {
+        let mut s = base();
+        s.peers = vec![peer("p", &[(CredentialKind::IpSuffix, "::a:b:c:d")])];
+        s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
+        let rs = build(&s);
+        assert_eq!(
+            rs.rules[0].sources,
+            Sources::Nets(vec!["2001:db8:1:2:a:b:c:d/128".parse().unwrap()])
+        );
+        s.networks[1].prefix = Some("2001:db8:9:9::".parse().unwrap());
+        let rs = build(&s);
+        assert_eq!(
+            rs.rules[0].sources,
+            Sources::Nets(vec!["2001:db8:9:9:a:b:c:d/128".parse().unwrap()])
+        );
+        // Without a /64 (DHCPv6) the suffix reaches nothing.
+        s.networks[1].prefix = None;
         assert!(build(&s).rules.is_empty());
     }
 
     #[test]
-    fn one_ygg_rule_per_ygg_interface() {
-        let mut s = ygg_snap();
-        s.backends.push(BackendInfo {
-            id: "ygg2".into(),
-            backend_type: BackendType::Yggdrasil,
-            interface: "ygg1".into(),
-        });
-        let rs = build(&s);
-        let bound: Vec<_> = rs.rules.iter().filter_map(|r| r.iif.as_deref()).collect();
-        assert_eq!(bound, ["ygg0", "ygg1"]);
-        let ids: BTreeSet<_> = rs.rules.iter().map(|r| &r.id).collect();
-        assert_eq!(ids.len(), rs.rules.len());
+    fn not_reachable_credentials_produce_no_rule() {
+        let mut s = base();
+        s.peers = vec![peer(
+            "p",
+            &[
+                (CredentialKind::WgKey, "AAAA"),
+                (CredentialKind::TlsSpki, "AAAA"),
+                (CredentialKind::TorClientKey, "AAAA"),
+            ],
+        )];
+        s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
+        assert!(build(&s).rules.is_empty());
+        // A dangling subject grants nothing.
+        s.grants = vec![grant("g", "web", Subject::Peer("gone".into()))];
+        assert!(build(&s).rules.is_empty());
     }
 
     #[test]
-    fn overlay_scope_per_ygg_backend() {
-        let mut s = ula_snap(Policy::Closed);
-        s.backends.push(ygg_backend());
+    fn grant_port_and_network_narrow_the_rules() {
+        let mut s = base();
+        s.apps[0].ports = vec![
+            app("x", &[8080, 9090], vec![]).ports[0].clone(),
+            app("x", &[9090], vec![]).ports[0].clone(),
+        ];
+        s.grants = vec![
+            Grant {
+                port: Some(tcp(9090)),
+                network_id: Some("ygg".into()),
+                ..grant("narrow", "web", Subject::Anyone)
+            },
+            grant("other-app", "nope", Subject::Anyone),
+        ];
         let rs = build(&s);
-        let overlay = rs.scopes.iter().find(|s| s.id == "overlay:ygg0").unwrap();
-        assert_eq!(overlay.kind, ScopeKind::Overlay);
+        assert_eq!(ids(&rs), ["a:ay:9090:tcp:narrow"]);
+        // A grant for a port the address does not serve gives no rule.
+        s.grants[0].port = Some(tcp(1));
+        assert!(build(&s).rules.is_empty());
+    }
+
+    #[test]
+    fn all_excludes_ports_claimed_by_an_only_address() {
+        let mut s = base();
+        s.apps[0].ports = vec![
+            app("x", &[80], vec![]).ports[0].clone(),
+            app("x", &[443], vec![]).ports[0].clone(),
+        ];
+        s.apps[0].addresses.push(address(
+            "ay2",
+            "web",
+            "ygg",
+            "300:1:2:3::200",
+            PortSet::Only(vec![tcp(443)]),
+        ));
+        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        let rs = build(&s);
+        let mut ygg_rules: Vec<_> = rs
+            .rules
+            .iter()
+            .filter(|r| r.dst == ip("300:1:2:3::100") || r.dst == ip("300:1:2:3::200"))
+            .map(|r| (r.dst.to_string(), r.port))
+            .collect();
+        ygg_rules.sort();
         assert_eq!(
-            overlay.matcher,
-            ScopeMatch::Interface {
-                name: "ygg0".into(),
-                families: Families::Both
-            }
+            ygg_rules,
+            [
+                ("300:1:2:3::100".to_string(), 80),
+                ("300:1:2:3::200".to_string(), 443)
+            ]
         );
-        assert_eq!(rs.scopes.len(), 2);
+        // The Only address serves its port even before the app listens on it.
+        s.apps[0].ports.clear();
+        let rs = build(&s);
+        assert!(rs.rules.iter().any(|r| r.id == "a:ay2:443:tcp:g"));
     }
 
     #[test]
-    fn overlay_scope_exists_without_any_socket() {
+    fn unlistening_ports_stay_in_the_ruleset() {
+        let mut s = base();
+        s.apps[0].ports[0].listening = false;
+        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        assert_eq!(build(&s).rules.len(), 2);
+    }
+
+    #[test]
+    fn address_of_an_unknown_network_is_denied_without_rules() {
+        let mut s = base();
+        s.networks.retain(|n| n.id != "ygg");
+        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        let rs = build(&s);
+        assert_eq!(ids(&rs), ["a:an:8080:tcp:g"]);
+        assert!(managed(&rs).contains(&ip("300:1:2:3::100")));
+        assert!(!rs.scopes.iter().any(|s| s.id.starts_with("overlay")));
+    }
+
+    #[test]
+    fn onion_locators_are_not_ip_rules() {
+        let mut s = base();
+        s.apps[0].addresses.push(Address {
+            locator: Locator::Onion {
+                hostname: "x.onion".into(),
+            },
+            ..address("ao", "web", "tor", "::1", PortSet::All)
+        });
+        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        assert_eq!(build(&s).rules.len(), 2);
+    }
+
+    #[test]
+    fn overlay_scope_exists_without_any_app() {
         let s = Snapshot {
-            backends: vec![ygg_backend()],
+            networks: vec![ygg()],
             ..Snapshot::default()
         };
         let rs = build(&s);
         assert_eq!(rs.scopes.len(), 1);
         assert_eq!(rs.scopes[0].id, "overlay:ygg0");
+        assert_eq!(rs.scopes[0].kind, ScopeKind::Overlay);
+        assert_eq!(
+            rs.scopes[0].matcher,
+            ScopeMatch::Interface {
+                name: "ygg0".into(),
+                families: Families::Both
+            }
+        );
         assert!(rs.rules.is_empty());
     }
 
     #[test]
     fn whole_host_scope_per_interface() {
-        let mut s = ula_snap(Policy::Closed);
-        assert_eq!(build(&s).scopes.len(), 1);
+        let mut s = base();
         s.protect_host = vec!["eth1".into(), "eth0".into(), "eth0".into(), "".into()];
         let rs = build(&s);
-        let ids: Vec<_> = rs.scopes.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, ["managed", "host:eth0", "host:eth1"]);
-        assert_eq!(rs.scopes[1].kind, ScopeKind::WholeHost);
+        let scope_ids: Vec<_> = rs.scopes.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            scope_ids,
+            ["managed", "overlay:ygg0", "host:eth0", "host:eth1"]
+        );
+        assert_eq!(rs.scopes[2].kind, ScopeKind::WholeHost);
         assert!(matches!(
-            rs.scopes[1].matcher,
+            rs.scopes[2].matcher,
             ScopeMatch::Interface {
                 families: Families::V6,
                 ..
@@ -814,38 +774,67 @@ mod tests {
     }
 
     #[test]
-    fn parse_protect_host_setting() {
-        assert!(parse_protect_host(None).is_empty());
-        assert!(parse_protect_host(Some("[]")).is_empty());
-        assert!(parse_protect_host(Some("not json")).is_empty());
-        assert_eq!(parse_protect_host(Some(r#"["b","a","a",""]"#)), ["a", "b"]);
+    fn output_is_deterministic() {
+        let mut a = base();
+        a.peers = vec![
+            peer(
+                "b",
+                &[
+                    (CredentialKind::YggKey, KEY),
+                    (CredentialKind::Ip, "fd00::9/128"),
+                ],
+            ),
+            peer("c", &[(CredentialKind::YggAddr, "200:1::5")]),
+        ];
+        a.groups = vec![PeerGroup {
+            id: "grp".into(),
+            label: "grp".into(),
+            members: vec!["b".into(), "c".into()],
+            created_at: Utc::now(),
+        }];
+        a.grants = vec![
+            grant("g1", "web", Subject::Group("grp".into())),
+            grant("g2", "web", Subject::Anyone),
+        ];
+        a.protect_host = vec!["eth0".into(), "eth1".into()];
+        let mut b = a.clone();
+        b.apps[0].addresses.reverse();
+        b.apps[0].ports.reverse();
+        b.peers.reverse();
+        b.grants.reverse();
+        b.groups[0].members.reverse();
+        b.networks.reverse();
+        b.protect_host.reverse();
+        assert_eq!(build(&a), build(&b));
+        let got = ids(&build(&a))
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        let mut sorted = got.clone();
+        sorted.sort();
+        assert_eq!(got, sorted);
+        let unique: BTreeSet<_> = got.iter().collect();
+        assert_eq!(unique.len(), got.len(), "rule ids are unique");
     }
 
     #[test]
-    fn output_is_deterministic() {
-        let mut a = ygg_snap();
-        a.sockets.push(sock(
-            "z",
-            22,
-            vec![saddr(
-                "ula",
-                BackendType::Ula,
-                "fd00::2",
-                "lo",
-                Policy::Open,
-            )],
-        ));
-        a.protect_host = vec!["eth0".into(), "eth1".into()];
-        let mut b = a.clone();
-        b.sockets.reverse();
-        b.sockets[0].acl.reverse();
-        b.protect_host.reverse();
-        b.backends.reverse();
-        assert_eq!(build(&a), build(&b));
-        let ids: Vec<_> = build(&a).rules.iter().map(|r| r.id.clone()).collect();
-        let mut sorted = ids.clone();
-        sorted.sort();
-        assert_eq!(ids, sorted);
+    fn golden_v1_snapshot() {
+        let mut s = base();
+        s.peers = vec![
+            peer("laptop", &[(CredentialKind::YggKey, KEY)]),
+            peer("nas", &[(CredentialKind::Ip, "fd00:5a::2/128")]),
+        ];
+        s.grants = vec![
+            grant("g1", "web", Subject::Peer("laptop".into())),
+            grant("g2", "web", Subject::Peer("nas".into())),
+        ];
+        s.protect_host = vec!["eth0".into()];
+        insta::assert_debug_snapshot!(build(&s));
+        // Reach is what the table says, for the record.
+        assert_eq!(
+            socketguard_core::best_reach(&s.peers[0].credentials, &ygg()),
+            Reach::Verified
+        );
     }
 
     // ─── Lockout guard ───────────────────────────────────────────────────
@@ -857,7 +846,7 @@ mod tests {
             port,
             protocol: Protocol::Tcp,
             bind_address: ip(bind),
-            exe_path: None,
+            exe_path: Some(format!("/usr/sbin/{name}")),
             cmdline: None,
         }
     }
@@ -869,6 +858,26 @@ mod tests {
         }]
     }
 
+    /// An sshd app, as the guard identifies it, with an address on the LAN network.
+    fn sshd_snap(grants: Vec<Grant>) -> Snapshot {
+        let (id, _, _) = app_identity("sshd", Some("/usr/sbin/sshd"), None);
+        let mut a = app(&id, &[22], vec![]);
+        a.addresses = vec![address("ad", &id, "lan", "2001:db8:1:2::22", PortSet::All)];
+        Snapshot {
+            apps: vec![a],
+            networks: vec![lan()],
+            grants: grants
+                .into_iter()
+                .map(|g| Grant {
+                    app_id: id.clone(),
+                    ..g
+                })
+                .collect(),
+            peers: vec![peer("admin", &[(CredentialKind::Ip, "fd00:5a::2/128")])],
+            ..Snapshot::default()
+        }
+    }
+
     #[test]
     fn lockout_wildcard_sshd_without_grant_is_a_risk() {
         let risks =
@@ -876,6 +885,10 @@ mod tests {
                 .unwrap_err();
         assert_eq!(risks.len(), 1);
         assert_eq!(risks[0].port, 22);
+        // An app with an address but no grant is still a risk.
+        assert!(
+            check_protect_host(&sshd_snap(vec![]), &[listener("sshd", 22, "::")], &eth0()).is_err()
+        );
     }
 
     #[test]
@@ -899,49 +912,56 @@ mod tests {
             listener("sshd", 22, "10.9.9.9"),
         ];
         assert!(check_protect_host(&Snapshot::default(), &ls, &eth0()).is_ok());
-        // Bound to an address of the protected interface: at risk.
         let ls = [listener("sshd", 22, "192.168.1.5")];
         assert!(check_protect_host(&Snapshot::default(), &ls, &eth0()).is_err());
     }
 
     #[test]
-    fn lockout_cleared_by_a_rule_for_the_listener() {
-        // The managed address lives on `lo` here, so protect `lo`.
-        let lo = [HostInterface {
-            name: "lo".into(),
-            addrs: vec![],
-        }];
-        let mut s = ula_snap(Policy::Open);
-        s.sockets[0].socket.port = 22;
-        s.sockets[0].socket.process_name = "sshd".into();
-        assert!(check_protect_host(&s, &[listener("sshd", 22, "::")], &lo).is_ok());
-        // A closed socket without ACL has no rule: still a risk.
-        let s = {
-            let mut s = s;
-            s.sockets[0].socket.addresses[0].policy = Policy::Closed;
-            s
-        };
-        assert!(check_protect_host(&s, &[listener("sshd", 22, "::")], &lo).is_err());
+    fn lockout_cleared_by_a_grant_that_reaches() {
+        let by_peer = sshd_snap(vec![grant("g", "", Subject::Peer("admin".into()))]);
+        assert!(check_protect_host(&by_peer, &[listener("sshd", 22, "::")], &eth0()).is_ok());
+        let anyone = sshd_snap(vec![grant("g", "", Subject::Anyone)]);
+        assert!(check_protect_host(&anyone, &[listener("sshd", 22, "::")], &eth0()).is_ok());
     }
 
     #[test]
-    fn lockout_rule_for_an_address_on_another_interface_does_not_help() {
-        // sshd is open on a ULA on `lo`, but the host scope on eth0 still drops SSH to
-        // eth0's own addresses.
-        let mut s = ula_snap(Policy::Open);
-        s.sockets[0].socket.port = 22;
+    fn lockout_not_cleared_by_an_unreachable_credential() {
+        let mut s = sshd_snap(vec![grant("g", "", Subject::Peer("admin".into()))]);
+        // A key credential does not identify anyone on a LAN.
+        s.peers = vec![peer("admin", &[(CredentialKind::YggKey, KEY)])];
         assert!(check_protect_host(&s, &[listener("sshd", 22, "::")], &eth0()).is_err());
-        // A managed address on eth0 itself does help.
-        s.sockets[0].socket.addresses[0].interface = "eth0".into();
-        assert!(check_protect_host(&s, &[listener("sshd", 22, "::")], &eth0()).is_ok());
+    }
+
+    #[test]
+    fn lockout_grant_for_another_app_or_interface_does_not_help() {
+        // A grant on another app's port 22 address.
+        let mut s = sshd_snap(vec![grant("g", "", Subject::Anyone)]);
+        s.apps[0].id = "someone-else".into();
+        s.apps[0].addresses[0].app_id = "someone-else".into();
+        s.grants[0].app_id = "someone-else".into();
+        assert!(check_protect_host(&s, &[listener("sshd", 22, "::")], &eth0()).is_err());
+        // The address is on a network whose interface is not the protected one.
+        let mut s = sshd_snap(vec![grant("g", "", Subject::Anyone)]);
+        s.networks[0].interface = Some("eth1".into());
+        assert!(check_protect_host(&s, &[listener("sshd", 22, "::")], &eth0()).is_err());
     }
 
     #[test]
     fn lockout_rule_bound_to_another_interface_does_not_help() {
-        let mut s = ygg_snap();
-        s.sockets[0].socket.port = 22;
-        // The only rule for port 22 is the ygg0-bound one plus a plain one; remove plain.
-        s.sockets[0].acl = vec![acl("w", "ygg", "200:1::5")];
+        let (id, _, _) = app_identity("sshd", Some("/usr/sbin/sshd"), None);
+        let mut a = app(&id, &[22], vec![]);
+        a.addresses = vec![address("ad", &id, "ygg", "300:1:2:3::22", PortSet::All)];
+        let s = Snapshot {
+            apps: vec![a],
+            networks: vec![ygg()],
+            peers: vec![peer("admin", &[(CredentialKind::YggKey, KEY)])],
+            grants: vec![Grant {
+                app_id: id,
+                ..grant("g", "", Subject::Peer("admin".into()))
+            }],
+            ..Snapshot::default()
+        };
+        // The only rule is bound to ygg0 and sits on a different interface than eth0.
         assert!(check_protect_host(&s, &[listener("sshd", 22, "::")], &eth0()).is_err());
     }
 

@@ -37,6 +37,10 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 
+# Command lines on Windows and macOS (Linux reads /proc directly).
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_NetworkManagement_WindowsFilteringPlatform",

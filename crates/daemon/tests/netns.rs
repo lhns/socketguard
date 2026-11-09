@@ -82,10 +82,14 @@ impl Drop for NsPair {
 
 // ─── Enforcement tests ───────────────────────────────────────────────────────
 
-use socketguard_core::{AclEntry, BackendType, ManagedSocket, Policy, Protocol, SocketAddress};
+use chrono::Utc;
+use socketguard_core::{
+    Address, App, AppPort, Credential, CredentialKind, Grant, Locator, Network, NetworkKind,
+    NetworkStatus, Peer, PortSet, Protocol, Subject,
+};
 use socketguard_daemon::firewall::nftables::NftablesFirewall;
 use socketguard_daemon::firewall::{DesiredRuleset, DropEvent, Firewall};
-use socketguard_daemon::ruleset::{self, BackendInfo, Snapshot, SocketSnapshot};
+use socketguard_daemon::ruleset::{self, Snapshot};
 use std::os::fd::AsRawFd;
 use std::process::{Child, Stdio};
 use std::sync::{mpsc, Mutex, MutexGuard};
@@ -250,59 +254,87 @@ impl Drop for Fixture {
     }
 }
 
-fn acl(backend: &str, src: &str) -> AclEntry {
-    AclEntry {
-        id: 0,
-        socket_id: "web".into(),
-        backend_id: backend.into(),
-        allowed_ip: src.into(),
-        label: None,
-        created_at: chrono::Utc::now(),
-    }
-}
-
-/// One closed socket on port 8080 with a managed address on each veth, a Yggdrasil
-/// backend on `ygg0`, whole-host protection of `sgv-a`, and the given ACL entries.
-fn snapshot(acl: Vec<AclEntry>) -> Snapshot {
-    let addr = |backend: &str, bt, a: &str, iface: &str| SocketAddress {
-        backend_id: backend.into(),
-        backend_type: bt,
-        address: a.parse().unwrap(),
-        interface: iface.into(),
-        prefix_len: 128,
-        policy: Policy::Closed,
-    };
-    let info = |id: &str, bt, iface: &str| BackendInfo {
+/// One app on port 8080 with an address on each veth (a LAN network on `sgv-a`, a
+/// Yggdrasil network on `ygg0`), whole-host protection of `sgv-a`, and, when `creds` is
+/// not empty, a peer holding those credentials with a grant to the app.
+fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
+    let now = Utc::now();
+    let address = |id: &str, network: &str, a: &str| Address {
         id: id.into(),
-        backend_type: bt,
-        interface: iface.into(),
+        app_id: "web".into(),
+        network_id: network.into(),
+        ports: PortSet::All,
+        locator: Locator::Ipv6 {
+            addr: a.parse().unwrap(),
+        },
+        created_at: now,
+    };
+    let network = |id: &str, kind, iface: &str| Network {
+        id: id.into(),
+        kind,
+        name: id.into(),
+        interface: Some(iface.into()),
+        grants_apply: true,
+        status: NetworkStatus::Up,
+        prefix: None,
+    };
+    let (peers, grants) = if creds.is_empty() {
+        (vec![], vec![])
+    } else {
+        (
+            vec![Peer {
+                id: "b".into(),
+                label: "b".into(),
+                credentials: creds
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (kind, value))| Credential {
+                        id: format!("c{i}"),
+                        kind: *kind,
+                        value: (*value).into(),
+                        label: None,
+                    })
+                    .collect(),
+                groups: vec![],
+                created_at: now,
+            }],
+            vec![Grant {
+                id: "g".into(),
+                app_id: "web".into(),
+                port: None,
+                network_id: None,
+                subject: Subject::Peer("b".into()),
+                created_at: now,
+            }],
+        )
     };
     Snapshot {
-        sockets: vec![SocketSnapshot {
-            socket: ManagedSocket {
-                id: "web".into(),
-                pid: 1,
-                process_name: "python3".into(),
+        apps: vec![App {
+            id: "web".into(),
+            name: "web".into(),
+            process_name: "python3".into(),
+            exe_path: None,
+            interpreter_arg: None,
+            reviewed: true,
+            first_seen: now,
+            last_seen: now,
+            ports: vec![AppPort {
                 port: PORT,
-                protocol: Protocol::Tcp,
-                addresses: vec![
-                    addr("ula", BackendType::Ula, MANAGED, "sgv-a"),
-                    addr("ygg", BackendType::Yggdrasil, MANAGED_YGG, "ygg0"),
-                ],
-                policy: Policy::Closed,
-                exe_path: None,
-                cmdline: None,
-                first_seen: chrono::Utc::now(),
-                last_seen: chrono::Utc::now(),
-                acl_group_id: None,
-                socket_group_ids: vec![],
-            },
-            acl,
+                proto: Protocol::Tcp,
+                listening: true,
+                last_seen: now,
+            }],
+            addresses: vec![
+                address("lan-addr", "lan", MANAGED),
+                address("ygg-addr", "ygg", MANAGED_YGG),
+            ],
         }],
-        backends: vec![
-            info("ula", BackendType::Ula, "sgv-a"),
-            info("ygg", BackendType::Yggdrasil, "ygg0"),
+        networks: vec![
+            network("lan", NetworkKind::Lan, "sgv-a"),
+            network("ygg", NetworkKind::Yggdrasil, "ygg0"),
         ],
+        peers,
+        grants,
         protect_host: vec!["sgv-a".into()],
         ..Snapshot::default()
     }
@@ -333,7 +365,7 @@ fn wildcard_listener_is_unreachable_inside_every_scope() {
         );
     }
 
-    fx.apply(&snapshot(vec![]));
+    fx.apply(&snapshot(&[]));
     for (label, dst) in fx.targets() {
         assert!(!fx.reachable(&dst, None), "{label} ({dst}) must be denied");
     }
@@ -345,7 +377,7 @@ fn granted_source_reaches_the_listener_others_do_not() {
         return;
     }
     let fx = Fixture::new("grant");
-    fx.apply(&snapshot(vec![acl("ula", "fd00:5a::2")]));
+    fx.apply(&snapshot(&[(CredentialKind::Ip, "fd00:5a::2/128")]));
 
     assert!(fx.reachable(MANAGED, None), "B (fd00:5a::2) is granted");
     // The grant is for that one address, not for the rest of the protected interface.
@@ -371,7 +403,11 @@ fn forged_overlay_source_is_dropped_off_the_overlay_interface() {
         return;
     }
     let fx = Fixture::new("forge");
-    fx.apply(&snapshot(vec![acl("ula", YGG_SRC), acl("ygg", YGG_SRC)]));
+    // A 200::/7 value is a Yggdrasil credential: the producer gives it a rule on the
+    // overlay address bound to ygg0, and none on the LAN address.
+    let rs = fx.apply(&snapshot(&[(CredentialKind::YggAddr, YGG_SRC)]));
+    assert_eq!(rs.rules.len(), 1);
+    assert_eq!(rs.rules[0].iif.as_deref(), Some("ygg0"));
 
     // A 200::/7 source arriving over the ordinary veth is not trusted ...
     assert!(
@@ -397,7 +433,7 @@ fn rules_persist_after_apply_and_disable_removes_them() {
     }
     let fx = Fixture::new("persist");
     assert!(!fx.table_exists());
-    fx.apply(&snapshot(vec![]));
+    fx.apply(&snapshot(&[]));
     assert!(fx.table_exists());
 
     // Nothing undoes the apply when the call is over and time passes.
@@ -406,7 +442,7 @@ fn rules_persist_after_apply_and_disable_removes_them() {
     assert!(!fx.reachable(MANAGED, None));
 
     // Applying again replaces the table (no duplicates) and keeps it in force.
-    fx.apply(&snapshot(vec![acl("ula", "fd00:5a::2")]));
+    fx.apply(&snapshot(&[(CredentialKind::Ip, "fd00:5a::2/128")]));
     assert!(fx.reachable(MANAGED, None));
 
     fx.fw.disable().unwrap();
@@ -428,7 +464,7 @@ fn blocked_probe_produces_drop_event_and_counter() {
             let _ = tx.lock().unwrap().send(ev);
         }))
         .expect("subscribe to NFLOG");
-    fx.apply(&snapshot(vec![]));
+    fx.apply(&snapshot(&[]));
 
     assert!(!fx.reachable(MANAGED, None));
     let managed_ip: std::net::IpAddr = MANAGED.parse().unwrap();
