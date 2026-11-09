@@ -73,6 +73,8 @@ sudo ./target/release/socketguard-daemon            # Linux/macOS
 .\target\release\socketguard-daemon.exe             # Windows, as Administrator
 ```
 
+On Linux, install `deploy/systemd/socketguard.service` (to `/etc/systemd/system/`, binary in `/usr/local/bin`): the daemon then applies the stored state before networking comes up.
+
 It serves the local API on `/run/socketguard.sock` or the named pipe `\.\pipe\socketguard`.
 To use the CLI or UI without elevation, join the `socketguard` group (Unix) or the local group
 `SocketGuard Users` (Windows) — see [docs/api.md](docs/api.md). On start it applies the stored

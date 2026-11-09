@@ -20,10 +20,10 @@ use crate::AppState;
 use chrono::Utc;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
 use socketguard_core::{
-    app_identity, grant_reach, new_id, normalize_credential, ActivityKind, ActivityQuery,
-    ActivityRecord, Address, AddressId, AddressMode, App, AppDetail, AppId, Credential,
-    CredentialError, Grant, GrantView, Locator, Network, NetworkKind, NewCredential, NewGrant,
-    Peer, PeerGroup, PortRef, PortSet, Protocol, Settings, Subject,
+    app_identity, grant_reach, new_id, normalize_credential, valid_interface_name, ActivityKind,
+    ActivityQuery, ActivityRecord, Address, AddressId, AddressMode, App, AppDetail, AppId,
+    Credential, CredentialError, Grant, GrantView, Locator, Network, NetworkKind, NewCredential,
+    NewGrant, Peer, PeerGroup, PortRef, PortSet, Protocol, Settings, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
@@ -34,8 +34,8 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
-/// An unchanged ruleset is still re-applied every this many reconcile passes, which
-/// corrects drift (e.g. someone deleting the table) without hammering `nft`.
+/// An unchanged ruleset is still re-applied every this many reconcile passes. Drift is
+/// caught sooner: [`Firewall::verify`] runs on every pass.
 const REAPPLY_EVERY: u32 = 30;
 
 /// Every backend allocates single addresses.
@@ -66,6 +66,8 @@ impl ActiveBackend {
 pub enum ProtectHostError {
     #[error("whole-host protection would lock out remote administration: {}", .0.iter().map(|r| r.to_string()).collect::<Vec<_>>().join("; "))]
     Lockout(Vec<LockoutRisk>),
+    #[error("{0}")]
+    Invalid(String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -313,10 +315,24 @@ impl Engine {
 
         if only_if_changed && !self.apply_failed.load(Ordering::Relaxed) {
             let unchanged = self.last_applied.lock().unwrap().as_ref() == Some(&desired);
-            if unchanged
-                && self.passes_since_apply.fetch_add(1, Ordering::Relaxed) + 1 < REAPPLY_EVERY
-            {
-                return Ok(());
+            if unchanged {
+                let passes = self.passes_since_apply.fetch_add(1, Ordering::Relaxed) + 1;
+                let fw = self.firewall.clone();
+                let in_force = tokio::task::spawn_blocking(move || match fw.verify() {
+                    Ok(true) => !fw.interfaces_changed(),
+                    Ok(false) => false,
+                    Err(e) => {
+                        debug!("Could not verify the firewall state: {e:#}");
+                        true
+                    }
+                })
+                .await?;
+                if in_force && passes < REAPPLY_EVERY {
+                    return Ok(());
+                }
+                if !in_force {
+                    warn!("The firewall state changed under us; re-applying the ruleset");
+                }
             }
         }
         self.passes_since_apply.store(0, Ordering::Relaxed);
@@ -326,9 +342,22 @@ impl Engine {
 
         let fw = self.firewall.clone();
         let to_apply = desired.clone();
+        let previous = self.last_applied.lock().unwrap().clone();
         let result = tokio::task::spawn_blocking(move || fw.apply(&to_apply)).await?;
         match result {
             Ok(()) => {
+                // Established flows outlive the rule that allowed them; cut those.
+                let revoked = previous
+                    .map(|old| firewall::revocations(&old, &desired))
+                    .unwrap_or_default();
+                if !revoked.is_empty() {
+                    let fw = self.firewall.clone();
+                    match tokio::task::spawn_blocking(move || fw.revoke(&revoked)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => warn!("Could not cut revoked connections: {e:#}"),
+                        Err(e) => warn!("Revocation task failed: {e}"),
+                    }
+                }
                 debug!(
                     "Applied ruleset: {} scopes, {} rules",
                     desired.scopes.len(),
@@ -342,7 +371,9 @@ impl Engine {
                 Ok(())
             }
             Err(e) => {
-                *self.last_applied.lock().unwrap() = None;
+                // A failed apply leaves the previous ruleset in force, which stays
+                // `last_applied` (the diff base for revocations); `apply_failed` forces
+                // the retry.
                 self.apply_failed.store(true, Ordering::Relaxed);
                 error!("Failed to apply firewall ruleset: {e}");
                 Err(e)
@@ -439,6 +470,11 @@ impl Engine {
     ) -> Result<Vec<LockoutRisk>, ProtectHostError> {
         let mut interfaces = interfaces;
         interfaces.retain(|i| !i.trim().is_empty());
+        if let Some(bad) = interfaces.iter().find(|i| !valid_interface_name(i)) {
+            return Err(ProtectHostError::Invalid(format!(
+                "invalid interface name {bad:?}"
+            )));
+        }
         interfaces.sort();
         interfaces.dedup();
         let mut risks = Vec::new();

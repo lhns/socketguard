@@ -4,8 +4,8 @@
 //! `NftablesFirewall` inside namespace A (the test thread enters it with `setns`), and
 //! probes a wildcard TCP listener there from namespace B.
 //!
-//! Needs root/CAP_NET_ADMIN, `ip` (iproute2), `nft` and `python3`; opt in with
-//! `SOCKETGUARD_NETNS_TESTS=1`.
+//! Needs root/CAP_NET_ADMIN, `ip` (iproute2), `nft` and `python3` (and `conntrack` for the
+//! revocation test, which skips without it); opt in with `SOCKETGUARD_NETNS_TESTS=1`.
 //! Compiles to nothing on other platforms.
 #![cfg(target_os = "linux")]
 
@@ -102,16 +102,48 @@ const MANAGED_YGG: &str = "300:5a::100";
 /// A source in 200::/7 that B owns on both of its veths.
 const YGG_SRC: &str = "200:5a::77";
 
+/// Greets with `ok`, then echoes until the client closes (so a client can hold a
+/// connection open).
 const LISTENER: &str = "
-import socket
+import socket, threading
 s = socket.socket(socket.AF_INET6)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(('::', 8080))
 s.listen(16)
+def serve(c):
+    try:
+        c.sendall(b'ok')
+        while True:
+            d = c.recv(100)
+            if not d:
+                break
+            c.sendall(d)
+    except Exception:
+        pass
+    finally:
+        c.close()
 while True:
     c, _ = s.accept()
-    c.sendall(b'ok')
-    c.close()
+    threading.Thread(target=serve, args=(c,), daemon=True).start()
+";
+
+/// Connects from `argv[2]` to `argv[1]`, prints `up`, then keeps the connection busy
+/// until it breaks (prints `cut`).
+const HOLD: &str = "
+import socket, sys, time
+dst, src = sys.argv[1], sys.argv[2]
+s = socket.create_connection((dst, 8080), timeout=1.5, source_address=(src, 0))
+assert s.recv(2) == b'ok'
+print('up', flush=True)
+while True:
+    try:
+        s.sendall(b'x')
+        if s.recv(1) != b'x':
+            break
+    except Exception:
+        break
+    time.sleep(0.2)
+print('cut', flush=True)
 ";
 
 const PROBE: &str = "
@@ -341,7 +373,7 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
 }
 
 /// Retries `f` for up to ~4 s; for checks that race interface or listener setup.
-fn eventually(f: impl Fn() -> bool) -> bool {
+fn eventually(mut f: impl FnMut() -> bool) -> bool {
     (0..20).any(|_| {
         f() || {
             std::thread::sleep(Duration::from_millis(200));
@@ -487,4 +519,124 @@ fn blocked_probe_produces_drop_event_and_counter() {
         .find(|c| c.id == "managed")
         .expect("managed counter");
     assert!(managed.packets > 0);
+}
+
+#[test]
+fn forged_lan_source_is_refused_on_another_interface() {
+    if !enabled() {
+        return;
+    }
+    let fx = Fixture::new("forgelan");
+    // An IP-only credential: its rule is bound to the LAN network's interface.
+    let rs = fx.apply(&snapshot(&[(CredentialKind::Ip, "fd00:5a::2/128")]));
+    assert_eq!(rs.rules.len(), 1);
+    assert_eq!(rs.rules[0].iif.as_deref(), Some("sgv-a"));
+    assert!(
+        fx.reachable(MANAGED, Some("fd00:5a::2")),
+        "the granted source on its own interface"
+    );
+
+    // B now sends the same source over the other veth (ygg0), as a forger would.
+    ip(&[
+        "-n",
+        &fx.ns.b,
+        "-6",
+        "route",
+        "replace",
+        &format!("{MANAGED}/128"),
+        "dev",
+        "ygg0",
+    ]);
+    assert!(
+        !fx.reachable(MANAGED, Some("fd00:5a::2")),
+        "the granted LAN source arriving on ygg0 must be refused"
+    );
+}
+
+#[test]
+fn revoked_grant_cuts_an_established_connection() {
+    if !enabled() {
+        return;
+    }
+    if Command::new("conntrack").arg("--version").output().is_err() {
+        eprintln!("skipping: conntrack is not installed");
+        return;
+    }
+    let fx = Fixture::new("revoke");
+    let granted = fx.apply(&snapshot(&[(CredentialKind::Ip, "fd00:5a::2/128")]));
+    assert!(eventually(|| fx.reachable(MANAGED, None)));
+
+    let mut client = Command::new("ip")
+        .args([
+            "netns",
+            "exec",
+            &fx.ns.b,
+            "python3",
+            "-c",
+            HOLD,
+            MANAGED,
+            "fd00:5a::2",
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("start client");
+    let mut lines = std::io::BufReader::new(client.stdout.take().unwrap());
+    let mut first = String::new();
+    std::io::BufRead::read_line(&mut lines, &mut first).unwrap();
+    assert_eq!(first.trim(), "up");
+
+    // Revoke: the new ruleset has no grant. The established flow survives the swap ...
+    let revoked_rs = fx.apply(&snapshot(&[]));
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        client.try_wait().unwrap().is_none(),
+        "established flows outlive the rule that allowed them"
+    );
+    // ... until the revocation is flushed from conntrack.
+    let revoked = socketguard_daemon::firewall::revocations(&granted, &revoked_rs);
+    assert_eq!(revoked.len(), 1);
+    fx.fw.revoke(&revoked).unwrap();
+    let cut = eventually(|| client.try_wait().unwrap().is_some());
+    let _ = client.kill();
+    assert!(cut, "the revoked connection must be cut");
+}
+
+#[test]
+fn overlapping_sources_are_aggregated_and_apply() {
+    if !enabled() {
+        return;
+    }
+    let fx = Fixture::new("overlap");
+    // Premise, for the record: what this nft version does with a raw overlap.
+    let raw = "table inet sgcheck {\n chain input {\n type filter hook input priority 0; policy accept;\n ip6 saddr { fd00:5a::/64, fd00:5a::2/128 } accept\n }\n}\n";
+    let mut child = Command::new("nft")
+        .args(["-f", "-"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), raw.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    eprintln!(
+        "raw overlapping set: success={} {}",
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    let _ = Command::new("nft")
+        .args(["delete", "table", "inet", "sgcheck"])
+        .output();
+
+    let rs = fx.apply(&snapshot(&[
+        (CredentialKind::Ip, "fd00:5a::/64"),
+        (CredentialKind::Ip, "fd00:5a::2/128"),
+    ]));
+    assert_eq!(rs.rules.len(), 1);
+    assert_eq!(
+        rs.rules[0].sources,
+        socketguard_daemon::firewall::Sources::Nets(vec!["fd00:5a::/64".parse().unwrap()])
+    );
+    assert!(
+        fx.reachable(MANAGED, None),
+        "B is inside the aggregated /64"
+    );
 }

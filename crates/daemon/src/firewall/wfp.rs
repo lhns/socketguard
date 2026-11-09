@@ -11,9 +11,20 @@
 //! denied inside a scope unless a rule matches (conservative; not exempted).
 //!
 //! Per-ruleset layout inside the sublayer (higher weight is evaluated first):
-//! - weight 15: hard permits: loopback (by remote address) and DHCP client replies;
+//! - weight 15: hard permits: loopback (by remote address) and DHCP client replies (v6
+//!   only from `fe80::/10`; not on the overlay interface);
 //! - weight 10: hard permits: one per (rule, source net);
 //! - weight 4: blocks: one per scope destination address / scope interface family.
+//!
+//! Interfaces: rules and scopes match `FWPM_CONDITION_IP_ARRIVAL_INTERFACE`, the interface
+//! the packet came in on (ADR 0029's `iif`), not the local interface of the destination
+//! address. Aliases are resolved to LUIDs when applying; the resolved map is remembered
+//! so [`Firewall::interfaces_changed`] can tell when an adapter was recreated. A BLOCK scope
+//! whose interface does not resolve fails the whole apply (the previous filters stay),
+//! because skipping it would silently leave the interface open; permits for an
+//! unresolvable interface are skipped. Established flows are never re-evaluated by ALE,
+//! so a revoked grant lets them live until they close ([`Firewall::revoke`] does nothing
+//! here, ADR 0030).
 //!
 //! Not used: `FWPM_FILTER_FLAG_BOOTTIME`. Boot-time filters are a separate table enforced
 //! before BFE starts and cannot be combined with PERSISTENT, so adding them would mean a
@@ -24,7 +35,7 @@ use super::{DesiredRuleset, DropEvent, DropSink, Families, Firewall, ScopeMatch,
 use anyhow::{anyhow, bail, Result};
 use ipnet::IpNet;
 use socketguard_core::Protocol;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -100,8 +111,10 @@ pub(crate) enum Cond {
     Proto(u8),
     /// A host (full prefix) matches by address, anything else by address+mask.
     Remote(IpNet),
-    /// Interface alias; resolved to a LUID when applying.
-    LocalIf(String),
+    /// Arrival interface alias; resolved to a LUID when applying.
+    ArrivalIf(String),
+    /// Any arrival interface but this one (no condition when the alias does not exist).
+    NotArrivalIf(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,20 +162,28 @@ pub(crate) fn plan(desired: &DesiredRuleset) -> Vec<FilterSpec> {
                 scope_id: None,
             });
         }
+        // Same-field conditions are ORed, so only one overlay can be excluded; SocketGuard
+        // allows a single Yggdrasil network.
+        let overlay = desired.overlay_interfaces().first().map(|i| i.to_string());
         for (layer, local, remote, name) in [
             (Layer::V6, 546, 547, "dhcpv6 reply"),
             (Layer::V4, 68, 67, "dhcpv4 reply"),
         ] {
+            let mut conds = vec![
+                Cond::Proto(17),
+                Cond::LocalPort(local),
+                Cond::RemotePort(remote),
+            ];
+            if layer == Layer::V6 {
+                conds.push(Cond::Remote("fe80::/10".parse().expect("valid net")));
+            }
+            conds.extend(overlay.clone().map(Cond::NotArrivalIf));
             out.push(FilterSpec {
                 name: format!("{NAME_PREFIX} {name}"),
                 layer,
                 action: Action::Permit,
                 weight: W_ALWAYS,
-                conds: vec![
-                    Cond::Proto(17),
-                    Cond::LocalPort(local),
-                    Cond::RemotePort(remote),
-                ],
+                conds,
                 scope_id: None,
             });
         }
@@ -176,7 +197,7 @@ pub(crate) fn plan(desired: &DesiredRuleset) -> Vec<FilterSpec> {
             Cond::Proto(proto_number(rule.proto)),
         ];
         if let Some(iif) = &rule.iif {
-            base.push(Cond::LocalIf(iif.clone()));
+            base.push(Cond::ArrivalIf(iif.clone()));
         }
         let name = format!("{NAME_PREFIX} {}", rule.id);
         let spec = |conds| FilterSpec {
@@ -229,7 +250,7 @@ pub(crate) fn plan(desired: &DesiredRuleset) -> Vec<FilterSpec> {
                     Families::Both => &[Layer::V6, Layer::V4],
                 };
                 for l in layers {
-                    out.push(block(*l, vec![Cond::LocalIf(iif.clone())]));
+                    out.push(block(*l, vec![Cond::ArrivalIf(iif.clone())]));
                 }
             }
         }
@@ -409,12 +430,15 @@ fn raw_cond(
                 }
             }
         }
-        Cond::LocalIf(name) => {
+        Cond::ArrivalIf(name) | Cond::NotArrivalIf(name) => {
             let luid = *luids
                 .get(name)
                 .ok_or_else(|| anyhow!("interface {name} not resolved"))?;
             let mut b = Box::new(luid);
-            r.fieldKey = FWPM_CONDITION_IP_LOCAL_INTERFACE;
+            if matches!(c, Cond::NotArrivalIf(_)) {
+                r.matchType = FWP_MATCH_NOT_EQUAL;
+            }
+            r.fieldKey = FWPM_CONDITION_IP_ARRIVAL_INTERFACE;
             r.conditionValue.r#type = FWP_UINT64;
             r.conditionValue.Anonymous.uint64 = &mut *b;
             store.luids.push(b);
@@ -470,6 +494,8 @@ impl Drop for DropSubscription {
 
 pub struct WfpFirewall {
     keys: Keys,
+    /// Alias to LUID (None: did not resolve) as of the last successful apply.
+    applied_luids: Mutex<HashMap<String, Option<u64>>>,
     filters: Arc<Mutex<HashMap<u64, Option<String>>>>,
     sub: Mutex<Option<DropSubscription>>,
 }
@@ -494,6 +520,7 @@ impl WfpFirewall {
     fn with_keys(keys: Keys) -> Self {
         WfpFirewall {
             keys,
+            applied_luids: Mutex::default(),
             filters: Arc::default(),
             sub: Mutex::new(None),
         }
@@ -659,24 +686,32 @@ impl Firewall for WfpFirewall {
     fn apply(&self, desired: &DesiredRuleset) -> Result<()> {
         let specs = plan(desired);
 
-        // Resolve interface aliases up front; a spec naming a missing interface is skipped.
-        let mut luids = HashMap::new();
-        let mut missing = HashSet::new();
+        // Resolve interface aliases up front.
+        let mut resolved: HashMap<String, Option<u64>> = HashMap::new();
         for c in specs.iter().flat_map(|s| &s.conds) {
-            if let Cond::LocalIf(n) = c {
-                if luids.contains_key(n) || missing.contains(n) {
-                    continue;
-                }
-                match resolve_luid(n) {
-                    Some(l) => {
-                        luids.insert(n.clone(), l);
-                    }
-                    None => {
-                        tracing::warn!(interface = %n, "interface not found; filters for it skipped");
-                        missing.insert(n.clone());
-                    }
-                }
+            if let Cond::ArrivalIf(n) | Cond::NotArrivalIf(n) = c {
+                resolved.entry(n.clone()).or_insert_with(|| resolve_luid(n));
             }
+        }
+        let luids: HashMap<String, u64> = resolved
+            .iter()
+            .filter_map(|(n, l)| l.map(|l| (n.clone(), l)))
+            .collect();
+        let is_missing = |n: &String| !luids.contains_key(n);
+        // Fail safe: a block scope on an interface that does not exist (yet) would be
+        // dropped silently. Refuse the apply instead; the previous filters stay and the
+        // engine retries on its next pass.
+        for s in specs.iter().filter(|s| s.action == Action::Block) {
+            if let Some(Cond::ArrivalIf(n)) = s
+                .conds
+                .iter()
+                .find(|c| matches!(c, Cond::ArrivalIf(n) if is_missing(n)))
+            {
+                bail!("interface {n:?} of a block scope does not resolve; keeping the previous filters");
+            }
+        }
+        for n in resolved.iter().filter(|(_, l)| l.is_none()).map(|(n, _)| n) {
+            tracing::warn!(interface = %n, "interface not found; permits for it skipped");
         }
 
         let e = Engine::open()?;
@@ -687,18 +722,38 @@ impl Firewall for WfpFirewall {
             for s in &specs {
                 if s.conds
                     .iter()
-                    .any(|c| matches!(c, Cond::LocalIf(n) if missing.contains(n)))
+                    .any(|c| matches!(c, Cond::ArrivalIf(n) if is_missing(n)))
                 {
+                    continue; // a permit for an interface that does not exist
+                }
+                if s.conds
+                    .iter()
+                    .any(|c| matches!(c, Cond::NotArrivalIf(n) if is_missing(n)))
+                {
+                    // Nothing to exclude: drop the condition.
+                    let mut s = s.clone();
+                    s.conds
+                        .retain(|c| !matches!(c, Cond::NotArrivalIf(n) if is_missing(n)));
+                    self.add_filter(&e, &s, &luids)?;
                     continue;
                 }
                 self.add_filter(&e, s, &luids)?;
             }
             txn.commit()?; // any early return above aborts via Txn::drop
         }
+        *self.applied_luids.lock().unwrap() = resolved;
         if let Err(err) = self.refresh_filter_map(&e) {
             tracing::warn!("could not refresh drop attribution map: {err:#}");
         }
         Ok(())
+    }
+
+    fn interfaces_changed(&self) -> bool {
+        self.applied_luids
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(alias, luid)| resolve_luid(alias) != *luid)
     }
 
     fn disable(&self) -> Result<()> {
@@ -717,6 +772,7 @@ impl Firewall for WfpFirewall {
         )?;
         txn.commit()?;
         self.filters.lock().unwrap().clear();
+        self.applied_luids.lock().unwrap().clear();
         Ok(())
     }
 
@@ -913,7 +969,33 @@ mod tests {
         assert!(permits
             .iter()
             .any(|s| s.conds.contains(&Cond::LocalPort(546))
-                && s.conds.contains(&Cond::RemotePort(547))));
+                && s.conds.contains(&Cond::RemotePort(547))
+                && s.conds.contains(&Cond::Remote(net("fe80::/10")))));
+        // DHCPv4 has no link-local source to require.
+        assert!(permits.iter().any(|s| s.layer == Layer::V4
+            && s.conds.contains(&Cond::RemotePort(67))
+            && !s.conds.iter().any(|c| matches!(c, Cond::Remote(_)))));
+    }
+
+    #[test]
+    fn dhcp_permits_exclude_the_overlay_interface() {
+        let d = DesiredRuleset {
+            scopes: vec![Scope {
+                id: "overlay:ygg0".into(),
+                kind: ScopeKind::Overlay,
+                matcher: ScopeMatch::Interface {
+                    name: "ygg0".into(),
+                    families: Families::Both,
+                },
+            }],
+            rules: vec![],
+        };
+        let p = plan(&d);
+        let dhcp: Vec<_> = p.iter().filter(|s| s.name.contains("dhcp")).collect();
+        assert_eq!(dhcp.len(), 2);
+        assert!(dhcp
+            .iter()
+            .all(|s| s.conds.contains(&Cond::NotArrivalIf("ygg0".into()))));
     }
 
     #[test]
@@ -963,7 +1045,7 @@ mod tests {
         assert_eq!(blocks(Families::Both), vec![Layer::V6, Layer::V4]);
         let p = plan(&mk(Families::V6));
         let b = p.iter().find(|s| s.action == Action::Block).unwrap();
-        assert_eq!(b.conds, vec![Cond::LocalIf("ygg0".into())]);
+        assert_eq!(b.conds, vec![Cond::ArrivalIf("ygg0".into())]);
     }
 
     #[test]
@@ -986,7 +1068,7 @@ mod tests {
             assert!(s.conds.contains(&Cond::LocalAddr(ip("fd00::1"))));
             assert!(s.conds.contains(&Cond::LocalPort(8080)));
             assert!(s.conds.contains(&Cond::Proto(6)));
-            assert!(s.conds.contains(&Cond::LocalIf("ygg0".into())));
+            assert!(s.conds.contains(&Cond::ArrivalIf("ygg0".into())));
         }
         assert!(p[0].conds.contains(&Cond::Remote(net("200::/7"))));
         assert!(p[1].conds.contains(&Cond::Remote(net("fd00::5/128"))));
@@ -1006,7 +1088,7 @@ mod tests {
         assert!(!p[0]
             .conds
             .iter()
-            .any(|c| matches!(c, Cond::Remote(_) | Cond::LocalIf(_))));
+            .any(|c| matches!(c, Cond::Remote(_) | Cond::ArrivalIf(_))));
     }
 
     #[test]
@@ -1050,9 +1132,13 @@ mod tests {
         let c = raw_cond(&mut store, &Cond::Remote(net("10.1.2.3/32")), &luids).unwrap();
         assert_eq!(c.conditionValue.r#type, FWP_UINT32);
         assert_eq!(unsafe { c.conditionValue.Anonymous.uint32 }, 0x0A01_0203);
-        let c = raw_cond(&mut store, &Cond::LocalIf("ygg0".into()), &luids).unwrap();
+        let c = raw_cond(&mut store, &Cond::ArrivalIf("ygg0".into()), &luids).unwrap();
         assert_eq!(c.conditionValue.r#type, FWP_UINT64);
+        assert_eq!(c.fieldKey, FWPM_CONDITION_IP_ARRIVAL_INTERFACE);
+        assert_eq!(c.matchType, FWP_MATCH_EQUAL);
         assert_eq!(unsafe { *c.conditionValue.Anonymous.uint64 }, 42);
-        assert!(raw_cond(&mut store, &Cond::LocalIf("nope".into()), &luids).is_err());
+        let c = raw_cond(&mut store, &Cond::NotArrivalIf("ygg0".into()), &luids).unwrap();
+        assert_eq!(c.matchType, FWP_MATCH_NOT_EQUAL);
+        assert!(raw_cond(&mut store, &Cond::ArrivalIf("nope".into()), &luids).is_err());
     }
 }

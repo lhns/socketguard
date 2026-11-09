@@ -603,7 +603,10 @@ pub fn normalize_credential(
         CredentialKind::YggAddr | CredentialKind::YggSubnet | CredentialKind::Ip => {
             let net = parse_ip_or_net(value)?;
             let in_ygg = ygg_range().contains(&net);
-            if kind == CredentialKind::Ip && !in_ygg && ygg_range().contains(&net.addr()) {
+            // A plain IP network must not contain the Yggdrasil range (`::/6`, `::/0`): it
+            // would trust overlay sources without the interface binding. Networks inside
+            // the range are normalized as Yggdrasil values below.
+            if kind == CredentialKind::Ip && !in_ygg && net.contains(&ygg_range()) {
                 return invalid("this network crosses the Yggdrasil range 200::/7");
             }
             if in_ygg || kind != CredentialKind::Ip {
@@ -1277,6 +1280,12 @@ mod tests {
         assert!(norm(Ip, "200::/16").is_err());
         assert!(norm(Ip, "300:1:2::/48").is_err());
         assert!(norm(Ip, "200::/6").is_err());
+        // Networks that contain the range (`::/6`, `::/1`, `::/0`) must not pass as plain IP.
+        for wide in ["::/6", "::/1", "::/0", "::/3", "200::/6"] {
+            assert!(norm(Ip, wide).is_err(), "{wide}");
+        }
+        assert!(norm(Ip, "2001:db8::/32").is_ok());
+        assert!(norm(Ip, "fc00::/7").is_ok());
         // Explicit kinds validate their shape.
         assert!(norm(YggAddr, "fd00::1").is_err());
         assert!(norm(YggAddr, "300:1:2:3::/64").is_err());

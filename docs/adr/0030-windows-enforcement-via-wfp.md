@@ -25,3 +25,12 @@ ADR 0008 used `netsh advfirewall`. In Windows Firewall a block rule wins over an
 - Precedence, interface matching and ownership are explicit, and user rules are never touched.
 - Unsafe FFI and WFP's API complexity enter the codebase.
 - Rules are no longer visible through `netsh`; inspection goes through `netsh wfp show filters` or the SocketGuard CLI.
+
+## Amendment: hardening after the security review
+
+- **Arrival interface.** Rule `iif` and interface scopes use `FWPM_CONDITION_IP_ARRIVAL_INTERFACE` (where the packet arrived), not `IP_LOCAL_INTERFACE` (the interface of the destination address), so the semantics match nftables and pf.
+- **Adapters get new LUIDs** when they are recreated (wintun after a Yggdrasil restart). The firewall remembers the alias to LUID map of the last apply; `Firewall::interfaces_changed` re-resolves the aliases (cheap) and the engine re-applies when the answer differs.
+- **Unresolvable interfaces fail safe.** A BLOCK scope whose interface alias does not resolve fails the whole apply and the previous filters stay in force (the engine retries each pass); skipping it would silently leave that interface open. A broader block on all interfaces was rejected, because it would cut unrelated traffic whenever an adapter is down. Permits for an unresolvable interface are skipped. Cost: while an adapter is missing, no other change can be applied. Until the adapter returns, filters bound to its old LUID match nothing, which is the gap the retry closes.
+- **Always-allowed permits** (weight 15): the DHCPv6 reply permit has a remote `fe80::/10` condition, and both DHCP permits exclude the overlay interface (`NOT_EQUAL` arrival interface; same-field conditions are ORed, so one overlay can be excluded, and SocketGuard allows a single Yggdrasil network).
+- **Grant permits are hard permits** (`FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT`), so a grant overrides explicit Windows Firewall block rules for that address and port. This is intended: it is the only way to beat Windows Firewall's default block for an inbound flow.
+- **Revocation does not cut established flows.** ALE recv-accept only sees new flows, so a flow admitted by a grant lives until it closes after the grant is revoked. `Firewall::revoke` does nothing on Windows.

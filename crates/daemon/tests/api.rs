@@ -575,6 +575,44 @@ async fn networks_list_add_and_remove() {
 }
 
 #[tokio::test]
+async fn hostile_interface_names_are_refused() {
+    let d = Daemon::new().await;
+    let nl = char::from(10u8);
+    let hostile = [
+        format!("eth0\"{nl} flush ruleset"),
+        format!("a{nl}b"),
+        "x\";accept".to_string(),
+        "x".repeat(65),
+    ];
+    for name in hostile {
+        let (s, body) = d
+            .post(
+                "/api/networks",
+                json!({"type": "dhcpv6", "interface": name}),
+            )
+            .await;
+        assert_eq!(
+            (s, code(&body)),
+            (StatusCode::BAD_REQUEST, "invalid"),
+            "{name:?}"
+        );
+        let (s, body) = d
+            .send(
+                Method::PUT,
+                "/api/settings/protect-host",
+                json!({"interfaces": [name]}),
+            )
+            .await;
+        assert_eq!(
+            (s, code(&body)),
+            (StatusCode::BAD_REQUEST, "invalid"),
+            "{name:?}"
+        );
+    }
+    assert_eq!(d.get("/api/networks").await.1.as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
 async fn networks_are_saved_to_the_config_file() {
     let dir = std::env::temp_dir().join(format!("sg-cfg-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();

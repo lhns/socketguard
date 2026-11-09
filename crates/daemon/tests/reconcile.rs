@@ -380,6 +380,48 @@ async fn reconcile_is_idempotent() {
 }
 
 #[tokio::test]
+async fn a_vanished_firewall_state_is_reapplied_on_the_next_pass() {
+    let h = Harness::new(
+        vec![local(), ygg()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    h.clear_calls();
+    h.fw.simulate_drift();
+    h.reconcile().await;
+    assert_eq!(applied(&h.fw_calls).len(), 1, "drift triggers a re-apply");
+    h.clear_calls();
+    h.reconcile().await;
+    assert!(applied(&h.fw_calls).is_empty());
+}
+
+#[tokio::test]
+async fn a_revoked_grant_cuts_its_established_connections() {
+    let h = Harness::new(
+        vec![lan(), ygg()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let peer = h.peer("friend", CredentialKind::Ip, "2001:db8::7").await;
+    let g = h.grant(&app.id, Subject::Peer(peer)).await;
+    h.reconcile().await;
+    assert!(h.fw.revoked().is_empty(), "granting revokes nothing");
+    h.engine()
+        .await
+        .delete_grant(&h.state, &g.grant.id)
+        .await
+        .unwrap();
+    h.reconcile().await;
+    let revoked = h.fw.revoked();
+    assert_eq!(revoked.len(), 1, "{revoked:?}");
+    assert_eq!(revoked[0].port, 80);
+    assert_eq!(revoked[0].src, Some("2001:db8::7/128".parse().unwrap()));
+}
+
+#[tokio::test]
 async fn interpreter_apps_are_split_by_script() {
     let h = Harness::new(
         vec![local()],
@@ -740,7 +782,11 @@ async fn an_ip_suffix_peer_follows_a_prefix_change() {
 
     let rs = h.last_ruleset();
     assert_eq!(rs.rules.len(), 1);
-    assert_eq!(rs.rules[0].iif, None, "IP-only: no interface binding");
+    assert_eq!(
+        rs.rules[0].iif.as_deref(),
+        Some("eth0"),
+        "IP-only credentials are bound to the network's interface"
+    );
     assert_eq!(
         rs.rules[0].sources,
         Sources::Nets(vec!["2001:db8:1:2::a:b/128".parse().unwrap()])
@@ -832,7 +878,7 @@ async fn a_grant_to_anyone_needs_confirmation_and_local_grants_are_rejected() {
     assert!(rs
         .rules
         .iter()
-        .all(|r| r.sources == Sources::Any && r.iif.is_none()));
+        .all(|r| r.sources == Sources::Any && r.iif.is_some()));
 
     // Duplicates and unknown references are refused.
     let e = h
@@ -880,7 +926,7 @@ async fn deleting_a_peer_removes_its_rules() {
     h.engine().await.delete_peer(&h.state, &a).await.unwrap();
     let rs = h.last_ruleset();
     assert_eq!(rs.rules.len(), 1, "only the other peer's rule remains");
-    assert_eq!(rs.rules[0].iif, None);
+    assert_eq!(rs.rules[0].iif.as_deref(), Some("eth0"));
     assert_eq!(h.state.db.list_grants().await.unwrap().len(), 1);
     let evs = drain(&mut events);
     assert!(evs.contains(&DaemonEvent::PeersChanged) && evs.contains(&DaemonEvent::GrantsChanged));
@@ -1541,7 +1587,7 @@ async fn local_on_a_non_loopback_interface_takes_grants_like_a_lan() {
     assert_eq!(view.reach[0].reach, Reach::IpOnly);
     let rs = h.last_ruleset();
     assert_eq!(rs.rules.len(), 1);
-    assert_eq!(rs.rules[0].iif, None);
+    assert_eq!(rs.rules[0].iif.as_deref(), Some("dummy0"));
     assert_eq!(
         rs.rules[0].sources,
         Sources::Nets(vec!["fd00::5/128".parse().unwrap()])

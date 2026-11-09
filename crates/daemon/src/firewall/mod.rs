@@ -10,8 +10,8 @@ pub mod desired;
 
 use anyhow::Result;
 pub use desired::{
-    Counter, DesiredRuleset, DropEvent, DropSink, Families, Rule, Scope, ScopeKind, ScopeMatch,
-    Sources,
+    revocations, safe_text, Counter, DesiredRuleset, DropEvent, DropSink, Families, Revocation,
+    Rule, Scope, ScopeKind, ScopeMatch, Sources,
 };
 
 /// Platform firewall backend (ADR 0029). Implementations hold no per-socket state: every
@@ -21,6 +21,25 @@ pub use desired::{
 pub trait Firewall: Send + Sync {
     /// Atomically replace all SocketGuard rules with `desired`.
     fn apply(&self, desired: &DesiredRuleset) -> Result<()>;
+
+    /// Whether the installed state is still in force (e.g. nobody deleted the table).
+    /// Cheap enough to call every reconcile pass; `false` makes the engine re-apply.
+    fn verify(&self) -> Result<bool> {
+        Ok(true)
+    }
+
+    /// Whether interfaces resolve differently from the last apply (WFP binds filters to
+    /// interface LUIDs, which change when an adapter is recreated). Cheap; `true` makes
+    /// the engine re-apply.
+    fn interfaces_changed(&self) -> bool {
+        false
+    }
+
+    /// Cut established connections that a ruleset change stopped allowing. Called after a
+    /// successful apply. Best effort: backends that cannot do it say so in their docs.
+    fn revoke(&self, _revoked: &[Revocation]) -> Result<()> {
+        Ok(())
+    }
 
     /// Remove everything SocketGuard installed. Only for explicit `disable` / uninstall.
     fn disable(&self) -> Result<()>;
@@ -103,8 +122,8 @@ pub(crate) fn golden_ruleset() -> DesiredRuleset {
         ],
         rules: vec![
             rule(
-                "a:al1:53:udp:g1",
-                None,
+                "a:al1:53:udp:g1:eth0",
+                Some("eth0"),
                 "fd00::9",
                 53,
                 Protocol::Udp,
@@ -130,8 +149,8 @@ pub(crate) fn golden_ruleset() -> DesiredRuleset {
                 Sources::Nets(vec!["200:1::5/128".parse().unwrap()]),
             ),
             rule(
-                "a:av4:22:tcp:g3",
-                None,
+                "a:av4:22:tcp:g3:eth0",
+                Some("eth0"),
                 "192.0.2.9",
                 22,
                 Protocol::Tcp,

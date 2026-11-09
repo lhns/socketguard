@@ -683,6 +683,7 @@ async fn protect_host_put(
                 },
             })
         }
+        Err(ProtectHostError::Invalid(msg)) => Err(ApiErr::invalid(msg)),
         Err(ProtectHostError::Other(e)) => Err(e.into()),
     }
 }

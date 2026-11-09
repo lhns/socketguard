@@ -155,6 +155,14 @@ async fn validate(
             doc.version
         ));
     }
+    if let Some(bad) = doc
+        .settings
+        .protect_host_interfaces
+        .iter()
+        .find(|i| !i.trim().is_empty() && !socketguard_core::valid_interface_name(i))
+    {
+        return invalid(format!("invalid interface name {bad:?}"));
+    }
     let mut doc = doc.clone();
     let mut peer_labels = BTreeSet::new();
     let mut seen_creds = BTreeSet::new();
@@ -628,6 +636,7 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
                     risks.iter().map(|r| r.to_string()).collect::<Vec<_>>().join("; ")
                 )));
             }
+            Err(ProtectHostError::Invalid(msg)) => return Err(EngineError::Invalid(msg)),
             Err(ProtectHostError::Other(e)) => return Err(EngineError::Internal(e)),
         }
     }

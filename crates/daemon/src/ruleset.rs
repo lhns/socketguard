@@ -8,8 +8,8 @@
 use crate::firewall::{DesiredRuleset, Families, Rule, Scope, ScopeKind, ScopeMatch, Sources};
 use ipnet::IpNet;
 use socketguard_core::{
-    app_identity, credential_source, App, Credential, Grant, ListeningSocket, Network, NetworkKind,
-    Peer, PeerGroup, PortRef, PortSet, Protocol, Subject,
+    app_identity, credential_source, valid_interface_name, App, Credential, Grant, ListeningSocket,
+    Network, NetworkKind, Peer, PeerGroup, PortRef, PortSet, Protocol, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
@@ -98,8 +98,10 @@ pub(crate) fn subject_credentials<'a>(
 ///   be unremediable).
 /// - Rules: for each IP address, each port it serves, each grant that applies, the
 ///   sources of the subject's credentials that are reachable on the address's network,
-///   merged per interface binding. Yggdrasil sources are bound to the network's
-///   interface (ADR 0028). Anyone gives `Sources::Any`.
+///   aggregated so that no source network overlaps another (nft rejects overlapping set
+///   elements). Every rule is bound to its network's interface, not only Yggdrasil ones,
+///   so a forged source on another interface is refused (ADR 0028). Anyone gives
+///   `Sources::Any`, bound the same way.
 ///
 /// Rule ids are `a:<address>:<port>:<proto>:<grant>`, plus `:<interface>` for the rule
 /// bound to an interface. Unique, and stable while the grant and address live.
@@ -111,7 +113,8 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
         snap.networks
             .iter()
             .filter(|n| n.kind == NetworkKind::Yggdrasil)
-            .filter_map(|n| n.interface.clone()),
+            .filter_map(|n| n.interface.clone())
+            .filter(|i| valid_interface_name(i)),
     );
 
     let mut rules: BTreeMap<String, Rule> = BTreeMap::new();
@@ -131,6 +134,17 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
             if !network.grants_apply {
                 continue;
             }
+            let iif = match &network.interface {
+                Some(i) if valid_interface_name(i) => Some(i.clone()),
+                Some(i) => {
+                    warnings.insert(format!(
+                        "Network {} has the invalid interface name {i:?}; it gets no grant rules",
+                        network.id
+                    ));
+                    continue;
+                }
+                None => None,
+            };
             let served = served_ports(app, address);
             for grant in snap.grants.iter().filter(|g| {
                 g.app_id == app.id
@@ -146,21 +160,14 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
                         let Some(net) = credential_source(c, network) else {
                             continue;
                         };
-                        let iif = if network.kind == NetworkKind::Yggdrasil {
-                            match &network.interface {
-                                Some(i) => Some(i.clone()),
-                                None => {
-                                    warnings.insert(format!(
-                                        "Network {} has no interface; skipping its Yggdrasil sources",
-                                        network.id
-                                    ));
-                                    continue;
-                                }
-                            }
-                        } else {
-                            None
-                        };
-                        bound.entry(iif).or_default().push(net);
+                        if network.kind == NetworkKind::Yggdrasil && iif.is_none() {
+                            warnings.insert(format!(
+                                "Network {} has no interface; skipping its Yggdrasil sources",
+                                network.id
+                            ));
+                            continue;
+                        }
+                        bound.entry(iif.clone()).or_default().push(net);
                     }
                 }
                 for port in served
@@ -183,15 +190,19 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
                         );
                     };
                     if grant.subject == Subject::Anyone {
-                        push(base, None, Sources::Any);
+                        let id = match &iif {
+                            Some(i) => format!("{base}:{i}"),
+                            None => base,
+                        };
+                        push(id, iif.clone(), Sources::Any);
                         continue;
                     }
-                    for (iif, nets) in &bound {
-                        let id = match iif {
+                    for (bound_iif, nets) in &bound {
+                        let id = match bound_iif {
                             Some(i) => format!("{base}:{i}"),
                             None => base.clone(),
                         };
-                        push(id, iif.clone(), Sources::Nets(sorted_unique(nets.clone())));
+                        push(id, bound_iif.clone(), Sources::Nets(IpNet::aggregate(nets)));
                     }
                 }
             }
@@ -218,7 +229,21 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
             },
         });
     }
-    for iface in sorted_unique(snap.protect_host.iter().filter(|s| !s.is_empty()).cloned()) {
+    for iface in sorted_unique(
+        snap.protect_host
+            .iter()
+            .filter(|s| !s.is_empty())
+            .filter(|s| {
+                let ok = valid_interface_name(s);
+                if !ok {
+                    warnings.insert(format!(
+                        "Ignoring the invalid protected interface name {s:?}"
+                    ));
+                }
+                ok
+            })
+            .cloned(),
+    ) {
         scopes.push(Scope {
             id: format!("host:{iface}"),
             kind: ScopeKind::WholeHost,
@@ -540,11 +565,11 @@ mod tests {
         let mut s = base();
         s.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
-        assert_eq!(ids(&rs), ["a:an:8080:tcp:g", "a:ay:8080:tcp:g"]);
-        assert!(rs
-            .rules
-            .iter()
-            .all(|r| r.sources == Sources::Any && r.iif.is_none()));
+        assert_eq!(ids(&rs), ["a:an:8080:tcp:g:eth0", "a:ay:8080:tcp:g:ygg0"]);
+        // Anyone is bound to the network's interface like any other rule.
+        assert!(rs.rules.iter().all(|r| r.sources == Sources::Any));
+        assert_eq!(rs.rules[0].iif.as_deref(), Some("eth0"));
+        assert_eq!(rs.rules[1].iif.as_deref(), Some("ygg0"));
         // Local is this machine only: no rule for it, though its address is managed.
         assert!(managed(&rs).contains(&ip("fd00::1")));
     }
@@ -564,13 +589,13 @@ mod tests {
     }
 
     #[test]
-    fn lan_ip_peer_gets_an_unbound_rule_only_on_the_lan() {
+    fn lan_ip_peer_gets_an_interface_bound_rule_only_on_the_lan() {
         let mut s = base();
         s.peers = vec![peer("p", &[(CredentialKind::Ip, "fd00:5a::2/128")])];
         s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
         let rs = build(&s);
-        assert_eq!(ids(&rs), ["a:an:8080:tcp:g"]);
-        assert_eq!(rs.rules[0].iif, None);
+        assert_eq!(ids(&rs), ["a:an:8080:tcp:g:eth0"]);
+        assert_eq!(rs.rules[0].iif.as_deref(), Some("eth0"));
         assert_eq!(rs.rules[0].dst, ip("2001:db8:1:2::100"));
     }
 
@@ -596,7 +621,7 @@ mod tests {
             created_at: Utc::now(),
         }];
         let rs = build(&s);
-        assert_eq!(ids(&rs), ["a:an:8080:tcp:g", "a:ay:8080:tcp:g:ygg0"]);
+        assert_eq!(ids(&rs), ["a:an:8080:tcp:g:eth0", "a:ay:8080:tcp:g:ygg0"]);
         let ygg_rule = &rs.rules[1];
         assert_eq!(
             ygg_rule.sources,
@@ -670,7 +695,7 @@ mod tests {
             grant("other-app", "nope", Subject::Anyone),
         ];
         let rs = build(&s);
-        assert_eq!(ids(&rs), ["a:ay:9090:tcp:narrow"]);
+        assert_eq!(ids(&rs), ["a:ay:9090:tcp:narrow:ygg0"]);
         // A grant for a port the address does not serve gives no rule.
         s.grants[0].port = Some(tcp(1));
         assert!(build(&s).rules.is_empty());
@@ -709,7 +734,7 @@ mod tests {
         // The Only address serves its port even before the app listens on it.
         s.apps[0].ports.clear();
         let rs = build(&s);
-        assert!(rs.rules.iter().any(|r| r.id == "a:ay2:443:tcp:g"));
+        assert!(rs.rules.iter().any(|r| r.id == "a:ay2:443:tcp:g:ygg0"));
     }
 
     #[test]
@@ -726,7 +751,7 @@ mod tests {
         s.networks.retain(|n| n.id != "ygg");
         s.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
-        assert_eq!(ids(&rs), ["a:an:8080:tcp:g"]);
+        assert_eq!(ids(&rs), ["a:an:8080:tcp:g:eth0"]);
         assert!(managed(&rs).contains(&ip("300:1:2:3::100")));
         assert!(!rs.scopes.iter().any(|s| s.id.starts_with("overlay")));
     }
@@ -846,6 +871,54 @@ mod tests {
             socketguard_core::best_reach(&s.peers[0].credentials, &ygg()),
             Reach::Verified
         );
+    }
+
+    #[test]
+    fn overlapping_sources_are_aggregated() {
+        let mut s = base();
+        s.peers = vec![
+            peer(
+                "p",
+                &[
+                    (CredentialKind::Ip, "fd00::/8"),
+                    (CredentialKind::Ip, "fd00::5/128"),
+                    (CredentialKind::Ip, "2001:db8::/64"),
+                    (CredentialKind::Ip, "2001:db8::7/128"),
+                ],
+            ),
+            peer("q", &[(CredentialKind::Ip, "fd00:1::/32")]),
+        ];
+        s.groups = vec![PeerGroup {
+            id: "grp".into(),
+            label: "grp".into(),
+            members: vec!["p".into(), "q".into()],
+            created_at: Utc::now(),
+        }];
+        s.grants = vec![grant("g", "web", Subject::Group("grp".into()))];
+        let rs = build(&s);
+        assert_eq!(
+            rs.rules[0].sources,
+            Sources::Nets(vec![
+                "2001:db8::/64".parse().unwrap(),
+                "fd00::/8".parse().unwrap()
+            ])
+        );
+    }
+
+    #[test]
+    fn hostile_interface_names_never_reach_the_ruleset() {
+        let mut s = base();
+        let evil = format!("eth0{} accept #", '"');
+        s.protect_host = vec![evil.clone(), "eth1".into()];
+        s.networks[1].interface = Some(evil.clone());
+        s.networks[2].interface = Some(format!("ygg0{}x", char::from(10u8)));
+        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        let (rs, warnings) = build_with_warnings(&s);
+        assert!(!warnings.is_empty());
+        assert!(rs.validate().is_ok());
+        assert!(rs.rules.is_empty());
+        let scope_ids: Vec<_> = rs.scopes.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(scope_ids, ["managed", "host:eth1"]);
     }
 
     // ─── Lockout guard ───────────────────────────────────────────────────

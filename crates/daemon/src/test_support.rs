@@ -1,6 +1,6 @@
 use crate::backend::yggdrasil::{NodeInfo, YggdrasilNode};
 use crate::backend::{with_prefix64, Ipv6Backend, Prefix};
-use crate::firewall::{Counter, DesiredRuleset, DropEvent, DropSink, Firewall};
+use crate::firewall::{Counter, DesiredRuleset, DropEvent, DropSink, Firewall, Revocation};
 use crate::monitor::SocketMonitor;
 use crate::network::NetworkInterface;
 use crate::AppState;
@@ -25,6 +25,9 @@ pub enum FirewallCall {
 pub struct MockFirewall {
     pub calls: Arc<Mutex<Vec<FirewallCall>>>,
     fail_apply: AtomicBool,
+    /// The next `verify` reports the installed state as gone.
+    drifted: AtomicBool,
+    revoked: Mutex<Vec<Revocation>>,
     drop_sink: Mutex<Option<DropSink>>,
     counters: Mutex<Vec<Counter>>,
 }
@@ -34,6 +37,8 @@ impl MockFirewall {
         Self {
             calls,
             fail_apply: AtomicBool::new(false),
+            drifted: AtomicBool::new(false),
+            revoked: Mutex::new(Vec::new()),
             drop_sink: Mutex::new(None),
             counters: Mutex::new(Vec::new()),
         }
@@ -54,6 +59,16 @@ impl MockFirewall {
             }
             None => false,
         }
+    }
+
+    /// Make the next `verify` report that the installed rules disappeared.
+    pub fn simulate_drift(&self) {
+        self.drifted.store(true, Ordering::Relaxed);
+    }
+
+    /// Every connection revocation the engine asked for, oldest first.
+    pub fn revoked(&self) -> Vec<Revocation> {
+        self.revoked.lock().unwrap().clone()
     }
 
     /// Make `apply` fail (the call is still recorded).
@@ -84,6 +99,15 @@ impl Firewall for MockFirewall {
         if self.fail_apply.load(Ordering::Relaxed) {
             anyhow::bail!("simulated apply failure");
         }
+        Ok(())
+    }
+
+    fn verify(&self) -> Result<bool> {
+        Ok(!self.drifted.swap(false, Ordering::Relaxed))
+    }
+
+    fn revoke(&self, revoked: &[Revocation]) -> Result<()> {
+        self.revoked.lock().unwrap().extend_from_slice(revoked);
         Ok(())
     }
 

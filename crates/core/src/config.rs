@@ -308,15 +308,38 @@ impl DaemonConfig {
                 }
                 _ => {}
             }
-            if inst.backend.interface().is_some_and(str::is_empty) {
-                return Err(format!(
-                    "backend '{}': interface must not be empty",
-                    inst.id
-                ));
+            if let Some(iface) = inst.backend.interface() {
+                if iface.is_empty() {
+                    return Err(format!(
+                        "backend '{}': interface must not be empty",
+                        inst.id
+                    ));
+                }
+                if !valid_interface_name(iface) {
+                    return Err(format!(
+                        "backend '{}': invalid interface name {iface:?} (allowed: letters, digits, '.', '_', '-' and space, at most {MAX_INTERFACE_NAME} characters)",
+                        inst.id
+                    ));
+                }
             }
         }
         Ok(())
     }
+}
+
+/// Longest accepted interface name.
+pub const MAX_INTERFACE_NAME: usize = 64;
+
+/// Whether `name` may be used as a network interface name. Names end up inside firewall
+/// scripts (nft, pf), so only `[A-Za-z0-9._-]` and the space of Windows aliases
+/// ("Ethernet 2") are allowed: no quotes, backslashes, newlines or other control
+/// characters. One validator for config, API, settings and the renderers.
+pub fn valid_interface_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_INTERFACE_NAME
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b' '))
 }
 
 /// Default Tor control port.
@@ -462,6 +485,44 @@ fn default_log_level() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interface_names_are_validated() {
+        for ok in [
+            "eth0",
+            "ygg0",
+            "Ethernet 2",
+            "br-lan.100",
+            "lo",
+            "Loopback Pseudo-Interface 1",
+        ] {
+            assert!(valid_interface_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "eth0\"; drop",
+            "a\nb",
+            "a\rb",
+            "eth0\" counter drop #",
+            r"a\b",
+            "a;b",
+            "a{b}",
+            "a#b",
+            "a\0b",
+            "a\tb",
+            "ethé",
+            &"x".repeat(65),
+        ] {
+            assert!(!valid_interface_name(bad), "{bad:?}");
+        }
+        assert!(valid_interface_name(&"x".repeat(64)));
+    }
+
+    #[test]
+    fn hostile_interface_is_rejected_on_load() {
+        let json = r#"{"backends":[{"type":"yggdrasil","interface":"ygg0\"\n flush ruleset"}]}"#;
+        assert!(serde_json::from_str::<DaemonConfig>(json).is_err());
+    }
 
     #[test]
     fn backend_id_is_optional_on_input() {

@@ -2,7 +2,8 @@
 //! `nft -f -` transaction. `render` is pure and golden-tested on every platform.
 
 use super::{
-    Counter, DesiredRuleset, DropSink, Families, Firewall, Rule, Scope, ScopeMatch, Sources,
+    safe_text, Counter, DesiredRuleset, DropSink, Families, Firewall, Revocation, Rule, Scope,
+    ScopeMatch, Sources,
 };
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -11,7 +12,9 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::net::IpAddr;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use tracing::warn;
 
 const TABLE: &str = "socketguard";
 /// NFLOG group for scope drops.
@@ -55,7 +58,7 @@ fn l3(ip: &IpAddr) -> &'static str {
 fn rule_line(r: &Rule) -> String {
     let mut s = String::new();
     if let Some(iif) = &r.iif {
-        let _ = write!(s, "iifname \"{iif}\" ");
+        let _ = write!(s, "iifname \"{}\" ", safe_text(iif));
     }
     if let Sources::Nets(nets) = &r.sources {
         let _ = write!(s, "{} saddr {} ", l3(&r.dst), set(nets));
@@ -92,7 +95,7 @@ fn scope_matches(sc: &Scope) -> Vec<String> {
                 Families::V6 => " meta nfproto ipv6",
                 Families::V4 => " meta nfproto ipv4",
             };
-            vec![format!("iifname \"{name}\"{fam}")]
+            vec![format!("iifname \"{}\"{fam}", safe_text(name))]
         }
     }
 }
@@ -112,22 +115,37 @@ pub fn render(rs: &DesiredRuleset) -> String {
     let _ = writeln!(o, "table inet {TABLE} {{");
     for id in &ids {
         // The comment keeps the hashed names readable in `nft list ruleset`.
-        let _ = writeln!(o, "\t# {id}");
+        let _ = writeln!(o, "\t# {}", safe_text(id));
         let _ = writeln!(o, "\tcounter {} {{ }}", counter_name(id));
     }
     o.push_str("\tchain input {\n");
     o.push_str("\t\ttype filter hook input priority 0; policy accept;\n");
     o.push_str("\t\t# always allowed\n");
-    for l in [
-        "ct state established,related accept",
-        "iif lo accept",
-        "icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, nd-redirect, packet-too-big, destination-unreachable, time-exceeded, parameter-problem, mld-listener-query, mld-listener-report, mld2-listener-report } accept",
-        "icmpv6 type echo-request limit rate 5/second accept",
-        "icmp type { destination-unreachable, time-exceeded, parameter-problem } accept",
-        "icmp type echo-request limit rate 5/second accept",
-        "meta nfproto ipv6 udp sport 547 udp dport 546 accept",
-        "meta nfproto ipv4 udp sport 67 udp dport 68 accept",
-    ] {
+    // DHCP replies and echo are for ordinary links; an overlay interface gets neither.
+    let overlays = rs.overlay_interfaces();
+    let not_overlay = if overlays.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "iifname != {} ",
+            set(overlays.iter().map(|i| format!("\"{}\"", safe_text(i))))
+        )
+    };
+    let always = [
+        "ct state established,related accept".to_string(),
+        "iif lo accept".to_string(),
+        // Neighbour discovery is only valid with hop limit 255 (never forwarded). Redirects
+        // and MLD reports are not accepted: a host needs neither.
+        "icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } ip6 hoplimit 255 accept".to_string(),
+        "icmpv6 type { packet-too-big, destination-unreachable, time-exceeded, parameter-problem } accept".to_string(),
+        "icmpv6 type mld-listener-query ip6 saddr fe80::/10 accept".to_string(),
+        "icmpv6 type echo-request limit rate 5/second accept".to_string(),
+        "icmp type { destination-unreachable, time-exceeded, parameter-problem } accept".to_string(),
+        "icmp type echo-request limit rate 5/second accept".to_string(),
+        format!("{not_overlay}ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept"),
+        format!("{not_overlay}meta nfproto ipv4 udp sport 67 udp dport 68 accept"),
+    ];
+    for l in always {
         let _ = writeln!(o, "\t\t{l}");
     }
     o.push_str("\t\t# rules\n");
@@ -140,7 +158,7 @@ pub fn render(rs: &DesiredRuleset) -> String {
             let _ = writeln!(
                 o,
                 "\t\t{m} limit rate 10/second burst 20 packets log group {LOG_GROUP} prefix \"sg:{}\"",
-                sc.id
+                safe_text(&sc.id)
             );
             let _ = writeln!(o, "\t\t{m} counter name \"{}\" drop", counter_name(&sc.id));
         }
@@ -179,8 +197,81 @@ fn run_nft(args: &[&str], stdin: Option<&str>) -> Result<std::process::Output> {
     Ok(child.wait_with_output()?)
 }
 
+/// `conntrack` arguments selecting the flows to a revoked destination: the original
+/// direction's destination, protocol and port.
+fn conntrack_selector(r: &Revocation) -> Vec<String> {
+    vec![
+        "-f".into(),
+        if r.dst.is_ipv6() { "ipv6" } else { "ipv4" }.into(),
+        "-d".into(),
+        r.dst.to_string(),
+        "-p".into(),
+        r.proto.to_string(),
+        "--dport".into(),
+        r.port.to_string(),
+    ]
+}
+
+fn conntrack_args(verb: &str, r: &Revocation, src: Option<IpAddr>) -> Vec<String> {
+    let mut a = vec![verb.to_string()];
+    a.extend(conntrack_selector(r));
+    if let Some(src) = src {
+        a.extend(["-s".to_string(), src.to_string()]);
+    }
+    a
+}
+
+/// The original source addresses in `conntrack -L` output (the first `src=` of a line).
+fn parse_conntrack_sources(out: &str) -> Vec<IpAddr> {
+    out.lines()
+        .filter_map(|l| {
+            l.split_whitespace()
+                .find_map(|t| t.strip_prefix("src="))
+                .and_then(|a| a.parse().ok())
+        })
+        .collect()
+}
+
+fn run_conntrack(args: &[String]) -> std::io::Result<std::process::Output> {
+    Command::new("conntrack")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+}
+
+/// Delete the flows a revocation names. `conntrack -D` takes no network for the source,
+/// so a net is resolved through a listing first. Returns false when the tool is missing.
+fn flush_conntrack(r: &Revocation) -> bool {
+    let mut sources: Vec<Option<IpAddr>> = Vec::new();
+    match r.src {
+        None => sources.push(None),
+        Some(net) if net.prefix_len() == net.max_prefix_len() => sources.push(Some(net.addr())),
+        Some(net) => match run_conntrack(&conntrack_args("-L", r, None)) {
+            Ok(out) => {
+                let mut found = parse_conntrack_sources(&String::from_utf8_lossy(&out.stdout));
+                found.retain(|a| net.contains(a));
+                found.sort();
+                found.dedup();
+                sources.extend(found.into_iter().map(Some));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(e) => warn!("conntrack listing failed: {e}"),
+        },
+    }
+    for src in sources {
+        match run_conntrack(&conntrack_args("-D", r, src)) {
+            Ok(_) => {} // a non-zero exit only means no flow matched
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(e) => warn!("conntrack delete failed: {e}"),
+        }
+    }
+    true
+}
+
 #[derive(Default)]
 pub struct NftablesFirewall {
+    /// The missing-conntrack warning is logged once.
+    conntrack_warned: AtomicBool,
     /// Counter name to rule or scope id, from the last applied ruleset.
     names: Mutex<HashMap<String, String>>,
 }
@@ -193,6 +284,7 @@ impl NftablesFirewall {
 
 impl Firewall for NftablesFirewall {
     fn apply(&self, desired: &DesiredRuleset) -> Result<()> {
+        desired.validate()?;
         let out = run_nft(&["-f", "-"], Some(&transaction(desired)))?;
         if !out.status.success() {
             bail!(
@@ -201,6 +293,32 @@ impl Firewall for NftablesFirewall {
             );
         }
         *self.names.lock().unwrap() = counter_names(desired);
+        Ok(())
+    }
+
+    fn verify(&self) -> Result<bool> {
+        let out = run_nft(&["list", "table", "inet", TABLE], None)?;
+        if out.status.success() {
+            return Ok(true);
+        }
+        let err = String::from_utf8_lossy(&out.stderr);
+        if err.contains("No such file or directory") {
+            return Ok(false);
+        }
+        bail!("nft list table failed: {}", err.trim());
+    }
+
+    fn revoke(&self, revoked: &[Revocation]) -> Result<()> {
+        for r in revoked {
+            if !flush_conntrack(r) {
+                if !self.conntrack_warned.swap(true, Ordering::Relaxed) {
+                    warn!(
+                        "conntrack is not installed: connections of revoked grants stay open until they close"
+                    );
+                }
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -317,6 +435,77 @@ mod tests {
                 bytes: 180
             }]
         );
+    }
+
+    fn revocation(src: Option<&str>) -> Revocation {
+        Revocation {
+            dst: "fd00::9".parse().unwrap(),
+            port: 80,
+            proto: Protocol::Tcp,
+            src: src.map(|s| s.parse().unwrap()),
+        }
+    }
+
+    #[test]
+    fn conntrack_commands() {
+        let r = revocation(Some("fd00::1/128"));
+        assert_eq!(
+            conntrack_args("-D", &r, Some("fd00::1".parse().unwrap())).join(" "),
+            "-D -f ipv6 -d fd00::9 -p tcp --dport 80 -s fd00::1"
+        );
+        assert_eq!(
+            conntrack_args("-D", &revocation(None), None).join(" "),
+            "-D -f ipv6 -d fd00::9 -p tcp --dport 80"
+        );
+    }
+
+    #[test]
+    fn parses_conntrack_listing() {
+        let out = "tcp      6 431999 ESTABLISHED src=fd00::1 dst=fd00::9 sport=5000 dport=80 src=fd00::9 dst=fd00::1 sport=80 dport=5000 [ASSURED] mark=0 use=1\n\
+                   udp      17 5 src=fd00::2 dst=fd00::9 sport=1 dport=80 [UNREPLIED] src=fd00::9 dst=fd00::2 sport=80 dport=1 mark=0 use=1\n";
+        assert_eq!(
+            parse_conntrack_sources(out),
+            vec![
+                "fd00::1".parse::<IpAddr>().unwrap(),
+                "fd00::2".parse().unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn ids_cannot_break_out() {
+        let mut rs = golden_ruleset();
+        let hostile = format!("x{}flush ruleset{}y", char::from(10u8), '"');
+        rs.rules[0].id = hostile.clone();
+        rs.scopes[0].id = hostile;
+        let out = render(&rs);
+        assert!(!out.contains("flush ruleset\n"));
+        assert!(!out.lines().any(|l| l.trim_start().starts_with("flush")));
+        for l in out
+            .lines()
+            .filter(|l| l.contains("prefix") && l.contains("flush"))
+        {
+            assert_eq!(l.matches('"').count(), 2, "{l}");
+        }
+    }
+
+    #[test]
+    fn dhcp_and_echo_are_narrow_and_skip_overlays() {
+        let out = render(&golden_ruleset());
+        assert!(out.contains(
+            "iifname != { \"ygg0\" } ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept"
+        ));
+        assert!(out.contains(
+            "iifname != { \"ygg0\" } meta nfproto ipv4 udp sport 67 udp dport 68 accept"
+        ));
+        assert!(out.contains("ip6 hoplimit 255 accept"));
+        assert!(!out.contains("nd-redirect"));
+        assert!(!out.contains("mld-listener-report"));
+        assert!(!out.contains("mld2-listener-report"));
+        assert!(out.contains("mld-listener-query ip6 saddr fe80::/10 accept"));
+        // Without an overlay there is no exclusion.
+        let plain = render(&DesiredRuleset::default());
+        assert!(plain.contains("\t\tip6 saddr fe80::/10 udp sport 547 udp dport 546 accept"));
     }
 
     #[test]

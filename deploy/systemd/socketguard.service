@@ -1,0 +1,43 @@
+[Unit]
+Description=SocketGuard daemon (applies the stored firewall state before networking comes up)
+# The rules must be in force before any interface is configured (ADR 0026).
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/socketguard-daemon
+Restart=on-failure
+RestartSec=2
+
+# State (socketguard.db, socketguard.json) lives in /var/lib/socketguard, the working
+# directory. The API socket is in /run, so no RuntimeDirectory is needed.
+StateDirectory=socketguard
+WorkingDirectory=/var/lib/socketguard
+ReadWritePaths=/run
+
+# nftables and interface addresses need CAP_NET_ADMIN. CAP_NET_RAW covers the DHCPv6
+# and router-advertisement sockets, CAP_SYS_PTRACE reading other users' /proc entries to
+# identify listening processes; CAP_CHOWN/CAP_FOWNER set the API socket's group and mode.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
