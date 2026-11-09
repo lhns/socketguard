@@ -1,41 +1,40 @@
-#[cfg(target_os = "linux")]
+// The renderers are pure, so nftables and pf compile (and are golden-tested) everywhere;
+// only their command invocations are platform specific.
+pub mod nflog;
 pub mod nftables;
-#[cfg(target_os = "macos")]
 pub mod pf;
 #[cfg(target_os = "windows")]
 pub mod wfp;
 
+pub mod desired;
+
 use anyhow::Result;
-use socketguard_core::Protocol;
-use std::net::Ipv6Addr;
+pub use desired::{
+    Counter, DesiredRuleset, DropEvent, DropSink, Families, Rule, Scope, ScopeKind, ScopeMatch,
+    Sources,
+};
 
-/// Trait for platform-specific firewall management
+/// Platform firewall backend (ADR 0029). Implementations hold no per-socket state: every
+/// call to [`Firewall::apply`] replaces SocketGuard's whole ruleset atomically, so a failed
+/// apply leaves the previous ruleset in force. Rules survive daemon exit (the state is
+/// frozen, ADR 0026); only [`Firewall::disable`] removes them.
 pub trait Firewall: Send + Sync {
-    /// Ensure only `allowed` source IPs can reach `dest_ip:dest_port`.
-    /// An empty `allowed` list means deny all.
-    fn apply_acl(
-        &self,
-        dest_ip: Ipv6Addr,
-        dest_port: u16,
-        protocol: Protocol,
-        allowed: &[Ipv6Addr],
-    ) -> Result<()>;
+    /// Atomically replace all SocketGuard rules with `desired`.
+    fn apply(&self, desired: &DesiredRuleset) -> Result<()>;
 
-    /// Remove all rules for a dest_ip:port:protocol
-    fn remove_acl(&self, dest_ip: Ipv6Addr, dest_port: u16, protocol: Protocol) -> Result<()>;
+    /// Remove everything SocketGuard installed. Only for explicit `disable` / uninstall.
+    fn disable(&self) -> Result<()>;
 
-    /// Block all traffic to a specific dest_ip:port
-    fn block_all(&self, dest_ip: Ipv6Addr, dest_port: u16, protocol: Protocol) -> Result<()> {
-        self.apply_acl(dest_ip, dest_port, protocol, &[])
+    /// Current counters for rules and scopes, keyed by their ids. Empty if unsupported.
+    fn counters(&self) -> Result<Vec<Counter>> {
+        Ok(Vec::new())
     }
 
-    /// Allow all traffic to a specific dest_ip:port (remove restrictions)
-    fn allow_all(&self, dest_ip: Ipv6Addr, dest_port: u16, protocol: Protocol) -> Result<()> {
-        self.remove_acl(dest_ip, dest_port, protocol)
+    /// Start delivering drop events to `sink` (rate-limited by the platform). No-op if
+    /// unsupported. Called at most once.
+    fn subscribe_drops(&self, _sink: DropSink) -> Result<()> {
+        Ok(())
     }
-
-    /// Remove all SocketGuard-managed firewall rules (for startup cleanup / shutdown)
-    fn cleanup_all_rules(&self) -> Result<()>;
 }
 
 /// Create the platform-appropriate firewall
@@ -51,5 +50,93 @@ pub fn create_firewall() -> Box<dyn Firewall> {
     #[cfg(target_os = "macos")]
     {
         Box::new(pf::PfFirewall::new())
+    }
+}
+
+/// A representative ruleset shared by the renderers' golden tests.
+#[cfg(test)]
+pub(crate) fn golden_ruleset() -> DesiredRuleset {
+    use socketguard_core::Protocol;
+    let rule = |id: &str, iif: Option<&str>, dst: &str, port, proto, sources| Rule {
+        id: id.to_string(),
+        iif: iif.map(str::to_string),
+        dst: dst.parse().unwrap(),
+        port,
+        proto,
+        sources,
+    };
+    DesiredRuleset {
+        scopes: vec![
+            Scope {
+                id: "managed".into(),
+                kind: ScopeKind::ManagedAddresses,
+                matcher: ScopeMatch::Destinations(vec![
+                    "fd00::1".parse().unwrap(),
+                    "301::1".parse().unwrap(),
+                    "192.0.2.9".parse().unwrap(),
+                ]),
+            },
+            Scope {
+                id: "overlay:ygg0".into(),
+                kind: ScopeKind::Overlay,
+                matcher: ScopeMatch::Interface {
+                    name: "ygg0".into(),
+                    families: Families::Both,
+                },
+            },
+            Scope {
+                id: "host:eth0".into(),
+                kind: ScopeKind::WholeHost,
+                matcher: ScopeMatch::Interface {
+                    name: "eth0".into(),
+                    families: Families::Both,
+                },
+            },
+            Scope {
+                id: "host:wlan0".into(),
+                kind: ScopeKind::WholeHost,
+                matcher: ScopeMatch::Interface {
+                    name: "wlan0".into(),
+                    families: Families::V6,
+                },
+            },
+        ],
+        rules: vec![
+            rule(
+                "g:sg1:ula:53:udp",
+                None,
+                "fd00::9",
+                53,
+                Protocol::Udp,
+                Sources::Any,
+            ),
+            rule(
+                "s:0af:ygg:8080:tcp",
+                None,
+                "301::1",
+                8080,
+                Protocol::Tcp,
+                Sources::Nets(vec![
+                    "fd00::10/128".parse().unwrap(),
+                    "fd00:5::/32".parse().unwrap(),
+                ]),
+            ),
+            rule(
+                "s:0af:ygg:8080:tcp:ygg:ygg0",
+                Some("ygg0"),
+                "301::1",
+                8080,
+                Protocol::Tcp,
+                Sources::Nets(vec!["200:1::5/128".parse().unwrap()]),
+            ),
+            rule(
+                "s:b1:v4:22:tcp",
+                None,
+                "192.0.2.9",
+                22,
+                Protocol::Tcp,
+                Sources::Nets(vec!["198.51.100.0/24".parse().unwrap()]),
+            ),
+        ],
     }
 }

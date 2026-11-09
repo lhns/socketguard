@@ -8,6 +8,7 @@ use socketguard_core::{
     socket_id, BackendType, ListeningSocket, ManagedSocket, Policy, Protocol, SocketAddress,
 };
 use socketguard_daemon::engine::Engine;
+use socketguard_daemon::firewall::{ScopeMatch, Sources};
 use socketguard_daemon::test_support::*;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
@@ -59,6 +60,11 @@ fn build_test_engine(
     )
 }
 
+/// `Sources::Nets` with exactly one network.
+fn only_source(net: &str) -> Sources {
+    Sources::Nets(vec![net.parse().unwrap()])
+}
+
 /// Helper: create a listening socket.
 fn listening_socket(name: &str, port: u16, protocol: Protocol) -> ListeningSocket {
     ListeningSocket {
@@ -106,10 +112,17 @@ async fn new_socket_gets_address_and_firewall() {
         matches!(&net[0], NetworkCall::AddAddress { iface, prefix, .. } if iface == "lo" && *prefix == 128)
     );
 
-    // MockFirewall should have received block_all (= apply_acl with empty allowed)
-    let fw = fw_calls.lock().unwrap();
+    // One ruleset: closed with no ACL has no rule, but the address is in the managed
+    // scope, i.e. denied (not "inactive").
+    let fw = applied(&fw_calls);
     assert_eq!(fw.len(), 1);
-    assert!(matches!(&fw[0], FirewallCall::ApplyAcl { allowed, .. } if allowed.is_empty()));
+    assert!(fw[0].rules.is_empty());
+    assert_eq!(fw[0].scopes.len(), 1);
+    assert_eq!(fw[0].scopes[0].id, "managed");
+    let ScopeMatch::Destinations(dsts) = &fw[0].scopes[0].matcher else {
+        panic!("managed scope matches destinations");
+    };
+    assert_eq!(dsts, &vec![IpAddr::V6(sockets[0].addresses[0].address)]);
 }
 
 // ─── Test 2: Closed policy with ACL entries ──────────────────────────────────
@@ -150,9 +163,11 @@ async fn closed_policy_with_acl_applies_allowed_ips() {
         engine.reconcile(&state).await.unwrap();
     }
 
-    let fw = fw_calls.lock().unwrap();
-    // Should have applied ACL with the allowed IP
-    assert!(fw.iter().any(|c| matches!(c, FirewallCall::ApplyAcl { allowed, .. } if allowed == &vec!["fd00::100".parse::<Ipv6Addr>().unwrap()])));
+    let fw = applied(&fw_calls);
+    assert_eq!(fw.len(), 1);
+    assert_eq!(fw[0].rules.len(), 1);
+    assert_eq!(fw[0].rules[0].port, 80);
+    assert_eq!(fw[0].rules[0].sources, only_source("fd00::100/128"));
 }
 
 // ─── Test 3: Open policy ─────────────────────────────────────────────────────
@@ -192,11 +207,12 @@ async fn open_policy_removes_acl() {
         engine.reconcile(&state).await.unwrap();
     }
 
-    let fw = fw_calls.lock().unwrap();
-    // Open policy → RemoveAcl (allow all)
-    assert!(fw
-        .iter()
-        .any(|c| matches!(c, FirewallCall::RemoveAcl { .. })));
+    let fw = applied(&fw_calls);
+    assert_eq!(fw.len(), 1);
+    assert_eq!(fw[0].rules.len(), 1);
+    assert_eq!(fw[0].rules[0].sources, Sources::Any);
+    // The address stays inside the managed scope; the rule is what lets traffic through.
+    assert_eq!(fw[0].scopes[0].id, "managed");
 }
 
 // ─── Test 4: Policy change closed→open ───────────────────────────────────────
@@ -212,7 +228,7 @@ async fn policy_change_closed_to_open_updates_firewall() {
     let config = single_backend_config();
     let state = test_app_state(engine, config).await;
 
-    // Reconcile 1: new socket, closed+no ACL = inactive (RemoveAcl to clean stale)
+    // Reconcile 1: new socket, closed with no ACL: denied by the managed scope
     {
         let mut engine = state.engine.write().await;
         engine.reconcile(&state).await.unwrap();
@@ -233,20 +249,16 @@ async fn policy_change_closed_to_open_updates_firewall() {
 
     fw_calls.lock().unwrap().clear();
 
-    // Reconcile 2: open policy should RemoveAcl
+    // Reconcile 2: open policy gives an any-source rule
     {
         let mut engine = state.engine.write().await;
         engine.reconcile(&state).await.unwrap();
     }
 
-    let fw = fw_calls.lock().unwrap();
-    assert!(fw
-        .iter()
-        .any(|c| matches!(c, FirewallCall::RemoveAcl { .. })));
-    // Should NOT have any ApplyAcl since we're open now
-    assert!(!fw
-        .iter()
-        .any(|c| matches!(c, FirewallCall::ApplyAcl { .. })));
+    let fw = applied(&fw_calls);
+    assert_eq!(fw.len(), 1);
+    assert_eq!(fw[0].rules.len(), 1);
+    assert_eq!(fw[0].rules[0].sources, Sources::Any);
 }
 
 // ─── Test 5: Stale socket cleanup ────────────────────────────────────────────
@@ -305,9 +317,10 @@ async fn stale_socket_gets_cleaned_up() {
     let sockets = state.db.list_sockets().await.unwrap();
     assert!(sockets.is_empty());
 
-    // Firewall should have been cleaned (RemoveAcl for the address)
-    let fw = fw_calls.lock().unwrap();
-    assert!(fw.iter().any(|c| matches!(c, FirewallCall::RemoveAcl { dest_ip, port: 8080, .. } if *dest_ip == "fd00::99".parse::<Ipv6Addr>().unwrap())));
+    // The last applied ruleset no longer mentions the address
+    let fw = applied(&fw_calls);
+    assert!(fw.last().unwrap().scopes.is_empty());
+    assert!(fw.last().unwrap().rules.is_empty());
 
     // Network should have address removed
     let net = net_calls.lock().unwrap();
@@ -391,16 +404,18 @@ async fn multi_backend_provisions_multiple_addresses() {
     assert_eq!(sockets.len(), 1);
     assert_eq!(sockets[0].addresses.len(), 2);
 
-    // Each address should have gotten an add_address and block_all
+    // Each address was added to its interface
     let net = net_calls.lock().unwrap();
     assert_eq!(net.len(), 2);
 
-    let fw = fw_calls.lock().unwrap();
-    assert_eq!(fw.len(), 2);
-    // Both should be block_all (ApplyAcl with empty allowed)
-    assert!(fw
-        .iter()
-        .all(|c| matches!(c, FirewallCall::ApplyAcl { allowed, .. } if allowed.is_empty())));
+    // One ruleset covering both addresses in the managed scope, no rules (closed)
+    let fw = applied(&fw_calls);
+    assert_eq!(fw.len(), 1);
+    assert!(fw[0].rules.is_empty());
+    let ScopeMatch::Destinations(dsts) = &fw[0].scopes[0].matcher else {
+        panic!("managed scope matches destinations");
+    };
+    assert_eq!(dsts.len(), 2);
 }
 
 // ─── Test 7: ACL group inheritance ───────────────────────────────────────────
@@ -453,9 +468,11 @@ async fn acl_group_inheritance_applies_group_acl() {
         engine.reconcile(&state).await.unwrap();
     }
 
-    let fw = fw_calls.lock().unwrap();
-    // Should apply ACL with group's allowed IP
-    assert!(fw.iter().any(|c| matches!(c, FirewallCall::ApplyAcl { allowed, .. } if allowed == &vec!["fd00::200".parse::<Ipv6Addr>().unwrap()])));
+    let fw = applied(&fw_calls);
+    assert_eq!(
+        fw.last().unwrap().rules[0].sources,
+        only_source("fd00::200/128")
+    );
 }
 
 // ─── Test 8: Process filter ──────────────────────────────────────────────────
@@ -552,22 +569,24 @@ async fn startup_reconcile_restores_state() {
         engine.startup_reconcile(&state).await;
     }
 
+    // Startup applies the desired state straight away: no cleanup or disable first
+    // (the frozen ruleset is replaced atomically, ADR 0026/0029).
     let fw = fw_calls.lock().unwrap();
-    // Should have cleanup_all first
-    assert!(matches!(&fw[0], FirewallCall::CleanupAll));
-
-    // Should have re-applied firewall (ApplyAcl with the ACL entry)
-    assert!(fw.iter().any(|c| matches!(c, FirewallCall::ApplyAcl { allowed, .. } if allowed == &vec!["fd00::100".parse::<Ipv6Addr>().unwrap()])));
+    assert_eq!(fw.len(), 1);
+    let FirewallCall::Apply(rs) = &fw[0] else {
+        panic!("startup must apply, not flush: {:?}", fw[0]);
+    };
+    assert_eq!(rs.rules[0].sources, only_source("fd00::100/128"));
 
     // Should have re-added the address
     let net = net_calls.lock().unwrap();
     assert!(net.iter().any(|c| matches!(c, NetworkCall::AddAddress { addr, .. } if *addr == "fd00::42".parse::<Ipv6Addr>().unwrap())));
 }
 
-// ─── Test 10: Shutdown cleanup ───────────────────────────────────────────────
+// ─── Test 10: Shutdown freezes state ─────────────────────────────────────────
 
 #[tokio::test]
-async fn shutdown_cleanup_removes_all_addresses() {
+async fn shutdown_removes_nothing() {
     let fw_calls = Arc::new(Mutex::new(Vec::new()));
     let net_calls = Arc::new(Mutex::new(Vec::new()));
 
@@ -610,23 +629,92 @@ async fn shutdown_cleanup_removes_all_addresses() {
             .unwrap();
     }
 
-    // Run shutdown cleanup
     {
         let engine = state.engine.read().await;
-        engine.shutdown_cleanup(&state).await;
+        engine.shutdown().await;
     }
 
-    // Firewall should have cleanup_all
-    let fw = fw_calls.lock().unwrap();
-    assert!(fw.iter().any(|c| matches!(c, FirewallCall::CleanupAll)));
+    // Rules and addresses stay (ADR 0026): no firewall call, no address removal.
+    assert!(fw_calls.lock().unwrap().is_empty());
+    assert!(net_calls.lock().unwrap().is_empty());
+}
 
-    // Network should have removed both addresses
+// ─── Test 10b: disable removes everything ────────────────────────────────────
+
+#[tokio::test]
+async fn disable_removes_rules_and_addresses() {
+    let fw_calls = Arc::new(Mutex::new(Vec::new()));
+    let net_calls = Arc::new(Mutex::new(Vec::new()));
+
+    let engine = build_test_engine(
+        MockSocketMonitor::new(vec![]),
+        fw_calls.clone(),
+        net_calls.clone(),
+    );
+    let state = test_app_state(engine, single_backend_config()).await;
+
+    for (name, port, ip_suffix) in [("nginx", 80u16, "42"), ("redis", 6379u16, "43")] {
+        let addr = SocketAddress {
+            backend_id: "mock-ula".to_string(),
+            backend_type: BackendType::Ula,
+            address: format!("fd00::{ip_suffix}").parse().unwrap(),
+            interface: "lo".to_string(),
+            prefix_len: 128,
+            policy: Policy::Closed,
+        };
+        let socket = ManagedSocket {
+            id: format!("tcp:{name}:{port}"),
+            pid: 1000,
+            process_name: name.to_string(),
+            port,
+            protocol: Protocol::Tcp,
+            addresses: vec![addr.clone()],
+            policy: Policy::Closed,
+            exe_path: None,
+            cmdline: None,
+            first_seen: chrono::Utc::now(),
+            last_seen: chrono::Utc::now(),
+            acl_group_id: None,
+            socket_group_ids: vec![],
+        };
+        state.db.upsert_socket(&socket).await.unwrap();
+        state
+            .db
+            .upsert_socket_address(&socket.id, &addr)
+            .await
+            .unwrap();
+    }
+    // A socket group address counts too.
+    let group = state.db.create_socket_group("web", "nginx").await.unwrap();
+    state
+        .db
+        .upsert_socket_group_address(&socketguard_core::SocketGroupAddress {
+            group_id: group.id,
+            backend_id: "mock-ula".into(),
+            address: "fd00::44".parse().unwrap(),
+            interface: "lo".into(),
+            prefix_len: 128,
+            policy: Policy::Closed,
+        })
+        .await
+        .unwrap();
+
+    {
+        let engine = state.engine.read().await;
+        engine.disable(&state).await.unwrap();
+    }
+
+    assert_eq!(*fw_calls.lock().unwrap(), vec![FirewallCall::Disable]);
     let net = net_calls.lock().unwrap();
-    let remove_count = net
+    let removed: Vec<_> = net
         .iter()
-        .filter(|c| matches!(c, NetworkCall::RemoveAddress { .. }))
-        .count();
-    assert_eq!(remove_count, 2);
+        .filter_map(|c| match c {
+            NetworkCall::RemoveAddress { addr, .. } => Some(*addr),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(removed.len(), 3);
+    assert!(removed.contains(&"fd00::44".parse().unwrap()));
 }
 
 // ─── Test 11: Error resilience — add_address fails for one backend ────────
@@ -721,14 +809,63 @@ async fn error_resilience_partial_backend_failure() {
         .count();
     assert_eq!(add_count, 2, "both add_address should have been attempted");
 
-    // The "lo" backend's firewall rule should have been applied (block_all succeeds after add_address)
-    // The "eth0" backend's firewall rule is skipped because add_address failed (continue in loop)
-    let fw = fw_calls.lock().unwrap();
-    // At least one firewall call for the successful backend
-    assert!(
-        fw.len() >= 1,
-        "at least the successful backend should get a firewall rule"
+    // The ruleset covers both addresses regardless: the failed one is simply not on the
+    // interface yet, so it is unreachable, and the scope is ready when it appears.
+    let fw = applied(&fw_calls);
+    assert_eq!(fw.len(), 1);
+    let ScopeMatch::Destinations(dsts) = &fw[0].scopes[0].matcher else {
+        panic!("managed scope matches destinations");
+    };
+    assert_eq!(dsts.len(), 2);
+}
+
+// ─── Test 11b: no ruleset in place, no addresses ─────────────────────────
+
+#[tokio::test]
+async fn failed_apply_keeps_addresses_off_interfaces() {
+    let fw_calls = Arc::new(Mutex::new(Vec::new()));
+    let net_calls = Arc::new(Mutex::new(Vec::new()));
+    let firewall = Arc::new(MockFirewall::new(fw_calls.clone()));
+    firewall.set_failing(true);
+    let monitor = MockSocketMonitor::new(vec![listening_socket("nginx", 80, Protocol::Tcp)]);
+    let mut backends = HashMap::new();
+    backends.insert(
+        "mock-ula".to_string(),
+        socketguard_daemon::engine::ActiveBackend {
+            config: BackendInstanceConfig {
+                id: "mock-ula".to_string(),
+                backend: BackendConfig::Ula {
+                    interface: "lo".to_string(),
+                },
+            },
+            backend: Box::new(MockIpv6Backend::new("fd00::", 128, "lo")),
+        },
     );
+    let engine = Engine::new_injectable(
+        Box::new(monitor),
+        firewall.clone(),
+        Arc::new(MockNetworkInterface::new(net_calls.clone())),
+        backends,
+        vec!["mock-ula".to_string()],
+    );
+    let state = test_app_state(engine, single_backend_config()).await;
+
+    {
+        let mut engine = state.engine.write().await;
+        engine.reconcile(&state).await.unwrap();
+    }
+    assert!(
+        net_calls.lock().unwrap().is_empty(),
+        "an address nothing denies must not be added"
+    );
+
+    // Once the firewall works again the next pass applies and adds the address.
+    firewall.set_failing(false);
+    {
+        let mut engine = state.engine.write().await;
+        engine.reconcile(&state).await.unwrap();
+    }
+    assert_eq!(net_calls.lock().unwrap().len(), 1);
 }
 
 // ─── Test 12: Backend add/remove ─────────────────────────────────────────
@@ -889,9 +1026,17 @@ async fn socket_group_provisioning_and_acl() {
             .unwrap();
     }
 
-    let fw = fw_calls.lock().unwrap();
-    // Should have applied ACL with the allowed IP for the group address
-    assert!(fw.iter().any(|c| matches!(c, FirewallCall::ApplyAcl { allowed, .. } if allowed == &vec!["fd00::300".parse::<Ipv6Addr>().unwrap()])));
+    // One rule per member (443 and 80) for the group's address, with the ACL source
+    let fw = applied(&fw_calls);
+    let rs = fw.last().unwrap();
+    let group_rules: Vec<_> = rs.rules.iter().filter(|r| r.id.starts_with("g:")).collect();
+    let mut ports: Vec<_> = group_rules.iter().map(|r| r.port).collect();
+    ports.sort();
+    assert_eq!(ports, [80, 443]);
+    assert!(group_rules
+        .iter()
+        .all(|r| r.dst == IpAddr::V6(sg_addrs[0].address)
+            && r.sources == only_source("fd00::300/128")));
 }
 
 // ─── Test 14: Idempotency — reconcile 3x with no state changes ──────────
@@ -919,7 +1064,7 @@ async fn idempotent_reconcile_no_duplicate_calls() {
 
     // Record initial call counts
     let initial_net_count = net_calls.lock().unwrap().len(); // 1 add_address
-    let initial_fw_count = fw_calls.lock().unwrap().len(); // 1 block_all
+    let initial_fw_count = fw_calls.lock().unwrap().len(); // 1 ruleset
 
     // Reconcile 2 and 3: no new sockets, same state
     for _ in 0..2 {
@@ -939,14 +1084,11 @@ async fn idempotent_reconcile_no_duplicate_calls() {
         "no new add_address calls on idempotent reconciles"
     );
 
-    // Firewall calls will grow because reconcile re-applies firewall on each pass for existing sockets.
-    // But the number of firewall calls per reconcile should be bounded (1 per address per reconcile).
+    // An unchanged ruleset is not re-sent.
     let final_fw_count = fw_calls.lock().unwrap().len();
-    // 1 from initial provision + 2 from subsequent reconciles (1 each for the existing socket)
     assert_eq!(
-        final_fw_count,
-        initial_fw_count + 2,
-        "each reconcile should apply firewall once per address, not more"
+        final_fw_count, initial_fw_count,
+        "unchanged state must not re-apply the ruleset"
     );
 }
 
@@ -1200,14 +1342,15 @@ async fn prefix_change_rehomes_socket_address_keeping_iid() {
     assert!(on_iface.contains(&new));
     assert!(!on_iface.contains(&old));
 
-    let fw = h.fw_calls.lock().unwrap();
-    assert!(fw.iter().any(
-        |c| matches!(c, FirewallCall::RemoveAcl { dest_ip, port: 80, .. } if *dest_ip == old)
-    ));
-    // Open policy: the firewall was re-applied for the new address.
-    assert!(fw.iter().any(
-        |c| matches!(c, FirewallCall::RemoveAcl { dest_ip, port: 80, .. } if *dest_ip == new)
-    ));
+    // The ruleset follows the address: open rule and managed scope now name the new one.
+    let fw = applied(&h.fw_calls);
+    let last = fw.last().unwrap();
+    assert_eq!(last.rules.len(), 1);
+    assert_eq!(last.rules[0].dst, IpAddr::V6(new));
+    let ScopeMatch::Destinations(dsts) = &last.scopes[0].matcher else {
+        panic!("managed scope matches destinations");
+    };
+    assert_eq!(dsts, &vec![IpAddr::V6(new)]);
 }
 
 #[tokio::test]
@@ -1266,13 +1409,13 @@ async fn missing_address_is_re_added() {
     let h = prefix_harness(vec![listening_socket("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
     let sid = h.state.db.list_sockets().await.unwrap()[0].id.clone();
-    // Closed with no ACL entries is inactive: not expected on the interface.
     let a = h.state.db.list_sockets().await.unwrap()[0].addresses[0].address;
+    // Closed addresses are on the interface too (denied by the ruleset, not absent).
     h.net.drop_address("ygg0", a);
     h.reconcile().await;
     assert!(
-        !h.net.addresses("ygg0").contains(&a),
-        "inactive address stays off"
+        h.net.addresses("ygg0").contains(&a),
+        "closed address is restored"
     );
 
     h.state
@@ -1280,10 +1423,11 @@ async fn missing_address_is_re_added() {
         .update_address_policy(&sid, "ygg", Policy::Open)
         .await
         .unwrap();
+    h.net.drop_address("ygg0", a);
     h.reconcile().await;
     assert!(
         h.net.addresses("ygg0").contains(&a),
-        "active address is restored"
+        "open address is restored"
     );
 }
 
@@ -1343,4 +1487,99 @@ async fn ula_global_id_survives_restart() {
 
     drop(db);
     let _ = std::fs::remove_file(&path);
+}
+
+// ─── Whole-host protection and the lockout guard ─────────────────────────────
+
+fn sshd_listener() -> ListeningSocket {
+    listening_socket("sshd", 22, Protocol::Tcp)
+}
+
+#[tokio::test]
+async fn protect_host_is_refused_when_it_would_lock_out_sshd() {
+    use socketguard_daemon::engine::ProtectHostError;
+    let fw_calls = Arc::new(Mutex::new(Vec::new()));
+    let net_calls = Arc::new(Mutex::new(Vec::new()));
+    let monitor = MockSocketMonitor::new(vec![sshd_listener()]);
+    let engine = build_test_engine(monitor, fw_calls.clone(), net_calls);
+    let state = test_app_state(engine, single_backend_config()).await;
+    {
+        let mut engine = state.engine.write().await;
+        engine.reconcile(&state).await.unwrap();
+    }
+    fw_calls.lock().unwrap().clear();
+
+    // sshd is closed with no grant: refused, nothing stored, nothing applied.
+    let err = {
+        let engine = state.engine.read().await;
+        engine
+            .set_protect_host(&state, vec!["eth0".into()], false)
+            .await
+            .unwrap_err()
+    };
+    assert!(matches!(&err, ProtectHostError::Lockout(r) if r.len() == 1 && r[0].port == 22));
+    assert!(state
+        .db
+        .get_setting("protect_host_interfaces")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(fw_calls.lock().unwrap().is_empty());
+
+    // Force overrides, reports the risk, stores the setting and applies the scope.
+    let risks = {
+        let engine = state.engine.read().await;
+        engine
+            .set_protect_host(&state, vec!["eth0".into()], true)
+            .await
+            .unwrap()
+    };
+    assert_eq!(risks.len(), 1);
+    assert_eq!(
+        state
+            .db
+            .get_setting("protect_host_interfaces")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(r#"["eth0"]"#)
+    );
+    let rs = applied(&fw_calls).pop().unwrap();
+    assert!(rs.scopes.iter().any(|s| s.id == "host:eth0"));
+
+    // An empty list switches it off again, without any check.
+    {
+        let engine = state.engine.read().await;
+        engine
+            .set_protect_host(&state, vec![], false)
+            .await
+            .unwrap();
+    }
+    let rs = applied(&fw_calls).pop().unwrap();
+    assert!(!rs.scopes.iter().any(|s| s.id == "host:eth0"));
+}
+
+#[tokio::test]
+async fn protect_host_is_allowed_once_sshd_is_granted() {
+    let fw_calls = Arc::new(Mutex::new(Vec::new()));
+    let monitor = MockSocketMonitor::new(vec![sshd_listener()]);
+    let engine = build_test_engine(monitor, fw_calls, Arc::new(Mutex::new(Vec::new())));
+    let state = test_app_state(engine, single_backend_config()).await;
+    {
+        let mut engine = state.engine.write().await;
+        engine.reconcile(&state).await.unwrap();
+    }
+    let sid = state.db.list_sockets().await.unwrap()[0].id.clone();
+    state
+        .db
+        .update_address_policy(&sid, "mock-ula", Policy::Open)
+        .await
+        .unwrap();
+
+    let engine = state.engine.read().await;
+    let risks = engine
+        .set_protect_host(&state, vec!["lo".into()], false)
+        .await
+        .unwrap();
+    assert!(risks.is_empty());
 }

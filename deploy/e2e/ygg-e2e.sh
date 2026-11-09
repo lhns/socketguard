@@ -35,6 +35,9 @@ retry() {
 
 A() { docker exec "$NODE_A" "$@"; }
 B() { docker exec "$NODE_B" "$@"; }
+daemon_running() { A pgrep -x socketguard-dae; }
+daemon_start() { docker exec -d "$NODE_A" sh -c "SOCKETGUARD_CONFIG=/etc/sg.json exec $DAEMON >>/var/log/sg.log 2>&1"; }
+daemon_stop() { A pkill -x socketguard-dae; retry 15 sh -c "! docker exec $NODE_A pgrep -x socketguard-dae"; }
 
 cleanup() {
   if [ "$failures" -ne 0 ]; then
@@ -101,7 +104,7 @@ docker exec -i "$NODE_A" sh -c 'cat > /etc/sg.json' <<JSON
   "backends": [{"id": "ygg", "type": "yggdrasil", "interface": "ygg0", "admin_endpoint": "$SOCK"}]
 }
 JSON
-docker exec -d "$NODE_A" sh -c "SOCKETGUARD_CONFIG=/etc/sg.json exec $DAEMON >/var/log/sg.log 2>&1"
+daemon_start
 
 # ── Allocation ───────────────────────────────────────────────────────────────
 # The listener's socket, its address, and whether that address is inside A's subnet.
@@ -119,8 +122,24 @@ step "address is configured on ygg0" retry 10 on_ygg0 "$ADDR"
 
 # ── Reachability ─────────────────────────────────────────────────────────────
 fetch_from_b() { B curl -fsS --max-time 5 "http://[$ADDR]:$PORT/" | grep -q sg-e2e-ok; }
+fetch_node_addr_from_b() { B curl -fsS --max-time 5 "http://[$NODE_ADDR]:$PORT/" | grep -q sg-e2e-ok; }
+ping_node_from_b() { B ping -6 -c 1 -W 3 "$NODE_ADDR"; }
+table_exists() { A nft list table inet socketguard >/dev/null; }
+
+# The overlay works (control), and the daemon installed its table.
+step "B reaches A over Yggdrasil (ping, always allowed)" retry 90 ping_node_from_b || exit 1
+step "the daemon installed the nftables table" table_exists
+
+# Secure by default: the policy is closed, so the allocated address is denied.
+step "closed: B cannot fetch the allocated address" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
+step "closed address is still configured on ygg0" on_ygg0 "$ADDR"
+
 step "open the socket via the CLI" A "$CLI" policy "$SID" open
-step "B can fetch from the new address" retry 60 fetch_from_b
+step "open: B can fetch from the new address" retry 30 fetch_from_b
+
+# The listener is bound to ::, so it also answers on A's own node address; the overlay
+# scope denies that because no grant covers it.
+step "wildcard listener is NOT reachable via A's 200: node address" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
 
 # ── Yggdrasil restart: same key, new tun ─────────────────────────────────────
 A pkill -x yggdrasil
@@ -129,6 +148,30 @@ ygg_start "$NODE_A"
 step "Yggdrasil is back on A with the same subnet" retry 30 sh -c "[ \"\$(docker exec $NODE_A yggdrasilctl -json -endpoint $SOCK getSelf | jq -r .subnet)\" = \"$SUBNET\" ]"
 step "address came back on ygg0" retry 40 on_ygg0 "$ADDR"
 step "B can fetch again" retry 90 fetch_from_b
+step "the overlay scope still covers the new tun" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
+
+# ── Daemon stop freezes the state ────────────────────────────────────────────
+step "stop the daemon" daemon_stop
+step "stopped: the table stays" table_exists
+step "stopped: the address stays on ygg0" on_ygg0 "$ADDR"
+step "stopped: open stays open" fetch_from_b
+step "stopped: the node address stays closed" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
+
+# A restart is not an outage and replaces the ruleset instead of flushing it.
+daemon_start
+step "restarted: daemon is up" retry 20 daemon_running
+step "restarted: open stays open" fetch_from_b
+step "close the socket via the CLI" retry 30 A "$CLI" policy "$SID" closed
+step "closed: B cannot fetch" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
+step "stop the daemon again" daemon_stop
+step "stopped: closed stays closed" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
+step "stopped: the table stays" table_exists
+
+# ── Disable ──────────────────────────────────────────────────────────────────
+step "daemon --disable succeeds" A sh -c "SOCKETGUARD_CONFIG=/etc/sg.json $DAEMON --disable"
+step "disable removed the table" sh -c "! docker exec $NODE_A nft list table inet socketguard >/dev/null 2>&1"
+step "disable removed the address from ygg0" sh -c "! docker exec $NODE_A ip -6 -j addr show dev ygg0 | jq -e --arg a '$ADDR' '[.[].addr_info[].local] | index(\$a)' >/dev/null"
+step "disabled: the wildcard listener is reachable via the node address" retry 10 fetch_node_addr_from_b
 
 echo
 if [ "$failures" -eq 0 ]; then echo "ALL STEPS PASSED"; else echo "$failures STEP(S) FAILED"; exit 1; fi

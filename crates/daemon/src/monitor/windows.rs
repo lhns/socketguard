@@ -3,7 +3,6 @@ use anyhow::Result;
 use socketguard_core::{ListeningSocket, Protocol};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use windows::Win32::Foundation::FALSE;
 use windows::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6TABLE_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
     MIB_UDP6TABLE_OWNER_PID, MIB_UDPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
@@ -51,7 +50,7 @@ fn list_tcp4_listeners() -> Result<Vec<ListeningSocket>> {
         GetExtendedTcpTable(
             None,
             &mut size,
-            FALSE,
+            false,
             AF_INET.0 as u32,
             TCP_TABLE_OWNER_PID_LISTENER,
             0,
@@ -65,7 +64,7 @@ fn list_tcp4_listeners() -> Result<Vec<ListeningSocket>> {
         let ret = GetExtendedTcpTable(
             Some(buf.as_mut_ptr() as *mut _),
             &mut size,
-            FALSE,
+            false,
             AF_INET.0 as u32,
             TCP_TABLE_OWNER_PID_LISTENER,
             0,
@@ -110,7 +109,7 @@ fn list_tcp6_listeners() -> Result<Vec<ListeningSocket>> {
         GetExtendedTcpTable(
             None,
             &mut size,
-            FALSE,
+            false,
             AF_INET6.0 as u32,
             TCP_TABLE_OWNER_PID_LISTENER,
             0,
@@ -124,7 +123,7 @@ fn list_tcp6_listeners() -> Result<Vec<ListeningSocket>> {
         let ret = GetExtendedTcpTable(
             Some(buf.as_mut_ptr() as *mut _),
             &mut size,
-            FALSE,
+            false,
             AF_INET6.0 as u32,
             TCP_TABLE_OWNER_PID_LISTENER,
             0,
@@ -163,7 +162,7 @@ fn list_udp4_listeners() -> Result<Vec<ListeningSocket>> {
         GetExtendedUdpTable(
             None,
             &mut size,
-            FALSE,
+            false,
             AF_INET.0 as u32,
             UDP_TABLE_OWNER_PID,
             0,
@@ -177,7 +176,7 @@ fn list_udp4_listeners() -> Result<Vec<ListeningSocket>> {
         let ret = GetExtendedUdpTable(
             Some(buf.as_mut_ptr() as *mut _),
             &mut size,
-            FALSE,
+            false,
             AF_INET.0 as u32,
             UDP_TABLE_OWNER_PID,
             0,
@@ -222,7 +221,7 @@ fn list_udp6_listeners() -> Result<Vec<ListeningSocket>> {
         GetExtendedUdpTable(
             None,
             &mut size,
-            FALSE,
+            false,
             AF_INET6.0 as u32,
             UDP_TABLE_OWNER_PID,
             0,
@@ -236,7 +235,7 @@ fn list_udp6_listeners() -> Result<Vec<ListeningSocket>> {
         let ret = GetExtendedUdpTable(
             Some(buf.as_mut_ptr() as *mut _),
             &mut size,
-            FALSE,
+            false,
             AF_INET6.0 as u32,
             UDP_TABLE_OWNER_PID,
             0,

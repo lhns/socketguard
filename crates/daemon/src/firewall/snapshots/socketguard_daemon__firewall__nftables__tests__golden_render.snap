@@ -1,0 +1,42 @@
+---
+source: crates/daemon/src/firewall/nftables.rs
+expression: render(&golden_ruleset())
+---
+table inet socketguard {
+	counter g.3asg1.3aula.3a53.3audp { }
+	counter host.3aeth0 { }
+	counter host.3awlan0 { }
+	counter managed { }
+	counter overlay.3aygg0 { }
+	counter s.3a0af.3aygg.3a8080.3atcp { }
+	counter s.3a0af.3aygg.3a8080.3atcp.3aygg.3aygg0 { }
+	counter s.3ab1.3av4.3a22.3atcp { }
+	chain input {
+		type filter hook input priority 0; policy accept;
+		# always allowed
+		ct state established,related accept
+		iif lo accept
+		icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, nd-redirect, packet-too-big, destination-unreachable, time-exceeded, parameter-problem, mld-listener-query, mld-listener-report, mld2-listener-report } accept
+		icmpv6 type echo-request limit rate 5/second accept
+		icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+		icmp type echo-request limit rate 5/second accept
+		meta nfproto ipv6 udp sport 547 udp dport 546 accept
+		meta nfproto ipv4 udp sport 67 udp dport 68 accept
+		# rules
+		ip6 daddr fd00::9 udp dport 53 counter name "g.3asg1.3aula.3a53.3audp" accept
+		ip6 saddr { fd00::10/128, fd00:5::/32 } ip6 daddr 301::1 tcp dport 8080 counter name "s.3a0af.3aygg.3a8080.3atcp" accept
+		iifname "ygg0" ip6 saddr { 200:1::5/128 } ip6 daddr 301::1 tcp dport 8080 counter name "s.3a0af.3aygg.3a8080.3atcp.3aygg.3aygg0" accept
+		ip saddr { 198.51.100.0/24 } ip daddr 192.0.2.9 tcp dport 22 counter name "s.3ab1.3av4.3a22.3atcp" accept
+		# scopes
+		ip6 daddr { fd00::1, 301::1 } limit rate 10/second burst 20 packets log group 7 prefix "sg:managed"
+		ip6 daddr { fd00::1, 301::1 } counter name "managed" drop
+		ip daddr { 192.0.2.9 } limit rate 10/second burst 20 packets log group 7 prefix "sg:managed"
+		ip daddr { 192.0.2.9 } counter name "managed" drop
+		iifname "ygg0" limit rate 10/second burst 20 packets log group 7 prefix "sg:overlay:ygg0"
+		iifname "ygg0" counter name "overlay.3aygg0" drop
+		iifname "eth0" limit rate 10/second burst 20 packets log group 7 prefix "sg:host:eth0"
+		iifname "eth0" counter name "host.3aeth0" drop
+		iifname "wlan0" meta nfproto ipv6 limit rate 10/second burst 20 packets log group 7 prefix "sg:host:wlan0"
+		iifname "wlan0" meta nfproto ipv6 counter name "host.3awlan0" drop
+	}
+}

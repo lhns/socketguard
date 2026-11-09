@@ -1,72 +1,73 @@
 use crate::backend::yggdrasil::{NodeInfo, YggdrasilNode};
 use crate::backend::{with_prefix64, Ipv6Backend, Prefix};
-use crate::firewall::Firewall;
+use crate::firewall::{DesiredRuleset, Firewall};
 use crate::monitor::SocketMonitor;
 use crate::network::NetworkInterface;
 use crate::AppState;
 use anyhow::Result;
 use socketguard_core::config::DaemonConfig;
-use socketguard_core::{AllocatedAddress, BackendType, ListeningSocket, Protocol};
+use socketguard_core::{AllocatedAddress, BackendType, ListeningSocket};
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 // ─── MockFirewall ────────────────────────────────────────────────────────────
 
+/// What the engine asked the firewall to do.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FirewallCall {
-    ApplyAcl {
-        dest_ip: Ipv6Addr,
-        port: u16,
-        protocol: Protocol,
-        allowed: Vec<Ipv6Addr>,
-    },
-    RemoveAcl {
-        dest_ip: Ipv6Addr,
-        port: u16,
-        protocol: Protocol,
-    },
-    CleanupAll,
+    /// A full ruleset was applied.
+    Apply(DesiredRuleset),
+    Disable,
 }
 
 pub struct MockFirewall {
     pub calls: Arc<Mutex<Vec<FirewallCall>>>,
+    fail_apply: AtomicBool,
 }
 
 impl MockFirewall {
     pub fn new(calls: Arc<Mutex<Vec<FirewallCall>>>) -> Self {
-        Self { calls }
+        Self {
+            calls,
+            fail_apply: AtomicBool::new(false),
+        }
+    }
+
+    /// Make `apply` fail (the call is still recorded).
+    pub fn set_failing(&self, failing: bool) {
+        self.fail_apply.store(failing, Ordering::Relaxed);
     }
 }
 
+/// The rulesets applied so far, oldest first.
+pub fn applied(calls: &Mutex<Vec<FirewallCall>>) -> Vec<DesiredRuleset> {
+    calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|c| match c {
+            FirewallCall::Apply(r) => Some(r.clone()),
+            FirewallCall::Disable => None,
+        })
+        .collect()
+}
+
 impl Firewall for MockFirewall {
-    fn apply_acl(
-        &self,
-        dest_ip: Ipv6Addr,
-        dest_port: u16,
-        protocol: Protocol,
-        allowed: &[Ipv6Addr],
-    ) -> Result<()> {
-        self.calls.lock().unwrap().push(FirewallCall::ApplyAcl {
-            dest_ip,
-            port: dest_port,
-            protocol,
-            allowed: allowed.to_vec(),
-        });
+    fn apply(&self, desired: &DesiredRuleset) -> Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(FirewallCall::Apply(desired.clone()));
+        if self.fail_apply.load(Ordering::Relaxed) {
+            anyhow::bail!("simulated apply failure");
+        }
         Ok(())
     }
 
-    fn remove_acl(&self, dest_ip: Ipv6Addr, dest_port: u16, protocol: Protocol) -> Result<()> {
-        self.calls.lock().unwrap().push(FirewallCall::RemoveAcl {
-            dest_ip,
-            port: dest_port,
-            protocol,
-        });
-        Ok(())
-    }
-
-    fn cleanup_all_rules(&self) -> Result<()> {
-        self.calls.lock().unwrap().push(FirewallCall::CleanupAll);
+    fn disable(&self) -> Result<()> {
+        self.calls.lock().unwrap().push(FirewallCall::Disable);
         Ok(())
     }
 }

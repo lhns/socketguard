@@ -1,22 +1,39 @@
 use crate::backend::{self, iid_of, same_prefix64, with_prefix64, Ipv6Backend};
-use crate::firewall::{self, Firewall};
+use crate::firewall::{self, DesiredRuleset, Firewall};
 use crate::monitor::{self, SocketMonitor};
 use crate::network::{self, NetworkInterface};
+use crate::ruleset::{
+    self, AclGroupSnapshot, BackendInfo, HostInterface, LockoutRisk, Snapshot, SocketGroupSnapshot,
+    SocketSnapshot, PROTECT_HOST_KEY,
+};
+use crate::state::Database;
 use crate::AppState;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
-use socketguard_core::{
-    socket_id, AclEntry, ManagedSocket, Policy, SocketAddress, SocketGroupAddress,
-};
+use socketguard_core::{socket_id, ManagedSocket, Policy, SocketAddress, SocketGroupAddress};
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
+
+/// An unchanged ruleset is still re-applied every this many reconcile passes, which
+/// corrects drift (e.g. someone deleting the table) without hammering `nft`.
+const REAPPLY_EVERY: u32 = 30;
 
 pub struct ActiveBackend {
     pub config: BackendInstanceConfig,
     pub backend: Box<dyn Ipv6Backend>,
+}
+
+/// Why `set_protect_host` did not change anything.
+#[derive(Debug, thiserror::Error)]
+pub enum ProtectHostError {
+    #[error("whole-host protection would lock out remote administration: {}", .0.iter().map(|r| r.to_string()).collect::<Vec<_>>().join("; "))]
+    Lockout(Vec<LockoutRisk>),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 pub struct Engine {
@@ -30,6 +47,13 @@ pub struct Engine {
     ula_global_id: [u8; 5],
     /// Interfaces already reported as unavailable (avoids a warning every poll).
     unavailable_ifaces: Mutex<HashSet<String>>,
+    /// The ruleset last applied successfully, to skip no-op applies.
+    last_applied: Mutex<Option<DesiredRuleset>>,
+    /// Reconcile passes since the last apply.
+    passes_since_apply: AtomicU32,
+    /// The last apply failed. Addresses are not added to interfaces then, because
+    /// nothing would deny them.
+    apply_failed: AtomicBool,
 }
 
 impl Engine {
@@ -64,15 +88,14 @@ impl Engine {
         let current_backend_ids: Vec<String> =
             config.backends.iter().map(|b| b.id.clone()).collect();
 
-        Ok(Self {
+        Ok(Self::assemble(
             monitor,
-            backends,
             firewall,
             network,
+            backends,
             current_backend_ids,
             ula_global_id,
-            unavailable_ifaces: Mutex::default(),
-        })
+        ))
     }
 
     /// Fully injectable constructor — for tests only.
@@ -83,179 +106,238 @@ impl Engine {
         backends: HashMap<String, ActiveBackend>,
         backend_ids: Vec<String>,
     ) -> Self {
+        Self::assemble(
+            monitor,
+            firewall,
+            network,
+            backends,
+            backend_ids,
+            backend::ula::UlaBackend::random_global_id(),
+        )
+    }
+
+    fn assemble(
+        monitor: Box<dyn SocketMonitor>,
+        firewall: Arc<dyn Firewall>,
+        network: Arc<dyn NetworkInterface>,
+        backends: HashMap<String, ActiveBackend>,
+        current_backend_ids: Vec<String>,
+        ula_global_id: [u8; 5],
+    ) -> Self {
         Self {
             monitor,
             backends,
             firewall,
             network,
-            current_backend_ids: backend_ids,
-            ula_global_id: backend::ula::UlaBackend::random_global_id(),
+            current_backend_ids,
+            ula_global_id,
             unavailable_ifaces: Mutex::default(),
+            last_applied: Mutex::default(),
+            passes_since_apply: AtomicU32::new(0),
+            apply_failed: AtomicBool::new(false),
         }
     }
 
-    /// Clean up all SocketGuard-managed firewall rules.
-    pub fn cleanup_all_firewall_rules(&self) {
-        info!("Cleaning up all SocketGuard firewall rules");
-        if let Err(e) = self.firewall.cleanup_all_rules() {
-            warn!("Failed to clean up firewall rules: {e}");
+    // ─── Firewall ────────────────────────────────────────────────────────────
+
+    /// Gather the producer's input from the DB and the active backends.
+    async fn gather_snapshot(&self, state: &AppState) -> anyhow::Result<Snapshot> {
+        let db = &state.db;
+        let mut sockets = Vec::new();
+        for socket in db.list_sockets().await? {
+            let acl = db.get_acl(&socket.id).await?;
+            sockets.push(SocketSnapshot { socket, acl });
+        }
+        let mut acl_groups = Vec::new();
+        for group in db.list_acl_groups().await? {
+            let entries = db.get_acl_group_entries(&group.id).await?;
+            acl_groups.push(AclGroupSnapshot { group, entries });
+        }
+        let mut socket_groups = Vec::new();
+        for group in db.list_socket_groups().await? {
+            let mut members = Vec::new();
+            for sid in db.get_socket_group_members(&group.id).await? {
+                if let Some(s) = db.get_socket(&sid).await? {
+                    members.push((s.port, s.protocol));
+                }
+            }
+            socket_groups.push(SocketGroupSnapshot {
+                addresses: db.get_socket_group_addresses(&group.id).await?,
+                acl: db.get_socket_group_acl_entries(&group.id).await?,
+                members,
+                group,
+            });
+        }
+        let backends = self
+            .backends
+            .iter()
+            .map(|(id, b)| BackendInfo {
+                id: id.clone(),
+                backend_type: b.config.backend.backend_type(),
+                interface: b.config.backend.interface().to_string(),
+            })
+            .collect();
+        let protect_host =
+            ruleset::parse_protect_host(db.get_setting(PROTECT_HOST_KEY).await?.as_deref());
+        Ok(Snapshot {
+            sockets,
+            acl_groups,
+            socket_groups,
+            backends,
+            protect_host,
+        })
+    }
+
+    /// Build the desired ruleset from the current state and apply it atomically. The
+    /// caller holds the firewall lock. With `only_if_changed`, an unchanged ruleset is
+    /// not re-sent (except every `REAPPLY_EVERY` passes).
+    async fn apply_locked(&self, state: &AppState, only_if_changed: bool) -> anyhow::Result<()> {
+        let snapshot = self.gather_snapshot(state).await?;
+        let (desired, warnings) = ruleset::build_with_warnings(&snapshot);
+
+        if only_if_changed && !self.apply_failed.load(Ordering::Relaxed) {
+            let unchanged = self.last_applied.lock().unwrap().as_ref() == Some(&desired);
+            if unchanged
+                && self.passes_since_apply.fetch_add(1, Ordering::Relaxed) + 1 < REAPPLY_EVERY
+            {
+                return Ok(());
+            }
+        }
+        self.passes_since_apply.store(0, Ordering::Relaxed);
+        for w in warnings {
+            warn!("{w}");
+        }
+
+        let fw = self.firewall.clone();
+        let to_apply = desired.clone();
+        let result = tokio::task::spawn_blocking(move || fw.apply(&to_apply)).await?;
+        match result {
+            Ok(()) => {
+                debug!(
+                    "Applied ruleset: {} scopes, {} rules",
+                    desired.scopes.len(),
+                    desired.rules.len()
+                );
+                *self.last_applied.lock().unwrap() = Some(desired);
+                self.apply_failed.store(false, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                *self.last_applied.lock().unwrap() = None;
+                self.apply_failed.store(true, Ordering::Relaxed);
+                error!("Failed to apply firewall ruleset: {e}");
+                Err(e)
+            }
         }
     }
 
-    /// Startup reconciliation: clean stale OS state, then re-apply desired state from DB.
+    /// Rebuild the ruleset from the current state and apply it. Call after any change to
+    /// sockets, addresses, policies, ACLs, groups or backends.
+    pub async fn apply_firewall(&self, state: &AppState) -> anyhow::Result<()> {
+        let _lock = state.firewall_lock.lock().await;
+        self.apply_locked(state, false).await
+    }
+
+    async fn apply_firewall_if_changed(&self, state: &AppState) -> anyhow::Result<()> {
+        let _lock = state.firewall_lock.lock().await;
+        self.apply_locked(state, true).await
+    }
+
+    /// Re-apply after a change to one socket's policy or ACL.
+    pub async fn apply_socket_acl(&self, state: &AppState, socket_id: &str) -> anyhow::Result<()> {
+        if state.db.get_socket(socket_id).await?.is_none() {
+            anyhow::bail!("socket not found");
+        }
+        self.apply_firewall(state).await
+    }
+
+    /// Re-apply after a change to a socket group's policy, members or ACL.
+    pub async fn apply_socket_group_acl(
+        &self,
+        state: &AppState,
+        _group_id: &str,
+    ) -> anyhow::Result<()> {
+        self.apply_firewall(state).await
+    }
+
+    /// Enable (or with an empty list, disable) whole-host protection for `interfaces`.
+    /// Refuses with [`ProtectHostError::Lockout`] when a remote-admin listener would lose
+    /// access, unless `force`. Returns the risks that were overridden.
+    pub async fn set_protect_host(
+        &self,
+        state: &AppState,
+        interfaces: Vec<String>,
+        force: bool,
+    ) -> Result<Vec<LockoutRisk>, ProtectHostError> {
+        let mut interfaces = interfaces;
+        interfaces.retain(|i| !i.trim().is_empty());
+        interfaces.sort();
+        interfaces.dedup();
+        let mut risks = Vec::new();
+        if !interfaces.is_empty() {
+            let snapshot = self.gather_snapshot(state).await?;
+            let listeners = self.monitor.list_listening_sockets()?;
+            let host_ifaces: Vec<HostInterface> = interfaces
+                .iter()
+                .map(|name| HostInterface {
+                    name: name.clone(),
+                    addrs: self
+                        .network
+                        .list_addresses(name)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                })
+                .collect();
+            if let Err(found) = ruleset::check_protect_host(&snapshot, &listeners, &host_ifaces) {
+                if !force {
+                    return Err(ProtectHostError::Lockout(found));
+                }
+                warn!("Enabling whole-host protection despite lockout risks: {found:?}");
+                risks = found;
+            }
+        }
+        let json = serde_json::to_string(&interfaces).map_err(anyhow::Error::from)?;
+        state.db.set_setting(PROTECT_HOST_KEY, &json).await?;
+        self.apply_firewall(state).await?;
+        Ok(risks)
+    }
+
+    // ─── Lifecycle ───────────────────────────────────────────────────────────
+
+    /// Startup: apply the desired state over whatever the previous run left (never a
+    /// flush, ADR 0026), then make sure the addresses are on their interfaces.
     pub async fn startup_reconcile(&self, state: &AppState) {
-        self.cleanup_all_firewall_rules();
-
-        let sockets = match state.db.list_sockets().await {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to list sockets for startup reconciliation: {e}");
-                return;
-            }
-        };
-
-        // Pre-fetch per-backend ACL data with group resolution
-        let mut socket_acls: Vec<(
-            ManagedSocket,
-            HashMap<String, Vec<Ipv6Addr>>,
-            HashMap<String, Policy>,
-        )> = Vec::new();
-        for socket in &sockets {
-            let mut acl_map: HashMap<String, Vec<Ipv6Addr>> = HashMap::new();
-            let mut resolved_policies: HashMap<String, Policy> = HashMap::new();
-            for addr in &socket.addresses {
-                let (effective_policy, _source) = match state
-                    .db
-                    .resolve_effective_policy(&socket.id, &addr.backend_id)
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!(
-                            "Failed to resolve policy for {}:{}: {e}",
-                            socket.id, addr.backend_id
-                        );
-                        (addr.policy, "address".to_string())
-                    }
-                };
-                resolved_policies.insert(addr.backend_id.clone(), effective_policy);
-
-                if effective_policy == Policy::Closed {
-                    let acl = if addr.policy == Policy::Group {
-                        // Get ACL entries from group
-                        match state.db.get_acl_group_for_socket(&socket.id).await {
-                            Ok(Some(group_id)) => state
-                                .db
-                                .get_acl_group_entries_for_backend(&group_id, &addr.backend_id)
-                                .await
-                                .unwrap_or_default(),
-                            _ => Vec::new(),
-                        }
-                    } else {
-                        state
-                            .db
-                            .get_acl_for_backend(&socket.id, &addr.backend_id)
-                            .await
-                            .unwrap_or_default()
-                    };
-                    let allowed = acl
-                        .iter()
-                        .filter_map(|e| e.allowed_ip.parse().ok())
-                        .collect();
-                    acl_map.insert(addr.backend_id.clone(), allowed);
-                }
-            }
-            socket_acls.push((socket.clone(), acl_map, resolved_policies));
+        if let Err(e) = self.apply_firewall(state).await {
+            error!("Startup: could not apply the firewall ruleset: {e}");
         }
-
-        // Run address + firewall setup in parallel
-        let mut join_set = JoinSet::new();
-        for (socket, acl_map, resolved_policies) in socket_acls {
-            let network = self.network.clone();
-            let firewall = self.firewall.clone();
-            join_set.spawn_blocking(move || {
-                for addr in &socket.addresses {
-                    let effective = resolved_policies
-                        .get(&addr.backend_id)
-                        .copied()
-                        .unwrap_or(addr.policy);
-                    // Closed with no ACL = inactive, don't add to interface
-                    if effective == Policy::Closed {
-                        let has_acl = acl_map
-                            .get(&addr.backend_id)
-                            .map(|v| !v.is_empty())
-                            .unwrap_or(false);
-                        if !has_acl {
-                            continue;
-                        }
-                    }
-                    if let Err(e) =
-                        network.add_address(&addr.interface, addr.address, addr.prefix_len)
-                    {
-                        warn!(
-                            "Failed to re-add IPv6 {} for socket {}: {e}",
-                            addr.address, socket.id
-                        );
-                    }
-                }
-
-                if let Err(e) =
-                    apply_firewall_sync(&*firewall, &socket, &acl_map, &resolved_policies)
-                {
-                    warn!("Failed to re-apply firewall for socket {}: {e}", socket.id);
-                }
-            });
+        self.ensure_addresses_present(state).await;
+        if let Err(e) = self.firewall.subscribe_drops(Box::new(|ev| {
+            debug!(
+                "Blocked {} -> {} port {:?} on {:?} (scope {:?})",
+                ev.src, ev.dst, ev.port, ev.iif, ev.scope_id
+            );
+        })) {
+            warn!("Drop logging unavailable: {e}");
         }
-
-        while let Some(result) = join_set.join_next().await {
-            if let Err(e) = result {
-                warn!("Startup reconciliation task failed: {e}");
-            }
-        }
-
-        info!(
-            "Startup reconciliation complete: {} sockets restored",
-            sockets.len()
-        );
+        info!("Startup reconciliation complete");
     }
 
-    /// Graceful shutdown: remove all firewall rules and IPv6 addresses.
-    pub async fn shutdown_cleanup(&self, state: &AppState) {
-        info!("Shutting down: cleaning up firewall rules and IPv6 addresses");
-
-        self.cleanup_all_firewall_rules();
-
-        let sockets = match state.db.list_sockets().await {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to list sockets for shutdown cleanup: {e}");
-                return;
-            }
-        };
-
-        let mut join_set = JoinSet::new();
-        for socket in sockets {
-            let network = self.network.clone();
-            join_set.spawn_blocking(move || {
-                for addr in &socket.addresses {
-                    if let Err(e) = network.remove_address(&addr.interface, addr.address) {
-                        warn!(
-                            "Failed to remove IPv6 {} during shutdown: {e}",
-                            addr.address
-                        );
-                    }
-                }
-            });
-        }
-
-        while let Some(result) = join_set.join_next().await {
-            if let Err(e) = result {
-                warn!("Shutdown cleanup task failed: {e}");
-            }
-        }
-
-        info!("Shutdown cleanup complete");
+    /// Graceful shutdown removes nothing: the ruleset and the addresses stay, so the host
+    /// keeps its protection while the daemon is down (ADR 0026).
+    pub async fn shutdown(&self) {
+        info!("Shutting down; firewall rules and addresses stay in place");
     }
+
+    /// Remove the firewall rules and every SocketGuard address (`--disable`, uninstall).
+    pub async fn disable(&self, state: &AppState) -> anyhow::Result<()> {
+        let _lock = state.firewall_lock.lock().await;
+        *self.last_applied.lock().unwrap() = None;
+        disable_all(&state.db, self.firewall.clone(), self.network.clone()).await
+    }
+
+    // ─── Backends ────────────────────────────────────────────────────────────
 
     /// Check if backends config has changed and apply additions/removals.
     /// Returns true if changes were detected.
@@ -310,9 +392,7 @@ impl Engine {
         let iface = inst.backend.interface().to_string();
         let backend_id = inst.id.clone();
         let backend_type = inst.backend.backend_type();
-
-        let mut new_addresses: Vec<(String, SocketAddress, u16, socketguard_core::Protocol)> =
-            Vec::new();
+        let mut allocated = 0;
 
         for socket in &sockets {
             // Skip if socket already has an address from this backend
@@ -335,8 +415,7 @@ impl Engine {
                         error!("Failed to save socket address: {e}");
                         continue;
                     }
-
-                    new_addresses.push((socket.id.clone(), addr, socket.port, socket.protocol));
+                    allocated += 1;
                 }
                 Err(e) => {
                     error!("Failed to allocate address from '{}': {e}", backend_id);
@@ -344,25 +423,8 @@ impl Engine {
             }
         }
 
-        // Add addresses to interfaces
-        let mut join_set = JoinSet::new();
-        for (_sid, addr, _port, _proto) in &new_addresses {
-            let iface = addr.interface.clone();
-            let ip = addr.address;
-            let prefix = addr.prefix_len;
-            let network = self.network.clone();
-            join_set.spawn_blocking(move || {
-                if let Err(e) = network.add_address(&iface, ip, prefix) {
-                    warn!("Failed to add address {} to {}: {e}", ip, iface);
-                }
-            });
-        }
-        while let Some(result) = join_set.join_next().await {
-            if let Err(e) = result {
-                warn!("Add address task failed: {e}");
-            }
-        }
-
+        // The ruleset (overlay scope, managed addresses) must know the backend before
+        // its addresses go on the interface.
         self.backends.insert(
             inst.id.clone(),
             ActiveBackend {
@@ -370,11 +432,12 @@ impl Engine {
                 backend: b,
             },
         );
+        let _ = self.apply_firewall(state).await;
+        self.ensure_addresses_present(state).await;
 
         info!(
             "Backend '{}' initialized, allocated {} addresses",
-            inst.id,
-            new_addresses.len()
+            inst.id, allocated
         );
     }
 
@@ -392,7 +455,7 @@ impl Engine {
             }
         };
 
-        // Remove addresses from interfaces
+        // Take the addresses off the interfaces first, then drop their rules.
         let mut join_set = JoinSet::new();
         for (_socket_id, addr) in deleted {
             let network = self.network.clone();
@@ -412,10 +475,13 @@ impl Engine {
         }
 
         self.backends.remove(backend_id);
+        let _ = self.apply_firewall(state).await;
         info!("Backend '{}' removed", backend_id);
     }
 
-    /// Reconcile: detect sockets, assign IPs, apply firewall rules.
+    // ─── Reconcile ───────────────────────────────────────────────────────────
+
+    /// Reconcile: detect sockets, assign IPs, apply the firewall ruleset.
     pub async fn reconcile(&mut self, state: &AppState) -> anyhow::Result<()> {
         // Check for config changes
         let config = state.config.read().await;
@@ -438,20 +504,10 @@ impl Engine {
         };
 
         let now = chrono::Utc::now();
+        let mut had_new_sockets = false;
 
-        // 2. Categorize sockets
-        struct ExistingUpdate {
-            socket: ManagedSocket,
-            acl_map: HashMap<String, Vec<Ipv6Addr>>,
-            resolved_policies: HashMap<String, Policy>,
-        }
-        struct NewProvision {
-            socket: ManagedSocket,
-        }
-
-        let mut existing_updates: Vec<ExistingUpdate> = Vec::new();
-        let mut new_provisions: Vec<NewProvision> = Vec::new();
-
+        // 2. Update known sockets, provision new ones (DB only; the ruleset and the
+        // interface addresses follow below, in that order).
         for ls in &current_sockets {
             // Apply process filter
             if !config_snapshot.process_filter.matches(&ls.process_name) {
@@ -461,7 +517,6 @@ impl Engine {
             let sid = socket_id(&ls.process_name, ls.port, ls.protocol);
 
             if let Ok(Some(mut existing)) = state.db.get_socket(&sid).await {
-                // Update metadata
                 existing.pid = ls.pid;
                 existing.process_name = ls.process_name.clone();
                 existing.exe_path = ls.exe_path.clone();
@@ -470,48 +525,6 @@ impl Engine {
                 if let Err(e) = state.db.upsert_socket(&existing).await {
                     error!("Failed to update socket {sid}: {e}");
                 }
-
-                // Build per-backend ACL map with group resolution
-                let mut acl_map: HashMap<String, Vec<Ipv6Addr>> = HashMap::new();
-                let mut resolved_policies: HashMap<String, Policy> = HashMap::new();
-                for addr in &existing.addresses {
-                    let (effective_policy, _) = state
-                        .db
-                        .resolve_effective_policy(&existing.id, &addr.backend_id)
-                        .await
-                        .unwrap_or((addr.policy, "address".to_string()));
-                    resolved_policies.insert(addr.backend_id.clone(), effective_policy);
-
-                    if effective_policy == Policy::Closed {
-                        let acl: Vec<AclEntry> = if addr.policy == Policy::Group {
-                            match state.db.get_acl_group_for_socket(&existing.id).await {
-                                Ok(Some(group_id)) => state
-                                    .db
-                                    .get_acl_group_entries_for_backend(&group_id, &addr.backend_id)
-                                    .await
-                                    .unwrap_or_default(),
-                                _ => Vec::new(),
-                            }
-                        } else {
-                            state
-                                .db
-                                .get_acl_for_backend(&existing.id, &addr.backend_id)
-                                .await
-                                .unwrap_or_default()
-                        };
-                        let allowed = acl
-                            .iter()
-                            .filter_map(|e| e.allowed_ip.parse().ok())
-                            .collect();
-                        acl_map.insert(addr.backend_id.clone(), allowed);
-                    }
-                }
-
-                existing_updates.push(ExistingUpdate {
-                    socket: existing,
-                    acl_map,
-                    resolved_policies,
-                });
                 continue;
             }
 
@@ -525,15 +538,14 @@ impl Engine {
             for (backend_id, active) in &self.backends {
                 match active.backend.allocate(None) {
                     Ok(alloc) => {
-                        let addr = SocketAddress {
+                        addresses.push(SocketAddress {
                             backend_id: backend_id.clone(),
                             backend_type: alloc.backend,
                             address: alloc.address,
                             interface: active.config.backend.interface().to_string(),
                             prefix_len: alloc.prefix_len,
                             policy: Policy::Closed,
-                        };
-                        addresses.push(addr);
+                        });
                     }
                     Err(e) => {
                         error!("Failed to allocate IPv6 from backend '{}': {e}", backend_id);
@@ -566,110 +578,52 @@ impl Engine {
                 error!("Failed to save socket: {e}");
                 continue;
             }
-
-            // Save each address to DB
             for addr in &addresses {
                 if let Err(e) = state.db.upsert_socket_address(&sid, addr).await {
                     error!("Failed to save socket address: {e}");
                 }
+                info!(
+                    "Assigned {} ({}) to {}:{} ({})",
+                    addr.address, addr.backend_id, ls.process_name, ls.port, ls.protocol
+                );
             }
-
-            new_provisions.push(NewProvision { socket: managed });
+            had_new_sockets = true;
         }
 
-        let had_new_sockets = !new_provisions.is_empty();
-
-        // Run all network+firewall operations in parallel
-        let mut join_set = JoinSet::new();
-
-        for update in existing_updates {
-            let firewall = self.firewall.clone();
-            join_set.spawn_blocking(move || {
-                if let Err(e) = apply_firewall_sync(
-                    &*firewall,
-                    &update.socket,
-                    &update.acl_map,
-                    &update.resolved_policies,
-                ) {
-                    warn!("Failed to reconcile firewall for {}: {e}", update.socket.id);
-                }
-            });
-        }
-
-        for prov in new_provisions {
-            let network = self.network.clone();
-            let firewall = self.firewall.clone();
-            join_set.spawn_blocking(move || {
-                for addr in &prov.socket.addresses {
-                    if let Err(e) =
-                        network.add_address(&addr.interface, addr.address, addr.prefix_len)
-                    {
-                        error!(
-                            "Failed to add IPv6 {} to {}: {e}",
-                            addr.address, addr.interface
-                        );
-                        continue;
-                    }
-
-                    if let Err(e) =
-                        firewall.block_all(addr.address, prov.socket.port, prov.socket.protocol)
-                    {
-                        warn!("Failed to apply firewall rule: {e}");
-                    }
-
-                    info!(
-                        "Assigned {} ({}) to {}:{} ({})",
-                        addr.address,
-                        addr.backend_id,
-                        prov.socket.process_name,
-                        prov.socket.port,
-                        prov.socket.protocol
-                    );
-                }
-            });
-        }
-
-        while let Some(result) = join_set.join_next().await {
-            if let Err(e) = result {
-                warn!("Reconciliation task failed: {e}");
-            }
-        }
-
-        // 3. Clean up stale sockets
+        // 3. Clean up stale sockets: addresses off the interfaces, then out of the DB.
         let stale_threshold =
             now - chrono::Duration::seconds(config_snapshot.poll_interval_secs as i64 * 3);
 
         let mut had_stale = false;
         if let Ok(stale) = state.db.stale_sockets(stale_threshold).await {
             had_stale = !stale.is_empty();
-            let mut stale_join_set = JoinSet::new();
-            for s in stale {
+            let ids: Vec<String> = stale.iter().map(|s| s.id.clone()).collect();
+            for s in &stale {
                 info!(
                     "Cleaning up stale socket: {}:{} ({})",
                     s.process_name, s.port, s.id
                 );
-                let sid = s.id.clone();
-                let firewall = self.firewall.clone();
-                let network = self.network.clone();
-                stale_join_set.spawn_blocking(move || {
-                    for addr in &s.addresses {
-                        if let Err(e) = firewall.remove_acl(addr.address, s.port, s.protocol) {
-                            warn!("Failed to remove firewall rules for {}: {e}", sid);
-                        }
-                        if let Err(e) = network.remove_address(&addr.interface, addr.address) {
-                            warn!("Failed to remove IPv6 {}: {e}", addr.address);
-                        }
-                    }
-                });
-
-                if let Err(e) = state.db.delete_socket(&s.id).await {
-                    error!("Failed to delete socket {}: {e}", s.id);
-                }
             }
-
-            while let Some(result) = stale_join_set.join_next().await {
-                if let Err(e) = result {
-                    warn!("Stale cleanup task failed: {e}");
+            let network = self.network.clone();
+            let addrs: Vec<_> = stale
+                .into_iter()
+                .flat_map(|s| s.addresses)
+                .map(|a| (a.interface, a.address))
+                .collect();
+            let removed = tokio::task::spawn_blocking(move || {
+                for (iface, addr) in addrs {
+                    if let Err(e) = network.remove_address(&iface, addr) {
+                        warn!("Failed to remove IPv6 {addr}: {e}");
+                    }
+                }
+            })
+            .await;
+            if let Err(e) = removed {
+                warn!("Stale cleanup task failed: {e}");
+            }
+            for id in ids {
+                if let Err(e) = state.db.delete_socket(&id).await {
+                    error!("Failed to delete socket {id}: {e}");
                 }
             }
         }
@@ -693,6 +647,10 @@ impl Engine {
             }
         }
 
+        // 5. One ruleset for everything above, then the addresses it now covers.
+        if let Err(e) = self.apply_firewall_if_changed(state).await {
+            warn!("Reconcile: firewall not updated: {e}");
+        }
         self.ensure_addresses_present(state).await;
 
         if had_new_sockets || had_stale {
@@ -703,9 +661,10 @@ impl Engine {
     }
 
     /// Re-home stored addresses of prefix-based backends whose /64 changed: keep the
-    /// interface ID, swap the prefix, move the address on the interface, update the DB and
-    /// re-apply the firewall for the affected sockets and socket groups.
+    /// interface ID, swap the prefix, update the DB, take the old addresses off the
+    /// interface, apply the ruleset that covers the new ones and only then add them.
     async fn rehome_prefix_changes(&self, state: &AppState) {
+        let mut moves: Vec<(String, Ipv6Addr, Ipv6Addr, u8)> = Vec::new();
         for (backend_id, active) in &self.backends {
             let prefix = match active.backend.current_prefix() {
                 Ok(Some(p)) if p.len == 64 => p,
@@ -724,7 +683,6 @@ impl Engine {
                 }
             };
             for socket in sockets {
-                let mut changed = false;
                 for addr in socket
                     .addresses
                     .iter()
@@ -738,25 +696,15 @@ impl Engine {
                         "Prefix of backend '{backend_id}' changed: moving {} to {new}",
                         addr.address
                     );
-                    self.move_address(&addr.interface, addr.address, new, addr.prefix_len);
-                    if let Err(e) =
-                        self.firewall
-                            .remove_acl(addr.address, socket.port, socket.protocol)
-                    {
-                        warn!("Failed to remove firewall rules for {}: {e}", addr.address);
-                    }
                     let updated = SocketAddress {
                         address: new,
                         ..addr.clone()
                     };
                     match state.db.upsert_socket_address(&socket.id, &updated).await {
-                        Ok(()) => changed = true,
+                        Ok(()) => {
+                            moves.push((addr.interface.clone(), addr.address, new, addr.prefix_len))
+                        }
                         Err(e) => error!("Failed to save re-homed address: {e}"),
-                    }
-                }
-                if changed {
-                    if let Err(e) = self.apply_socket_acl(state, &socket.id).await {
-                        warn!("Failed to re-apply firewall for {}: {e}", socket.id);
                     }
                 }
             }
@@ -768,16 +716,6 @@ impl Engine {
                     .get_socket_group_addresses(&group.id)
                     .await
                     .unwrap_or_default();
-                let members = state
-                    .db
-                    .get_socket_group_members(&group.id)
-                    .await
-                    .unwrap_or_default();
-                let member = match members.first() {
-                    Some(sid) => state.db.get_socket(sid).await.ok().flatten(),
-                    None => None,
-                };
-                let mut changed = false;
                 for addr in addrs.iter().filter(|a| a.backend_id == *backend_id) {
                     if same_prefix64(addr.address, prefix.addr) {
                         continue;
@@ -787,86 +725,56 @@ impl Engine {
                         "Prefix of backend '{backend_id}' changed: moving group {} address {} to {new}",
                         group.id, addr.address
                     );
-                    self.move_address(&addr.interface, addr.address, new, addr.prefix_len);
-                    if let Some(m) = &member {
-                        let _ = self.firewall.remove_acl(addr.address, m.port, m.protocol);
-                    }
                     let updated = SocketGroupAddress {
                         address: new,
                         ..addr.clone()
                     };
                     match state.db.upsert_socket_group_address(&updated).await {
-                        Ok(()) => changed = true,
+                        Ok(()) => {
+                            moves.push((addr.interface.clone(), addr.address, new, addr.prefix_len))
+                        }
                         Err(e) => error!("Failed to save re-homed group address: {e}"),
                     }
                 }
-                if changed {
-                    if let Err(e) = self.apply_socket_group_acl(state, &group.id).await {
-                        warn!("Failed to re-apply firewall for group {}: {e}", group.id);
-                    }
+            }
+        }
+        if moves.is_empty() {
+            return;
+        }
+
+        // Old addresses leave the interface before the ruleset stops covering them; new
+        // ones are added only once a ruleset that covers them is in place. Without one the
+        // ensure-present pass adds them after the next successful apply.
+        for (iface, old, _, _) in &moves {
+            if let Err(e) = self.network.remove_address(iface, *old) {
+                warn!("Failed to remove {old} from {iface}: {e}");
+            }
+        }
+        if self.apply_firewall(state).await.is_ok() {
+            for (iface, _, new, prefix_len) in moves {
+                if let Err(e) = self.network.add_address(&iface, new, prefix_len) {
+                    warn!("Failed to add {new} to {iface}: {e}");
                 }
             }
         }
-    }
-
-    fn move_address(&self, iface: &str, old: Ipv6Addr, new: Ipv6Addr, prefix_len: u8) {
-        if let Err(e) = self.network.remove_address(iface, old) {
-            warn!("Failed to remove {old} from {iface}: {e}");
-        }
-        if let Err(e) = self.network.add_address(iface, new, prefix_len) {
-            // The ensure-present pass retries.
-            warn!("Failed to add {new} to {iface}: {e}");
-        }
-    }
-
-    /// Whether an address should be on its interface: not a closed address without ACL
-    /// entries (same rule as startup reconciliation).
-    async fn is_address_active(
-        &self,
-        state: &AppState,
-        socket: &ManagedSocket,
-        addr: &SocketAddress,
-    ) -> bool {
-        let effective = state
-            .db
-            .resolve_effective_policy(&socket.id, &addr.backend_id)
-            .await
-            .map(|(p, _)| p)
-            .unwrap_or(addr.policy);
-        if effective != Policy::Closed {
-            return true;
-        }
-        let acl = if addr.policy == Policy::Group {
-            match state.db.get_acl_group_for_socket(&socket.id).await {
-                Ok(Some(gid)) => state
-                    .db
-                    .get_acl_group_entries_for_backend(&gid, &addr.backend_id)
-                    .await
-                    .unwrap_or_default(),
-                _ => Vec::new(),
-            }
-        } else {
-            state
-                .db
-                .get_acl_for_backend(&socket.id, &addr.backend_id)
-                .await
-                .unwrap_or_default()
-        };
-        !acl.is_empty()
     }
 
     /// Re-add expected addresses that are missing from their interface, e.g. after
     /// Yggdrasil restarted and recreated its tun. Interfaces that don't exist are skipped.
+    /// Does nothing while the last ruleset apply failed: an address no scope covers would
+    /// be exposed.
     async fn ensure_addresses_present(&self, state: &AppState) {
+        if self.apply_failed.load(Ordering::Relaxed) {
+            debug!("Not adding addresses: the firewall ruleset is not in place");
+            return;
+        }
         let mut expected: HashMap<String, Vec<(Ipv6Addr, u8)>> = HashMap::new();
         for socket in state.db.list_sockets().await.unwrap_or_default() {
             for addr in &socket.addresses {
-                if self.is_address_active(state, &socket, addr).await {
-                    expected
-                        .entry(addr.interface.clone())
-                        .or_default()
-                        .push((addr.address, addr.prefix_len));
-                }
+                expected
+                    .entry(addr.interface.clone())
+                    .or_default()
+                    .push((addr.address, addr.prefix_len));
             }
         }
         for group in state.db.list_socket_groups().await.unwrap_or_default() {
@@ -907,87 +815,13 @@ impl Engine {
                     continue;
                 }
                 match self.network.add_address(&iface, addr, prefix_len) {
-                    Ok(()) => info!("Re-added missing address {addr} to {iface}"),
-                    Err(e) => warn!("Failed to re-add {addr} to {iface}: {e}"),
+                    Ok(()) => info!("Added address {addr} to {iface}"),
+                    Err(e) => warn!("Failed to add {addr} to {iface}: {e}"),
                 }
             }
         }
     }
 
-    /// Apply firewall rules for a socket based on its current policy and ACL entries.
-    pub async fn apply_socket_acl(&self, state: &AppState, socket_id: &str) -> anyhow::Result<()> {
-        let socket = state
-            .db
-            .get_socket(socket_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("socket not found"))?;
-
-        let _lock = state.firewall_lock.lock().await;
-        self.apply_firewall_for_socket(state, &socket).await
-    }
-
-    /// Apply firewall rules for a socket (per-address policy with group resolution, ADR 0018).
-    async fn apply_firewall_for_socket(
-        &self,
-        state: &AppState,
-        socket: &ManagedSocket,
-    ) -> anyhow::Result<()> {
-        for addr in &socket.addresses {
-            let (effective_policy, _source) = state
-                .db
-                .resolve_effective_policy(&socket.id, &addr.backend_id)
-                .await?;
-
-            match effective_policy {
-                Policy::Closed => {
-                    let acl: Vec<AclEntry> = if addr.policy == Policy::Group {
-                        match state.db.get_acl_group_for_socket(&socket.id).await? {
-                            Some(group_id) => {
-                                state
-                                    .db
-                                    .get_acl_group_entries_for_backend(&group_id, &addr.backend_id)
-                                    .await?
-                            }
-                            None => Vec::new(),
-                        }
-                    } else {
-                        state
-                            .db
-                            .get_acl_for_backend(&socket.id, &addr.backend_id)
-                            .await?
-                    };
-                    let allowed: Vec<Ipv6Addr> = acl
-                        .iter()
-                        .filter_map(|e| e.allowed_ip.parse().ok())
-                        .collect();
-                    if allowed.is_empty() {
-                        // Closed + no ACL = inactive. Remove any stale firewall rules.
-                        let _ =
-                            self.firewall
-                                .remove_acl(addr.address, socket.port, socket.protocol);
-                    } else {
-                        self.firewall.apply_acl(
-                            addr.address,
-                            socket.port,
-                            socket.protocol,
-                            &allowed,
-                        )?;
-                    }
-                }
-                Policy::Open => {
-                    self.firewall
-                        .allow_all(addr.address, socket.port, socket.protocol)?;
-                }
-                Policy::Group => {
-                    // Should not reach here — resolve_effective_policy returns Closed or Open
-                    let _ = self
-                        .firewall
-                        .remove_acl(addr.address, socket.port, socket.protocol);
-                }
-            }
-        }
-        Ok(())
-    }
     /// Ensure a socket group has addresses allocated for all active backends.
     /// Called when members are added to a group.
     pub async fn ensure_socket_group_addresses(
@@ -995,11 +829,10 @@ impl Engine {
         state: &AppState,
         group_id: &str,
     ) -> anyhow::Result<()> {
-        use socketguard_core::{Policy, SocketGroupAddress};
-
         let existing = state.db.get_socket_group_addresses(group_id).await?;
         let existing_backend_ids: Vec<&str> =
             existing.iter().map(|a| a.backend_id.as_str()).collect();
+        let mut allocated = false;
 
         for (backend_id, active) in &self.backends {
             if existing_backend_ids.contains(&backend_id.as_str()) {
@@ -1020,22 +853,11 @@ impl Engine {
                     if let Err(e) = state.db.upsert_socket_group_address(&sg_addr).await {
                         error!("Failed to save socket group address: {e}");
                     } else {
-                        // Add the address to the network interface
-                        if let Err(e) = self.network.add_address(
-                            &sg_addr.interface,
-                            sg_addr.address,
-                            sg_addr.prefix_len,
-                        ) {
-                            error!(
-                                "Failed to add socket group IPv6 {} to {}: {e}",
-                                sg_addr.address, sg_addr.interface
-                            );
-                        } else {
-                            info!(
-                                "Allocated {} ({}) for socket group {}",
-                                sg_addr.address, backend_id, group_id
-                            );
-                        }
+                        info!(
+                            "Allocated {} ({}) for socket group {}",
+                            sg_addr.address, backend_id, group_id
+                        );
+                        allocated = true;
                     }
                 }
                 Err(e) => {
@@ -1047,144 +869,58 @@ impl Engine {
             }
         }
 
+        if allocated {
+            // Ruleset first, then the addresses it covers.
+            self.apply_firewall(state).await?;
+            self.ensure_addresses_present(state).await;
+        }
         Ok(())
     }
 
-    /// Apply firewall rules for a socket group address based on its policy and ACL entries.
-    /// Uses port/protocol from member sockets to configure firewall rules.
-    pub async fn apply_socket_group_acl(
+    /// Delete a socket group: its addresses leave the interfaces, then the ruleset drops
+    /// their scope and rules.
+    pub async fn delete_socket_group(
         &self,
         state: &AppState,
         group_id: &str,
     ) -> anyhow::Result<()> {
-        let addresses = state.db.get_socket_group_addresses(group_id).await?;
-        let members = state.db.get_socket_group_members(group_id).await?;
-        let acl_entries = state.db.get_socket_group_acl_entries(group_id).await?;
-
-        // Get port/protocol from first member socket
-        let member_socket = if let Some(sid) = members.first() {
-            state.db.get_socket(sid).await?
-        } else {
-            None
-        };
-
-        let (port, protocol) = match member_socket {
-            Some(ref s) => (s.port, s.protocol),
-            None => return Ok(()), // No members, nothing to apply
-        };
-
-        let _lock = state.firewall_lock.lock().await;
-
-        for addr in &addresses {
-            let backend_acl: Vec<Ipv6Addr> = acl_entries
-                .iter()
-                .filter(|e| e.backend_id == addr.backend_id)
-                .filter_map(|e| e.allowed_ip.parse().ok())
-                .collect();
-
-            match addr.policy {
-                Policy::Open => {
-                    self.firewall.allow_all(addr.address, port, protocol)?;
-                }
-                Policy::Closed => {
-                    if backend_acl.is_empty() {
-                        let _ = self.firewall.remove_acl(addr.address, port, protocol);
-                    } else {
-                        self.firewall
-                            .apply_acl(addr.address, port, protocol, &backend_acl)?;
-                    }
-                }
-                Policy::Group => {
-                    // Resolve ACL from linked ACL group (ADR 0020)
-                    let sg = state.db.list_socket_groups().await?;
-                    let socket_group = sg.iter().find(|g| g.id == addr.group_id);
-                    if let Some(sg) = socket_group {
-                        if let Some(ref acl_gid) = sg.acl_group_id {
-                            if let Some(acl_group) = state.db.get_acl_group(acl_gid).await? {
-                                match acl_group.policy {
-                                    Policy::Open => {
-                                        self.firewall.allow_all(addr.address, port, protocol)?;
-                                    }
-                                    Policy::Closed => {
-                                        let group_entries =
-                                            state.db.get_acl_group_entries(acl_gid).await?;
-                                        let group_acl: Vec<Ipv6Addr> = group_entries
-                                            .iter()
-                                            .filter(|e| e.backend_id == addr.backend_id)
-                                            .filter_map(|e| e.allowed_ip.parse().ok())
-                                            .collect();
-                                        if group_acl.is_empty() {
-                                            let _ = self.firewall.remove_acl(
-                                                addr.address,
-                                                port,
-                                                protocol,
-                                            );
-                                        } else {
-                                            self.firewall.apply_acl(
-                                                addr.address,
-                                                port,
-                                                protocol,
-                                                &group_acl,
-                                            )?;
-                                        }
-                                    }
-                                    Policy::Group => {
-                                        let _ =
-                                            self.firewall.remove_acl(addr.address, port, protocol);
-                                    }
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                    // No ACL group linked — treat as inactive
-                    let _ = self.firewall.remove_acl(addr.address, port, protocol);
-                }
+        let addrs = state.db.get_socket_group_addresses(group_id).await?;
+        state.db.delete_socket_group(group_id).await?;
+        for a in addrs {
+            if let Err(e) = self.network.remove_address(&a.interface, a.address) {
+                warn!("Failed to remove {} from {}: {e}", a.address, a.interface);
             }
         }
-
-        Ok(())
+        self.apply_firewall(state).await
     }
 }
 
-/// Apply firewall rules synchronously (for use in spawn_blocking).
-/// Uses per-address policy with group resolution (ADR 0018).
-/// `acl_by_backend` provides allowed IPs keyed by backend_id.
-/// `resolved_policies` provides the effective policy after group resolution.
-fn apply_firewall_sync(
-    firewall: &dyn Firewall,
-    socket: &ManagedSocket,
-    acl_by_backend: &HashMap<String, Vec<Ipv6Addr>>,
-    resolved_policies: &HashMap<String, Policy>,
+/// Remove the firewall rules and every SocketGuard address in the DB. Needs only the
+/// database, so `--disable` works without starting an engine.
+pub async fn disable_all(
+    db: &Database,
+    firewall: Arc<dyn Firewall>,
+    network: Arc<dyn NetworkInterface>,
 ) -> anyhow::Result<()> {
-    for addr in &socket.addresses {
-        let effective = resolved_policies
-            .get(&addr.backend_id)
-            .copied()
-            .unwrap_or(addr.policy);
-        match effective {
-            Policy::Open => {
-                firewall.allow_all(addr.address, socket.port, socket.protocol)?;
-            }
-            Policy::Closed => {
-                let allowed = acl_by_backend
-                    .get(&addr.backend_id)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-                if allowed.is_empty() {
-                    // Closed + no ACL = inactive. Clean up any stale rules.
-                    let _ = firewall.remove_acl(addr.address, socket.port, socket.protocol);
-                } else {
-                    firewall.apply_acl(addr.address, socket.port, socket.protocol, allowed)?;
-                }
-            }
-            Policy::Group => {
-                // Should not reach here — resolved_policies should have resolved this
-                let _ = firewall.remove_acl(addr.address, socket.port, socket.protocol);
-            }
+    let mut addrs: Vec<(String, Ipv6Addr)> = Vec::new();
+    for s in db.list_sockets().await? {
+        addrs.extend(s.addresses.into_iter().map(|a| (a.interface, a.address)));
+    }
+    for g in db.list_socket_groups().await? {
+        for a in db.get_socket_group_addresses(&g.id).await? {
+            addrs.push((a.interface, a.address));
         }
     }
-    Ok(())
+    tokio::task::spawn_blocking(move || {
+        // Addresses first: removing the rules first would briefly expose them.
+        for (iface, addr) in addrs {
+            if let Err(e) = network.remove_address(&iface, addr) {
+                warn!("Failed to remove {addr} from {iface}: {e}");
+            }
+        }
+        firewall.disable()
+    })
+    .await?
 }
 
 /// Run the reconciliation loop with shutdown support.
@@ -1215,19 +951,7 @@ pub async fn run_loop(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{FirewallCall, MockFirewall};
-    #[allow(unused_imports)]
-    use socketguard_core::{BackendType, ManagedSocket, Policy, Protocol, SocketAddress};
-    use std::net::Ipv6Addr;
-    use std::sync::{Arc as StdArc, Mutex as StdMutex};
-
-    fn resolved_map(socket: &ManagedSocket) -> HashMap<String, Policy> {
-        socket
-            .addresses
-            .iter()
-            .map(|a| (a.backend_id.clone(), a.policy))
-            .collect()
-    }
+    use socketguard_core::{BackendType, Protocol};
 
     fn test_socket(policy: Policy) -> ManagedSocket {
         ManagedSocket {
@@ -1252,170 +976,6 @@ mod tests {
             acl_group_id: None,
             socket_group_ids: vec![],
         }
-    }
-
-    fn test_socket_multi_addr(policy: Policy) -> ManagedSocket {
-        ManagedSocket {
-            id: "test123".to_string(),
-            pid: 1000,
-            process_name: "test".to_string(),
-            port: 8080,
-            protocol: Protocol::Tcp,
-            addresses: vec![
-                SocketAddress {
-                    backend_id: "ula".to_string(),
-                    backend_type: BackendType::Ula,
-                    address: "fd00::1".parse().unwrap(),
-                    interface: "lo".to_string(),
-                    prefix_len: 128,
-                    policy,
-                },
-                SocketAddress {
-                    backend_id: "slaac-Ethernet".to_string(),
-                    backend_type: BackendType::Slaac,
-                    address: "2001:db8::1".parse().unwrap(),
-                    interface: "Ethernet".to_string(),
-                    prefix_len: 64,
-                    policy,
-                },
-            ],
-            policy,
-            exe_path: None,
-            cmdline: None,
-            first_seen: chrono::Utc::now(),
-            last_seen: chrono::Utc::now(),
-            acl_group_id: None,
-            socket_group_ids: vec![],
-        }
-    }
-
-    #[test]
-    fn apply_firewall_sync_closed_no_acl_inactive() {
-        let calls = StdArc::new(StdMutex::new(Vec::new()));
-        let fw = MockFirewall::new(calls.clone());
-        let socket = test_socket(Policy::Closed);
-        let acl_map = HashMap::new();
-        let resolved = resolved_map(&socket);
-
-        apply_firewall_sync(&fw, &socket, &acl_map, &resolved).unwrap();
-
-        let recorded = calls.lock().unwrap();
-        // Closed + no ACL = inactive → remove any stale rules
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(
-            recorded[0],
-            FirewallCall::RemoveAcl {
-                dest_ip: "fd00::1".parse().unwrap(),
-                port: 8080,
-                protocol: Protocol::Tcp,
-            }
-        );
-    }
-
-    #[test]
-    fn apply_firewall_sync_closed_with_acl_allows_listed() {
-        let calls = StdArc::new(StdMutex::new(Vec::new()));
-        let fw = MockFirewall::new(calls.clone());
-        let socket = test_socket(Policy::Closed);
-        let allowed: Vec<Ipv6Addr> = vec!["fd00::10".parse().unwrap(), "fd00::20".parse().unwrap()];
-        let acl_map: HashMap<String, Vec<Ipv6Addr>> = [("ula".to_string(), allowed.clone())].into();
-        let resolved = resolved_map(&socket);
-
-        apply_firewall_sync(&fw, &socket, &acl_map, &resolved).unwrap();
-
-        let recorded = calls.lock().unwrap();
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(
-            recorded[0],
-            FirewallCall::ApplyAcl {
-                dest_ip: "fd00::1".parse().unwrap(),
-                port: 8080,
-                protocol: Protocol::Tcp,
-                allowed: vec!["fd00::10".parse().unwrap(), "fd00::20".parse().unwrap()],
-            }
-        );
-    }
-
-    #[test]
-    fn apply_firewall_sync_open_removes_restrictions() {
-        let calls = StdArc::new(StdMutex::new(Vec::new()));
-        let fw = MockFirewall::new(calls.clone());
-        let socket = test_socket(Policy::Open);
-        let acl_map = HashMap::new();
-        let resolved = resolved_map(&socket);
-
-        apply_firewall_sync(&fw, &socket, &acl_map, &resolved).unwrap();
-
-        let recorded = calls.lock().unwrap();
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(
-            recorded[0],
-            FirewallCall::RemoveAcl {
-                dest_ip: "fd00::1".parse().unwrap(),
-                port: 8080,
-                protocol: Protocol::Tcp,
-            }
-        );
-    }
-
-    #[test]
-    fn apply_firewall_sync_multi_address_mixed_policy() {
-        let calls = StdArc::new(StdMutex::new(Vec::new()));
-        let fw = MockFirewall::new(calls.clone());
-        let mut socket = test_socket_multi_addr(Policy::Closed);
-        // Set different policies per address
-        socket.addresses[0].policy = Policy::Open; // ula: open
-        socket.addresses[1].policy = Policy::Closed; // slaac: closed
-        let acl_map: HashMap<String, Vec<Ipv6Addr>> = [(
-            "slaac-Ethernet".to_string(),
-            vec!["fd00::10".parse().unwrap()],
-        )]
-        .into();
-        let resolved = resolved_map(&socket);
-
-        apply_firewall_sync(&fw, &socket, &acl_map, &resolved).unwrap();
-
-        let recorded = calls.lock().unwrap();
-        assert_eq!(recorded.len(), 2);
-        // First: ula is open -> RemoveAcl
-        assert!(matches!(recorded[0], FirewallCall::RemoveAcl { .. }));
-        // Second: slaac is closed -> ApplyAcl
-        assert!(matches!(recorded[1], FirewallCall::ApplyAcl { .. }));
-    }
-
-    #[test]
-    fn apply_firewall_sync_multi_address_closed_with_acl() {
-        let calls = StdArc::new(StdMutex::new(Vec::new()));
-        let fw = MockFirewall::new(calls.clone());
-        let socket = test_socket_multi_addr(Policy::Closed);
-        let acl_map: HashMap<String, Vec<Ipv6Addr>> = [
-            ("ula".to_string(), vec!["fd00::10".parse().unwrap()]),
-            (
-                "slaac-Ethernet".to_string(),
-                vec!["fd00::10".parse().unwrap()],
-            ),
-        ]
-        .into();
-        let resolved = resolved_map(&socket);
-
-        apply_firewall_sync(&fw, &socket, &acl_map, &resolved).unwrap();
-
-        let recorded = calls.lock().unwrap();
-        assert_eq!(recorded.len(), 2);
-    }
-
-    #[test]
-    fn apply_firewall_sync_multi_address_open() {
-        let calls = StdArc::new(StdMutex::new(Vec::new()));
-        let fw = MockFirewall::new(calls.clone());
-        let socket = test_socket_multi_addr(Policy::Open);
-        let acl_map = HashMap::new();
-        let resolved = resolved_map(&socket);
-
-        apply_firewall_sync(&fw, &socket, &acl_map, &resolved).unwrap();
-
-        let recorded = calls.lock().unwrap();
-        assert_eq!(recorded.len(), 2);
     }
 
     #[test]
@@ -1456,39 +1016,5 @@ mod tests {
         let stale_threshold = chrono::Utc::now() - chrono::Duration::seconds(60);
         let stale_sockets = db.stale_sockets(stale_threshold).await.unwrap();
         assert!(stale_sockets.is_empty());
-    }
-
-    #[tokio::test]
-    async fn apply_firewall_for_socket_closed_fetches_acl() {
-        let db = crate::state::Database::new(":memory:").await.unwrap();
-        db.migrate().await.unwrap();
-
-        let socket = test_socket(Policy::Closed);
-        db.upsert_socket(&socket).await.unwrap();
-        for addr in &socket.addresses {
-            db.upsert_socket_address(&socket.id, addr).await.unwrap();
-        }
-        db.add_acl_entry(&socket.id, "ula", "fd00::10", Some("peer1"))
-            .await
-            .unwrap();
-
-        let acl = db.get_acl(&socket.id).await.unwrap();
-        assert_eq!(acl.len(), 1);
-        assert_eq!(acl[0].allowed_ip, "fd00::10");
-
-        let allowed: Vec<Ipv6Addr> = acl
-            .iter()
-            .filter_map(|e| e.allowed_ip.parse().ok())
-            .collect();
-        assert_eq!(allowed, vec!["fd00::10".parse::<Ipv6Addr>().unwrap()]);
-    }
-
-    #[tokio::test]
-    async fn empty_db_startup_reconcile_is_noop() {
-        let db = crate::state::Database::new(":memory:").await.unwrap();
-        db.migrate().await.unwrap();
-
-        let sockets = db.list_sockets().await.unwrap();
-        assert!(sockets.is_empty());
     }
 }

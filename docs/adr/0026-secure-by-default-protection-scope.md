@@ -32,3 +32,6 @@ ADR 0004 closed only allocated (address, port) pairs inside an otherwise `policy
 - A stopped or crashed daemon fails closed. Without `disable` and the uninstaller, a user who stops the daemon could be locked out, so both are release blockers.
 - Remote admin over Yggdrasil (e.g. sshd on the node's `200:` address) stops accepting new connections on install until granted; the user is warned instead of blocked, since the whole-host lockout guard does not apply here.
 - LAN and IPv4 traffic to non-managed addresses stays open unless the user opts into whole-host mode. IPv4 never gets per-app addresses (ADR 0036).
+## Amendment (2026-11-09)
+
+Whole-host scopes cover IPv6 only for now. No grant can target an IPv4 address yet (there are no IPv4 locators and IPv4 credentials are rejected), so an IPv4 whole-host scope would cut off the host's IPv4 services with no way to re-allow them. IPv4 whole-host protection returns together with IPv4 grants.

@@ -1,0 +1,22 @@
+---
+source: crates/daemon/src/firewall/pf.rs
+expression: render(&golden_ruleset())
+---
+# always allowed (replies to outbound traffic match existing state)
+pass quick on lo0 all
+pass in quick inet6 proto icmp6 icmp6-type { 1, 2, 3, 4, 130, 131, 134, 135, 136, 137, 143 }
+pass in quick inet6 proto icmp6 icmp6-type 128
+pass in quick inet proto icmp icmp-type { 3, 11, 12, 8 }
+pass in quick inet6 proto udp from any port 547 to any port 546
+pass in quick inet proto udp from any port 67 to any port 68
+# rules
+pass in quick inet6 proto udp from any to fd00::9 port 53 keep state
+pass in quick inet6 proto tcp from { fd00::10/128, fd00:5::/32 } to 301::1 port 8080 keep state
+pass in quick on ygg0 inet6 proto tcp from { 200:1::5/128 } to 301::1 port 8080 keep state
+pass in quick inet proto tcp from { 198.51.100.0/24 } to 192.0.2.9 port 22 keep state
+# scopes
+block drop in log quick inet6 from any to { fd00::1, 301::1 }
+block drop in log quick inet from any to { 192.0.2.9 }
+block drop in log quick on ygg0 all
+block drop in log quick on eth0 all
+block drop in log quick on wlan0 inet6 all

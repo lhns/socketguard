@@ -762,7 +762,13 @@ async fn delete_socket_group(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.db.delete_socket_group(&id).await {
+    let deleted = state
+        .engine
+        .read()
+        .await
+        .delete_socket_group(&state, &id)
+        .await;
+    match deleted {
         Ok(_) => {
             let _ = state.events.send(DaemonEvent::SocketsChanged);
             StatusCode::NO_CONTENT.into_response()
@@ -783,11 +789,15 @@ async fn add_socket_group_members(
         }
     }
 
-    // Ensure the socket group has addresses allocated for all active backends
+    // Ensure the socket group has addresses allocated for all active backends, and
+    // re-apply: its members define the ports the group's rules cover.
     {
         let engine = state.engine.read().await;
         if let Err(e) = engine.ensure_socket_group_addresses(&state, &id).await {
             tracing::warn!("Failed to allocate socket group addresses: {e}");
+        }
+        if let Err(e) = engine.apply_socket_group_acl(&state, &id).await {
+            tracing::warn!("Failed to update firewall for socket group {id}: {e}");
         }
     }
 
@@ -801,6 +811,15 @@ async fn remove_socket_group_member(
 ) -> impl IntoResponse {
     match state.db.remove_socket_from_group(&id, &socket_id).await {
         Ok(_) => {
+            if let Err(e) = state
+                .engine
+                .read()
+                .await
+                .apply_socket_group_acl(&state, &id)
+                .await
+            {
+                tracing::warn!("Failed to update firewall for socket group {id}: {e}");
+            }
             let _ = state.events.send(DaemonEvent::SocketsChanged);
             StatusCode::NO_CONTENT.into_response()
         }

@@ -10,6 +10,10 @@ async fn main() -> Result<()> {
     // Load config first so we can use its log_level for tracing
     let config = load_config_sync();
 
+    if std::env::args().any(|a| a == "--disable") {
+        return disable(&config).await;
+    }
+
     let log_directive = format!("socketguard={}", config.log_level);
     let telemetry = telemetry::init(
         tracing_subscriber::EnvFilter::from_default_env().add_directive(
@@ -103,10 +107,10 @@ async fn main() -> Result<()> {
     // Wait for reconciliation loop to finish
     let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), recon_handle).await;
 
-    // Graceful cleanup: remove firewall rules and IPv6 addresses
+    // Rules and addresses stay in place (ADR 0026); `--disable` removes them.
     {
         let engine = state.engine.read().await;
-        engine.shutdown_cleanup(&state).await;
+        engine.shutdown().await;
     }
 
     auth::cleanup_token_file();
@@ -114,6 +118,25 @@ async fn main() -> Result<()> {
     info!("SocketGuard daemon stopped");
     // Flush pending OTel data; the exporters block, so keep them off the runtime threads.
     let _ = tokio::task::spawn_blocking(move || telemetry.shutdown()).await;
+    Ok(())
+}
+
+/// `--disable`: remove the SocketGuard firewall rules and addresses, then exit. For
+/// uninstall and recovery, so it needs only the config and the database.
+async fn disable(config: &DaemonConfig) -> Result<()> {
+    // No telemetry here, but failures to remove an address should reach the terminal.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
+    let db = state::Database::new(&config.db_path).await?;
+    db.migrate().await?;
+    engine::disable_all(
+        &db,
+        Arc::from(firewall::create_firewall()),
+        Arc::from(network::create_network_interface()),
+    )
+    .await?;
+    eprintln!("[socketguard] Firewall rules and addresses removed");
     Ok(())
 }
 

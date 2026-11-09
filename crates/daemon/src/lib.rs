@@ -14,6 +14,7 @@ pub mod engine;
 pub mod firewall;
 pub mod monitor;
 pub mod network;
+pub mod ruleset;
 pub mod state;
 pub mod telemetry;
 /// Test support module — mock implementations for integration tests.
