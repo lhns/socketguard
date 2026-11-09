@@ -331,15 +331,15 @@ impl DaemonConfig {
 pub const MAX_INTERFACE_NAME: usize = 64;
 
 /// Whether `name` may be used as a network interface name. Names end up inside firewall
-/// scripts (nft, pf), so only `[A-Za-z0-9._-]` and the space of Windows aliases
-/// ("Ethernet 2") are allowed: no quotes, backslashes, newlines or other control
+/// scripts (nft, pf), so only `[A-Za-z0-9._-]` and the spaces and parentheses of Windows
+/// aliases ("Ethernet 2", "vEthernet (WSL)") are allowed: no quotes, backslashes, newlines or other control
 /// characters. One validator for config, API, settings and the renderers.
 pub fn valid_interface_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_INTERFACE_NAME
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b' '))
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b' ' | b'(' | b')')
+        })
 }
 
 /// Default Tor control port.
@@ -495,6 +495,7 @@ mod tests {
             "br-lan.100",
             "lo",
             "Loopback Pseudo-Interface 1",
+            "vEthernet (WSL)",
         ] {
             assert!(valid_interface_name(ok), "{ok}");
         }
