@@ -38,6 +38,17 @@ pub enum BackendConfig {
         control: String,
         #[serde(default)]
         auth: TorAuth,
+        /// With cookie auth: the cookie file PROTOCOLINFO must report. A control port
+        /// naming any other file is refused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cookie_path: Option<String>,
+        /// With cookie auth: the directory (Tor's data dir) whose owner may own the cookie
+        /// file. Default: the directory of `cookie_path`; without either, only root.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cookie_dir: Option<String>,
+        /// On a Unix control socket: the uid Tor must run as (checked on the peer).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect_tor_uid: Option<u32>,
     },
 }
 
@@ -46,10 +57,16 @@ pub enum BackendConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TorAuth {
-    /// Read the cookie file named by PROTOCOLINFO.
+    /// SAFECOOKIE: the cookie file named by PROTOCOLINFO proves who we talk to and is
+    /// never sent. Plain COOKIE is refused.
     #[default]
     Cookie,
+    /// SAFECOOKIE if offered, else plain COOKIE, which hands the cookie to whoever
+    /// answers on the control address. Opt-in for a Tor too old for SAFECOOKIE.
+    #[serde(rename = "cookie_insecure")]
+    CookieInsecure,
     Password(String),
+    /// No authentication; accepted on a Unix control socket only.
     None,
 }
 
@@ -383,6 +400,9 @@ fn parse_single_backend(
             "tor" => Ok(BackendConfig::Tor {
                 control: default_tor_control(),
                 auth: TorAuth::default(),
+                cookie_path: None,
+                cookie_dir: None,
+                expect_tor_uid: None,
             }),
             other => Err(format!("invalid backend: {other}")),
         }
@@ -733,6 +753,9 @@ mod tests {
         let tor = BackendConfig::Tor {
             control: DEFAULT_TOR_CONTROL.to_string(),
             auth: TorAuth::Cookie,
+            cookie_path: None,
+            cookie_dir: None,
+            expect_tor_uid: None,
         };
         assert_eq!(tor.interface(), None);
         assert!(tor.is_singleton());
@@ -747,11 +770,15 @@ mod tests {
             defaults.backend,
             BackendConfig::Tor {
                 control: "127.0.0.1:9051".into(),
-                auth: TorAuth::Cookie
+                auth: TorAuth::Cookie,
+                cookie_path: None,
+                cookie_dir: None,
+                expect_tor_uid: None,
             }
         );
         for auth in [
             TorAuth::Cookie,
+            TorAuth::CookieInsecure,
             TorAuth::None,
             TorAuth::Password("pw".into()),
         ] {
@@ -760,6 +787,9 @@ mod tests {
                 backend: BackendConfig::Tor {
                     control: "unix:/run/tor/control".into(),
                     auth,
+                    cookie_path: Some("/var/lib/tor/control_auth_cookie".into()),
+                    cookie_dir: None,
+                    expect_tor_uid: Some(110),
                 },
             };
             let json = serde_json::to_string(&inst).unwrap();
@@ -774,6 +804,15 @@ mod tests {
             inst.backend,
             BackendConfig::Tor { auth: TorAuth::Password(ref p), .. } if p == "pw"
         ));
+        let json = r#"{"type":"tor","auth":"cookie_insecure"}"#;
+        let inst: BackendInstanceConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            inst.backend,
+            BackendConfig::Tor {
+                auth: TorAuth::CookieInsecure,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -783,6 +822,9 @@ mod tests {
             backend: BackendConfig::Tor {
                 control: DEFAULT_TOR_CONTROL.into(),
                 auth: TorAuth::Cookie,
+                cookie_path: None,
+                cookie_dir: None,
+                expect_tor_uid: None,
             },
         };
         assert!(DaemonConfig::validate_backends(&[tor("tor")]).is_ok());

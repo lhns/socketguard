@@ -35,8 +35,11 @@ Let a user in:
 ### Windows
 
 The pipe is created with this ACL: `SYSTEM` and `Administrators` full access, plus the local
-group `SocketGuard Users` read/write if it exists at daemon start (otherwise the daemon logs
-a warning and leaves it out). Remote clients are rejected, and a new server instance is always
+group `SocketGuard Users` read and write-data (mask `0x12008B`, not create-instance) if it
+exists at daemon start and is a group (otherwise the daemon logs a warning and leaves it
+out). The first server instance is created exclusively, so the daemon does not start if
+something else already owns the name, and clients open the pipe with identification-level
+impersonation only. Remote clients are rejected, and a new server instance is always
 waiting, so many clients can connect at once.
 
 Let a user in:
@@ -54,8 +57,11 @@ therefore needs `SocketGuard Users`, even if they are an administrator.
 
 Bodies are JSON (`Content-Type: application/json`). Types are Rust names in
 `socketguard_core::api_types` or `socketguard_core` (model). Statuses are 200 unless noted;
-creates return 201 with the new object, deletes 204 with no body. Every error has the
-[error body](#errors).
+creates return 201 with the new object, deletes 204 with no body. A change to apps, peers,
+credentials, groups or grants is saved before it is enforced; if a network that is not
+enforced by the firewall (Tor) cannot enforce it, the response is **202** instead, with the
+same body (deletes: a body with only the notice) plus
+[`enforcement`](#pending-enforcement). Every error has the [error body](#errors).
 
 | Method | Path | Request | Response | Notes |
 |---|---|---|---|---|
@@ -130,6 +136,16 @@ published ports are the TCP ports covered by grants, and a key granted fewer of 
 left out until the port gets its own address (`split`). UDP is not served over Tor. A Tor control
 port that cannot be reached shows as the network's `status` `down`; nothing is published or
 removed until it is back.
+
+### Pending enforcement
+
+    {"enforcement": {"status": "pending", "message": "saved, but not yet enforced; retrying (network 'tor': cannot reach the Tor control port ...)"}}
+
+`Enforcement { status, message }` (`EnforcementNotice` for a body without other content). It
+means the change is in the database but a network could not apply it yet, for example a
+grant was revoked while Tor was down, so the onion service is still published. The daemon
+keeps the removal on a persisted list and retries on every pass until Tor confirms it. The
+CLI prints `warning: ...` to stderr, and the client's `Saved<T>` carries `enforcement`.
 
 ## Errors
 

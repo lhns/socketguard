@@ -19,6 +19,7 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["trace"] }
 http = "1"
 sha2 = "0.10"
+hmac = "0.12"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 rand = "0.8"
 socket2 = "0.6"

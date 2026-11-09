@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::CommandFactory;
 use futures_util::StreamExt;
 use serde::Serialize;
-use socketguard_client::{ApiEvent, Client, Error as ApiError, GrantQuery};
+use socketguard_client::{ApiEvent, Client, Error as ApiError, GrantQuery, Saved};
 use socketguard_core::api_types::{
     error_code, ApplyRequest, ExportDocument, LockoutRiskInfo, MergeRequest, NewGroup, NewNetwork,
     NewPeer, ProtectHostRequest, SplitRequest, UpdateSettings,
@@ -97,6 +97,24 @@ impl Ctx {
     /// Result of a change that returns nothing: a message, or `{"ok": true}`.
     fn done(&self, message: impl Into<String>) -> Result<()> {
         self.print(&serde_json::json!({"ok": true}), || message.into())
+    }
+
+    /// Like [`Ctx::done`] for a change the daemon may not have enforced everywhere yet
+    /// (HTTP 202): the warning goes to stderr, and into the JSON.
+    fn done_saved(&self, saved: Saved<()>, message: impl Into<String>) -> Result<()> {
+        self.warn_pending(&saved.enforcement);
+        let mut v = serde_json::json!({"ok": true});
+        if let Some(e) = &saved.enforcement {
+            v["enforcement"] = serde_json::to_value(e)?;
+        }
+        self.print(&v, || message.into())
+    }
+
+    /// Say that a saved change is not in effect everywhere yet.
+    fn warn_pending(&self, enforcement: &Option<socketguard_core::api_types::Enforcement>) {
+        if let Some(e) = enforcement {
+            eprintln!("warning: {}", e.message);
+        }
     }
 
     async fn apps(&self) -> Result<Vec<App>> {
@@ -337,11 +355,14 @@ async fn apps(c: &Ctx, cmd: AppsCmd) -> Result<()> {
         }
         AppsCmd::Rm { app } => {
             let app = c.app(&app).await?;
-            c.client.delete_app(&app.id).await?;
-            c.done(format!(
-                "forgot {} (it reappears as pending if it listens again)",
-                app.name
-            ))
+            let saved = c.client.delete_app(&app.id).await?;
+            c.done_saved(
+                saved,
+                format!(
+                    "forgot {} (it reappears as pending if it listens again)",
+                    app.name
+                ),
+            )
         }
         AppsCmd::Split { app, network, port } => {
             let app = c.app(&app).await?;
@@ -461,13 +482,15 @@ async fn peers(c: &Ctx, cmd: PeersCmd) -> Result<()> {
         }
         PeersCmd::Rm { peer } => {
             let peer = c.peer(&peer).await?;
-            c.client.delete_peer(&peer.id).await?;
-            c.done(format!("removed peer {} and its grants", peer.label))
+            let saved = c.client.delete_peer(&peer.id).await?;
+            c.done_saved(saved, format!("removed peer {} and its grants", peer.label))
         }
         PeersCmd::Cred(CredCmd::Add { peer, cred }) => {
             let peer = c.peer(&peer).await?;
             let cred = parse::parse_cred(&cred)?;
-            let added = c.client.add_credential(&peer.id, &cred).await?;
+            let saved = c.client.add_credential(&peer.id, &cred).await?;
+            c.warn_pending(&saved.enforcement);
+            let added = saved.value;
             c.print(&added, || {
                 format!("added {} {} to {}", added.kind, added.value, peer.label)
             })
@@ -476,12 +499,11 @@ async fn peers(c: &Ctx, cmd: PeersCmd) -> Result<()> {
             let peer = c.peer(&peer).await?;
             let ids: Vec<String> = peer.credentials.iter().map(|x| x.id.clone()).collect();
             let id = resolve_id("credential", &ids, &cred_id)?;
-            c.client.remove_credential(&peer.id, id).await?;
-            c.done(format!(
-                "removed credential {} from {}",
-                short(id),
-                peer.label
-            ))
+            let saved = c.client.remove_credential(&peer.id, id).await?;
+            c.done_saved(
+                saved,
+                format!("removed credential {} from {}", short(id), peer.label),
+            )
         }
     }
 }
@@ -611,6 +633,8 @@ async fn grant(c: &Ctx, a: GrantArgs) -> Result<()> {
         }
         other => other?,
     };
+    c.warn_pending(&created.enforcement);
+    let created = created.value;
     let names = c.names().await?;
     c.print(&created, || {
         format!(
@@ -669,8 +693,8 @@ async fn revoke(c: &Ctx, a: RevokeArgs) -> Result<()> {
             }
         }
     };
-    c.client.delete_grant(&id).await?;
-    c.done(format!("revoked grant {}", short(&id)))
+    let saved = c.client.delete_grant(&id).await?;
+    c.done_saved(saved, format!("revoked grant {}", short(&id)))
 }
 
 async fn grants(c: &Ctx, a: GrantsArgs) -> Result<()> {
@@ -941,7 +965,8 @@ async fn grant_all_ports(
         }
         req.confirm_open = true;
     }
-    c.client.create_grant(&req).await?;
+    let saved = c.client.create_grant(&req).await?;
+    c.warn_pending(&saved.enforcement);
     c.client.review_app(&app.id, true).await?;
     println!("granted");
     Ok(())

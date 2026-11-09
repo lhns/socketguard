@@ -19,9 +19,9 @@ use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use serde::{de::DeserializeOwned, Serialize};
 use socketguard_core::api_types::{
-    ApiError, ApplyRequest, ApplyResponse, DisableRequest, ExportDocument, MergeRequest, NewGroup,
-    NewNetwork, NewPeer, ProtectHostRequest, ProtectHostResponse, ReviewRequest, SetMembers,
-    SplitRequest, StatusResponse, UpdateLabel, UpdateSettings,
+    ApiError, ApplyRequest, ApplyResponse, DisableRequest, Enforcement, ExportDocument,
+    MergeRequest, NewGroup, NewNetwork, NewPeer, ProtectHostRequest, ProtectHostResponse,
+    ReviewRequest, SetMembers, SplitRequest, StatusResponse, UpdateLabel, UpdateSettings,
 };
 use socketguard_core::{
     ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
@@ -78,6 +78,15 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// The result of a change that is saved but may not be enforced everywhere yet. The
+/// daemon answers 202 then, with `enforcement` saying what is pending (e.g. Tor is down
+/// and an onion service could not be taken off the network yet); it keeps retrying.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Saved<T> {
+    pub value: T,
+    pub enforcement: Option<Enforcement>,
+}
 
 type HeaderHook = Arc<dyn Fn(&mut HeaderMap) + Send + Sync>;
 
@@ -200,6 +209,17 @@ impl Client {
         query: Option<String>,
         body: Option<Vec<u8>>,
     ) -> Result<Bytes> {
+        Ok(self.call_status(route, params, query, body).await?.1)
+    }
+
+    /// Like [`Client::call_raw`], with the success status.
+    async fn call_status(
+        &self,
+        route: &Route,
+        params: &[&str],
+        query: Option<String>,
+        body: Option<Vec<u8>>,
+    ) -> Result<(StatusCode, Bytes)> {
         let resp = self.send(route, params, query, body).await?;
         let status = resp.status();
         let bytes = resp
@@ -209,7 +229,7 @@ impl Client {
             .map_err(|e| Error::Protocol(e.to_string()))?
             .to_bytes();
         if status.is_success() {
-            Ok(bytes)
+            Ok((status, bytes))
         } else {
             Err(api_error(status, &bytes))
         }
@@ -228,6 +248,45 @@ impl Client {
 
     async fn call_unit(&self, route: &Route, params: &[&str], body: Option<Vec<u8>>) -> Result<()> {
         self.call_raw(route, params, None, body).await.map(|_| ())
+    }
+
+    /// A call whose answer may carry a pending-enforcement notice (HTTP 202).
+    async fn call_saved<T: DeserializeOwned>(
+        &self,
+        route: &Route,
+        params: &[&str],
+        body: Option<Vec<u8>>,
+    ) -> Result<Saved<T>> {
+        let (status, bytes) = self.call_status(route, params, None, body).await?;
+        let bad = |e: serde_json::Error| Error::Protocol(format!("bad response: {e}"));
+        let enforcement = if status == StatusCode::ACCEPTED {
+            #[derive(serde::Deserialize)]
+            struct Notice {
+                enforcement: Enforcement,
+            }
+            Some(
+                serde_json::from_slice::<Notice>(&bytes)
+                    .map_err(bad)?
+                    .enforcement,
+            )
+        } else {
+            None
+        };
+        // An empty body (204) is the unit value.
+        let value = if bytes.is_empty() {
+            serde_json::from_value(serde_json::Value::Null)
+        } else {
+            serde_json::from_slice(&bytes)
+        };
+        // A 202 to a delete carries only the notice, which is not a `()`.
+        let value = match value {
+            Ok(v) => v,
+            Err(_) if enforcement.is_some() => {
+                serde_json::from_value(serde_json::Value::Null).map_err(bad)?
+            }
+            Err(e) => return Err(bad(e)),
+        };
+        Ok(Saved { value, enforcement })
     }
 
     // ─── Status and events ───────────────────────────────────────────────────
@@ -265,8 +324,8 @@ impl Client {
     }
 
     /// Forget an app. It reappears as pending the next time it listens.
-    pub async fn delete_app(&self, id: &str) -> Result<()> {
-        self.call_unit(&routes::DELETE_APP, &[id], None).await
+    pub async fn delete_app(&self, id: &str) -> Result<Saved<()>> {
+        self.call_saved(&routes::DELETE_APP, &[id], None).await
     }
 
     pub async fn review_app(&self, id: &str, reviewed: bool) -> Result<AppDetail> {
@@ -308,17 +367,21 @@ impl Client {
         self.call(&routes::UPDATE_PEER, &[id], None, body).await
     }
 
-    pub async fn delete_peer(&self, id: &str) -> Result<()> {
-        self.call_unit(&routes::DELETE_PEER, &[id], None).await
+    pub async fn delete_peer(&self, id: &str) -> Result<Saved<()>> {
+        self.call_saved(&routes::DELETE_PEER, &[id], None).await
     }
 
-    pub async fn add_credential(&self, peer_id: &str, req: &NewCredential) -> Result<Credential> {
-        self.call(&routes::ADD_CREDENTIAL, &[peer_id], None, json(req))
+    pub async fn add_credential(
+        &self,
+        peer_id: &str,
+        req: &NewCredential,
+    ) -> Result<Saved<Credential>> {
+        self.call_saved(&routes::ADD_CREDENTIAL, &[peer_id], json(req))
             .await
     }
 
-    pub async fn remove_credential(&self, peer_id: &str, credential_id: &str) -> Result<()> {
-        self.call_unit(&routes::REMOVE_CREDENTIAL, &[peer_id, credential_id], None)
+    pub async fn remove_credential(&self, peer_id: &str, credential_id: &str) -> Result<Saved<()>> {
+        self.call_saved(&routes::REMOVE_CREDENTIAL, &[peer_id, credential_id], None)
             .await
     }
 
@@ -365,12 +428,12 @@ impl Client {
 
     /// Create a grant. To Anyone it needs `confirm_open: true`, else the error code is
     /// `confirmation_required`.
-    pub async fn create_grant(&self, req: &NewGrant) -> Result<GrantView> {
-        self.call(&routes::CREATE_GRANT, &[], None, json(req)).await
+    pub async fn create_grant(&self, req: &NewGrant) -> Result<Saved<GrantView>> {
+        self.call_saved(&routes::CREATE_GRANT, &[], json(req)).await
     }
 
-    pub async fn delete_grant(&self, id: &str) -> Result<()> {
-        self.call_unit(&routes::DELETE_GRANT, &[id], None).await
+    pub async fn delete_grant(&self, id: &str) -> Result<Saved<()>> {
+        self.call_saved(&routes::DELETE_GRANT, &[id], None).await
     }
 
     // ─── Networks ────────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 HOST_ROOT="$(cd "$ROOT" && pwd -W 2>/dev/null || pwd)"
 
+TARGET_VOL=${TARGET_VOL:-sg-target}   # docker volume holding the Linux build
 IMAGE=sg-tor-e2e-node
 NET=sg-tor-e2e-net
 NODE_A=sg-tor-e2e-a
@@ -59,7 +60,7 @@ docker build -q -t "$IMAGE" -f "$HOST_ROOT/deploy/e2e/Dockerfile.tor" "$HOST_ROO
 pass "build node image"
 
 docker run --rm -v "$HOST_ROOT":/work -w /work \
-  -v sg-cargo-registry:/usr/local/cargo/registry -v sg-target:/work/target \
+  -v sg-cargo-registry:/usr/local/cargo/registry -v ${TARGET_VOL}:/work/target \
   -e CARGO_PROFILE_DEV_DEBUG=0 -e CARGO_PROFILE_TEST_DEBUG=0 -e CARGO_INCREMENTAL=0 \
   rust:1-bookworm cargo build -p socketguard-daemon -p socketguard-cli \
   || { fail "build daemon and CLI"; exit 1; }
@@ -71,7 +72,7 @@ SG=/target/debug/socketguard
 docker network create "$NET" >/dev/null || { fail "create network"; exit 1; }
 for n in "$NODE_A" "$NODE_B"; do
   # NET_ADMIN: the daemon on A installs its (empty) nftables table like on any host.
-  docker run -d --name "$n" --network "$NET" --cap-add NET_ADMIN -v sg-target:/target:ro "$IMAGE" sleep infinity >/dev/null \
+  docker run -d --name "$n" --network "$NET" --cap-add NET_ADMIN -v ${TARGET_VOL}:/target:ro "$IMAGE" sleep infinity >/dev/null \
     || { fail "start $n"; exit 1; }
 done
 
@@ -123,7 +124,7 @@ docker exec -i "$NODE_A" sh -c 'cat > /etc/sg.json' <<'JSON'
   "poll_interval_secs": 2,
   "db_path": "/var/lib/sg.db", "log_level": "debug",
   "process_filter": {"mode": "allowlist", "patterns": ["python3*"]},
-  "backends": [{"id": "tor", "type": "tor", "control": "127.0.0.1:9051"}]
+  "backends": [{"id": "tor", "type": "tor", "control": "127.0.0.1:9051", "cookie_path": "/var/lib/tor-a/control_auth_cookie"}]
 }
 JSON
 daemon_start

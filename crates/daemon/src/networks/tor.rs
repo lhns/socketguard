@@ -7,13 +7,12 @@
 //! Services are `Detach`ed, so they survive control-connection drops and a daemon exit
 //! (ADR 0026). The service key is stored with the address, so the `.onion` name is stable.
 
-use super::tor_control::{base32, Control, Endpoint, ServiceSpec};
+use super::tor_control::{base32, AuthOptions, Control, Endpoint, ServiceSpec};
 use super::{
     Capabilities, EnforcedAddress, EnforcedSubject, LocatorRequest, Network, NetworkEnforcement,
     NewLocator,
 };
 use anyhow::{anyhow, bail, Context, Result};
-use socketguard_core::config::TorAuth;
 use socketguard_core::{
     Address, CredentialKind, Locator, NetworkKind, NetworkStatus, PortRef, Protocol,
 };
@@ -180,7 +179,7 @@ fn set_status(current: &mut NetworkStatus, new: NetworkStatus) {
 
 pub struct TorNetwork {
     endpoint: Endpoint,
-    auth: TorAuth,
+    opts: AuthOptions,
     check_every: Duration,
     state: Mutex<State>,
     /// Serializes control-port work, without holding `state` across I/O.
@@ -188,10 +187,10 @@ pub struct TorNetwork {
 }
 
 impl TorNetwork {
-    pub fn new(control: &str, auth: TorAuth, check_every: Duration) -> Self {
+    pub fn with_options(control: &str, opts: AuthOptions, check_every: Duration) -> Self {
         Self {
             endpoint: Endpoint::parse(control),
-            auth,
+            opts,
             check_every,
             state: Mutex::new(State {
                 applied: HashMap::new(),
@@ -205,7 +204,7 @@ impl TorNetwork {
     }
 
     fn connect(&self) -> Result<Control> {
-        match Control::connect(&self.endpoint, &self.auth) {
+        match Control::connect(&self.endpoint, &self.opts) {
             Ok(c) => Ok(c),
             Err(e) => {
                 set_status(
@@ -272,8 +271,11 @@ impl Network for TorNetwork {
             return Ok(());
         };
         let _io = self.io.lock().unwrap();
+        // Forget the service only once Tor confirmed it is gone: if Tor is down it is
+        // still published, and the caller tombstones it for a retry.
+        self.connect()?.del_onion(&id)?;
         self.state.lock().unwrap().applied.remove(&id);
-        self.connect()?.del_onion(&id)
+        Ok(())
     }
 
     fn enforce(&self, enforcement: &NetworkEnforcement) -> Result<()> {
@@ -292,6 +294,15 @@ impl Network for TorNetwork {
             }
         }
 
+        // Services to take down even though no address wants them: tombstones, and ones
+        // we created whose address is gone.
+        let stale: BTreeSet<String> = enforcement
+            .tombstones
+            .iter()
+            .chain(enforcement.owned.difference(&ours))
+            .cloned()
+            .collect();
+
         let _io = self.io.lock().unwrap();
         let (applied, due) = {
             let st = self.state.lock().unwrap();
@@ -303,7 +314,7 @@ impl Network for TorNetwork {
             && desired
                 .iter()
                 .all(|(id, spec)| applied.get(id) == Some(spec));
-        if same && !due {
+        if same && !due && stale.is_empty() {
             return Ok(());
         }
 
@@ -313,7 +324,7 @@ impl Network for TorNetwork {
         let mut errors: Vec<String> = Vec::new();
 
         // Closed first: anything of ours that should not be published goes.
-        for id in ours.iter().chain(applied.keys()) {
+        for id in ours.iter().chain(applied.keys()).chain(&stale) {
             if desired.contains_key(id) || !(live.contains(id) || applied.contains_key(id)) {
                 continue;
             }
@@ -392,14 +403,18 @@ impl Network for TorNetwork {
         ids.extend(self.state.lock().unwrap().applied.keys().cloned());
         let mut c = self.connect()?;
         let mut failed = Vec::new();
+        let mut removed = Vec::new();
         for id in ids {
-            if let Err(e) = c.del_onion(&id) {
-                failed.push(format!("{e:#}"));
+            match c.del_onion(&id) {
+                Ok(()) => removed.push(id),
+                Err(e) => failed.push(format!("{e:#}")),
             }
         }
         {
             let mut st = self.state.lock().unwrap();
-            st.applied.clear();
+            for id in &removed {
+                st.applied.remove(id);
+            }
             st.checked = None;
         }
         if failed.is_empty() {
@@ -569,11 +584,14 @@ mod tests {
     }
 
     fn enforcement(addrs: Vec<EnforcedAddress>) -> NetworkEnforcement {
-        NetworkEnforcement { addresses: addrs }
+        NetworkEnforcement {
+            addresses: addrs,
+            ..Default::default()
+        }
     }
 
     fn net(mock: &MockTorControl, every: Duration) -> TorNetwork {
-        TorNetwork::new(&mock.addr(), TorAuth::None, every)
+        TorNetwork::with_options(&mock.addr(), mock.auth_options(), every)
     }
 
     #[test]
@@ -696,5 +714,101 @@ mod tests {
         assert_eq!(mock.detached().len(), 1);
         n.disable(&[]).unwrap();
         assert!(mock.detached().is_empty());
+    }
+
+    // ── Revocation must not fail open ──
+
+    fn stale(
+        owned: &[&str],
+        tombstones: &[&str],
+        addrs: Vec<EnforcedAddress>,
+    ) -> NetworkEnforcement {
+        NetworkEnforcement {
+            addresses: addrs,
+            owned: owned.iter().map(|s| s.to_string()).collect(),
+            tombstones: tombstones.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_revocation_during_an_outage_is_retried_until_tor_confirms() {
+        let mock = MockTorControl::start();
+        let n = net(&mock, CHECK_INTERVAL);
+        let keyed = address(&[8080], vec![grant(None, creds(&[KEY_A]))]);
+        n.enforce(&enforcement(vec![keyed])).unwrap();
+        assert_eq!(mock.detached(), ["svc1"]);
+
+        let revoked = address(&[8080], vec![]);
+        mock.set_down(true);
+        assert!(n.enforce(&enforcement(vec![revoked.clone()])).is_err());
+        assert_eq!(
+            mock.detached(),
+            ["svc1"],
+            "still published while Tor is away"
+        );
+        // Forgotten from `applied` only after a confirmed removal.
+        assert!(n.state.lock().unwrap().applied.contains_key("svc1"));
+
+        mock.set_down(false);
+        n.enforce(&enforcement(vec![revoked])).unwrap();
+        assert!(mock.detached().is_empty());
+        assert!(n.state.lock().unwrap().applied.is_empty());
+    }
+
+    #[test]
+    fn remove_locator_keeps_the_service_in_memory_until_it_is_gone() {
+        let mock = MockTorControl::start();
+        let n = net(&mock, CHECK_INTERVAL);
+        let keyed = address(&[8080], vec![grant(None, creds(&[KEY_A]))]);
+        n.enforce(&enforcement(vec![keyed])).unwrap();
+        let gone = Address {
+            id: "addr1".into(),
+            app_id: "app".into(),
+            network_id: "tor".into(),
+            locator: Locator::Onion {
+                hostname: "svc1.onion".into(),
+            },
+            ports: socketguard_core::PortSet::All,
+            created_at: chrono::Utc::now(),
+        };
+        mock.set_down(true);
+        assert!(n.remove_locator(&gone).is_err());
+        assert!(n.state.lock().unwrap().applied.contains_key("svc1"));
+        mock.set_down(false);
+        n.remove_locator(&gone).unwrap();
+        assert!(mock.detached().is_empty());
+        assert!(n.state.lock().unwrap().applied.is_empty());
+    }
+
+    #[test]
+    fn tombstones_are_retried_even_when_nothing_else_changed() {
+        let mock = MockTorControl::start();
+        let n = net(&mock, CHECK_INTERVAL);
+        n.enforce(&enforcement(vec![address(&[8080], vec![])]))
+            .unwrap();
+        mock.inject_service("gone1");
+        let before = mock.commands().len();
+        // Within the check interval and with nothing wanted, but a tombstone: Tor is asked.
+        mock.set_down(true);
+        assert!(n.enforce(&stale(&[], &["gone1"], vec![])).is_err());
+        assert_eq!(mock.detached(), ["gone1"]);
+        mock.set_down(false);
+        n.enforce(&stale(&[], &["gone1"], vec![])).unwrap();
+        assert!(mock.commands().len() > before);
+        assert!(mock.detached().is_empty());
+        // A tombstone for a service Tor no longer runs is just done.
+        n.enforce(&stale(&[], &["gone1"], vec![])).unwrap();
+    }
+
+    #[test]
+    fn owned_services_without_an_address_are_swept_and_others_are_left() {
+        let mock = MockTorControl::start();
+        let n = net(&mock, CHECK_INTERVAL);
+        mock.inject_service("ours-but-gone");
+        mock.inject_service("foreign");
+        let keyed = address(&[8080], vec![grant(None, creds(&[KEY_A]))]);
+        n.enforce(&stale(&["ours-but-gone", "svc1"], &[], vec![keyed]))
+            .unwrap();
+        assert_eq!(mock.detached(), ["foreign", "svc1"]);
     }
 }
