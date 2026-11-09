@@ -124,6 +124,7 @@ pub struct MockNetworkInterface {
     pub calls: Arc<Mutex<Vec<NetworkCall>>>,
     addrs: Arc<Mutex<HashMap<String, HashSet<Ipv6Addr>>>>,
     missing_ifaces: Arc<Mutex<HashSet<String>>>,
+    remove_failing: Arc<Mutex<bool>>,
 }
 
 impl MockNetworkInterface {
@@ -132,6 +133,7 @@ impl MockNetworkInterface {
             calls,
             addrs: Arc::default(),
             missing_ifaces: Arc::default(),
+            remove_failing: Arc::default(),
         }
     }
 
@@ -150,6 +152,21 @@ impl MockNetworkInterface {
         if let Some(set) = self.addrs.lock().unwrap().get_mut(iface) {
             set.remove(&addr);
         }
+    }
+
+    /// Make `remove_address` fail (and leave the address in place) while set.
+    pub fn set_remove_failing(&self, failing: bool) {
+        *self.remove_failing.lock().unwrap() = failing;
+    }
+
+    /// Put an address on an interface without a recorded call (a leftover of a crash).
+    pub fn plant_address(&self, iface: &str, addr: Ipv6Addr) {
+        self.addrs
+            .lock()
+            .unwrap()
+            .entry(iface.to_string())
+            .or_default()
+            .insert(addr);
     }
 
     /// Simulate an interface that does not exist (removing it also clears its addresses).
@@ -188,6 +205,9 @@ impl NetworkInterface for MockNetworkInterface {
             iface: iface.to_string(),
             addr,
         });
+        if *self.remove_failing.lock().unwrap() {
+            anyhow::bail!("simulated remove_address failure on {iface}");
+        }
         if let Some(set) = self.addrs.lock().unwrap().get_mut(iface) {
             set.remove(&addr);
         }

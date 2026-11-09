@@ -28,6 +28,9 @@ pub struct Snapshot {
     pub grants: Vec<Grant>,
     /// Interfaces under whole-host protection.
     pub protect_host: Vec<String>,
+    /// Addresses the daemon owns on interfaces, whether or not an app still has them
+    /// (retiring ones included): denied until they are really gone.
+    pub owned: Vec<IpAddr>,
 }
 
 fn sorted_unique<T: Ord>(v: impl IntoIterator<Item = T>) -> Vec<T> {
@@ -116,7 +119,7 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
 
     let mut rules: BTreeMap<String, Rule> = BTreeMap::new();
     let mut warnings: BTreeSet<String> = BTreeSet::new();
-    let mut managed: BTreeSet<IpAddr> = BTreeSet::new();
+    let mut managed: BTreeSet<IpAddr> = snap.owned.iter().copied().collect();
 
     for app in &snap.apps {
         for address in &app.addresses {
@@ -846,6 +849,20 @@ mod tests {
             socketguard_core::best_reach(&s.peers[0].credentials, &ygg()),
             Reach::Verified
         );
+    }
+
+    #[test]
+    fn owned_addresses_stay_in_the_managed_scope_without_an_app() {
+        let s = Snapshot {
+            owned: vec![ip("300:1:2:3::dead")],
+            ..Snapshot::default()
+        };
+        let rs = build(&s);
+        assert!(rs.scopes.iter().any(|sc| matches!(
+            &sc.matcher,
+            ScopeMatch::Destinations(d) if d == &vec![ip("300:1:2:3::dead")]
+        )));
+        assert!(rs.rules.is_empty());
     }
 
     // ─── Lockout guard ───────────────────────────────────────────────────

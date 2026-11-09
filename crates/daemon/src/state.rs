@@ -1757,6 +1757,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owned_addresses_are_claimed_retired_and_forgotten() {
+        let db = db().await;
+        let a: Ipv6Addr = "300:1::1".parse().unwrap();
+        db.claim_address(a, "ygg0", Some("ygg")).await.unwrap();
+        db.claim_address(a, "ygg0", Some("ygg")).await.unwrap();
+        let rows = db.list_owned_addresses().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].retiring);
+        db.retire_address(a, "ygg0", Some("ygg")).await.unwrap();
+        assert!(db.list_owned_addresses().await.unwrap()[0].retiring);
+        // Retiring an unknown address records it too (adopting a legacy one).
+        let b: Ipv6Addr = "300:1::2".parse().unwrap();
+        db.retire_address(b, "ygg0", None).await.unwrap();
+        assert_eq!(db.list_owned_addresses().await.unwrap().len(), 2);
+        // Claiming again makes it active.
+        db.claim_address(a, "ygg0", Some("ygg")).await.unwrap();
+        assert!(!db.list_owned_addresses().await.unwrap()[0].retiring);
+        db.forget_address(a).await.unwrap();
+        db.forget_address(b).await.unwrap();
+        assert!(db.list_owned_addresses().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn v2_database_migrates_to_v3() {
+        let path = temp_db_path("v2-to-v3");
+        {
+            let opts = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true);
+            let mut c = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::raw_sql(SCHEMA).execute(&mut c).await.unwrap();
+            sqlx::raw_sql(MIGRATION_1_TO_2)
+                .execute(&mut c)
+                .await
+                .unwrap();
+            sqlx::query("PRAGMA user_version = 2")
+                .execute(&mut c)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO apps (id, name, process_name, reviewed, first_seen, last_seen) \
+                 VALUES ('old', 'n', 'p', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            )
+            .execute(&mut c)
+            .await
+            .unwrap();
+        }
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        let app = db.get_app("old").await.unwrap().unwrap();
+        assert_eq!(app.identity_note, None);
+        assert_eq!(db.list_owned_addresses().await.unwrap().len(), 0);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
     async fn onion_keys_follow_their_address() {
         let db = db().await;
         db.insert_app(&app("a1")).await.unwrap();
