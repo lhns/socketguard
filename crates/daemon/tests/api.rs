@@ -1,0 +1,989 @@
+//! API v1 through the router (no transport): every route, the error mappings, the
+//! confirmation and protect-host rules, export and apply, events and trace propagation.
+
+mod common;
+
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode};
+use common::*;
+use serde_json::{json, Value};
+use socketguard_core::api_types::{ApplyRequest, ApplyResponse, ChangeKind, ExportDocument};
+use tower::ServiceExt;
+
+fn id(v: &Value) -> String {
+    v["id"].as_str().unwrap().to_string()
+}
+
+fn code(v: &Value) -> &str {
+    v["code"].as_str().unwrap()
+}
+
+// ─── Status, fallback, malformed requests ────────────────────────────────────
+
+#[tokio::test]
+async fn status_reports_networks_and_counts() {
+    let d = Daemon::new().await;
+    let (s, body) = d.get("/api/status").await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(body["version"].is_string());
+    assert_eq!(body["networks"].as_array().unwrap().len(), 3);
+    assert_eq!(body["counts"]["apps"], 1);
+    assert_eq!(body["counts"]["pending_apps"], 1);
+    assert_eq!(body["counts"]["addresses"], 3);
+    assert_eq!(body["protect_host_interfaces"], json!([]));
+}
+
+#[tokio::test]
+async fn errors_have_code_and_message() {
+    let d = Daemon::new().await;
+    let (s, body) = d.get("/api/nope").await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(code(&body), "not_found");
+    assert!(body["message"].is_string());
+    assert!(body.get("details").is_none());
+
+    // Malformed JSON, wrong field type and a bad query value are all 400 `invalid`.
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/peers")
+        .header("content-type", "application/json")
+        .body(Body::from("{not json"))
+        .unwrap();
+    let resp = d.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let (s, body) = d.post("/api/peers", json!({"label": 5})).await;
+    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
+    let (s, body) = d.get("/api/apps?pending=maybe").await;
+    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
+}
+
+// ─── Apps ────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn apps_list_get_review_and_pending_filter() {
+    let d = Daemon::new().await;
+    let app_id = d.app_id().await;
+
+    let (s, body) = d.get("/api/apps").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(
+        d.get("/api/apps?pending=true")
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let (s, body) = d.get(&format!("/api/apps/{app_id}")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["name"], "nginx");
+    assert_eq!(body["grants"], json!([]));
+    assert_eq!(body["counters"], json!([]));
+    assert_eq!(body["addresses"].as_array().unwrap().len(), 3);
+
+    let (s, body) = d
+        .post(
+            &format!("/api/apps/{app_id}/review"),
+            json!({"reviewed": true}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["reviewed"], true);
+    assert_eq!(d.get("/api/apps?pending=true").await.1, json!([]));
+
+    let (s, body) = d.get("/api/apps/nope").await;
+    assert_eq!((s, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
+    let (s, _) = d
+        .post("/api/apps/nope/review", json!({"reviewed": true}))
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn split_and_merge_and_errors() {
+    let d = Daemon::new().await;
+    let app_id = d.app_id().await;
+    let path = format!("/api/apps/{app_id}");
+
+    let (s, only) = d
+        .post(
+            &format!("{path}/split"),
+            json!({"network_id": "ygg", "port": 80, "proto": "tcp"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{only}");
+    assert_eq!(
+        only["ports"],
+        json!({"only": [{"port": 80, "proto": "tcp"}]})
+    );
+
+    let (s, body) = d
+        .post(
+            &format!("{path}/split"),
+            json!({"network_id": "ygg", "port": 80, "proto": "tcp"}),
+        )
+        .await;
+    assert_eq!((s, code(&body)), (StatusCode::CONFLICT, "conflict"));
+    let (s, body) = d
+        .post(
+            &format!("{path}/split"),
+            json!({"network_id": "ygg", "port": 81, "proto": "tcp"}),
+        )
+        .await;
+    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
+    let (s, body) = d
+        .post(
+            &format!("{path}/split"),
+            json!({"network_id": "nope", "port": 80, "proto": "tcp"}),
+        )
+        .await;
+    assert_eq!((s, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
+
+    let detail = d.get(&path).await.1;
+    let ygg_ids: Vec<String> = detail["addresses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["network_id"] == "ygg")
+        .map(id)
+        .collect();
+    assert_eq!(ygg_ids.len(), 2);
+    let (s, body) = d
+        .post(
+            &format!("{path}/merge"),
+            json!({"network_id": "ygg", "address_ids": [ygg_ids[0]]}),
+        )
+        .await;
+    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
+    let (s, merged) = d
+        .post(
+            &format!("{path}/merge"),
+            json!({"network_id": "ygg", "address_ids": ygg_ids}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{merged}");
+    let detail = d.get(&path).await.1;
+    let after = detail["addresses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["network_id"] == "ygg")
+        .count();
+    assert_eq!(after, 1);
+}
+
+#[tokio::test]
+async fn deleting_an_app_forgets_it_until_it_listens_again() {
+    let d = Daemon::new().await;
+    let app_id = d.app_id().await;
+    let (s, _) = d.delete(&format!("/api/apps/{app_id}")).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(
+        d.get(&format!("/api/apps/{app_id}")).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        d.delete(&format!("/api/apps/{app_id}")).await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    d.reconcile().await;
+    let (_, body) = d.get("/api/apps?pending=true").await;
+    assert_eq!(
+        body.as_array().unwrap().len(),
+        1,
+        "it listens, so it is pending again"
+    );
+}
+
+// ─── Peers and groups ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn peers_crud_and_credentials() {
+    let d = Daemon::new().await;
+    let pid = d.ygg_peer("alice").await;
+
+    let (s, body) = d.get("/api/peers").await;
+    assert_eq!((s, body.as_array().unwrap().len()), (StatusCode::OK, 1));
+    let (s, body) = d.get(&format!("/api/peers/{pid}")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["label"], "alice");
+    assert_eq!(body["credentials"][0]["kind"], "ygg_key");
+
+    let (s, body) = d.post("/api/peers", json!({"label": "alice"})).await;
+    assert_eq!((s, code(&body)), (StatusCode::CONFLICT, "conflict"));
+    let (s, body) = d
+        .post(
+            "/api/peers",
+            json!({"label": "bad", "credentials": [{"kind": "ygg_key", "value": "zz"}]}),
+        )
+        .await;
+    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
+    let (s, body) = d
+        .post(
+            "/api/peers",
+            json!({"label": "bob", "credentials": [{"kind": "ygg_key", "value": KEY}]}),
+        )
+        .await;
+    assert_eq!(
+        (s, code(&body)),
+        (StatusCode::CONFLICT, "conflict"),
+        "credentials are unique"
+    );
+
+    let (s, body) = d
+        .send(
+            Method::PATCH,
+            &format!("/api/peers/{pid}"),
+            json!({"label": "alicia"}),
+        )
+        .await;
+    assert_eq!(
+        (s, body["label"].as_str()),
+        (StatusCode::OK, Some("alicia"))
+    );
+    let (s, _) = d
+        .send(Method::PATCH, "/api/peers/nope", json!({"label": "x"}))
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    let (s, cred) = d
+        .post(
+            &format!("/api/peers/{pid}/credentials"),
+            json!({"kind": "ip", "value": "fd00::5", "label": "laptop"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{cred}");
+    assert_eq!(cred["value"], "fd00::5/128", "normalized");
+    let (s, _) = d
+        .post(
+            &format!("/api/peers/{pid}/credentials"),
+            json!({"kind": "ip", "value": "fd00::5"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let cid = id(&cred);
+    assert_eq!(
+        d.delete(&format!("/api/peers/{pid}/credentials/{cid}"))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        d.delete(&format!("/api/peers/{pid}/credentials/{cid}"))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+
+    assert_eq!(
+        d.delete(&format!("/api/peers/{pid}")).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        d.delete(&format!("/api/peers/{pid}")).await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn groups_crud_and_members() {
+    let d = Daemon::new().await;
+    let alice = d.ygg_peer("alice").await;
+    let (_, bob) = d.post("/api/peers", json!({"label": "bob"})).await;
+    let bob = id(&bob);
+
+    let (s, g) = d
+        .post(
+            "/api/peer-groups",
+            json!({"label": "team", "members": [alice]}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{g}");
+    let gid = id(&g);
+    assert_eq!(g["members"], json!([alice]));
+    assert_eq!(
+        d.get("/api/peer-groups").await.1.as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        d.get(&format!("/api/peer-groups/{gid}")).await.1["label"],
+        "team"
+    );
+
+    let (s, body) = d.post("/api/peer-groups", json!({"label": "team"})).await;
+    assert_eq!((s, code(&body)), (StatusCode::CONFLICT, "conflict"));
+    let (s, body) = d
+        .post(
+            "/api/peer-groups",
+            json!({"label": "x", "members": ["nope"]}),
+        )
+        .await;
+    assert_eq!((s, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
+
+    let (s, g) = d
+        .send(
+            Method::PATCH,
+            &format!("/api/peer-groups/{gid}"),
+            json!({"label": "crew"}),
+        )
+        .await;
+    assert_eq!((s, g["label"].as_str()), (StatusCode::OK, Some("crew")));
+    let (s, g) = d
+        .send(
+            Method::PUT,
+            &format!("/api/peer-groups/{gid}/members"),
+            json!({"peer_ids": [alice, bob]}),
+        )
+        .await;
+    assert_eq!(
+        (s, g["members"].as_array().unwrap().len()),
+        (StatusCode::OK, 2)
+    );
+    let (s, _) = d
+        .send(
+            Method::PUT,
+            &format!("/api/peer-groups/{gid}/members"),
+            json!({"peer_ids": ["nope"]}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    assert_eq!(
+        d.delete(&format!("/api/peer-groups/{gid}")).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        d.get(&format!("/api/peer-groups/{gid}")).await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+// ─── Grants ──────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn grants_with_reach_filters_and_errors() {
+    let d = Daemon::new().await;
+    let app_id = d.app_id().await;
+    let alice = d.ygg_peer("alice").await;
+    let (_, g) = d
+        .post(
+            "/api/peer-groups",
+            json!({"label": "team", "members": [alice]}),
+        )
+        .await;
+    let gid = id(&g);
+
+    let (s, grant) = d
+        .post(
+            "/api/grants",
+            json!({"app_id": app_id, "subject": {"kind": "peer", "id": alice}}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{grant}");
+    let reach: Vec<_> = grant["reach"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["network_id"].as_str().unwrap(),
+                r["reach"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert!(reach.contains(&("ygg", "verified")) && reach.contains(&("lan", "not_reachable")));
+    assert!(
+        !reach.iter().any(|(n, _)| *n == "local"),
+        "Local takes no grants"
+    );
+    let grant_id = id(&grant);
+
+    let (s, _) = d
+        .post(
+            "/api/grants",
+            json!({"app_id": app_id, "subject": {"kind": "group", "id": gid}}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    assert_eq!(d.get("/api/grants").await.1.as_array().unwrap().len(), 2);
+    assert_eq!(
+        d.get(&format!("/api/grants?app={app_id}"))
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(d.get("/api/grants?app=other").await.1, json!([]));
+    assert_eq!(
+        d.get(&format!("/api/grants?peer={alice}"))
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "directly and through the group"
+    );
+    assert_eq!(
+        d.get(&format!("/api/grants?group={gid}"))
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Errors.
+    let (s, body) = d
+        .post(
+            "/api/grants",
+            json!({"app_id": app_id, "subject": {"kind": "peer", "id": alice}}),
+        )
+        .await;
+    assert_eq!((s, code(&body)), (StatusCode::CONFLICT, "conflict"));
+    let (s, body) = d
+        .post(
+            "/api/grants",
+            json!({"app_id": "nope", "subject": {"kind": "anyone"}, "confirm_open": true}),
+        )
+        .await;
+    assert_eq!((s, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
+    let (s, body) = d
+        .post("/api/grants", json!({"app_id": app_id, "port": {"port": 9, "proto": "tcp"}, "subject": {"kind": "peer", "id": alice}}))
+        .await;
+    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
+    let (s, body) = d
+        .post("/api/grants", json!({"app_id": app_id, "network_id": "local", "subject": {"kind": "peer", "id": alice}}))
+        .await;
+    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "local_network"));
+    assert_eq!(body["message"], "Local is this machine only");
+
+    assert_eq!(
+        d.delete(&format!("/api/grants/{grant_id}")).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        d.delete(&format!("/api/grants/{grant_id}")).await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn a_grant_to_anyone_needs_confirmation() {
+    let d = Daemon::new().await;
+    let app_id = d.app_id().await;
+    let (s, body) = d
+        .post(
+            "/api/grants",
+            json!({"app_id": app_id, "subject": {"kind": "anyone"}}),
+        )
+        .await;
+    assert_eq!(
+        (s, code(&body)),
+        (StatusCode::CONFLICT, "confirmation_required")
+    );
+    assert_eq!(d.get("/api/grants").await.1, json!([]));
+
+    let (s, grant) = d
+        .post(
+            "/api/grants",
+            json!({"app_id": app_id, "subject": {"kind": "anyone"}, "confirm_open": true}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{grant}");
+    assert!(grant["reach"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["reach"] == "open"));
+}
+
+// ─── Networks ────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn networks_list_add_and_remove() {
+    let d = Daemon::new().await;
+    let (s, body) = d.get("/api/networks").await;
+    assert_eq!((s, body.as_array().unwrap().len()), (StatusCode::OK, 3));
+
+    let (s, body) = d.post("/api/networks", json!({"type": "ula"})).await;
+    assert_eq!(
+        (s, code(&body)),
+        (StatusCode::CONFLICT, "conflict"),
+        "one ULA network only"
+    );
+    let (s, body) = d
+        .post("/api/networks", json!({"type": "dhcpv6", "interface": ""}))
+        .await;
+    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
+    let (s, body) = d
+        .post("/api/networks", json!({"type": "carrier-pigeon"}))
+        .await;
+    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
+
+    let (s, net) = d
+        .post(
+            "/api/networks",
+            json!({"id": "lan2", "type": "slaac", "interface": "eth9", "prefix": "2001:db8:9:9::/64"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{net}");
+    assert_eq!(net["id"], "lan2");
+    assert_eq!(net["kind"], "lan");
+    assert!(d
+        .state
+        .config
+        .read()
+        .await
+        .backends
+        .iter()
+        .any(|b| b.id == "lan2"));
+    let (s, body) = d
+        .post("/api/networks", json!({"id": "lan2", "type": "slaac", "interface": "eth9", "prefix": "2001:db8:9:9::/64"}))
+        .await;
+    assert_eq!((s, code(&body)), (StatusCode::CONFLICT, "conflict"));
+
+    // The next reconcile must not mistake the new network for a config change.
+    d.reconcile().await;
+    assert_eq!(d.get("/api/networks").await.1.as_array().unwrap().len(), 4);
+
+    assert_eq!(
+        d.delete("/api/networks/lan2").await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(!d
+        .state
+        .config
+        .read()
+        .await
+        .backends
+        .iter()
+        .any(|b| b.id == "lan2"));
+    assert_eq!(d.get("/api/networks").await.1.as_array().unwrap().len(), 3);
+    assert_eq!(
+        d.delete("/api/networks/lan2").await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+// ─── Settings, protect-host ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn settings_get_and_put() {
+    let d = Daemon::new().await;
+    let (s, body) = d.get("/api/settings").await;
+    assert_eq!(
+        (s, body["address_mode"].as_str()),
+        (StatusCode::OK, Some("per_app"))
+    );
+    let (s, body) = d
+        .send(
+            Method::PUT,
+            "/api/settings",
+            json!({"address_mode": "per_port"}),
+        )
+        .await;
+    assert_eq!(
+        (s, body["address_mode"].as_str()),
+        (StatusCode::OK, Some("per_port"))
+    );
+    let (s, body) = d.send(Method::PUT, "/api/settings", json!({})).await;
+    assert_eq!(
+        (s, body["address_mode"].as_str()),
+        (StatusCode::OK, Some("per_port")),
+        "absent = unchanged"
+    );
+    let (s, body) = d
+        .send(
+            Method::PUT,
+            "/api/settings",
+            json!({"address_mode": "bogus"}),
+        )
+        .await;
+    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
+}
+
+#[tokio::test]
+async fn protect_host_is_refused_with_the_risks_unless_forced() {
+    let d = Daemon::new().await;
+    d.sockets.lock().unwrap().push(listener("sshd", 22));
+    d.reconcile().await;
+
+    let (s, body) = d
+        .send(
+            Method::PUT,
+            "/api/settings/protect-host",
+            json!({"interfaces": ["eth0"]}),
+        )
+        .await;
+    assert_eq!(
+        (s, code(&body)),
+        (StatusCode::CONFLICT, "protect_host_refused"),
+        "{body}"
+    );
+    let risks = body["details"].as_array().unwrap();
+    assert_eq!(risks[0]["process_name"], "sshd");
+    assert_eq!(risks[0]["port"], 22);
+    assert_eq!(
+        d.get("/api/settings").await.1["protect_host_interfaces"],
+        json!([])
+    );
+
+    let (s, body) = d
+        .send(
+            Method::PUT,
+            "/api/settings/protect-host",
+            json!({"interfaces": ["eth0"], "force": true}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["settings"]["protect_host_interfaces"], json!(["eth0"]));
+    assert_eq!(body["overridden"][0]["process_name"], "sshd");
+
+    let (s, body) = d
+        .send(
+            Method::PUT,
+            "/api/settings/protect-host",
+            json!({"interfaces": []}),
+        )
+        .await;
+    assert_eq!(
+        (s, body["settings"]["protect_host_interfaces"].clone()),
+        (StatusCode::OK, json!([]))
+    );
+}
+
+// ─── Activity and disable ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn activity_is_filterable() {
+    let d = Daemon::new().await;
+    d.ygg_peer("alice").await;
+    let (s, all) = d.get("/api/activity").await;
+    assert_eq!(s, StatusCode::OK);
+    let kinds: Vec<&str> = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"app_discovered") && kinds.contains(&"peer_added"));
+
+    let (_, only) = d.get("/api/activity?kind=peer_added").await;
+    assert_eq!(only.as_array().unwrap().len(), 1);
+    assert_eq!(
+        d.get("/api/activity?limit=1")
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let first = all[0]["id"].as_i64().unwrap();
+    let (_, older) = d.get(&format!("/api/activity?before={first}")).await;
+    assert_eq!(
+        older.as_array().unwrap().len(),
+        all.as_array().unwrap().len() - 1
+    );
+    assert_eq!(
+        d.get("/api/activity?since=2999-01-01T00:00:00Z").await.1,
+        json!([])
+    );
+    let (s, body) = d.get("/api/activity?kind=nonsense").await;
+    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
+}
+
+#[tokio::test]
+async fn disable_needs_confirmation() {
+    use socketguard_daemon::test_support::FirewallCall;
+    let d = Daemon::new().await;
+    let (s, body) = d.post("/api/disable", json!({"confirm": false})).await;
+    assert_eq!(
+        (s, code(&body)),
+        (StatusCode::CONFLICT, "confirmation_required")
+    );
+    let (s, _) = d.post("/api/disable", json!({"confirm": true})).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(d
+        .fw
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|c| matches!(c, FirewallCall::Disable)));
+}
+
+// ─── Events ──────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn events_stream_pushes_named_events() {
+    use http_body_util::BodyExt;
+    let d = Daemon::new().await;
+    let req = Request::builder()
+        .uri("/api/events")
+        .body(Body::empty())
+        .unwrap();
+    let resp = d.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "text/event-stream");
+    let mut body = resp.into_body();
+
+    d.ygg_peer("alice").await;
+    let mut seen = String::new();
+    let wait = async {
+        while !(seen.contains("event: peers_changed") && seen.contains("event: activity")) {
+            let frame = body.frame().await.unwrap().unwrap();
+            if let Some(data) = frame.data_ref() {
+                seen.push_str(&String::from_utf8_lossy(data));
+            }
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+        .await
+        .unwrap_or_else(|_| panic!("events not pushed, got: {seen:?}"));
+}
+
+// ─── Export and apply ────────────────────────────────────────────────────────
+
+async fn export(d: &Daemon) -> ExportDocument {
+    let (s, body) = d.get("/api/export").await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    serde_json::from_value(body).unwrap()
+}
+
+async fn apply(d: &Daemon, document: &ExportDocument, dry_run: bool) -> (StatusCode, Value) {
+    d.post(
+        "/api/apply",
+        serde_json::to_value(ApplyRequest {
+            document: document.clone(),
+            dry_run,
+        })
+        .unwrap(),
+    )
+    .await
+}
+
+async fn apply_ok(d: &Daemon, document: &ExportDocument, dry_run: bool) -> ApplyResponse {
+    let (s, body) = apply(d, document, dry_run).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    serde_json::from_value(body).unwrap()
+}
+
+/// alice (ygg key + ip), bob, group team = {alice, bob}, nginx granted to alice and to
+/// team, and to Anyone on ygg.
+async fn populated() -> Daemon {
+    let d = Daemon::new().await;
+    let app_id = d.app_id().await;
+    let alice = d.ygg_peer("alice").await;
+    d.post(
+        &format!("/api/peers/{alice}/credentials"),
+        json!({"kind": "ip", "value": "fd00::5", "label": "laptop"}),
+    )
+    .await;
+    let (_, bob) = d.post("/api/peers", json!({"label": "bob"})).await;
+    let (_, team) = d
+        .post(
+            "/api/peer-groups",
+            json!({"label": "team", "members": [alice, id(&bob)]}),
+        )
+        .await;
+    for subject in [
+        json!({"kind": "peer", "id": alice}),
+        json!({"kind": "group", "id": id(&team)}),
+    ] {
+        let (s, b) = d
+            .post("/api/grants", json!({"app_id": app_id, "subject": subject}))
+            .await;
+        assert_eq!(s, StatusCode::CREATED, "{b}");
+    }
+    let (s, b) = d
+        .post("/api/grants", json!({"app_id": app_id, "network_id": "ygg", "port": {"port": 80, "proto": "tcp"}, "subject": {"kind": "anyone"}, "confirm_open": true}))
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{b}");
+    d
+}
+
+#[tokio::test]
+async fn export_has_the_documented_shape() {
+    let d = populated().await;
+    let (s, body) = d.get("/api/export").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["version"], 1);
+    assert_eq!(body["settings"]["address_mode"], "per_app");
+    assert_eq!(body["peers"][0]["label"], "alice");
+    assert_eq!(body["peers"][0]["credentials"][0]["kind"], "ip");
+    assert_eq!(
+        body["groups"][0],
+        json!({"label": "team", "members": ["alice", "bob"]})
+    );
+    let grants = body["grants"].as_array().unwrap();
+    assert_eq!(grants.len(), 3);
+    assert!(grants
+        .iter()
+        .any(|g| g["subject"] == "anyone" && g["network"] == "ygg" && g["app"]["name"] == "nginx"));
+    assert!(grants
+        .iter()
+        .any(|g| g["subject"] == json!({"peer": "alice"})));
+    assert!(grants
+        .iter()
+        .any(|g| g["subject"] == json!({"group": "team"})));
+}
+
+#[tokio::test]
+async fn export_then_apply_is_an_empty_diff() {
+    let d = populated().await;
+    let doc = export(&d).await;
+    for dry_run in [true, false] {
+        let r = apply_ok(&d, &doc, dry_run).await;
+        assert!(r.is_empty(), "{r:?}");
+        assert_eq!(r.dry_run, dry_run);
+    }
+    assert_eq!(export(&d).await, doc);
+}
+
+#[tokio::test]
+async fn apply_dry_run_reports_and_changes_nothing() {
+    let d = populated().await;
+    let app = d.state.db.list_apps().await.unwrap().remove(0);
+    let before = export(&d).await;
+    let mut doc = before.clone();
+    doc.settings.address_mode = socketguard_core::AddressMode::PerPort;
+    doc.peers.retain(|p| p.label != "bob");
+    doc.peers.push(
+        serde_json::from_value(
+            json!({"label": "carol", "credentials": [{"kind": "ip", "value": "fd00::9"}]}),
+        )
+        .unwrap(),
+    );
+    doc.groups[0].members = vec!["alice".into(), "carol".into()];
+    doc.grants.retain(|g| {
+        g.subject
+            != serde_json::from_value::<socketguard_core::api_types::ExportSubject>(json!("anyone"))
+                .unwrap()
+    });
+    doc.grants.push(
+        serde_json::from_value(
+            json!({"app": {"id": app.id, "name": "nginx"}, "network": "lan", "subject": "anyone"}),
+        )
+        .unwrap(),
+    );
+
+    let r = apply_ok(&d, &doc, true).await;
+    assert!(r.dry_run);
+    let summary: Vec<String> = r
+        .changes
+        .iter()
+        .map(|c| format!("{:?} {:?} {}", c.kind, c.item, c.name))
+        .collect();
+    let has = |s: &str| assert!(summary.iter().any(|x| x.contains(s)), "{s} in {summary:#?}");
+    has("Update Setting address_mode");
+    has("Create Peer carol");
+    has("Delete Peer bob");
+    has("Update Group team");
+    has("Delete Grant nginx 80/tcp on ygg to Anyone");
+    has("Create Grant nginx on lan to Anyone");
+    assert!(
+        r.changes.iter().filter(|c| c.opens_to_anyone).count() == 2,
+        "both Anyone changes are marked"
+    );
+    assert!(r
+        .changes
+        .iter()
+        .all(|c| c.kind != ChangeKind::Update || c.detail.is_some()));
+    assert_eq!(export(&d).await, before, "a dry run changes nothing");
+}
+
+#[tokio::test]
+async fn apply_makes_the_state_match_the_document() {
+    let d = populated().await;
+    let app = d.state.db.list_apps().await.unwrap().remove(0);
+    let mut doc = export(&d).await;
+    doc.settings.address_mode = socketguard_core::AddressMode::PerPort;
+    // alice loses her laptop; carol gets it (a credential moves between peers); bob goes.
+    doc.peers.retain(|p| p.label != "bob");
+    doc.peers[0]
+        .credentials
+        .retain(|c| c.value != "fd00::5/128");
+    doc.peers.push(serde_json::from_value(json!({"label": "carol", "credentials": [{"kind": "ip", "value": "fd00::5", "label": "laptop"}]})).unwrap());
+    doc.groups[0].members = vec!["alice".into(), "carol".into()];
+    doc.grants.clear();
+    doc.grants.push(
+        serde_json::from_value(
+            json!({"app": {"id": app.id, "name": "x"}, "subject": {"group": "team"}}),
+        )
+        .unwrap(),
+    );
+    doc.grants.push(serde_json::from_value(json!({"app": {"id": app.id, "name": "x"}, "port": {"port": 80, "proto": "tcp"}, "subject": "anyone"})).unwrap());
+
+    let r = apply_ok(&d, &doc, false).await;
+    assert!(!r.is_empty() && !r.dry_run);
+
+    // Converged: the same document is now an empty diff.
+    let again = apply_ok(&d, &doc, true).await;
+    assert!(again.is_empty(), "{again:?}");
+    let now = export(&d).await;
+    assert_eq!(
+        now.settings.address_mode,
+        socketguard_core::AddressMode::PerPort
+    );
+    assert_eq!(
+        now.peers
+            .iter()
+            .map(|p| p.label.as_str())
+            .collect::<Vec<_>>(),
+        ["alice", "carol"]
+    );
+    assert_eq!(now.grants.len(), 2);
+    // The Anyone grant in the file counted as confirmed, and is in force.
+    let grants = d.get("/api/grants").await.1;
+    assert!(grants
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|g| g["subject"]["kind"] == "anyone"));
+}
+
+#[tokio::test]
+async fn apply_rejects_documents_that_cannot_be_applied() {
+    let d = populated().await;
+    let good = export(&d).await;
+    let bad = |f: &dyn Fn(&mut ExportDocument)| {
+        let mut doc = good.clone();
+        f(&mut doc);
+        doc
+    };
+    let docs = [
+        bad(&|d| d.version = 2),
+        bad(&|d| d.groups[0].members.push("nobody".into())),
+        bad(&|d| d.peers.push(d.peers[0].clone())),
+        bad(&|d| d.grants[0].app.id = "nope".into()),
+        bad(&|d| d.grants[0].subject = serde_json::from_value(json!({"peer": "nobody"})).unwrap()),
+        bad(&|d| d.grants[0].network = Some("nope".into())),
+        bad(&|d| d.peers[0].credentials[0].value = "not an address".into()),
+    ];
+    for doc in docs {
+        let (s, body) = apply(&d, &doc, false).await;
+        assert_eq!(
+            (s, code(&body)),
+            (StatusCode::BAD_REQUEST, "invalid"),
+            "{body}"
+        );
+    }
+    let (s, body) = apply(
+        &d,
+        &bad(&|d| d.grants[0].network = Some("local".into())),
+        false,
+    )
+    .await;
+    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "local_network"));
+    assert_eq!(export(&d).await, good, "nothing was applied");
+}

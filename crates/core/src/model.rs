@@ -24,6 +24,7 @@ pub fn new_id() -> String {
 
 // ─── Apps ────────────────────────────────────────────────────────────────────
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct App {
     pub id: AppId,
@@ -41,6 +42,7 @@ pub struct App {
     pub addresses: Vec<Address>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppPort {
     pub port: u16,
@@ -49,6 +51,7 @@ pub struct AppPort {
     pub last_seen: DateTime<Utc>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PortRef {
     pub port: u16,
@@ -62,6 +65,7 @@ impl std::fmt::Display for PortRef {
 }
 
 /// Which of an app's ports an address serves.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PortSet {
@@ -70,6 +74,7 @@ pub enum PortSet {
     Only(Vec<PortRef>),
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Address {
     pub id: AddressId,
@@ -82,6 +87,7 @@ pub struct Address {
 
 /// Where an address can be reached; network-specific. The interface ID of an IPv6 locator
 /// is the low 64 bits of `addr`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Locator {
@@ -100,6 +106,7 @@ impl Locator {
 
 // ─── Networks ────────────────────────────────────────────────────────────────
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkKind {
@@ -122,13 +129,15 @@ impl From<crate::types::BackendType> for NetworkKind {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Network {
     pub id: NetworkId,
     pub kind: NetworkKind,
     pub name: String,
     pub interface: Option<String>,
-    /// False for Local: it is this machine only, grants have no effect there.
+    /// False for Local on a loopback interface: it is this machine only, grants have no
+    /// effect there. Local on another interface takes grants like any IP network.
     pub grants_apply: bool,
     pub status: NetworkStatus,
     /// The /64 the network currently allocates from, as its network address. Needed to
@@ -137,6 +146,7 @@ pub struct Network {
     pub prefix: Option<Ipv6Addr>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum NetworkStatus {
@@ -146,6 +156,7 @@ pub enum NetworkStatus {
 
 // ─── Peers, credentials, groups ──────────────────────────────────────────────
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialKind {
@@ -201,6 +212,7 @@ impl std::str::FromStr for CredentialKind {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credential {
     pub id: String,
@@ -211,6 +223,7 @@ pub struct Credential {
 }
 
 /// A credential as given by a user, before normalization.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewCredential {
     pub kind: CredentialKind,
@@ -219,6 +232,7 @@ pub struct NewCredential {
     pub label: Option<String>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Peer {
     pub id: PeerId,
@@ -228,6 +242,7 @@ pub struct Peer {
     pub created_at: DateTime<Utc>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerGroup {
     pub id: PeerGroupId,
@@ -238,6 +253,7 @@ pub struct PeerGroup {
 
 // ─── Grants and reach ────────────────────────────────────────────────────────
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub enum Subject {
@@ -246,6 +262,7 @@ pub enum Subject {
     Anyone,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grant {
     pub id: GrantId,
@@ -259,6 +276,7 @@ pub struct Grant {
 }
 
 /// How strongly a source is identified on a network.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reach {
@@ -295,6 +313,7 @@ impl Reach {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrantReach {
     pub network_id: NetworkId,
@@ -302,6 +321,7 @@ pub struct GrantReach {
 }
 
 /// A grant with the reach the daemon computed for it, for frontends.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GrantView {
     #[serde(flatten)]
@@ -310,15 +330,34 @@ pub struct GrantView {
 }
 
 /// An app with its grants.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppDetail {
     #[serde(flatten)]
     pub app: App,
     pub grants: Vec<GrantView>,
+    /// Packets and bytes the firewall allowed in, per network and grant subject, as of
+    /// the last reconcile pass. Empty where the platform has no counters.
+    #[serde(default)]
+    pub counters: Vec<AppCounter>,
+}
+
+/// Allowed traffic of an app through one grant, summed over its rules.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppCounter {
+    pub network_id: NetworkId,
+    /// Label of the grant's subject: a peer or group label, or "Anyone".
+    pub subject: String,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub packets: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub bytes: u64,
 }
 
 /// Request to create a grant. A grant to [`Subject::Anyone`] opens the app to everyone
 /// and needs `confirm_open`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewGrant {
     pub app_id: AppId,
@@ -333,6 +372,7 @@ pub struct NewGrant {
 
 // ─── Settings ────────────────────────────────────────────────────────────────
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AddressMode {
@@ -361,6 +401,7 @@ impl std::str::FromStr for AddressMode {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     pub address_mode: AddressMode,
@@ -369,6 +410,7 @@ pub struct Settings {
 
 // ─── Activity ────────────────────────────────────────────────────────────────
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityKind {
@@ -424,8 +466,10 @@ impl std::str::FromStr for ActivityKind {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityRecord {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub id: i64,
     pub at: DateTime<Utc>,
     pub kind: ActivityKind,
@@ -440,6 +484,7 @@ pub struct ActivityRecord {
 }
 
 /// Filter for listing activity, newest first.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityQuery {
     pub since: Option<DateTime<Utc>>,
@@ -447,6 +492,7 @@ pub struct ActivityQuery {
     pub app_id: Option<AppId>,
     pub peer_id: Option<PeerId>,
     /// Only records with an id below this one (paging).
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub before: Option<i64>,
     pub limit: Option<u32>,
 }
@@ -598,10 +644,17 @@ fn is_ygg_subnet_host(addr: Ipv6Addr) -> bool {
     ygg_subnet_range().contains(&addr)
 }
 
+/// Whether `name` is a loopback interface (`lo`, `lo0`, "Loopback Pseudo-Interface 1").
+/// Local networks on one are this machine only; grants have no effect there.
+pub fn is_loopback_interface(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n == "lo" || n == "lo0" || n.contains("loopback")
+}
+
 /// How well `credential` identifies a source on `network` (ADR 0028). A network on which
-/// grants do not apply (Local) reaches nothing.
+/// grants do not apply (Local on loopback) reaches nothing.
 pub fn reach(credential: &Credential, network: &Network) -> Reach {
-    if !network.grants_apply || network.kind == NetworkKind::Local {
+    if !network.grants_apply {
         return Reach::NotReachable;
     }
     match (credential.kind, network.kind) {
@@ -618,8 +671,14 @@ pub fn reach(credential: &Credential, network: &Network) -> Reach {
             _ => Reach::NotReachable,
         },
         (CredentialKind::YggSubnet, NetworkKind::Yggdrasil) => Reach::WholeSubnet,
-        (CredentialKind::Ip, NetworkKind::Lan) => Reach::IpOnly,
-        (CredentialKind::IpSuffix, NetworkKind::Lan) if network.prefix.is_some() => Reach::IpOnly,
+        // Local takes grants only when its interface is not loopback (ADR 0027); it then
+        // behaves like any IP network.
+        (CredentialKind::Ip, NetworkKind::Lan | NetworkKind::Local) => Reach::IpOnly,
+        (CredentialKind::IpSuffix, NetworkKind::Lan | NetworkKind::Local)
+            if network.prefix.is_some() =>
+        {
+            Reach::IpOnly
+        }
         _ => Reach::NotReachable,
     }
 }
@@ -983,6 +1042,34 @@ mod tests {
                 let n = net("n", *k, Some("fd00:1:2:3::"));
                 assert_eq!(reach(c, &n), *want, "{:?} on {:?}", c.kind, k);
             }
+        }
+    }
+
+    #[test]
+    fn local_on_a_real_interface_takes_grants() {
+        let mut local = net("local", NetworkKind::Local, Some("fd00:1:2:3::"));
+        local.grants_apply = true;
+        let ip = cred(CredentialKind::Ip, "fd00::5/128");
+        let suffix = cred(CredentialKind::IpSuffix, "::a:b:c:d");
+        let key = cred(CredentialKind::YggKey, KEY);
+        assert_eq!(reach(&ip, &local), Reach::IpOnly);
+        assert_eq!(reach(&suffix, &local), Reach::IpOnly);
+        assert_eq!(reach(&key, &local), Reach::NotReachable);
+        assert!(credential_source(&ip, &local).is_some());
+        local.prefix = None;
+        assert_eq!(reach(&suffix, &local), Reach::NotReachable);
+        // Loopback keeps it machine-only.
+        local.grants_apply = false;
+        assert_eq!(reach(&ip, &local), Reach::NotReachable);
+    }
+
+    #[test]
+    fn loopback_interface_names() {
+        for n in ["lo", "lo0", "Loopback Pseudo-Interface 1"] {
+            assert!(is_loopback_interface(n), "{n}");
+        }
+        for n in ["eth0", "dummy0", "Ethernet", "lo1"] {
+            assert!(!is_loopback_interface(n), "{n}");
         }
     }
 

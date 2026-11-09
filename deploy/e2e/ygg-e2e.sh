@@ -97,7 +97,7 @@ A sh -c "mkdir -p /srv/www && echo sg-e2e-ok > /srv/www/index.html"
 docker exec -d "$NODE_A" sh -c "cd /srv/www && exec python3 -m http.server $PORT --bind ::"
 docker exec -i "$NODE_A" sh -c 'cat > /etc/sg.json' <<JSON
 {
-  "listen_addr": "127.0.0.1", "listen_port": 9476, "poll_interval_secs": 2,
+  "poll_interval_secs": 2,
   "db_path": "/var/lib/sg.db", "log_level": "debug",
   "process_filter": {"mode": "allowlist", "patterns": ["python3*"]},
   "backends": [{"id": "ygg", "type": "yggdrasil", "interface": "ygg0", "admin_endpoint": "$SOCK"}]

@@ -1,0 +1,29 @@
+[package]
+name = "socketguard-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+socketguard-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+bytes = "1"
+futures-util = "0.3"
+percent-encoding = "2"
+serde_urlencoded = "0.7"
+opentelemetry = { version = "0.33", optional = true }
+
+[features]
+# Inject the W3C trace context of the current OpenTelemetry context into every request
+# (needs a text-map propagator installed globally).
+otel = ["dep:opentelemetry"]
+
+[dev-dependencies]
+opentelemetry_sdk = { version = "0.33", features = ["trace"] }

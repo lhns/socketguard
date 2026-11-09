@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// Per-backend configuration
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum BackendConfig {
@@ -200,11 +201,11 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 /// - Legacy: `{ "backend": "ula", "interface": "lo", ... }`
 #[derive(Debug, Clone, Serialize)]
 pub struct DaemonConfig {
-    /// REST API listen address
-    pub listen_addr: String,
+    /// Unix socket of the local API (ADR 0032). Ignored on Windows.
+    pub api_socket: String,
 
-    /// REST API listen port
-    pub listen_port: u16,
+    /// Named pipe of the local API on Windows (ADR 0032). Ignored elsewhere.
+    pub api_pipe: String,
 
     /// Backend instances
     pub backends: Vec<BackendInstanceConfig>,
@@ -228,8 +229,8 @@ impl Default for DaemonConfig {
         let default_backend = BackendConfig::default();
         let id = default_backend.default_id();
         Self {
-            listen_addr: "127.0.0.1".to_string(),
-            listen_port: 9476,
+            api_socket: default_api_socket(),
+            api_pipe: default_api_pipe(),
             backends: vec![BackendInstanceConfig {
                 id,
                 backend: default_backend,
@@ -332,10 +333,10 @@ impl<'de> Deserialize<'de> for DaemonConfig {
     {
         #[derive(Deserialize)]
         struct RawConfig {
-            #[serde(default = "default_listen_addr")]
-            listen_addr: String,
-            #[serde(default = "default_listen_port")]
-            listen_port: u16,
+            #[serde(default = "default_api_socket")]
+            api_socket: String,
+            #[serde(default = "default_api_pipe")]
+            api_pipe: String,
             // Multi-backend format: array of backend instances
             #[serde(default)]
             backends: Option<Vec<serde_json::Value>>,
@@ -377,8 +378,8 @@ impl<'de> Deserialize<'de> for DaemonConfig {
         DaemonConfig::validate_backends(&backends).map_err(serde::de::Error::custom)?;
 
         Ok(DaemonConfig {
-            listen_addr: raw.listen_addr,
-            listen_port: raw.listen_port,
+            api_socket: raw.api_socket,
+            api_pipe: raw.api_pipe,
             backends,
             poll_interval_secs: raw.poll_interval_secs,
             db_path: raw.db_path,
@@ -388,12 +389,18 @@ impl<'de> Deserialize<'de> for DaemonConfig {
     }
 }
 
-fn default_listen_addr() -> String {
-    "127.0.0.1".to_string()
+/// Default path of the API socket on Unix.
+pub const DEFAULT_API_SOCKET: &str = "/run/socketguard.sock";
+
+/// Default name of the API pipe on Windows.
+pub const DEFAULT_API_PIPE: &str = r"\\.\pipe\socketguard";
+
+fn default_api_socket() -> String {
+    DEFAULT_API_SOCKET.to_string()
 }
 
-fn default_listen_port() -> u16 {
-    9476
+fn default_api_pipe() -> String {
+    DEFAULT_API_PIPE.to_string()
 }
 
 fn default_poll_interval() -> u64 {
@@ -434,8 +441,8 @@ mod tests {
     #[test]
     fn default_config_has_sane_values() {
         let config = DaemonConfig::default();
-        assert_eq!(config.listen_addr, "127.0.0.1");
-        assert_eq!(config.listen_port, 9476);
+        assert_eq!(config.api_socket, DEFAULT_API_SOCKET);
+        assert_eq!(config.api_pipe, DEFAULT_API_PIPE);
         assert_eq!(config.backends.len(), 1);
         assert_eq!(config.backends[0].backend.backend_type(), BackendType::Ula);
         assert_eq!(config.poll_interval_secs, 2);
@@ -455,8 +462,8 @@ mod tests {
         );
         assert_eq!(config.backends[0].backend.interface(), "tun0");
         assert_eq!(config.backends[0].id, "yggdrasil");
-        assert_eq!(config.listen_addr, "127.0.0.1");
-        assert_eq!(config.listen_port, 9476);
+        assert_eq!(config.api_socket, DEFAULT_API_SOCKET);
+        assert_eq!(config.api_pipe, DEFAULT_API_PIPE);
     }
 
     #[test]
@@ -505,7 +512,7 @@ mod tests {
         let json = r#"{}"#;
         let config: DaemonConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.backends[0].backend.backend_type(), BackendType::Ula);
-        assert_eq!(config.listen_addr, "127.0.0.1");
+        assert_eq!(config.api_socket, DEFAULT_API_SOCKET);
     }
 
     #[test]
@@ -513,8 +520,8 @@ mod tests {
         let config = DaemonConfig::default();
         let json = serde_json::to_string(&config).unwrap();
         let parsed: DaemonConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.listen_addr, config.listen_addr);
-        assert_eq!(parsed.listen_port, config.listen_port);
+        assert_eq!(parsed.api_socket, config.api_socket);
+        assert_eq!(parsed.api_pipe, config.api_pipe);
         assert_eq!(parsed.backends.len(), config.backends.len());
         assert_eq!(
             parsed.backends[0].backend.backend_type(),

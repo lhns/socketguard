@@ -259,6 +259,8 @@ pub struct HostInterface {
 /// A remote-admin listener that whole-host protection would cut off.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockoutRisk {
+    /// The app the listener belongs to.
+    pub app_id: String,
     pub process_name: String,
     pub port: u16,
     pub protocol: Protocol,
@@ -348,7 +350,13 @@ pub fn check_protect_host(
                 && app_of_dst.get(&r.dst) == Some(&app_id.as_str())
         });
         if !allowed {
-            risks.insert((l.port, l.protocol.to_string(), l.process_name.clone(), ip));
+            risks.insert((
+                l.port,
+                l.protocol.to_string(),
+                l.process_name.clone(),
+                ip,
+                app_id,
+            ));
         }
     }
     if risks.is_empty() {
@@ -356,12 +364,15 @@ pub fn check_protect_host(
     } else {
         Err(risks
             .into_iter()
-            .map(|(port, proto, process_name, bind_address)| LockoutRisk {
-                process_name,
-                port,
-                protocol: proto.parse().expect("round-trips Display"),
-                bind_address,
-            })
+            .map(
+                |(port, proto, process_name, bind_address, app_id)| LockoutRisk {
+                    app_id,
+                    process_name,
+                    port,
+                    protocol: proto.parse().expect("round-trips Display"),
+                    bind_address,
+                },
+            )
             .collect())
     }
 }

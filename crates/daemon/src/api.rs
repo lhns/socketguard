@@ -1,23 +1,35 @@
-//! HTTP API. Phase 6 replaces this with API v1; until then only the status endpoint and
-//! the event stream exist so the daemon runs.
+//! The local HTTP API v1 (ADR 0032, 0033; reference in docs/api.md). Served over a Unix
+//! socket or a named pipe by [`crate::transport`]; there is no TCP listener, no token and
+//! no CORS. Handlers translate between HTTP and the engine and hold no logic of their own.
 
+use crate::apply;
+use crate::engine::{EngineError, GrantFilter, ProtectHostError};
+use crate::ruleset::LockoutRisk;
 use crate::AppState;
 use axum::{
-    extract::{Request, State},
-    http::StatusCode,
-    middleware::Next,
+    body::Body,
+    extract::{FromRequest, FromRequestParts, MatchedPath, Path, Request, State},
+    http::{request::Parts, Method, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
-    response::IntoResponse,
-    routing::get,
+    response::{IntoResponse, Response},
+    routing::{delete, get, patch, post, put, MethodRouter},
     Json, Router,
 };
 use futures_util::stream::Stream;
 use futures_util::StreamExt;
-use socketguard_core::api_types::{ApiError, StatusResponse};
+use serde::de::DeserializeOwned;
+use socketguard_core::api_types::{
+    error_code, ApiError, ApplyRequest, Counts, DisableRequest, LockoutRiskInfo, MergeRequest,
+    NewGroup, NewNetwork, NewPeer, ProtectHostRequest, ProtectHostResponse, ReviewRequest,
+    SetMembers, SplitRequest, StatusResponse, UpdateLabel, UpdateSettings,
+};
+use socketguard_core::config::BackendInstanceConfig;
+use socketguard_core::{ActivityKind, ActivityQuery, NewCredential, NewGrant, PortRef};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
-use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
+use tracing::Span;
 
 /// Push notifications for frontends (SSE event names in `name`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,61 +66,282 @@ impl DaemonEvent {
     }
 }
 
-pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/api/status", get(status))
-        .route("/api/events", get(sse_events))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_auth,
-        ))
-        .layer(CorsLayer::permissive())
-        .with_state(state)
-}
+// ─── Routes ──────────────────────────────────────────────────────────────────
 
-async fn require_auth(
-    State(state): State<Arc<AppState>>,
-    req: Request,
-    next: Next,
-) -> impl IntoResponse {
-    let auth_header = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok());
+/// Every route of the API. The router is built from this table, so it is also the list
+/// the coverage tests compare against the client crate (and, in Phase 7, the CLI).
+pub const ROUTES: &[(Method, &str)] = &[
+    (Method::GET, "/api/status"),
+    (Method::GET, "/api/events"),
+    (Method::GET, "/api/apps"),
+    (Method::GET, "/api/apps/{id}"),
+    (Method::DELETE, "/api/apps/{id}"),
+    (Method::POST, "/api/apps/{id}/review"),
+    (Method::POST, "/api/apps/{id}/split"),
+    (Method::POST, "/api/apps/{id}/merge"),
+    (Method::GET, "/api/peers"),
+    (Method::POST, "/api/peers"),
+    (Method::GET, "/api/peers/{id}"),
+    (Method::PATCH, "/api/peers/{id}"),
+    (Method::DELETE, "/api/peers/{id}"),
+    (Method::POST, "/api/peers/{id}/credentials"),
+    (Method::DELETE, "/api/peers/{id}/credentials/{cred_id}"),
+    (Method::GET, "/api/peer-groups"),
+    (Method::POST, "/api/peer-groups"),
+    (Method::GET, "/api/peer-groups/{id}"),
+    (Method::PATCH, "/api/peer-groups/{id}"),
+    (Method::DELETE, "/api/peer-groups/{id}"),
+    (Method::PUT, "/api/peer-groups/{id}/members"),
+    (Method::GET, "/api/grants"),
+    (Method::POST, "/api/grants"),
+    (Method::DELETE, "/api/grants/{id}"),
+    (Method::GET, "/api/networks"),
+    (Method::POST, "/api/networks"),
+    (Method::DELETE, "/api/networks/{id}"),
+    (Method::GET, "/api/settings"),
+    (Method::PUT, "/api/settings"),
+    (Method::PUT, "/api/settings/protect-host"),
+    (Method::GET, "/api/activity"),
+    (Method::GET, "/api/export"),
+    (Method::POST, "/api/apply"),
+    (Method::POST, "/api/disable"),
+];
 
-    match auth_header {
-        Some(value) if value.starts_with("Bearer ") => {
-            let token = &value[7..];
-            if token == state.api_token {
-                next.run(req).await.into_response()
-            } else {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(ApiError {
-                        error: "invalid bearer token".into(),
-                    }),
-                )
-                    .into_response()
-            }
-        }
-        _ => (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError {
-                error: "missing or malformed Authorization header".into(),
-            }),
-        )
-            .into_response(),
+type Shared = Arc<AppState>;
+
+/// The handler for one entry of [`ROUTES`]. A route without a handler fails the router
+/// build, which every API test hits.
+fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
+    match (method.as_str(), path) {
+        ("GET", "/api/status") => get(status),
+        ("GET", "/api/events") => get(sse_events),
+        ("GET", "/api/apps") => get(apps_list),
+        ("GET", "/api/apps/{id}") => get(app_get),
+        ("DELETE", "/api/apps/{id}") => delete(app_delete),
+        ("POST", "/api/apps/{id}/review") => post(app_review),
+        ("POST", "/api/apps/{id}/split") => post(app_split),
+        ("POST", "/api/apps/{id}/merge") => post(app_merge),
+        ("GET", "/api/peers") => get(peers_list),
+        ("POST", "/api/peers") => post(peer_create),
+        ("GET", "/api/peers/{id}") => get(peer_get),
+        ("PATCH", "/api/peers/{id}") => patch(peer_update),
+        ("DELETE", "/api/peers/{id}") => delete(peer_delete),
+        ("POST", "/api/peers/{id}/credentials") => post(credential_add),
+        ("DELETE", "/api/peers/{id}/credentials/{cred_id}") => delete(credential_remove),
+        ("GET", "/api/peer-groups") => get(groups_list),
+        ("POST", "/api/peer-groups") => post(group_create),
+        ("GET", "/api/peer-groups/{id}") => get(group_get),
+        ("PATCH", "/api/peer-groups/{id}") => patch(group_update),
+        ("DELETE", "/api/peer-groups/{id}") => delete(group_delete),
+        ("PUT", "/api/peer-groups/{id}/members") => put(group_members),
+        ("GET", "/api/grants") => get(grants_list),
+        ("POST", "/api/grants") => post(grant_create),
+        ("DELETE", "/api/grants/{id}") => delete(grant_delete),
+        ("GET", "/api/networks") => get(networks_list),
+        ("POST", "/api/networks") => post(network_create),
+        ("DELETE", "/api/networks/{id}") => delete(network_delete),
+        ("GET", "/api/settings") => get(settings_get),
+        ("PUT", "/api/settings") => put(settings_put),
+        ("PUT", "/api/settings/protect-host") => put(protect_host_put),
+        ("GET", "/api/activity") => get(activity_list),
+        ("GET", "/api/export") => get(export_get),
+        ("POST", "/api/apply") => post(apply_post),
+        ("POST", "/api/disable") => post(disable_post),
+        _ => unreachable!("route {method} {path} has no handler"),
     }
 }
 
-async fn status() -> impl IntoResponse {
-    Json(StatusResponse {
+pub fn router(state: Arc<AppState>) -> Router {
+    let mut router: Router<Shared> = Router::new();
+    for (method, path) in ROUTES {
+        router = router.route(path, handler(method, path));
+    }
+    router
+        .fallback(|| async {
+            ApiErr::new(
+                StatusCode::NOT_FOUND,
+                error_code::NOT_FOUND,
+                "no such route",
+            )
+        })
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_request_span)
+                .on_request(())
+                .on_response(|resp: &Response, _: std::time::Duration, span: &Span| {
+                    span.record("http.response.status_code", resp.status().as_u16());
+                }),
+        )
+        .with_state(state)
+}
+
+// ─── Tracing ─────────────────────────────────────────────────────────────────
+
+struct HeaderExtractor<'a>(&'a axum::http::HeaderMap);
+
+impl opentelemetry::propagation::Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|v| v.to_str().ok())
+    }
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(|k| k.as_str()).collect()
+    }
+}
+
+/// A span per request, parented to the caller's W3C `traceparent` so CLI or UI actions
+/// and the daemon's work form one trace (ADR 0034).
+fn make_request_span(req: &Request<Body>) -> Span {
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    let route = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_else(|| req.uri().path().to_string());
+    let name = format!("{} {route}", req.method());
+    let span = tracing::info_span!(
+        "api request",
+        otel.name = %name,
+        http.request.method = %req.method(),
+        http.route = %route,
+        http.response.status_code = tracing::field::Empty,
+    );
+    let parent = opentelemetry::global::get_text_map_propagator(|p| {
+        p.extract(&HeaderExtractor(req.headers()))
+    });
+    let _ = span.set_parent(parent);
+    span
+}
+
+// ─── Errors ──────────────────────────────────────────────────────────────────
+
+/// An error response: status plus the [`ApiError`] body.
+pub struct ApiErr {
+    status: StatusCode,
+    body: ApiError,
+}
+
+impl ApiErr {
+    fn new(status: StatusCode, code: &str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            body: ApiError {
+                code: code.to_string(),
+                message: message.into(),
+                details: None,
+            },
+        }
+    }
+
+    fn invalid(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, error_code::INVALID, message)
+    }
+}
+
+impl IntoResponse for ApiErr {
+    fn into_response(self) -> Response {
+        (self.status, Json(self.body)).into_response()
+    }
+}
+
+impl From<EngineError> for ApiErr {
+    fn from(e: EngineError) -> Self {
+        match e {
+            EngineError::NotFound(_) => {
+                Self::new(StatusCode::NOT_FOUND, error_code::NOT_FOUND, e.to_string())
+            }
+            EngineError::Invalid(_) => Self::invalid(e.to_string()),
+            EngineError::Conflict(_) => {
+                Self::new(StatusCode::CONFLICT, error_code::CONFLICT, e.to_string())
+            }
+            EngineError::LocalNetwork => Self::new(
+                StatusCode::BAD_REQUEST,
+                error_code::LOCAL_NETWORK,
+                e.to_string(),
+            ),
+            EngineError::ConfirmationRequired => Self::new(
+                StatusCode::CONFLICT,
+                error_code::CONFIRMATION_REQUIRED,
+                e.to_string(),
+            ),
+            EngineError::Internal(err) => {
+                tracing::error!("API request failed: {err:#}");
+                Self::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_code::INTERNAL,
+                    "internal error",
+                )
+            }
+        }
+    }
+}
+
+impl From<anyhow::Error> for ApiErr {
+    fn from(e: anyhow::Error) -> Self {
+        EngineError::Internal(e).into()
+    }
+}
+
+type ApiResult<T> = Result<T, ApiErr>;
+
+fn risk_info(r: &LockoutRisk) -> LockoutRiskInfo {
+    LockoutRiskInfo {
+        process_name: r.process_name.clone(),
+        port: r.port,
+        protocol: r.protocol,
+        bind_address: r.bind_address.to_string(),
+        message: r.to_string(),
+    }
+}
+
+// Extractors that fail with the API's error body instead of axum's plain text.
+
+pub struct ApiJson<T>(pub T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for ApiJson<T> {
+    type Rejection = ApiErr;
+    async fn from_request(req: Request, state: &S) -> Result<Self, ApiErr> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(v)) => Ok(ApiJson(v)),
+            Err(e) => Err(ApiErr::invalid(e.body_text())),
+        }
+    }
+}
+
+pub struct ApiQuery<T>(pub T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequestParts<S> for ApiQuery<T> {
+    type Rejection = ApiErr;
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, ApiErr> {
+        axum::extract::Query::<T>::try_from_uri(&parts.uri)
+            .map(|q| ApiQuery(q.0))
+            .map_err(|e| ApiErr::invalid(e.body_text()))
+    }
+}
+
+// ─── Status and events ───────────────────────────────────────────────────────
+
+async fn status(State(state): State<Shared>) -> ApiResult<Json<StatusResponse>> {
+    let engine = state.engine.read().await;
+    let apps = engine.list_apps(&state, false).await?;
+    let pending_apps = apps.iter().filter(|a| !a.reviewed).count() as u32;
+    let addresses = apps.iter().map(|a| a.addresses.len()).sum::<usize>() as u32;
+    Ok(Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
-    })
+        networks: engine.networks(),
+        protect_host_interfaces: engine.settings(&state).await?.protect_host_interfaces,
+        counts: Counts {
+            apps: apps.len() as u32,
+            pending_apps,
+            addresses,
+            peers: engine.list_peers(&state).await?.len() as u32,
+            groups: engine.list_groups(&state).await?.len() as u32,
+            grants: state.db.list_grants().await?.len() as u32,
+        },
+    }))
 }
 
 async fn sse_events(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Shared>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state.events.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|result| {
@@ -119,4 +352,375 @@ async fn sse_events(
         )
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// ─── Apps ────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize, Default)]
+struct AppsParams {
+    pending: Option<bool>,
+}
+
+async fn apps_list(
+    State(state): State<Shared>,
+    ApiQuery(q): ApiQuery<AppsParams>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let apps = engine.list_apps(&state, q.pending.unwrap_or(false)).await?;
+    Ok(Json(apps).into_response())
+}
+
+async fn app_get(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(engine.get_app(&state, &id).await?).into_response())
+}
+
+async fn app_delete(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<StatusCode> {
+    state.engine.read().await.delete_app(&state, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn app_review(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<ReviewRequest>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    engine.review_app(&state, &id, req.reviewed).await?;
+    Ok(Json(engine.get_app(&state, &id).await?).into_response())
+}
+
+async fn app_split(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<SplitRequest>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let address = engine
+        .split(
+            &state,
+            &id,
+            &req.network_id,
+            PortRef {
+                port: req.port,
+                proto: req.proto,
+            },
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(address)).into_response())
+}
+
+async fn app_merge(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<MergeRequest>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let address = engine
+        .merge(&state, &id, &req.network_id, &req.address_ids)
+        .await?;
+    Ok(Json(address).into_response())
+}
+
+// ─── Peers ───────────────────────────────────────────────────────────────────
+
+async fn peers_list(State(state): State<Shared>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(engine.list_peers(&state).await?).into_response())
+}
+
+async fn peer_create(
+    State(state): State<Shared>,
+    ApiJson(req): ApiJson<NewPeer>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let peer = engine
+        .create_peer(&state, &req.label, &req.credentials)
+        .await?;
+    Ok((StatusCode::CREATED, Json(peer)).into_response())
+}
+
+async fn peer_get(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(engine.get_peer(&state, &id).await?).into_response())
+}
+
+async fn peer_update(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<UpdateLabel>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(engine.update_peer_label(&state, &id, &req.label).await?).into_response())
+}
+
+async fn peer_delete(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<StatusCode> {
+    state.engine.read().await.delete_peer(&state, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn credential_add(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<NewCredential>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let c = engine.add_credential(&state, &id, &req).await?;
+    Ok((StatusCode::CREATED, Json(c)).into_response())
+}
+
+async fn credential_remove(
+    State(state): State<Shared>,
+    Path((id, cred_id)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    state
+        .engine
+        .read()
+        .await
+        .remove_credential(&state, &id, &cred_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── Peer groups ─────────────────────────────────────────────────────────────
+
+async fn groups_list(State(state): State<Shared>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(engine.list_groups(&state).await?).into_response())
+}
+
+async fn group_create(
+    State(state): State<Shared>,
+    ApiJson(req): ApiJson<NewGroup>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let g = engine
+        .create_group(&state, &req.label, &req.members)
+        .await?;
+    Ok((StatusCode::CREATED, Json(g)).into_response())
+}
+
+async fn group_get(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(engine.get_group(&state, &id).await?).into_response())
+}
+
+async fn group_update(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<UpdateLabel>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(engine.rename_group(&state, &id, &req.label).await?).into_response())
+}
+
+async fn group_delete(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    state.engine.read().await.delete_group(&state, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn group_members(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<SetMembers>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(engine.set_group_members(&state, &id, &req.peer_ids).await?).into_response())
+}
+
+// ─── Grants ──────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize, Default)]
+struct GrantParams {
+    app: Option<String>,
+    peer: Option<String>,
+    group: Option<String>,
+}
+
+async fn grants_list(
+    State(state): State<Shared>,
+    ApiQuery(q): ApiQuery<GrantParams>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let grants = engine
+        .list_grants(
+            &state,
+            GrantFilter {
+                app_id: q.app,
+                peer_id: q.peer,
+                group_id: q.group,
+            },
+        )
+        .await?;
+    Ok(Json(grants).into_response())
+}
+
+async fn grant_create(
+    State(state): State<Shared>,
+    ApiJson(req): ApiJson<NewGrant>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let grant = engine.create_grant(&state, &req).await?;
+    Ok((StatusCode::CREATED, Json(grant)).into_response())
+}
+
+async fn grant_delete(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    state.engine.read().await.delete_grant(&state, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── Networks ────────────────────────────────────────────────────────────────
+
+async fn networks_list(State(state): State<Shared>) -> ApiResult<Response> {
+    Ok(Json(state.engine.read().await.networks()).into_response())
+}
+
+async fn network_create(
+    State(state): State<Shared>,
+    ApiJson(req): ApiJson<NewNetwork>,
+) -> ApiResult<Response> {
+    let id = req
+        .id
+        .filter(|i| !i.trim().is_empty())
+        .unwrap_or_else(|| req.backend.default_id());
+    let inst = BackendInstanceConfig {
+        id,
+        backend: req.backend,
+    };
+    let network = state.engine.write().await.add_network(&state, inst).await?;
+    Ok((StatusCode::CREATED, Json(network)).into_response())
+}
+
+async fn network_delete(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    state
+        .engine
+        .write()
+        .await
+        .remove_network(&state, &id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── Settings ────────────────────────────────────────────────────────────────
+
+async fn settings_get(State(state): State<Shared>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(engine.settings(&state).await?).into_response())
+}
+
+async fn settings_put(
+    State(state): State<Shared>,
+    ApiJson(req): ApiJson<UpdateSettings>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    if let Some(mode) = req.address_mode {
+        engine.set_address_mode(&state, mode).await?;
+    }
+    Ok(Json(engine.settings(&state).await?).into_response())
+}
+
+async fn protect_host_put(
+    State(state): State<Shared>,
+    ApiJson(req): ApiJson<ProtectHostRequest>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    match engine
+        .set_protect_host(&state, req.interfaces, req.force)
+        .await
+    {
+        Ok(risks) => Ok(Json(ProtectHostResponse {
+            settings: engine.settings(&state).await?,
+            overridden: risks.iter().map(risk_info).collect(),
+        })
+        .into_response()),
+        Err(ProtectHostError::Lockout(risks)) => {
+            let infos: Vec<LockoutRiskInfo> = risks.iter().map(risk_info).collect();
+            Err(ApiErr {
+                status: StatusCode::CONFLICT,
+                body: ApiError {
+                    code: error_code::PROTECT_HOST_REFUSED.to_string(),
+                    message: format!(
+                        "whole-host protection would lock out remote administration: {}",
+                        risks
+                            .iter()
+                            .map(|r| r.to_string())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
+                    details: serde_json::to_value(infos).ok(),
+                },
+            })
+        }
+        Err(ProtectHostError::Other(e)) => Err(e.into()),
+    }
+}
+
+// ─── Activity, export, maintenance ───────────────────────────────────────────
+
+#[derive(serde::Deserialize, Default)]
+struct ActivityParams {
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    kind: Option<ActivityKind>,
+    app: Option<String>,
+    peer: Option<String>,
+    limit: Option<u32>,
+    before: Option<i64>,
+}
+
+async fn activity_list(
+    State(state): State<Shared>,
+    ApiQuery(q): ApiQuery<ActivityParams>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let records = engine
+        .activity(
+            &state,
+            &ActivityQuery {
+                since: q.since,
+                kind: q.kind,
+                app_id: q.app,
+                peer_id: q.peer,
+                before: q.before,
+                limit: q.limit,
+            },
+        )
+        .await?;
+    Ok(Json(records).into_response())
+}
+
+async fn export_get(State(state): State<Shared>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(apply::export(&engine, &state).await?).into_response())
+}
+
+async fn apply_post(
+    State(state): State<Shared>,
+    ApiJson(req): ApiJson<ApplyRequest>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(apply::apply(&engine, &state, req).await?).into_response())
+}
+
+async fn disable_post(
+    State(state): State<Shared>,
+    ApiJson(req): ApiJson<DisableRequest>,
+) -> ApiResult<StatusCode> {
+    if !req.confirm {
+        return Err(ApiErr::new(
+            StatusCode::CONFLICT,
+            error_code::CONFIRMATION_REQUIRED,
+            "disabling removes every SocketGuard firewall rule and address; confirm it with {\"confirm\": true}",
+        ));
+    }
+    state.engine.read().await.disable(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

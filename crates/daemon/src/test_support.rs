@@ -1,6 +1,6 @@
 use crate::backend::yggdrasil::{NodeInfo, YggdrasilNode};
 use crate::backend::{with_prefix64, Ipv6Backend, Prefix};
-use crate::firewall::{DesiredRuleset, DropEvent, DropSink, Firewall};
+use crate::firewall::{Counter, DesiredRuleset, DropEvent, DropSink, Firewall};
 use crate::monitor::SocketMonitor;
 use crate::network::NetworkInterface;
 use crate::AppState;
@@ -26,6 +26,7 @@ pub struct MockFirewall {
     pub calls: Arc<Mutex<Vec<FirewallCall>>>,
     fail_apply: AtomicBool,
     drop_sink: Mutex<Option<DropSink>>,
+    counters: Mutex<Vec<Counter>>,
 }
 
 impl MockFirewall {
@@ -34,7 +35,13 @@ impl MockFirewall {
             calls,
             fail_apply: AtomicBool::new(false),
             drop_sink: Mutex::new(None),
+            counters: Mutex::new(Vec::new()),
         }
+    }
+
+    /// What `counters()` reports from now on.
+    pub fn set_counters(&self, counters: Vec<Counter>) {
+        *self.counters.lock().unwrap() = counters;
     }
 
     /// Deliver a drop event to the engine, as the platform would. Returns false if the
@@ -83,6 +90,10 @@ impl Firewall for MockFirewall {
     fn disable(&self) -> Result<()> {
         self.calls.lock().unwrap().push(FirewallCall::Disable);
         Ok(())
+    }
+
+    fn counters(&self) -> Result<Vec<Counter>> {
+        Ok(self.counters.lock().unwrap().clone())
     }
 
     fn subscribe_drops(&self, sink: DropSink) -> Result<()> {
@@ -416,6 +427,5 @@ pub async fn test_app_state(engine: crate::engine::Engine, config: DaemonConfig)
         engine: tokio::sync::RwLock::new(engine),
         firewall_lock: tokio::sync::Mutex::new(()),
         events: events_tx,
-        api_token: "test-token".to_string(),
     })
 }

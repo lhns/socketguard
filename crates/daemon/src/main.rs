@@ -32,14 +32,13 @@ async fn main() -> Result<()> {
         );
     }
 
-    let api_token = auth::generate_and_store_token()?;
-
     let db = state::Database::new(&config.db_path).await?;
     db.migrate().await?;
     info!("Database initialized at {}", config.db_path);
 
     let ula_global_id = db.ula_global_id().await?;
     let engine = engine::Engine::new(&config, ula_global_id)?;
+    engine.register_metrics(&opentelemetry::global::meter("socketguard"));
 
     let (events_tx, _) = broadcast::channel::<api::DaemonEvent>(64);
 
@@ -49,24 +48,17 @@ async fn main() -> Result<()> {
         engine: tokio::sync::RwLock::new(engine),
         firewall_lock: tokio::sync::Mutex::new(()),
         events: events_tx,
-        api_token,
     });
 
     // Shutdown signal channel
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Start the API server FIRST so the UI can connect immediately
-    let listen_addr = format!("{}:{}", config.listen_addr, config.listen_port);
-    info!("API listening on {listen_addr}");
-    let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
+    let server = transport::bind(&config)?;
     let app = api::router(state.clone());
 
     // Start serving in a background task
-    let api_handle = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await
-    });
+    let api_handle = tokio::spawn(async move { server.serve(app, shutdown_signal()).await });
 
     // Startup reconciliation runs AFTER the API is available
     {
@@ -112,8 +104,6 @@ async fn main() -> Result<()> {
         let engine = state.engine.read().await;
         engine.shutdown().await;
     }
-
-    auth::cleanup_token_file();
 
     info!("SocketGuard daemon stopped");
     // Flush pending OTel data; the exporters block, so keep them off the runtime threads.

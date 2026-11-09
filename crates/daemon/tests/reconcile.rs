@@ -1479,3 +1479,249 @@ async fn protect_host_is_allowed_by_a_grant_to_anyone() {
         .await
         .is_ok());
 }
+
+// ─── Local on a real interface (ADR 0027) ────────────────────────────────────
+
+#[tokio::test]
+async fn local_on_a_non_loopback_interface_takes_grants_like_a_lan() {
+    let dummy = Net {
+        id: "local",
+        config: BackendConfig::Ula {
+            interface: "dummy0".into(),
+        },
+        mock: {
+            let m = MockIpv6Backend::new("fd00:1:2:3::", 128, "dummy0");
+            m.set_prefix("fd00:1:2:3::");
+            m
+        },
+    };
+    let h = Harness::new(vec![dummy], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let net = h.engine().await.networks().remove(0);
+    assert!(net.grants_apply, "{net:?}");
+
+    let peer = h.peer("laptop", CredentialKind::Ip, "fd00::5").await;
+    let view = h.grant(&app.id, Subject::Peer(peer)).await;
+    assert_eq!(view.reach.len(), 1);
+    assert_eq!(view.reach[0].reach, Reach::IpOnly);
+    let rs = h.last_ruleset();
+    assert_eq!(rs.rules.len(), 1);
+    assert_eq!(rs.rules[0].iif, None);
+    assert_eq!(
+        rs.rules[0].sources,
+        Sources::Nets(vec!["fd00::5/128".parse().unwrap()])
+    );
+
+    // A grant naming the network is accepted, too.
+    let e = h
+        .engine()
+        .await
+        .create_grant(
+            &h.state,
+            &NewGrant {
+                app_id: app.id.clone(),
+                port: None,
+                network_id: Some("local".into()),
+                subject: Subject::Anyone,
+                confirm_open: true,
+            },
+        )
+        .await;
+    assert!(e.is_ok(), "{e:?}");
+}
+
+// ─── Remote administration inside a protected scope ──────────────────────────
+
+#[tokio::test]
+async fn remote_admin_inside_a_protected_scope_is_reported_once() {
+    let h = Harness::new(
+        vec![lan(), ygg()],
+        vec![listener("sshd", 22, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    let sshd = h.app().await;
+
+    // sshd listens on a wildcard, the Yggdrasil overlay is protected, no grant reaches it.
+    let exposed = h.activity(ActivityKind::RemoteAdminExposed).await;
+    assert_eq!(exposed.len(), 1, "{exposed:?}");
+    assert_eq!(exposed[0].app_id.as_deref(), Some(sshd.id.as_str()));
+    assert_eq!(exposed[0].network_id.as_deref(), Some("ygg"));
+    assert_eq!(exposed[0].port, Some(22));
+
+    // Passes that change nothing do not repeat it.
+    h.reconcile().await;
+    h.reconcile().await;
+    assert_eq!(h.activity(ActivityKind::RemoteAdminExposed).await.len(), 1);
+
+    // A protected host interface is a second scope, reported once more.
+    h.engine()
+        .await
+        .set_protect_host(&h.state, vec!["eth0".into()], true)
+        .await
+        .unwrap();
+    h.reconcile().await;
+    h.reconcile().await;
+    let exposed = h.activity(ActivityKind::RemoteAdminExposed).await;
+    assert_eq!(exposed.len(), 2, "{exposed:?}");
+    assert!(exposed
+        .iter()
+        .any(|r| r.network_id.as_deref() == Some("lan")));
+
+    // Once a grant reaches sshd on both, the situation clears; losing it reports again.
+    let peer = h.peer("admin", CredentialKind::YggKey, KEY).await;
+    let ip_peer = h.peer("admin-lan", CredentialKind::Ip, "2001:db8::7").await;
+    let g1 = h.grant(&sshd.id, Subject::Peer(peer)).await;
+    h.grant(&sshd.id, Subject::Peer(ip_peer)).await;
+    h.reconcile().await;
+    assert_eq!(h.activity(ActivityKind::RemoteAdminExposed).await.len(), 2);
+    h.engine()
+        .await
+        .delete_grant(&h.state, &g1.grant.id)
+        .await
+        .unwrap();
+    h.reconcile().await;
+    assert_eq!(
+        h.activity(ActivityKind::RemoteAdminExposed).await.len(),
+        3,
+        "reported again after the grant was lost"
+    );
+}
+
+#[tokio::test]
+async fn ordinary_apps_in_a_protected_scope_are_not_remote_admin() {
+    let h = Harness::new(
+        vec![lan(), ygg()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    assert!(h
+        .activity(ActivityKind::RemoteAdminExposed)
+        .await
+        .is_empty());
+}
+
+// ─── Metrics ─────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn metrics_export_gauges_and_firewall_counters_without_source_addresses() {
+    use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+    use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+
+    let exporter = InMemoryMetricExporter::default();
+    let provider = SdkMeterProvider::builder()
+        .with_reader(PeriodicReader::builder(exporter.clone()).build())
+        .build();
+
+    let h = Harness::new(
+        vec![local(), ygg()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.engine()
+        .await
+        .register_metrics(&provider.meter("socketguard-test"));
+    h.reconcile().await;
+    let app = h.app().await;
+    let peer = h.peer("alice", CredentialKind::YggKey, KEY).await;
+    h.grant(&app.id, Subject::Peer(peer)).await;
+
+    // The firewall reports counters for the rule of the grant and for a scope.
+    let rs = h.last_ruleset();
+    h.fw.set_counters(vec![
+        socketguard_daemon::firewall::Counter {
+            id: rs.rules[0].id.clone(),
+            packets: 7,
+            bytes: 700,
+        },
+        socketguard_daemon::firewall::Counter {
+            id: "overlay:ygg0".into(),
+            packets: 3,
+            bytes: 300,
+        },
+        socketguard_daemon::firewall::Counter {
+            id: "not-in-the-ruleset".into(),
+            packets: 1,
+            bytes: 1,
+        },
+    ]);
+    h.reconcile().await;
+    provider.force_flush().unwrap();
+
+    type Points = Vec<(Vec<(String, String)>, u64)>;
+    let finished = exporter.get_finished_metrics().unwrap();
+    let last = finished.last().expect("a collection");
+    let mut seen: HashMap<String, Points> = HashMap::new();
+    for scope in last.scope_metrics() {
+        for m in scope.metrics() {
+            let points: Points = match m.data() {
+                AggregatedMetrics::U64(MetricData::Gauge(g)) => {
+                    g.data_points().map(|p| (Vec::new(), p.value())).collect()
+                }
+                AggregatedMetrics::U64(MetricData::Sum(s)) => s
+                    .data_points()
+                    .map(|p| {
+                        let mut a: Vec<_> = p
+                            .attributes()
+                            .map(|kv| (kv.key.to_string(), kv.value.to_string()))
+                            .collect();
+                        a.sort();
+                        (a, p.value())
+                    })
+                    .collect(),
+                _ => continue,
+            };
+            seen.insert(m.name().to_string(), points);
+        }
+    }
+    assert_eq!(seen["socketguard.apps"][0].1, 1);
+    assert_eq!(seen["socketguard.addresses"][0].1, 2);
+    assert_eq!(seen["socketguard.peers"][0].1, 1);
+    assert_eq!(seen["socketguard.grants"][0].1, 1);
+
+    let attrs = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+        let mut v: Vec<_> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        v.sort();
+        v
+    };
+    let mut packets = seen["socketguard.firewall.packets"].clone();
+    packets.sort();
+    let mut want = vec![
+        (
+            attrs(&[("app", "nginx"), ("network", "ygg"), ("subject", "alice")]),
+            7,
+        ),
+        (attrs(&[("scope", "overlay:ygg0")]), 3),
+    ];
+    want.sort();
+    assert_eq!(packets, want);
+    assert_eq!(
+        seen["socketguard.firewall.bytes"]
+            .iter()
+            .map(|(_, v)| *v)
+            .sum::<u64>(),
+        1000
+    );
+    // Bounded cardinality: only app, network, subject and scope ever appear as attributes.
+    for points in seen.values() {
+        for (a, _) in points {
+            assert!(a
+                .iter()
+                .all(|(k, _)| ["app", "network", "subject", "scope"].contains(&k.as_str())));
+        }
+    }
+
+    // The same totals are on the app detail.
+    let detail = h.engine().await.get_app(&h.state, &app.id).await.unwrap();
+    assert_eq!(detail.counters.len(), 1);
+    assert_eq!(
+        (detail.counters[0].packets, detail.counters[0].bytes),
+        (7, 700)
+    );
+}

@@ -118,6 +118,10 @@ impl Telemetry {
     /// Install the global `tracing` subscriber: console output plus whichever OTel
     /// layers are active. `filter` applies to everything.
     pub fn install(&self, filter: EnvFilter) {
+        // Incoming `traceparent` headers continue the caller's trace (API requests).
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
         let trace_layer = self
             .tracer
             .as_ref()

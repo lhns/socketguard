@@ -10,6 +10,7 @@
 use crate::api::DaemonEvent;
 use crate::backend::{self, iid_of, same_prefix64, with_prefix64, Ipv6Backend};
 use crate::firewall::{self, DesiredRuleset, DropEvent, Firewall};
+use crate::metrics::{CounterKey, Metrics};
 use crate::monitor::{self, SocketMonitor};
 use crate::network::{self, NetworkInterface};
 use crate::ruleset::{self, HostInterface, LockoutRisk, Snapshot};
@@ -18,10 +19,10 @@ use crate::AppState;
 use chrono::Utc;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
 use socketguard_core::{
-    app_identity, grant_reach, new_id, normalize_credential, ActivityKind, ActivityQuery,
-    ActivityRecord, Address, AddressId, AddressMode, App, AppDetail, AppId, Credential,
-    CredentialError, Grant, GrantView, Locator, Network, NetworkKind, NetworkStatus, NewCredential,
-    NewGrant, Peer, PeerGroup, PortRef, PortSet, Protocol, Settings, Subject,
+    app_identity, grant_reach, is_loopback_interface, new_id, normalize_credential, ActivityKind,
+    ActivityQuery, ActivityRecord, Address, AddressId, AddressMode, App, AppDetail, AppId,
+    Credential, CredentialError, Grant, GrantView, Locator, Network, NetworkKind, NetworkStatus,
+    NewCredential, NewGrant, Peer, PeerGroup, PortRef, PortSet, Protocol, Settings, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
@@ -121,6 +122,12 @@ pub struct Engine {
     drops: Arc<Mutex<Vec<DropEvent>>>,
     /// Drops aggregated per (src, dst, port, proto, minute), flushed once the minute is over.
     drop_agg: Mutex<BTreeMap<DropKey, u32>>,
+    /// Which app, network and subject each rule of the applied ruleset belongs to, for
+    /// attributing its counter.
+    counter_keys: Mutex<HashMap<String, CounterKey>>,
+    metrics: Metrics,
+    /// (app, scope) pairs already reported as `RemoteAdminExposed`.
+    exposed_reported: Mutex<HashSet<(String, String)>>,
 }
 
 impl Engine {
@@ -205,7 +212,16 @@ impl Engine {
             apply_failed: AtomicBool::new(false),
             drops: Arc::default(),
             drop_agg: Mutex::default(),
+            counter_keys: Mutex::default(),
+            metrics: Metrics::default(),
+            exposed_reported: Mutex::default(),
         }
+    }
+
+    /// Create the OpenTelemetry instruments on `meter` (ADR 0034). Without a meter
+    /// provider they do nothing.
+    pub fn register_metrics(&self, meter: &opentelemetry::metrics::Meter) {
+        self.metrics.register(meter);
     }
 
     fn emit(&self, state: &AppState, ev: DaemonEvent) {
@@ -245,7 +261,10 @@ impl Engine {
             kind,
             name: id.to_string(),
             interface: Some(active.config.backend.interface().to_string()),
-            grants_apply: kind != NetworkKind::Local,
+            // Local on loopback is this machine only; on another interface it takes grants
+            // like any IP network (ADR 0027).
+            grants_apply: kind != NetworkKind::Local
+                || !is_loopback_interface(active.config.backend.interface()),
             status,
             prefix,
         }
@@ -310,6 +329,9 @@ impl Engine {
                     desired.scopes.len(),
                     desired.rules.len()
                 );
+                *self.counter_keys.lock().unwrap() = counter_keys(&snapshot, &desired);
+                // The table was replaced, so the platform's counters restarted at zero.
+                self.metrics.counters_reset();
                 *self.last_applied.lock().unwrap() = Some(desired);
                 self.apply_failed.store(false, Ordering::Relaxed);
                 Ok(())
@@ -486,6 +508,47 @@ impl Engine {
         }
     }
 
+    /// The API's add: validate against the current networks, create the backend, add it
+    /// and return the network as it now stands.
+    pub async fn add_network(
+        &mut self,
+        state: &AppState,
+        inst: BackendInstanceConfig,
+    ) -> Result<Network, EngineError> {
+        if self.backends.contains_key(&inst.id) {
+            return Err(EngineError::Conflict(format!(
+                "network {} already exists",
+                inst.id
+            )));
+        }
+        let mut all: Vec<BackendInstanceConfig> =
+            self.backends.values().map(|b| b.config.clone()).collect();
+        all.push(inst.clone());
+        DaemonConfig::validate_backends(&all).map_err(|e| {
+            if e.starts_with("at most one") {
+                EngineError::Conflict(e)
+            } else {
+                EngineError::Invalid(e)
+            }
+        })?;
+        let b = backend::create_backend(&inst.backend, self.ula_global_id)
+            .map_err(|e| EngineError::Invalid(format!("cannot create network: {e}")))?;
+        self.add_backend_instance_with(state, &inst, b).await;
+        self.networks()
+            .into_iter()
+            .find(|n| n.id == inst.id)
+            .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))
+    }
+
+    /// The API's remove.
+    pub async fn remove_network(&mut self, state: &AppState, id: &str) -> Result<(), EngineError> {
+        if !self.backends.contains_key(id) {
+            return Err(EngineError::NotFound(format!("network {id}")));
+        }
+        self.remove_backend_instance(state, id).await;
+        Ok(())
+    }
+
     /// [`Engine::add_backend_instance`] with the allocator already built (tests inject mocks).
     pub async fn add_backend_instance_with(
         &mut self,
@@ -502,6 +565,17 @@ impl Engine {
                 backend: b,
             },
         );
+        // Keep the config (and the change detector) in step, so the next reconcile does
+        // not see this network as new.
+        {
+            let mut config = state.config.write().await;
+            if !config.backends.iter().any(|b| b.id == inst.id) {
+                config.backends.push(inst.clone());
+            }
+        }
+        if !self.current_backend_ids.contains(&inst.id) {
+            self.current_backend_ids.push(inst.id.clone());
+        }
         let created = match self.ensure_addresses(state).await {
             Ok(n) => n,
             Err(e) => {
@@ -538,6 +612,13 @@ impl Engine {
             .await;
         }
         self.backends.remove(backend_id);
+        state
+            .config
+            .write()
+            .await
+            .backends
+            .retain(|b| b.id != backend_id);
+        self.current_backend_ids.retain(|id| id != backend_id);
         let _ = self.apply_firewall(state).await;
         self.emit(state, DaemonEvent::NetworksChanged);
         self.emit(state, DaemonEvent::AppsChanged);
@@ -601,6 +682,9 @@ impl Engine {
         }
         self.ensure_addresses_present(state).await;
         self.flush_drops(state).await;
+        self.poll_counters().await;
+        self.refresh_metric_counts(state).await;
+        self.check_remote_admin(state, &current_sockets).await;
 
         if changed || created > 0 {
             self.emit(state, DaemonEvent::AppsChanged);
@@ -871,6 +955,118 @@ impl Engine {
         }
     }
 
+    // ─── Counters, metrics, exposure ─────────────────────────────────────────
+
+    /// Read the firewall's counters and fold them into the metrics.
+    async fn poll_counters(&self) {
+        let fw = self.firewall.clone();
+        let counters = match tokio::task::spawn_blocking(move || fw.counters()).await {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
+                debug!("Could not read firewall counters: {e}");
+                return;
+            }
+            Err(e) => {
+                warn!("Counter task failed: {e}");
+                return;
+            }
+        };
+        let keys = self.counter_keys.lock().unwrap();
+        self.metrics.record(counters.into_iter().filter_map(|c| {
+            let key = keys.get(&c.id)?.clone();
+            Some((c.id, key, c.packets, c.bytes))
+        }));
+    }
+
+    async fn refresh_metric_counts(&self, state: &AppState) {
+        let db = &state.db;
+        let (Ok(apps), Ok(peers), Ok(grants)) = (
+            db.list_apps().await,
+            db.list_peers().await,
+            db.list_grants().await,
+        ) else {
+            return;
+        };
+        let addresses = apps.iter().map(|a| a.addresses.len()).sum();
+        self.metrics
+            .set_counts(apps.len(), addresses, peers.len(), grants.len());
+    }
+
+    /// Report remote-admin listeners (sshd, RDP) that sit inside a protected scope (an
+    /// overlay or a protected host interface) that no grant reaches: they are cut off
+    /// from there. Once per app and scope, until the situation clears.
+    async fn check_remote_admin(
+        &self,
+        state: &AppState,
+        sockets: &[socketguard_core::ListeningSocket],
+    ) {
+        let Ok(snapshot) = self.gather_snapshot(state).await else {
+            return;
+        };
+        // (scope key, interface, network id): the key is the network id when the interface
+        // belongs to a network, else the interface name.
+        let mut scopes: Vec<(String, String, Option<String>)> = Vec::new();
+        for n in &snapshot.networks {
+            if let (NetworkKind::Yggdrasil, Some(iface)) = (n.kind, &n.interface) {
+                scopes.push((n.id.clone(), iface.clone(), Some(n.id.clone())));
+            }
+        }
+        for iface in &snapshot.protect_host {
+            let net = snapshot
+                .networks
+                .iter()
+                .find(|n| n.interface.as_deref() == Some(iface));
+            let key = net.map(|n| n.id.clone()).unwrap_or_else(|| iface.clone());
+            if !scopes.iter().any(|(k, _, _)| *k == key) {
+                scopes.push((key, iface.clone(), net.map(|n| n.id.clone())));
+            }
+        }
+        let mut current: HashSet<(String, String)> = HashSet::new();
+        let mut fresh = Vec::new();
+        for (key, iface, net_id) in scopes {
+            let host = HostInterface {
+                addrs: self
+                    .network
+                    .list_addresses(&iface)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+                name: iface,
+            };
+            let Err(risks) = ruleset::check_protect_host(&snapshot, sockets, &[host]) else {
+                continue;
+            };
+            for risk in risks {
+                if current.insert((risk.app_id.clone(), key.clone())) {
+                    fresh.push((key.clone(), net_id.clone(), risk));
+                }
+            }
+        }
+        let new: Vec<_> = {
+            let mut seen = self.exposed_reported.lock().unwrap();
+            let new = fresh
+                .into_iter()
+                .filter(|(key, _, risk)| !seen.contains(&(risk.app_id.clone(), key.clone())))
+                .collect();
+            *seen = current;
+            new
+        };
+        for (key, net_id, risk) in new {
+            let message = format!(
+                "Remote administration is cut off: {} (port {}/{}) is inside the protected scope {key} and no grant reaches it",
+                risk.process_name, risk.port, risk.protocol
+            );
+            warn!("{message}");
+            let mut act =
+                NewActivity::new(ActivityKind::RemoteAdminExposed, message).app(&risk.app_id);
+            act.network_id = net_id;
+            act.port = Some(risk.port);
+            act.proto = Some(risk.protocol);
+            self.record(state, act).await;
+        }
+    }
+
     // ─── Drops ───────────────────────────────────────────────────────────────
 
     /// Fold the pending drop events into per-minute aggregates and write the closed
@@ -971,7 +1167,11 @@ impl Engine {
                 },
             )
             .await?;
-        Ok(AppDetail { app, grants })
+        Ok(AppDetail {
+            counters: self.metrics.app_counters(&app.id),
+            app,
+            grants,
+        })
     }
 
     pub async fn list_peers(&self, state: &AppState) -> Result<Vec<Peer>, EngineError> {
@@ -1670,6 +1870,69 @@ impl Engine {
         self.emit(state, DaemonEvent::GrantsChanged);
         Ok(())
     }
+}
+
+/// Attribute every rule and scope of `desired` for the metrics. Rule ids are
+/// `a:<address>:<port>:<proto>:<grant>[:<iif>]` (see `ruleset::build_with_warnings`).
+fn counter_keys(snap: &Snapshot, desired: &DesiredRuleset) -> HashMap<String, CounterKey> {
+    let mut out = HashMap::new();
+    for sc in &desired.scopes {
+        out.insert(
+            sc.id.clone(),
+            CounterKey::Scope {
+                scope: sc.id.clone(),
+            },
+        );
+    }
+    let peers: HashMap<&str, &str> = snap
+        .peers
+        .iter()
+        .map(|p| (p.id.as_str(), p.label.as_str()))
+        .collect();
+    let groups: HashMap<&str, &str> = snap
+        .groups
+        .iter()
+        .map(|g| (g.id.as_str(), g.label.as_str()))
+        .collect();
+    for rule in &desired.rules {
+        let mut parts = rule.id.splitn(5, ':');
+        let (Some("a"), Some(address_id), Some(_), Some(_), Some(rest)) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
+            continue;
+        };
+        let grant_id = rest.split(':').next().unwrap_or(rest);
+        let Some((app, address)) = snap.apps.iter().find_map(|a| {
+            a.addresses
+                .iter()
+                .find(|x| x.id == address_id)
+                .map(|x| (a, x))
+        }) else {
+            continue;
+        };
+        let Some(grant) = snap.grants.iter().find(|g| g.id == grant_id) else {
+            continue;
+        };
+        let subject = match &grant.subject {
+            Subject::Anyone => "Anyone".to_string(),
+            Subject::Peer(id) => peers.get(id.as_str()).unwrap_or(&"unknown").to_string(),
+            Subject::Group(id) => groups.get(id.as_str()).unwrap_or(&"unknown").to_string(),
+        };
+        out.insert(
+            rule.id.clone(),
+            CounterKey::Rule {
+                app_id: app.id.clone(),
+                app: app.name.clone(),
+                network: address.network_id.clone(),
+                subject,
+            },
+        );
+    }
+    out
 }
 
 trait AppPortsExt {

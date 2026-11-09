@@ -5,50 +5,38 @@ use super::{
     Counter, DesiredRuleset, DropSink, Families, Firewall, Rule, Scope, ScopeMatch, Sources,
 };
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::net::IpAddr;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 const TABLE: &str = "socketguard";
 /// NFLOG group for scope drops.
 pub const LOG_GROUP: u16 = 7;
 
-/// nft counter names are bare identifiers; escape everything else as `.hh` (hex byte) so
-/// the id can be recovered from `nft -j list counters`.
+/// nft counter names are bare identifiers of at most 31 characters, and ids contain
+/// colons and interface names. A counter is named `c` + 16 hex of SHA-256(id); the firewall
+/// remembers the mapping from the ruleset it applied.
 fn counter_name(id: &str) -> String {
-    let mut out = String::new();
-    for b in id.bytes() {
-        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
-            out.push(b as char);
-        } else {
-            let _ = write!(out, ".{b:02x}");
-        }
+    let digest = Sha256::digest(id.as_bytes());
+    let mut out = String::from("c");
+    for b in &digest[..8] {
+        let _ = write!(out, "{b:02x}");
     }
     out
 }
 
-fn id_from_counter_name(name: &str) -> String {
-    let b = name.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        let esc = (b[i] == b'.')
-            .then(|| b.get(i + 1..i + 3))
-            .flatten()
-            .and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
-        match esc {
-            Some(v) => {
-                out.push(v);
-                i += 3;
-            }
-            None => {
-                out.push(b[i]);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
+/// Counter name to id, for every rule and scope of `rs`.
+fn counter_names(rs: &DesiredRuleset) -> HashMap<String, String> {
+    rs.scopes
+        .iter()
+        .map(|s| s.id.as_str())
+        .chain(rs.rules.iter().map(|r| r.id.as_str()))
+        .map(|id| (counter_name(id), id.to_string()))
+        .collect()
 }
 
 fn set<T: std::fmt::Display>(items: impl IntoIterator<Item = T>) -> String {
@@ -123,6 +111,8 @@ pub fn render(rs: &DesiredRuleset) -> String {
     let mut o = String::new();
     let _ = writeln!(o, "table inet {TABLE} {{");
     for id in &ids {
+        // The comment keeps the hashed names readable in `nft list ruleset`.
+        let _ = writeln!(o, "\t# {id}");
         let _ = writeln!(o, "\tcounter {} {{ }}", counter_name(id));
     }
     o.push_str("\tchain input {\n");
@@ -190,11 +180,14 @@ fn run_nft(args: &[&str], stdin: Option<&str>) -> Result<std::process::Output> {
 }
 
 #[derive(Default)]
-pub struct NftablesFirewall;
+pub struct NftablesFirewall {
+    /// Counter name to rule or scope id, from the last applied ruleset.
+    names: Mutex<HashMap<String, String>>,
+}
 
 impl NftablesFirewall {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
@@ -207,6 +200,7 @@ impl Firewall for NftablesFirewall {
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
+        *self.names.lock().unwrap() = counter_names(desired);
         Ok(())
     }
 
@@ -228,7 +222,10 @@ impl Firewall for NftablesFirewall {
             }
             bail!("nft list counters failed: {}", err.trim());
         }
-        parse_counters(&String::from_utf8_lossy(&out.stdout))
+        parse_counters(
+            &String::from_utf8_lossy(&out.stdout),
+            &self.names.lock().unwrap(),
+        )
     }
 
     fn subscribe_drops(&self, sink: DropSink) -> Result<()> {
@@ -244,8 +241,8 @@ impl Firewall for NftablesFirewall {
     }
 }
 
-/// Parse the output of `nft -j list counters`.
-fn parse_counters(json: &str) -> Result<Vec<Counter>> {
+/// Parse the output of `nft -j list counters`; counters whose name is unknown are skipped.
+fn parse_counters(json: &str, names: &HashMap<String, String>) -> Result<Vec<Counter>> {
     let v: serde_json::Value = serde_json::from_str(json).context("invalid nft JSON")?;
     let items = v["nftables"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     Ok(items
@@ -253,7 +250,7 @@ fn parse_counters(json: &str) -> Result<Vec<Counter>> {
         .filter_map(|i| i.get("counter"))
         .filter_map(|c| {
             Some(Counter {
-                id: id_from_counter_name(c["name"].as_str()?),
+                id: names.get(c["name"].as_str()?)?.clone(),
                 packets: c["packets"].as_u64()?,
                 bytes: c["bytes"].as_u64()?,
             })
@@ -288,29 +285,34 @@ mod tests {
     }
 
     #[test]
-    fn counter_names_round_trip() {
+    fn counter_names_are_short_and_deterministic() {
         for id in [
             "managed",
-            "a:ay1:80:tcp:g2:ygg0",
+            "a:6f1c0a9e-1111-2222-3333-444455556666:443:tcp:6f1c0a9e-1111-2222-3333-444455556667:Yggdrasil 0",
             "host:eth0.100",
-            "a-b_c é",
         ] {
             let n = counter_name(id);
-            assert!(n
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b)));
-            assert_eq!(id_from_counter_name(&n), id);
+            assert_eq!(n.len(), 17);
+            assert!(n.starts_with('c') && n.bytes().all(|b| b.is_ascii_alphanumeric()));
+            assert_eq!(n, counter_name(id));
         }
+        assert_ne!(counter_name("a"), counter_name("b"));
     }
 
     #[test]
     fn parses_counter_json() {
-        let json = r#"{"nftables": [{"metainfo": {}}, {"counter": {"family": "inet",
-            "name": "s.3aa.3a80", "table": "socketguard", "handle": 2, "packets": 3, "bytes": 180}}]}"#;
+        let id = "a:addr:80:tcp:grant";
+        let names = HashMap::from([(counter_name(id), id.to_string())]);
+        let json = format!(
+            r#"{{"nftables": [{{"metainfo": {{}}}},
+            {{"counter": {{"family": "inet", "name": "{}", "table": "socketguard", "handle": 2, "packets": 3, "bytes": 180}}}},
+            {{"counter": {{"family": "inet", "name": "cunknown", "table": "socketguard", "handle": 3, "packets": 1, "bytes": 1}}}}]}}"#,
+            counter_name(id)
+        );
         assert_eq!(
-            parse_counters(json).unwrap(),
+            parse_counters(&json, &names).unwrap(),
             vec![Counter {
-                id: "s:a:80".into(),
+                id: id.into(),
                 packets: 3,
                 bytes: 180
             }]
@@ -329,7 +331,10 @@ mod tests {
         };
         assert_eq!(
             rule_line(&r),
-            "ip daddr 10.0.0.1 udp dport 53 counter name \"x\" accept"
+            format!(
+                "ip daddr 10.0.0.1 udp dport 53 counter name \"{}\" accept",
+                counter_name("x")
+            )
         );
     }
 }

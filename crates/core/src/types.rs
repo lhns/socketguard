@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv6Addr};
 
 /// Network protocol
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
@@ -44,6 +45,7 @@ pub struct ListeningSocket {
 }
 
 /// IPv6 backend type
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BackendType {

@@ -1,21 +1,16 @@
-//! SocketGuard CLI. The model changed (ADR 0027) and API v1 has not landed yet (redesign
-//! phase 6), so only `status` works until the CLI is rewritten.
+//! SocketGuard CLI. API v1 and the client crate exist (redesign phase 6); the commands that
+//! cover the whole API arrive with phase 7a, so only `status` works until then.
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
-use socketguard_core::api_types::StatusResponse;
+use socketguard_client::Client;
 
 #[derive(Parser)]
 #[command(name = "socketguard", about = "Per-app access control")]
 struct Cli {
-    /// Daemon API address
-    #[arg(long, default_value = "http://127.0.0.1:9476", global = true)]
-    api: String,
-
-    /// Override the API bearer token (default: read from token file)
-    #[arg(long, global = true)]
-    token: Option<String>,
+    /// Daemon socket path (Unix) or pipe name (Windows)
+    #[arg(long, env = "SOCKETGUARD_SOCKET", global = true)]
+    socket: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -30,39 +25,14 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let token = match cli.token {
-        Some(t) => t,
-        None => {
-            let path = socketguard_core::api_token_path();
-            std::fs::read_to_string(&path)
-                .with_context(|| {
-                    format!(
-                        "failed to read API token from {} - is the daemon running?",
-                        path.display()
-                    )
-                })?
-                .trim()
-                .to_string()
-        }
+    let client = match cli.socket {
+        Some(s) => Client::new(s),
+        None => Client::from_env(),
     };
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {token}")).context("invalid token value")?,
-    );
-    let client = reqwest::Client::builder()
-        .default_headers(headers)
-        .build()?;
 
     match cli.command {
         Commands::Status => {
-            let resp = client
-                .get(format!("{}/api/status", cli.api))
-                .send()
-                .await
-                .context("cannot reach the daemon")?
-                .error_for_status()?;
-            let status: StatusResponse = resp.json().await?;
+            let status = client.status().await.context("cannot reach the daemon")?;
             println!("daemon {} is running", status.version);
         }
     }

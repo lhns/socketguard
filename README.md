@@ -106,7 +106,7 @@ sudo ./target/release/socketguard-daemon
 .\target\release\socketguard-daemon.exe
 ```
 
-The daemon starts a REST API on `127.0.0.1:9476` and begins polling for listening sockets every 2 seconds (configurable via `poll_interval_secs`).
+The daemon serves a local API on a Unix socket (`/run/socketguard.sock`) or, on Windows, the named pipe `\\.\pipe\socketguard` (see [docs/api.md](docs/api.md) for access control), and begins polling for listening sockets every 2 seconds (configurable via `poll_interval_secs`).
 
 On startup, the daemon cleans up any stale firewall rules left by a previous crash and re-applies rules from the database. On shutdown (Ctrl+C or SIGTERM), it removes all managed firewall rules and IPv6 addresses.
 
@@ -170,8 +170,6 @@ The daemon reads `socketguard.json` (or the path in `$SOCKETGUARD_CONFIG`) on st
 
 ```json
 {
-  "listen_addr": "127.0.0.1",
-  "listen_port": 9476,
   "backend": "ula",
   "interface": "lo",
   "poll_interval_secs": 2,
@@ -182,8 +180,8 @@ The daemon reads `socketguard.json` (or the path in `$SOCKETGUARD_CONFIG`) on st
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `listen_addr` | REST API bind address | `127.0.0.1` |
-| `listen_port` | REST API port | `9476` |
+| `api_socket` | Unix socket of the local API | `/run/socketguard.sock` |
+| `api_pipe` | Windows named pipe of the local API | `\\.\pipe\socketguard` |
 | `backend` | IPv6 backend: `ula` or `yggdrasil` | `ula` |
 | `interface` | Network interface for IPv6 addresses | `lo` (Linux), `lo0` (macOS), `Loopback Pseudo-Interface 1` (Windows) |
 | `poll_interval_secs` | Socket polling interval | `2` |
@@ -200,22 +198,11 @@ Generates random addresses in the `fd00::/8` range. No external dependencies. Su
 
 Generates Ed25519 keypairs and derives addresses in the `200::/7` range using Yggdrasil's address derivation algorithm. This enables identity-based access control — allowing a Yggdrasil address is equivalent to allowing the holder of the corresponding private key.
 
-## REST API
+## API
 
-The daemon exposes a REST API on `127.0.0.1:9476`:
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/sockets` | List all sockets |
-| `GET` | `/api/sockets/:id` | Socket detail + ACL |
-| `PUT` | `/api/sockets/:id/acl` | Replace ACL entries |
-| `POST` | `/api/sockets/:id/acl/allow` | Add allowed IP |
-| `DELETE` | `/api/sockets/:id/acl/:entry_id` | Remove ACL entry |
-| `PUT` | `/api/sockets/:id/policy` | Set policy |
-| `GET` | `/api/config` | Get config |
-| `PUT` | `/api/config` | Update config |
-| `GET` | `/api/backends` | List backends |
-| `GET` | `/api/events` | SSE stream (push notifications) |
+The daemon exposes a local REST API with server-sent events on a Unix socket or Windows named
+pipe; there is no network listener. Routes, error codes, events, access control and the export
+format are in [docs/api.md](docs/api.md).
 
 ## Platform Support
 

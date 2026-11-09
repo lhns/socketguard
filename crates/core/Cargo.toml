@@ -12,8 +12,11 @@ uuid = { workspace = true }
 ipnet = { workspace = true }
 sha2 = "0.10"
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+ts-rs = { version = "11", optional = true, features = ["chrono-impl", "serde-json-impl"] }
+
+[features]
+# Derive TypeScript bindings; see docs/api.md.
+ts = ["dep:ts-rs"]
 
 [dev-dependencies]
 insta = { workspace = true }

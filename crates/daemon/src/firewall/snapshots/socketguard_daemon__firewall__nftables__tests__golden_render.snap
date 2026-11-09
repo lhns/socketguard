@@ -3,14 +3,22 @@ source: crates/daemon/src/firewall/nftables.rs
 expression: render(&golden_ruleset())
 ---
 table inet socketguard {
-	counter a.3aal1.3a53.3audp.3ag1 { }
-	counter a.3aav4.3a22.3atcp.3ag3 { }
-	counter a.3aay1.3a8080.3atcp.3ag1 { }
-	counter a.3aay1.3a8080.3atcp.3ag2.3aygg0 { }
-	counter host.3aeth0 { }
-	counter host.3awlan0 { }
-	counter managed { }
-	counter overlay.3aygg0 { }
+	# a:al1:53:udp:g1
+	counter c963bbd60fda741de { }
+	# a:av4:22:tcp:g3
+	counter ce2f436f86825f12a { }
+	# a:ay1:8080:tcp:g1
+	counter cd998f0c373c765fb { }
+	# a:ay1:8080:tcp:g2:ygg0
+	counter c91f26dc41cb2bb42 { }
+	# host:eth0
+	counter c3b22f5fdf596bb2e { }
+	# host:wlan0
+	counter c4a59116813a5952f { }
+	# managed
+	counter c7fdfda5f50a433ae { }
+	# overlay:ygg0
+	counter c6095c103ed141158 { }
 	chain input {
 		type filter hook input priority 0; policy accept;
 		# always allowed
@@ -23,20 +31,20 @@ table inet socketguard {
 		meta nfproto ipv6 udp sport 547 udp dport 546 accept
 		meta nfproto ipv4 udp sport 67 udp dport 68 accept
 		# rules
-		ip6 daddr fd00::9 udp dport 53 counter name "a.3aal1.3a53.3audp.3ag1" accept
-		ip6 saddr { fd00::10/128, fd00:5::/32 } ip6 daddr 301::1 tcp dport 8080 counter name "a.3aay1.3a8080.3atcp.3ag1" accept
-		iifname "ygg0" ip6 saddr { 200:1::5/128 } ip6 daddr 301::1 tcp dport 8080 counter name "a.3aay1.3a8080.3atcp.3ag2.3aygg0" accept
-		ip saddr { 198.51.100.0/24 } ip daddr 192.0.2.9 tcp dport 22 counter name "a.3aav4.3a22.3atcp.3ag3" accept
+		ip6 daddr fd00::9 udp dport 53 counter name "c963bbd60fda741de" accept
+		ip6 saddr { fd00::10/128, fd00:5::/32 } ip6 daddr 301::1 tcp dport 8080 counter name "cd998f0c373c765fb" accept
+		iifname "ygg0" ip6 saddr { 200:1::5/128 } ip6 daddr 301::1 tcp dport 8080 counter name "c91f26dc41cb2bb42" accept
+		ip saddr { 198.51.100.0/24 } ip daddr 192.0.2.9 tcp dport 22 counter name "ce2f436f86825f12a" accept
 		# scopes
 		ip6 daddr { fd00::1, 301::1 } limit rate 10/second burst 20 packets log group 7 prefix "sg:managed"
-		ip6 daddr { fd00::1, 301::1 } counter name "managed" drop
+		ip6 daddr { fd00::1, 301::1 } counter name "c7fdfda5f50a433ae" drop
 		ip daddr { 192.0.2.9 } limit rate 10/second burst 20 packets log group 7 prefix "sg:managed"
-		ip daddr { 192.0.2.9 } counter name "managed" drop
+		ip daddr { 192.0.2.9 } counter name "c7fdfda5f50a433ae" drop
 		iifname "ygg0" limit rate 10/second burst 20 packets log group 7 prefix "sg:overlay:ygg0"
-		iifname "ygg0" counter name "overlay.3aygg0" drop
+		iifname "ygg0" counter name "c6095c103ed141158" drop
 		iifname "eth0" limit rate 10/second burst 20 packets log group 7 prefix "sg:host:eth0"
-		iifname "eth0" counter name "host.3aeth0" drop
+		iifname "eth0" counter name "c3b22f5fdf596bb2e" drop
 		iifname "wlan0" meta nfproto ipv6 limit rate 10/second burst 20 packets log group 7 prefix "sg:host:wlan0"
-		iifname "wlan0" meta nfproto ipv6 counter name "host.3awlan0" drop
+		iifname "wlan0" meta nfproto ipv6 counter name "c4a59116813a5952f" drop
 	}
 }
