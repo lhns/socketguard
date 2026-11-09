@@ -44,6 +44,9 @@ impl Harness {
             backend: BackendConfig::Tor {
                 control: tor.addr(),
                 auth: TorAuth::None,
+                cookie_path: None,
+                cookie_dir: None,
+                expect_tor_uid: None,
             },
         };
         let mut backends = HashMap::new();
@@ -51,7 +54,11 @@ impl Harness {
             "tor".to_string(),
             ActiveBackend {
                 config: cfg.clone(),
-                network: Arc::new(TorNetwork::new(&tor.addr(), TorAuth::None, Duration::ZERO)),
+                network: Arc::new(TorNetwork::with_options(
+                    &tor.addr(),
+                    tor.auth_options(),
+                    Duration::ZERO,
+                )),
             },
         );
         let engine = Engine::new_injectable(
@@ -264,4 +271,158 @@ async fn an_unreachable_tor_creates_no_address_and_is_retried() {
     h.tor.set_down(false);
     h.reconcile().await;
     assert_eq!(h.app().await.addresses.len(), 1);
+}
+
+// ─── Revocation must not fail open ───────────────────────────────────────────
+
+async fn ledger(h: &Harness) -> socketguard_daemon::networks::ledger::Ledger {
+    socketguard_daemon::networks::ledger::load(&h.state.db)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn revoking_while_tor_is_down_completes_when_it_returns() {
+    let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
+    h.reconcile().await;
+    let grant = h.grant(Subject::Anyone).await;
+    assert_eq!(h.tor.detached().len(), 1);
+
+    h.tor.set_down(true);
+    h.revoke(&grant).await; // the grant is gone from the database ...
+    assert!(h.state.db.list_grants().await.unwrap().is_empty());
+    assert_eq!(h.tor.detached().len(), 1, "... but the service still runs");
+    let pending = h.state.engine.read().await.enforcement_pending();
+    assert!(pending.is_some(), "the caller is told");
+
+    h.reconcile().await; // still down: still pending
+    assert_eq!(h.tor.detached().len(), 1);
+    h.tor.set_down(false);
+    h.reconcile().await;
+    assert!(h.tor.detached().is_empty(), "retried until it worked");
+    assert!(h.state.engine.read().await.enforcement_pending().is_none());
+}
+
+#[tokio::test]
+async fn an_app_deleted_while_tor_is_down_is_tombstoned_and_swept() {
+    let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
+    h.reconcile().await;
+    h.grant(Subject::Anyone).await;
+    let app = h.app().await;
+
+    h.tor.set_down(true);
+    h.state
+        .engine
+        .read()
+        .await
+        .delete_app(&h.state, &app.id)
+        .await
+        .unwrap();
+    assert!(h.state.db.onion_keys().await.unwrap().is_empty());
+    assert_eq!(h.tor.detached(), ["mocksvc1"], "still published");
+    assert!(ledger(&h).await.tombstones.contains("mocksvc1"));
+
+    h.tor.set_down(false);
+    h.state
+        .engine
+        .write()
+        .await
+        .reconcile(&h.state)
+        .await
+        .unwrap();
+    assert!(h.tor.detached().is_empty());
+    let l = ledger(&h).await;
+    assert!(l.tombstones.is_empty(), "{l:?}");
+    assert!(!l.owned.contains("mocksvc1"), "{l:?}");
+}
+
+#[tokio::test]
+async fn a_service_of_ours_whose_address_vanished_is_swept_but_foreign_ones_stay() {
+    let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
+    h.reconcile().await;
+    h.grant(Subject::Anyone).await;
+    h.tor.inject_service("someoneelse");
+    let app = h.app().await;
+    // The address disappears behind the daemon's back (deleted while it was down).
+    h.state.db.delete_app(&app.id).await.unwrap();
+    assert_eq!(h.tor.detached().len(), 2);
+
+    h.reconcile().await;
+    assert!(h.tor.detached().contains(&"someoneelse".to_string()));
+    assert!(!h.tor.detached().contains(&"mocksvc1".to_string()));
+    assert!(!ledger(&h).await.owned.contains("mocksvc1"));
+}
+
+// ─── The API says when enforcement is pending ────────────────────────────────
+
+async fn call(
+    h: &Harness,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json");
+    let body = match body {
+        Some(b) => axum::body::Body::from(b.to_string()),
+        None => axum::body::Body::empty(),
+    };
+    req = req.header("accept", "application/json");
+    let resp = socketguard_daemon::api::router(h.state.clone())
+        .oneshot(req.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+#[tokio::test]
+async fn mutations_answer_202_while_enforcement_is_pending() {
+    use axum::http::StatusCode;
+    let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let new_grant = serde_json::json!({
+        "app_id": app.id, "subject": {"kind": "anyone"}, "confirm_open": true
+    });
+
+    // Healthy: the usual 201 and 204, no enforcement field.
+    let (s, body) = call(&h, "POST", "/api/grants", Some(new_grant.clone())).await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert!(body.get("enforcement").is_none());
+    let id = body["id"].as_str().unwrap().to_string();
+
+    // Tor down: the revocation is saved, the answer is 202 with the notice.
+    h.tor.set_down(true);
+    let (s, body) = call(&h, "DELETE", &format!("/api/grants/{id}"), None).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["enforcement"]["status"], "pending");
+    assert!(body["enforcement"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("tor"));
+    assert!(h.state.db.list_grants().await.unwrap().is_empty());
+
+    // A create keeps its body and gains the field.
+    let (s, body) = call(&h, "POST", "/api/grants", Some(new_grant)).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{body}");
+    assert!(body["id"].is_string());
+    assert_eq!(body["enforcement"]["status"], "pending");
+
+    // Back up: after the retry, plain success again.
+    h.tor.set_down(false);
+    h.reconcile().await;
+    let (s, _) = call(&h, "DELETE", "/api/peers/none", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let id = h.state.db.list_grants().await.unwrap().remove(0).id;
+    let (s, body) = call(&h, "DELETE", &format!("/api/grants/{id}"), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
 }

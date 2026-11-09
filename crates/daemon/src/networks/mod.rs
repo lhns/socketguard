@@ -7,6 +7,7 @@
 //! The trait is blocking: IP allocation already runs commands, and the Tor client uses
 //! plain sockets. The engine calls it from `spawn_blocking`.
 
+pub mod ledger;
 pub mod tor;
 pub mod tor_control;
 
@@ -19,7 +20,7 @@ use socketguard_core::{
     is_loopback_interface, Address, AddressId, AppId, Credential, CredentialKind, Locator,
     Network as NetworkInfo, NetworkKind, NetworkStatus, PortRef, PortSet, Subject,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
@@ -58,6 +59,12 @@ pub struct NewLocator {
 #[derive(Debug, Clone, Default)]
 pub struct NetworkEnforcement {
     pub addresses: Vec<EnforcedAddress>,
+    /// Service ids this daemon ever created on the network (persisted by the engine), so
+    /// ones whose address is gone can still be swept. Never touch others.
+    pub owned: BTreeSet<String>,
+    /// Service ids that must be removed (their address was deleted); retried until the
+    /// network confirms.
+    pub tombstones: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -245,9 +252,21 @@ pub fn create(
     net: Arc<dyn NetworkInterface>,
 ) -> Result<Arc<dyn Network>> {
     match config {
-        BackendConfig::Tor { control, auth } => Ok(Arc::new(tor::TorNetwork::new(
+        BackendConfig::Tor {
             control,
-            auth.clone(),
+            auth,
+            cookie_path,
+            cookie_dir,
+            expect_tor_uid,
+        } => Ok(Arc::new(tor::TorNetwork::with_options(
+            control,
+            tor_control::AuthOptions {
+                auth: auth.clone(),
+                cookie_path: cookie_path.clone(),
+                cookie_dir: cookie_dir.clone(),
+                expect_tor_uid: *expect_tor_uid,
+                allow_none_over_tcp: false,
+            },
             tor::CHECK_INTERVAL,
         ))),
         ip => Ok(Arc::new(IpNetwork::for_config(
@@ -326,7 +345,10 @@ pub fn enforcement_for(
             });
         }
     }
-    NetworkEnforcement { addresses }
+    NetworkEnforcement {
+        addresses,
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
@@ -350,7 +372,8 @@ mod tests {
     /// Whatever a network declares as verified must be Verified in core's reach table.
     #[test]
     fn declared_verification_agrees_with_reach() {
-        let tor = tor::TorNetwork::new("127.0.0.1:1", Default::default(), tor::CHECK_INTERVAL);
+        let tor =
+            tor::TorNetwork::with_options("127.0.0.1:1", Default::default(), tor::CHECK_INTERVAL);
         let ygg = IpNetwork::new(
             NetworkKind::Yggdrasil,
             true,

@@ -519,8 +519,37 @@ pub async fn standard_daemon(
 
 // ─── MockTorControl ──────────────────────────────────────────────────────────
 
+/// How the mock control port authenticates its clients.
+#[derive(Clone, Default)]
+pub enum MockAuth {
+    /// `METHODS=NULL`: any AUTHENTICATE succeeds.
+    #[default]
+    None,
+    /// SAFECOOKIE and COOKIE with this cookie, reported at `cookie_path`. With
+    /// `wrong_server_hash` the server cannot prove it knows the cookie (a rogue one).
+    SafeCookie {
+        cookie: [u8; 32],
+        cookie_path: String,
+        wrong_server_hash: bool,
+    },
+    /// Only plain COOKIE.
+    CookieOnly {
+        cookie: [u8; 32],
+        cookie_path: String,
+    },
+}
+
+/// Per-connection authentication progress.
+#[derive(Default)]
+struct MockConn {
+    authed: bool,
+    client_nonce: Vec<u8>,
+    server_nonce: Vec<u8>,
+}
+
 #[derive(Default)]
 struct MockTorState {
+    auth: MockAuth,
     commands: Vec<String>,
     /// Running onion services: id -> the ADD_ONION command that created it.
     services: std::collections::BTreeMap<String, String>,
@@ -528,8 +557,8 @@ struct MockTorState {
     down: bool,
 }
 
-/// A scripted Tor control port on 127.0.0.1 (no authentication). It records every
-/// command and keeps the set of detached onion services like Tor would. `ADD_ONION` with
+/// A scripted Tor control port on 127.0.0.1 (no authentication unless given a
+/// [`MockAuth`]). It records every command and keeps the set of detached onion services like Tor would. `ADD_ONION` with
 /// `NEW:ED25519-V3` creates service `mocksvc<N>` with key `ED25519-V3:mocksvc<N>`; a
 /// given key `ED25519-V3:<name>` runs service `<name>`.
 pub struct MockTorControl {
@@ -539,9 +568,16 @@ pub struct MockTorControl {
 
 impl MockTorControl {
     pub fn start() -> Self {
+        Self::start_with(MockAuth::None)
+    }
+
+    pub fn start_with(auth: MockAuth) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let state = Arc::new(Mutex::new(MockTorState::default()));
+        let state = Arc::new(Mutex::new(MockTorState {
+            auth,
+            ..MockTorState::default()
+        }));
         let shared = state.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -556,6 +592,25 @@ impl MockTorControl {
     /// The control address to configure (`host:port`).
     pub fn addr(&self) -> String {
         self.addr.to_string()
+    }
+
+    /// Client options that fit this mock: `none` over TCP for an open one, SAFECOOKIE
+    /// pinned to the mock's cookie file otherwise.
+    pub fn auth_options(&self) -> crate::networks::tor_control::AuthOptions {
+        use crate::networks::tor_control::AuthOptions;
+        use socketguard_core::config::TorAuth;
+        match &self.state.lock().unwrap().auth {
+            MockAuth::None => AuthOptions {
+                allow_none_over_tcp: true,
+                ..AuthOptions::new(TorAuth::None)
+            },
+            MockAuth::SafeCookie { cookie_path, .. } | MockAuth::CookieOnly { cookie_path, .. } => {
+                AuthOptions {
+                    cookie_path: Some(cookie_path.clone()),
+                    ..AuthOptions::new(TorAuth::Cookie)
+                }
+            }
+        }
     }
 
     /// Every command received, oldest first (including AUTHENTICATE and QUIT).
@@ -581,6 +636,15 @@ impl MockTorControl {
             .collect()
     }
 
+    /// A service some other program runs on this Tor.
+    pub fn inject_service(&self, id: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .services
+            .insert(id.to_string(), "ADD_ONION (foreign)".to_string());
+    }
+
     /// Tor restarted: every service is gone.
     pub fn forget_services(&self) {
         self.state.lock().unwrap().services.clear();
@@ -598,12 +662,13 @@ impl MockTorControl {
         }
         let mut writer = stream.try_clone().unwrap();
         let reader = BufReader::new(stream);
+        let mut conn = MockConn::default();
         for line in reader.lines() {
             let Ok(line) = line else { return };
             let reply = {
                 let mut st = state.lock().unwrap();
                 st.commands.push(line.clone());
-                Self::reply(&mut st, &line)
+                Self::reply(&mut st, &mut conn, &line)
             };
             if writer.write_all(reply.as_bytes()).is_err() || line == "QUIT" {
                 return;
@@ -611,19 +676,104 @@ impl MockTorControl {
         }
     }
 
-    fn reply(st: &mut MockTorState, line: &str) -> String {
+    fn reply(st: &mut MockTorState, conn: &mut MockConn, line: &str) -> String {
+        use crate::networks::tor_control::{
+            hex, safecookie_hash, CONTROLLER_TO_SERVER, SERVER_TO_CONTROLLER,
+        };
         let (cmd, rest) = line.split_once(' ').unwrap_or((line, ""));
+        let unhex = |s: &str| -> Vec<u8> {
+            (0..s.len() / 2)
+                .filter_map(|i| u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok())
+                .collect()
+        };
+        let info = |methods: &str, path: Option<&String>| {
+            // A control-spec quoted string escapes backslashes (Windows paths) and quotes.
+            let file = path.map_or(String::new(), |p| {
+                format!(
+                    " COOKIEFILE=\"{}\"",
+                    p.replace('\\', "\\\\").replace('"', "\\\"")
+                )
+            });
+            format!("250-PROTOCOLINFO 1\r\n250-AUTH METHODS={methods}{file}\r\n250-VERSION Tor=\"0.4.8.0\"\r\n250 OK\r\n")
+        };
+        match (&st.auth, cmd) {
+            (MockAuth::None, "PROTOCOLINFO") => info("NULL", None),
+            (MockAuth::SafeCookie { cookie_path, .. }, "PROTOCOLINFO") => {
+                info("COOKIE,SAFECOOKIE", Some(cookie_path))
+            }
+            (MockAuth::CookieOnly { cookie_path, .. }, "PROTOCOLINFO") => {
+                info("COOKIE", Some(cookie_path))
+            }
+            (
+                MockAuth::SafeCookie {
+                    cookie,
+                    wrong_server_hash,
+                    ..
+                },
+                "AUTHCHALLENGE",
+            ) => {
+                conn.client_nonce = unhex(rest.strip_prefix("SAFECOOKIE ").unwrap_or_default());
+                conn.server_nonce = vec![7u8; 32];
+                let mut hash = safecookie_hash(
+                    SERVER_TO_CONTROLLER,
+                    cookie,
+                    &conn.client_nonce,
+                    &conn.server_nonce,
+                );
+                if *wrong_server_hash {
+                    hash[0] ^= 1;
+                }
+                format!(
+                    "250 AUTHCHALLENGE SERVERHASH={} SERVERNONCE={}\r\n",
+                    hex(&hash),
+                    hex(&conn.server_nonce)
+                )
+            }
+            (MockAuth::SafeCookie { cookie, .. }, "AUTHENTICATE") => {
+                let want = safecookie_hash(
+                    CONTROLLER_TO_SERVER,
+                    cookie,
+                    &conn.client_nonce,
+                    &conn.server_nonce,
+                );
+                conn.authed = unhex(rest) == want;
+                if conn.authed {
+                    "250 OK\r\n".into()
+                } else {
+                    "515 Authentication failed: bad hash\r\n".into()
+                }
+            }
+            (MockAuth::CookieOnly { cookie, .. }, "AUTHENTICATE") => {
+                conn.authed = unhex(rest) == cookie.as_slice();
+                if conn.authed {
+                    "250 OK\r\n".into()
+                } else {
+                    "515 Authentication failed: bad cookie\r\n".into()
+                }
+            }
+            (MockAuth::None, "AUTHENTICATE") => {
+                conn.authed = true;
+                "250 OK\r\n".into()
+            }
+            (_, "QUIT") => "250 closing connection\r\n".into(),
+            (MockAuth::None, _) => Self::command(st, cmd, rest, line),
+            _ if conn.authed => Self::command(st, cmd, rest, line),
+            _ => "514 Authentication required.\r\n".into(),
+        }
+    }
+
+    fn command(st: &mut MockTorState, cmd: &str, rest: &str, line: &str) -> String {
         match cmd {
-            "PROTOCOLINFO" => "250-PROTOCOLINFO 1\r\n250-AUTH METHODS=NULL\r\n250-VERSION Tor=\"0.4.8.0\"\r\n250 OK\r\n".into(),
-            "AUTHENTICATE" => "250 OK\r\n".into(),
-            "QUIT" => "250 closing connection\r\n".into(),
             "GETINFO" if rest == "version" => "250-version=0.4.8.0\r\n250 OK\r\n".into(),
             "GETINFO" if rest == "onions/detached" => {
                 if st.services.is_empty() {
                     "250-onions/detached=\r\n250 OK\r\n".into()
                 } else {
                     let ids: Vec<&str> = st.services.keys().map(String::as_str).collect();
-                    format!("250+onions/detached=\r\n{}\r\n.\r\n250 OK\r\n", ids.join("\r\n"))
+                    format!(
+                        "250+onions/detached=\r\n{}\r\n.\r\n250 OK\r\n",
+                        ids.join("\r\n")
+                    )
                 }
             }
             "ADD_ONION" => {

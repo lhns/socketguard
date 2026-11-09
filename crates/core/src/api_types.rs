@@ -30,6 +30,32 @@ pub struct ApiError {
     pub details: Option<serde_json::Value>,
 }
 
+/// Whether a change has taken effect on the networks (`enforcement.status`).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EnforcementStatus {
+    /// Saved, but a network could not enforce it yet (e.g. Tor is down); the daemon keeps
+    /// retrying.
+    Pending,
+}
+
+/// The `enforcement` field of an HTTP 202 response: the change is saved but not yet
+/// enforced everywhere. Absent on a plain success.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Enforcement {
+    pub status: EnforcementStatus,
+    pub message: String,
+}
+
+/// Body of a 202 response to a request that otherwise has no body (deletes).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnforcementNotice {
+    pub enforcement: Enforcement,
+}
+
 /// A remote-admin listener that whole-host protection would cut off.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

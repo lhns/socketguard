@@ -3,7 +3,7 @@
 //! no CORS. Handlers translate between HTTP and the engine and hold no logic of their own.
 
 use crate::apply;
-use crate::engine::{EngineError, GrantFilter, ProtectHostError};
+use crate::engine::{Engine, EngineError, GrantFilter, ProtectHostError};
 use crate::ruleset::LockoutRisk;
 use crate::AppState;
 use axum::{
@@ -19,9 +19,9 @@ use futures_util::stream::Stream;
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use socketguard_core::api_types::{
-    error_code, ApiError, ApplyRequest, Counts, DisableRequest, LockoutRiskInfo, MergeRequest,
-    NewGroup, NewNetwork, NewPeer, ProtectHostRequest, ProtectHostResponse, ReviewRequest,
-    SetMembers, SplitRequest, StatusResponse, UpdateLabel, UpdateSettings,
+    error_code, ApiError, ApplyRequest, Counts, DisableRequest, EnforcementNotice, LockoutRiskInfo,
+    MergeRequest, NewGroup, NewNetwork, NewPeer, ProtectHostRequest, ProtectHostResponse,
+    ReviewRequest, SetMembers, SplitRequest, StatusResponse, UpdateLabel, UpdateSettings,
 };
 use socketguard_core::config::BackendInstanceConfig;
 use socketguard_core::{ActivityKind, ActivityQuery, NewCredential, NewGrant, PortRef};
@@ -285,6 +285,32 @@ impl From<anyhow::Error> for ApiErr {
 
 type ApiResult<T> = Result<T, ApiErr>;
 
+/// The success response of a change that may need a network to enforce it: `ok` (with
+/// `body`, if any) when nothing is pending, else 202 with the same body and an
+/// `enforcement` field (a body of its own for deletes). The change is saved either way.
+fn saved<T: serde::Serialize>(engine: &Engine, ok: StatusCode, body: Option<T>) -> Response {
+    let Some(pending) = engine.enforcement_pending() else {
+        return match body {
+            Some(b) => (ok, Json(b)).into_response(),
+            None => ok.into_response(),
+        };
+    };
+    let json = match body.map(serde_json::to_value) {
+        Some(Ok(serde_json::Value::Object(mut m))) => {
+            m.insert(
+                "enforcement".to_string(),
+                serde_json::to_value(&pending).unwrap_or_default(),
+            );
+            serde_json::Value::Object(m)
+        }
+        _ => serde_json::to_value(EnforcementNotice {
+            enforcement: pending,
+        })
+        .unwrap_or_default(),
+    };
+    (StatusCode::ACCEPTED, Json(json)).into_response()
+}
+
 fn risk_info(r: &LockoutRisk) -> LockoutRiskInfo {
     LockoutRiskInfo {
         process_name: r.process_name.clone(),
@@ -378,9 +404,10 @@ async fn app_get(State(state): State<Shared>, Path(id): Path<String>) -> ApiResu
     Ok(Json(engine.get_app(&state, &id).await?).into_response())
 }
 
-async fn app_delete(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<StatusCode> {
-    state.engine.read().await.delete_app(&state, &id).await?;
-    Ok(StatusCode::NO_CONTENT)
+async fn app_delete(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    engine.delete_app(&state, &id).await?;
+    Ok(saved(&engine, StatusCode::NO_CONTENT, None::<()>))
 }
 
 async fn app_review(
@@ -410,7 +437,7 @@ async fn app_split(
             },
         )
         .await?;
-    Ok((StatusCode::CREATED, Json(address)).into_response())
+    Ok(saved(&engine, StatusCode::CREATED, Some(address)))
 }
 
 async fn app_merge(
@@ -422,7 +449,7 @@ async fn app_merge(
     let address = engine
         .merge(&state, &id, &req.network_id, &req.address_ids)
         .await?;
-    Ok(Json(address).into_response())
+    Ok(saved(&engine, StatusCode::OK, Some(address)))
 }
 
 // ─── Peers ───────────────────────────────────────────────────────────────────
@@ -457,9 +484,10 @@ async fn peer_update(
     Ok(Json(engine.update_peer_label(&state, &id, &req.label).await?).into_response())
 }
 
-async fn peer_delete(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<StatusCode> {
-    state.engine.read().await.delete_peer(&state, &id).await?;
-    Ok(StatusCode::NO_CONTENT)
+async fn peer_delete(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    engine.delete_peer(&state, &id).await?;
+    Ok(saved(&engine, StatusCode::NO_CONTENT, None::<()>))
 }
 
 async fn credential_add(
@@ -469,20 +497,16 @@ async fn credential_add(
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
     let c = engine.add_credential(&state, &id, &req).await?;
-    Ok((StatusCode::CREATED, Json(c)).into_response())
+    Ok(saved(&engine, StatusCode::CREATED, Some(c)))
 }
 
 async fn credential_remove(
     State(state): State<Shared>,
     Path((id, cred_id)): Path<(String, String)>,
-) -> ApiResult<StatusCode> {
-    state
-        .engine
-        .read()
-        .await
-        .remove_credential(&state, &id, &cred_id)
-        .await?;
-    Ok(StatusCode::NO_CONTENT)
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    engine.remove_credential(&state, &id, &cred_id).await?;
+    Ok(saved(&engine, StatusCode::NO_CONTENT, None::<()>))
 }
 
 // ─── Peer groups ─────────────────────────────────────────────────────────────
@@ -517,12 +541,10 @@ async fn group_update(
     Ok(Json(engine.rename_group(&state, &id, &req.label).await?).into_response())
 }
 
-async fn group_delete(
-    State(state): State<Shared>,
-    Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
-    state.engine.read().await.delete_group(&state, &id).await?;
-    Ok(StatusCode::NO_CONTENT)
+async fn group_delete(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    engine.delete_group(&state, &id).await?;
+    Ok(saved(&engine, StatusCode::NO_CONTENT, None::<()>))
 }
 
 async fn group_members(
@@ -531,7 +553,8 @@ async fn group_members(
     ApiJson(req): ApiJson<SetMembers>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    Ok(Json(engine.set_group_members(&state, &id, &req.peer_ids).await?).into_response())
+    let group = engine.set_group_members(&state, &id, &req.peer_ids).await?;
+    Ok(saved(&engine, StatusCode::OK, Some(group)))
 }
 
 // ─── Grants ──────────────────────────────────────────────────────────────────
@@ -567,15 +590,13 @@ async fn grant_create(
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
     let grant = engine.create_grant(&state, &req).await?;
-    Ok((StatusCode::CREATED, Json(grant)).into_response())
+    Ok(saved(&engine, StatusCode::CREATED, Some(grant)))
 }
 
-async fn grant_delete(
-    State(state): State<Shared>,
-    Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
-    state.engine.read().await.delete_grant(&state, &id).await?;
-    Ok(StatusCode::NO_CONTENT)
+async fn grant_delete(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    engine.delete_grant(&state, &id).await?;
+    Ok(saved(&engine, StatusCode::NO_CONTENT, None::<()>))
 }
 
 // ─── Networks ────────────────────────────────────────────────────────────────

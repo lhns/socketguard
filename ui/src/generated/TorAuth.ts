@@ -3,4 +3,4 @@
 /**
  * How the daemon authenticates to the Tor control port.
  */
-export type TorAuth = "cookie" | { "password": string } | "none";
+export type TorAuth = "cookie" | "cookie_insecure" | { "password": string } | "none";

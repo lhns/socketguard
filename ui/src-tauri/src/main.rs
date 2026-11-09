@@ -99,19 +99,22 @@ async fn create_peer(req: NewPeer) -> CmdResult<Peer> {
     Ok(client().create_peer(&req).await?)
 }
 
+// Commands built on `Saved<T>` drop its `enforcement` notice (HTTP 202); the UI does not show it yet.
 #[tauri::command]
 async fn add_credential(peer_id: String, req: NewCredential) -> CmdResult<Credential> {
-    Ok(client().add_credential(&peer_id, &req).await?)
+    Ok(client().add_credential(&peer_id, &req).await?.value)
 }
 
 #[tauri::command]
 async fn remove_credential(peer_id: String, credential_id: String) -> CmdResult<()> {
-    Ok(client().remove_credential(&peer_id, &credential_id).await?)
+    client().remove_credential(&peer_id, &credential_id).await?;
+    Ok(())
 }
 
 #[tauri::command]
 async fn delete_peer(id: String) -> CmdResult<()> {
-    Ok(client().delete_peer(&id).await?)
+    client().delete_peer(&id).await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -126,12 +129,13 @@ async fn list_grants() -> CmdResult<Vec<GrantView>> {
 
 #[tauri::command]
 async fn create_grant(req: NewGrant) -> CmdResult<GrantView> {
-    Ok(client().create_grant(&req).await?)
+    Ok(client().create_grant(&req).await?.value)
 }
 
 #[tauri::command]
 async fn delete_grant(id: String) -> CmdResult<()> {
-    Ok(client().delete_grant(&id).await?)
+    client().delete_grant(&id).await?;
+    Ok(())
 }
 
 #[tauri::command]

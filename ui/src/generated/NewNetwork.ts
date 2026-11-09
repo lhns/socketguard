@@ -34,4 +34,18 @@ interface: string, } | { "type": "tor",
 /**
  * Control port: `host:port` or `unix:/path/to/socket`.
  */
-control: string, auth: TorAuth, });
+control: string, auth: TorAuth, 
+/**
+ * With cookie auth: the cookie file PROTOCOLINFO must report. A control port
+ * naming any other file is refused.
+ */
+cookie_path?: string | null, 
+/**
+ * With cookie auth: the directory (Tor's data dir) whose owner may own the cookie
+ * file. Default: the directory of `cookie_path`; without either, only root.
+ */
+cookie_dir?: string | null, 
+/**
+ * On a Unix control socket: the uid Tor must run as (checked on the peer).
+ */
+expect_tor_uid?: number | null, });

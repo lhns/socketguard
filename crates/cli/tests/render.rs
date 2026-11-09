@@ -381,7 +381,10 @@ fn tor_network_config_from_flags() {
         socketguard_cli::commands::tor_config(None, None).unwrap(),
         BackendConfig::Tor {
             control: "127.0.0.1:9051".into(),
-            auth: TorAuth::Cookie
+            auth: TorAuth::Cookie,
+            cookie_path: None,
+            cookie_dir: None,
+            expect_tor_uid: None
         }
     );
     assert_eq!(
@@ -389,7 +392,10 @@ fn tor_network_config_from_flags() {
             .unwrap(),
         BackendConfig::Tor {
             control: "unix:/run/tor/c".into(),
-            auth: TorAuth::Password("pw".into())
+            auth: TorAuth::Password("pw".into()),
+            cookie_path: None,
+            cookie_dir: None,
+            expect_tor_uid: None
         }
     );
 }

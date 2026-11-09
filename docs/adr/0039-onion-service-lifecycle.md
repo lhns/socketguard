@@ -25,4 +25,15 @@ ADR 0037 puts Tor enforcement on the control port: an address with no grant is c
 - The `.onion` name of an address is stable for as long as the address exists; deleting the address (or its app) deletes the key and the name.
 - A Tor restart or daemon restart briefly re-adds services (descriptor republish takes time).
 - Anyone with read access to the database can impersonate the onion services.
-- No new crates: the control client is a few hundred lines over `std::net`.
+- No new crates for the control client itself: a few hundred lines over `std::net`, plus `hmac` (with `sha2`) for SAFECOOKIE.
+
+## Amendment: control-port trust and fail-closed revocation (security review)
+
+The control address is where the daemon sends onion keys, and the default `127.0.0.1:9051` can be bound by any local user while Tor is down. A rogue listener could also name any file as the cookie file. Separately, a revocation could be lost while Tor was down.
+
+- **A unix control socket is preferred** (`control: "unix:/run/tor/control"`, Tor's `ControlSocket`): only Tor's account can own that path. `auth: none` is accepted only there. Optional `expect_tor_uid` checks the peer uid of the socket (Linux).
+- **SAFECOOKIE by default** (`auth: cookie`): the daemon sends an `AUTHCHALLENGE` and verifies the server's HMAC over the cookie and both nonces before it sends its own hash. A server that does not know the cookie gets nothing further, and the cookie never goes over the wire. Plain COOKIE is refused unless `auth: cookie_insecure` is configured. Password auth is unverifiable and only as safe as the address.
+- **The cookie file is checked before it is read**: not a symlink, a regular file of exactly 32 bytes, not writable by others, and on Unix owned by root, by `expect_tor_uid` or by the owner of `cookie_dir` (default: the directory of `cookie_path`). The optional `cookie_path` must equal the path PROTOCOLINFO reports.
+- A `Control` value only exists after one of these succeeded, so `ADD_ONION` with a stored key cannot be sent to an unauthenticated server. The e2e Tor config uses `CookieAuthentication 1`, which offers SAFECOOKIE.
+- **Revocation fails closed.** The engine persists, in the settings table (no schema change), `tor_owned_services` (every service id we created or that has an address) and `tor_tombstones` (ids whose address was deleted and that must be removed). Every enforcement pass retries both until Tor confirms (DEL_ONION, or `onions/detached` no longer lists the id), and sweeps any detached service in the owned set that no address wants. Services we did not create are never touched. A service leaves the in-memory `applied` set only after a confirmed removal.
+- **Failures are visible.** Mutations still commit, but answer HTTP 202 with `enforcement: {status: "pending", message}` while a network cannot enforce them (docs/api.md).

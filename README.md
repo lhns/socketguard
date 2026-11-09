@@ -168,6 +168,24 @@ socketguard apps show myapp                     # prints the .onion name
 socketguard share myapp                         # http://<id>.onion:8080
 ```
 
+The daemon sends your onion keys to whatever answers on the control address, and any local
+user can bind the default `127.0.0.1:9051` while Tor is down. Therefore:
+
+- **Prefer a Unix control socket** (`ControlSocket /run/tor/control` in torrc, then
+  `--control unix:/run/tor/control`). Only Tor's account can own that path, and `auth: none` is
+  accepted only there. `expect_tor_uid` additionally checks the uid serving the socket (Linux).
+- With the default `auth: cookie` the daemon uses SAFECOOKIE: it verifies that the control port
+  knows the cookie before it sends anything, and never sends the cookie. Plain COOKIE is
+  refused; `auth: cookie_insecure` accepts it for a Tor without SAFECOOKIE.
+- The cookie file must be a regular, 32-byte file (no symlink, not writable by others) owned by
+  root, by `expect_tor_uid` or by the owner of `cookie_dir` (default: the directory of
+  `cookie_path`). Set `cookie_path` (for example `/var/lib/tor/control_auth_cookie`) to pin the
+  file PROTOCOLINFO may name. These are keys of the tor entry in `backends` in the config file.
+- Revoking access never fails open: if Tor is down the removal is remembered and retried, the
+  change returns HTTP 202 with `enforcement: pending` (the CLI warns), and onion services we
+  created whose address is gone are removed on the next pass. Services we did not create are
+  left alone.
+
 The service keys live in the daemon's database (mode 0600 on Unix; on Windows keep it where only
 the service account and Administrators have access). See ADR 0037 and 0039. A Docker end-to-end
 test is in `deploy/e2e/tor-e2e.sh`.

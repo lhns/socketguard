@@ -368,8 +368,9 @@ impl Engine {
 
     /// Enforce the grants on the networks that do not use the firewall (Tor). The caller
     /// holds the firewall lock, which also keeps two enforcements from interleaving. A
-    /// failure (e.g. Tor is down) is logged and shows as the network's status; the next
-    /// pass retries.
+    /// failure (e.g. Tor is down) is logged, shows as the network's status and in
+    /// [`Engine::enforcement_pending`] (so API mutations answer 202); the next pass
+    /// retries, including removals recorded in the ledger (`networks::ledger`).
     async fn enforce_networks(&self, state: &AppState) {
         let nets: Vec<(String, Arc<dyn networks::Network>)> = self
             .sorted_backend_ids()
@@ -394,31 +395,81 @@ impl Engine {
             }
         };
         let binds = self.binds.lock().unwrap().clone();
+        let ledger = networks::ledger::load(&state.db).await.unwrap_or_else(|e| {
+            warn!("Could not read the onion service ledger: {e:#}");
+            Default::default()
+        });
         for (id, net) in nets {
             let Some(info) = snapshot.networks.iter().find(|n| n.id == id) else {
                 continue;
             };
-            let enforcement = networks::enforcement_for(info, &snapshot, &secrets, &binds);
+            let mut enforcement = networks::enforcement_for(info, &snapshot, &secrets, &binds);
+            let wanted: BTreeSet<String> = enforcement
+                .addresses
+                .iter()
+                .filter_map(|a| networks::tor::service_id(&a.locator))
+                .collect();
+            // Record what may come to exist before it is published, so a crash cannot
+            // leave a service nobody would sweep.
+            if let Err(e) = networks::ledger::add_owned(&state.db, &wanted).await {
+                warn!("Could not record the onion services: {e:#}");
+            }
+            enforcement.owned = ledger.owned.union(&wanted).cloned().collect();
+            enforcement.tombstones = ledger.tombstones.clone();
+            let passed = networks::ledger::Ledger {
+                owned: enforcement.owned.clone(),
+                tombstones: enforcement.tombstones.clone(),
+            };
             let result = tokio::task::spawn_blocking(move || net.enforce(&enforcement)).await;
             let outcome = match result {
                 Ok(r) => r,
                 Err(e) => Err(anyhow::anyhow!("enforcement task failed: {e}")),
             };
-            let mut failing = self.enforce_failing.lock().unwrap();
-            match outcome {
+            let settled = match outcome {
                 Ok(()) => {
-                    if failing.remove(&id).is_some() {
+                    if self.enforce_failing.lock().unwrap().remove(&id).is_some() {
                         info!("Network '{id}' enforcement recovered");
                     }
+                    true
                 }
                 Err(e) => {
                     let msg = format!("{e:#}");
+                    let mut failing = self.enforce_failing.lock().unwrap();
                     if failing.insert(id.clone(), msg.clone()).as_deref() != Some(msg.as_str()) {
                         warn!("Cannot enforce grants on network '{id}', will retry: {msg}");
                     }
+                    false
+                }
+            };
+            if settled {
+                // Everything not wanted that we passed in is gone now.
+                if let Err(e) = networks::ledger::settle(&state.db, &passed, &wanted).await {
+                    warn!("Could not update the onion service ledger: {e:#}");
                 }
             }
         }
+    }
+
+    /// Set when the last enforcement on a network that is not an IP network failed, so a
+    /// change that was saved is not yet in effect there. Mutations report it to their
+    /// caller (HTTP 202).
+    pub fn enforcement_pending(&self) -> Option<socketguard_core::api_types::Enforcement> {
+        let failing = self.enforce_failing.lock().unwrap();
+        if failing.is_empty() {
+            return None;
+        }
+        let mut parts: Vec<String> = failing
+            .iter()
+            .map(|(id, msg)| format!("network '{id}': {msg}"))
+            .collect();
+        parts.sort();
+        Some(socketguard_core::api_types::Enforcement {
+            status: socketguard_core::api_types::EnforcementStatus::Pending,
+            message: format!(
+                "saved, but not yet enforced; retrying ({})",
+                parts.join("; ")
+            ),
+        })
     }
 
     /// Apply, then put missing addresses on their interfaces (the ruleset first).
@@ -695,7 +746,7 @@ impl Engine {
                 Vec::new()
             }
         };
-        self.remove_locators(backend_id, &deleted).await;
+        self.remove_locators(state, backend_id, &deleted).await;
         let iface = self.interface_of(backend_id).map(str::to_string);
         if let Some(iface) = iface {
             self.remove_from_interface(
@@ -724,7 +775,7 @@ impl Engine {
     /// Release the locators of `addresses` on a network that is not an IP network (the
     /// onion services leave Tor). IP addresses are taken off their interface by
     /// `remove_from_interface` instead.
-    async fn remove_locators(&self, network_id: &str, addresses: &[Address]) {
+    async fn remove_locators(&self, state: &AppState, network_id: &str, addresses: &[Address]) {
         let Some(active) = self.backends.get(network_id) else {
             return;
         };
@@ -732,11 +783,23 @@ impl Engine {
             return;
         }
         for a in addresses {
+            // Tombstone first: if the network cannot be reached now (or we crash), the
+            // service is still removed by a later enforcement pass.
+            let id: Vec<String> = networks::tor::service_id(&a.locator).into_iter().collect();
+            if let Err(e) = networks::ledger::add_tombstones(&state.db, &id).await {
+                warn!("Could not record the removal of {id:?}: {e:#}");
+            }
             let net = active.network.clone();
-            let a = a.clone();
-            match tokio::task::spawn_blocking(move || net.remove_locator(&a)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => warn!("Could not release a locator on '{network_id}': {e}"),
+            let addr = a.clone();
+            match tokio::task::spawn_blocking(move || net.remove_locator(&addr)).await {
+                Ok(Ok(())) => {
+                    if let Err(e) = networks::ledger::clear_tombstones(&state.db, &id).await {
+                        warn!("Could not clear the removal of {id:?}: {e:#}");
+                    }
+                }
+                Ok(Err(e)) => {
+                    warn!("Could not release a locator on '{network_id}', will retry: {e:#}")
+                }
                 Err(e) => warn!("Release task failed: {e}"),
             }
         }
@@ -1500,7 +1563,7 @@ impl Engine {
             .ok_or_else(|| EngineError::NotFound(format!("app {id}")))?;
         self.remove_from_interface(self.interface_addrs(&app.addresses))
             .await;
-        self.remove_app_locators(&app.addresses).await;
+        self.remove_app_locators(state, &app.addresses).await;
         state.db.delete_app(id).await?;
         self.apply_firewall(state).await?;
         self.record(
@@ -1517,7 +1580,7 @@ impl Engine {
         Ok(())
     }
 
-    async fn remove_app_locators(&self, addresses: &[Address]) {
+    async fn remove_app_locators(&self, state: &AppState, addresses: &[Address]) {
         let networks: BTreeSet<&str> = addresses.iter().map(|a| a.network_id.as_str()).collect();
         for nid in networks {
             let of_network: Vec<Address> = addresses
@@ -1525,7 +1588,7 @@ impl Engine {
                 .filter(|a| a.network_id == nid)
                 .cloned()
                 .collect();
-            self.remove_locators(nid, &of_network).await;
+            self.remove_locators(state, nid, &of_network).await;
         }
     }
 
@@ -1667,7 +1730,7 @@ impl Engine {
         // The others' addresses leave the interface before their rules go.
         self.remove_from_interface(self.interface_addrs(&gone))
             .await;
-        self.remove_locators(network_id, &gone).await;
+        self.remove_locators(state, network_id, &gone).await;
         state.db.update_address_ports(&keep.id, &merged).await?;
         for a in &gone {
             state.db.delete_address(&a.id).await?;
