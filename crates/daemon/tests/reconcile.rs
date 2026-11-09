@@ -248,6 +248,8 @@ fn listener(name: &str, port: u16, protocol: Protocol) -> ListeningSocket {
         bind_address: IpAddr::V6("::".parse().unwrap()),
         exe_path: Some(format!("/usr/bin/{name}")),
         cmdline: Some(vec![name.to_string()]),
+        uid: Some("1000".into()),
+        foreign_mntns: false,
     }
 }
 
@@ -264,6 +266,8 @@ fn script(interpreter: &str, script: &str, port: u16) -> ListeningSocket {
             script.to_string(),
             "--serve".into(),
         ]),
+        uid: Some("1000".into()),
+        foreign_mntns: false,
     }
 }
 
@@ -1855,4 +1859,202 @@ async fn a_network_that_cannot_initialise_is_down_not_fatal() {
         addr,
         "fd3e:1eec:520:582e::".parse().unwrap()
     ));
+}
+
+// ─── Address lifecycle: owned addresses are denied until really gone ─────────
+
+/// Whether the managed scope of the last applied ruleset denies `addr`.
+fn denied(h: &Harness, addr: Ipv6Addr) -> bool {
+    h.last_ruleset()
+        .scopes
+        .iter()
+        .any(|s| matches!(&s.matcher, ScopeMatch::Destinations(d) if d.contains(&IpAddr::V6(addr))))
+}
+
+#[tokio::test]
+async fn failed_removal_keeps_the_address_denied_and_is_retried() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let a = Harness::addr_on(&app, "ygg");
+    assert!(h.net.addresses("ygg0").contains(&a));
+    assert!(denied(&h, a));
+
+    h.set_sockets(vec![]);
+    h.net.set_remove_failing(true);
+    h.engine()
+        .await
+        .delete_app(&h.state, &app.id)
+        .await
+        .unwrap();
+    // The app and its row are gone, but the address is still on the interface...
+    assert!(h.apps().await.is_empty());
+    assert!(h.net.addresses("ygg0").contains(&a));
+    let owned = h.state.db.list_owned_addresses().await.unwrap();
+    assert_eq!(owned.len(), 1);
+    assert!(owned[0].retiring);
+    // ...and still denied.
+    assert!(denied(&h, a));
+
+    h.reconcile().await;
+    assert!(h.net.addresses("ygg0").contains(&a));
+    assert!(
+        denied(&h, a),
+        "still denied while the removal keeps failing"
+    );
+
+    h.net.set_remove_failing(false);
+    h.reconcile().await;
+    assert!(!h.net.addresses("ygg0").contains(&a));
+    assert!(h.state.db.list_owned_addresses().await.unwrap().is_empty());
+    h.reconcile().await;
+    assert!(!denied(&h, a), "the scope drops it once it is gone");
+}
+
+#[tokio::test]
+async fn crash_leftover_retiring_address_is_removed_at_startup() {
+    let h = Harness::new(vec![ygg()], vec![]).await;
+    // The previous run marked the address retiring and died before removing it.
+    let ghost: Ipv6Addr = "300:1:2:3::dead".parse().unwrap();
+    h.net.plant_address("ygg0", ghost);
+    h.state
+        .db
+        .retire_address(ghost, "ygg0", Some("ygg"))
+        .await
+        .unwrap();
+
+    h.engine().await.startup_reconcile(&h.state).await;
+
+    let first = applied(&h.fw_calls).remove(0);
+    assert!(
+        first.scopes.iter().any(|s| matches!(
+            &s.matcher,
+            ScopeMatch::Destinations(d) if d.contains(&IpAddr::V6(ghost))
+        )),
+        "denied by the first ruleset, before it is removed"
+    );
+    assert!(!h.net.addresses("ygg0").contains(&ghost));
+    assert!(h.state.db.list_owned_addresses().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn orphaned_owned_address_is_swept() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    // An address we own that no app has any more (e.g. a crash between the DB update and
+    // the removal).
+    let orphan: Ipv6Addr = "300:1:2:3::beef".parse().unwrap();
+    h.net.plant_address("ygg0", orphan);
+    h.state
+        .db
+        .claim_address(orphan, "ygg0", Some("ygg"))
+        .await
+        .unwrap();
+    let kept = Harness::addr_on(&h.app().await, "ygg");
+
+    h.reconcile().await;
+    assert!(!h.net.addresses("ygg0").contains(&orphan));
+    assert!(
+        h.net.addresses("ygg0").contains(&kept),
+        "apps' addresses stay"
+    );
+    let owned = h.state.db.list_owned_addresses().await.unwrap();
+    assert_eq!(owned.len(), 1);
+    assert_eq!(owned[0].addr, kept);
+    assert!(!owned[0].retiring);
+}
+
+#[tokio::test]
+async fn address_outside_the_applied_ruleset_is_never_added() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let first = Harness::addr_on(&h.app().await, "ygg");
+
+    // A second app appears, but the ruleset that would cover it cannot be applied.
+    h.fw.set_failing(true);
+    let mut sockets = vec![listener("nginx", 80, Protocol::Tcp)];
+    sockets.push(listener("redis", 6379, Protocol::Tcp));
+    h.set_sockets(sockets);
+    h.reconcile().await;
+    assert_eq!(h.apps().await.len(), 2);
+    assert_eq!(
+        h.net.addresses("ygg0"),
+        [first].into_iter().collect(),
+        "only the covered address is on the interface"
+    );
+    assert_eq!(
+        h.state.db.list_owned_addresses().await.unwrap().len(),
+        1,
+        "and nothing else was recorded as owned"
+    );
+
+    h.fw.set_failing(false);
+    h.reconcile().await;
+    assert_eq!(h.net.addresses("ygg0").len(), 2);
+}
+
+#[tokio::test]
+async fn disable_removes_owned_addresses_and_keeps_rows_until_confirmed() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let a = Harness::addr_on(&h.app().await, "ygg");
+
+    h.net.set_remove_failing(true);
+    h.engine().await.disable(&h.state).await.unwrap();
+    assert!(h.net.addresses("ygg0").contains(&a));
+    let owned = h.state.db.list_owned_addresses().await.unwrap();
+    assert_eq!(owned.len(), 1);
+    assert!(owned[0].retiring);
+
+    // The disabled daemon keeps retrying the removal.
+    h.net.set_remove_failing(false);
+    h.reconcile().await;
+    assert!(!h.net.addresses("ygg0").contains(&a));
+    assert!(h.state.db.list_owned_addresses().await.unwrap().is_empty());
+}
+
+// ─── App identity (ADR 0027 amendment) ───────────────────────────────────────
+
+#[tokio::test]
+async fn identity_is_per_user_and_never_shared_with_forgeries() {
+    let mut other_user = listener("nginx", 8080, Protocol::Tcp);
+    other_user.uid = Some("1001".into());
+    let mut foreign = listener("nginx", 8081, Protocol::Tcp);
+    foreign.foreign_mntns = true;
+    let mut no_exe = listener("nginx", 8082, Protocol::Tcp);
+    no_exe.exe_path = None;
+    let mut inline = script("node", "/srv/trusted/app.js", 8083);
+    inline.cmdline = Some(
+        ["node", "--eval=1", "/srv/trusted/app.js"]
+            .map(String::from)
+            .to_vec(),
+    );
+    let h = Harness::new(
+        vec![local()],
+        vec![
+            listener("nginx", 80, Protocol::Tcp),
+            other_user,
+            foreign,
+            no_exe,
+            script("node", "/srv/trusted/app.js", 3000),
+            inline,
+        ],
+    )
+    .await;
+    h.reconcile().await;
+
+    let apps = h.apps().await;
+    assert_eq!(apps.len(), 6, "{apps:?}");
+    let notes: Vec<_> = apps
+        .iter()
+        .filter_map(|a| a.identity_note.clone())
+        .collect();
+    assert!(notes.contains(&"foreign mount namespace".to_string()));
+    assert!(notes.contains(&"no executable path".to_string()));
+    assert!(notes.contains(&"inline code".to_string()));
+    let trusted = apps
+        .iter()
+        .find(|a| a.interpreter_arg.as_deref() == Some("/srv/trusted/app.js"))
+        .unwrap();
+    assert_eq!(trusted.ports.len(), 1, "the inline process did not join it");
 }

@@ -3,6 +3,7 @@ use anyhow::Result;
 use socketguard_core::{normalize_exe_path, ListeningSocket, Platform, Protocol};
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6TABLE_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
     MIB_UDP6TABLE_OWNER_PID, MIB_UDPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
@@ -11,6 +12,9 @@ use windows::Win32::NetworkManagement::IpHelper::{
 use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
 pub struct WindowsSocketMonitor;
+
+/// Set once the first unattributable socket was logged.
+static LOGGED_UNATTRIBUTABLE: AtomicBool = AtomicBool::new(false);
 
 impl SocketMonitor for WindowsSocketMonitor {
     fn list_listening_sockets(&self) -> Result<Vec<ListeningSocket>> {
@@ -44,6 +48,7 @@ impl SocketMonitor for WindowsSocketMonitor {
             }
             if let Some(d) = details.get(&socket.pid) {
                 socket.cmdline = d.cmdline.clone();
+                socket.uid = d.uid.clone();
                 if socket.exe_path.is_none() {
                     socket.exe_path = d
                         .exe_path
@@ -51,6 +56,26 @@ impl SocketMonitor for WindowsSocketMonitor {
                         .map(|p| normalize_exe_path(p, Platform::Windows));
                 }
             }
+            if socket.process_name == "unknown" {
+                if let Some(name) = socket
+                    .exe_path
+                    .as_deref()
+                    .map(|p| p.rsplit('\\').next().unwrap_or(p))
+                {
+                    socket.process_name = name.to_string();
+                }
+            }
+        }
+
+        // A socket whose owner cannot be told gets no app and no addresses: merging all of
+        // them into one "unknown" app would let any of them inherit the others' grants.
+        let before = sockets.len();
+        sockets.retain(|s| s.pid != 0 && s.process_name != "unknown");
+        if sockets.len() != before && !LOGGED_UNATTRIBUTABLE.swap(true, Ordering::Relaxed) {
+            tracing::debug!(
+                "Skipping {} sockets with no attributable process (further ones are not logged)",
+                before - sockets.len()
+            );
         }
 
         Ok(sockets)
@@ -110,6 +135,8 @@ fn list_tcp4_listeners() -> Result<Vec<ListeningSocket>> {
                 bind_address: addr,
                 exe_path: None,
                 cmdline: None,
+                uid: None,
+                foreign_mntns: false,
             });
         }
 
@@ -163,6 +190,8 @@ fn list_tcp6_listeners() -> Result<Vec<ListeningSocket>> {
                 bind_address: addr,
                 exe_path: None,
                 cmdline: None,
+                uid: None,
+                foreign_mntns: false,
             });
         }
 
@@ -222,6 +251,8 @@ fn list_udp4_listeners() -> Result<Vec<ListeningSocket>> {
                 bind_address: addr,
                 exe_path: None,
                 cmdline: None,
+                uid: None,
+                foreign_mntns: false,
             });
         }
 
@@ -275,6 +306,8 @@ fn list_udp6_listeners() -> Result<Vec<ListeningSocket>> {
                 bind_address: addr,
                 exe_path: None,
                 cmdline: None,
+                uid: None,
+                foreign_mntns: false,
             });
         }
 

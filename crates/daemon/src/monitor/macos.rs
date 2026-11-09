@@ -40,6 +40,7 @@ impl SocketMonitor for MacosSocketMonitor {
         for s in &mut sockets {
             if let Some(d) = details.get(&s.pid) {
                 s.cmdline = d.cmdline.clone();
+                s.uid = d.uid.clone();
                 if d.exe_path.is_some() {
                     s.exe_path = d.exe_path.clone();
                 }
@@ -105,6 +106,8 @@ fn parse_lsof_name(
         bind_address,
         exe_path: None, // filled in by caller from exe_map
         cmdline: None,
+        uid: None, // filled in from sysinfo
+        foreign_mntns: false,
     })
 }
 

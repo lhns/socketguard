@@ -15,7 +15,7 @@ export const networks: Network[] = [
 ];
 
 export const app1: App = {
-  id: "a1", name: "nginx", process_name: "nginx", exe_path: "/usr/sbin/nginx", interpreter_arg: null,
+  id: "a1", name: "nginx", process_name: "nginx", exe_path: "/usr/sbin/nginx", interpreter_arg: null, identity_note: null,
   reviewed: false, first_seen: "2026-01-01T00:00:00Z", last_seen: "2026-01-01T00:00:00Z",
   ports: [{ port: 8080, proto: "tcp", listening: true, last_seen: "2026-01-01T00:00:00Z" }],
   addresses: [

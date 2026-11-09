@@ -19,6 +19,8 @@ fn listener(name: &str, port: u16) -> ListeningSocket {
         bind_address: IpAddr::V6("::".parse().unwrap()),
         exe_path: Some(format!("/usr/bin/{name}")),
         cmdline: Some(vec![name.to_string()]),
+        uid: Some("1000".into()),
+        foreign_mntns: false,
     }
 }
 

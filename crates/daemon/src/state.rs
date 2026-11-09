@@ -1,4 +1,4 @@
-//! SQLite persistence, schema v2 (ADR 0027, 0037): apps, ports, addresses, peers, credentials,
+//! SQLite persistence, schema v3 (ADR 0027, 0037): apps, ports, addresses, peers, credentials,
 //! groups, grants, settings, activity and onion service keys. Versioned with
 //! `PRAGMA user_version`; a database from before the redesign is renamed out of the way,
 //! never migrated.
@@ -22,13 +22,30 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tracing::{info, warn};
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Schema v1 -> v2: the service keys of onion addresses (ADR 0037).
 const MIGRATION_1_TO_2: &str = r#"
 CREATE TABLE onion_keys (
     address_id TEXT PRIMARY KEY REFERENCES addresses(id) ON DELETE CASCADE,
     private_key TEXT NOT NULL
+);
+"#;
+
+/// Schema v2 -> v3: why an app's identity is special (ADR 0027 amendment), and the
+/// addresses the daemon has put on interfaces, written ahead of the change so an address
+/// can never be on an interface without the ruleset knowing about it.
+///
+/// Existing app ids are not recomputed (the uid they now include was never stored): they
+/// stay as inert records and their programs reappear as new, pending apps.
+const MIGRATION_2_TO_3: &str = r#"
+ALTER TABLE apps ADD COLUMN identity_note TEXT;
+CREATE TABLE owned_addresses (
+    addr TEXT PRIMARY KEY,
+    interface TEXT NOT NULL,
+    network_id TEXT,
+    state TEXT NOT NULL,
+    since TEXT
 );
 "#;
 
@@ -126,6 +143,16 @@ CREATE TABLE activity (
 );
 CREATE INDEX activity_at ON activity(at);
 "#;
+
+/// An address the daemon has put on (or is taking off) an interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedAddress {
+    pub addr: Ipv6Addr,
+    pub interface: String,
+    pub network_id: Option<String>,
+    /// Being removed: not wanted any more, but still denied until it is really gone.
+    pub retiring: bool,
+}
 
 pub struct Database {
     pool: SqlitePool,
@@ -271,6 +298,10 @@ impl Database {
             sqlx::raw_sql(MIGRATION_1_TO_2).execute(&mut *tx).await?;
             current = 2;
         }
+        if current == 2 {
+            sqlx::raw_sql(MIGRATION_2_TO_3).execute(&mut *tx).await?;
+            current = 3;
+        }
         if current != version {
             sqlx::query(&format!("PRAGMA user_version = {current}"))
                 .execute(&mut *tx)
@@ -371,14 +402,15 @@ impl Database {
 
     pub async fn insert_app(&self, app: &App) -> Result<()> {
         sqlx::query(
-            "INSERT INTO apps (id, name, process_name, exe_path, interpreter_arg, reviewed, \
-             first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO apps (id, name, process_name, exe_path, interpreter_arg, identity_note, \
+             reviewed, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&app.id)
         .bind(&app.name)
         .bind(&app.process_name)
         .bind(&app.exe_path)
         .bind(&app.interpreter_arg)
+        .bind(&app.identity_note)
         .bind(app.reviewed)
         .bind(ts(app.first_seen))
         .bind(ts(app.last_seen))
@@ -435,13 +467,13 @@ impl Database {
     async fn load_apps(&self, only: Option<&str>) -> Result<Vec<App>> {
         let rows = match only {
             Some(id) => {
-                sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, reviewed, first_seen, last_seen FROM apps WHERE id = ?")
+                sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, identity_note, reviewed, first_seen, last_seen FROM apps WHERE id = ?")
                     .bind(id)
                     .fetch_all(&self.pool)
                     .await?
             }
             None => {
-                sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, reviewed, first_seen, last_seen FROM apps ORDER BY name, id")
+                sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, identity_note, reviewed, first_seen, last_seen FROM apps ORDER BY name, id")
                     .fetch_all(&self.pool)
                     .await?
             }
@@ -454,6 +486,7 @@ impl Database {
                 process_name: r.get("process_name"),
                 exe_path: r.get("exe_path"),
                 interpreter_arg: r.get("interpreter_arg"),
+                identity_note: r.get("identity_note"),
                 reviewed: r.get("reviewed"),
                 first_seen: parse_ts(r.get("first_seen"))?,
                 last_seen: parse_ts(r.get("last_seen"))?,
@@ -706,6 +739,87 @@ impl Database {
             .await?;
         tx.commit().await?;
         Ok(addrs)
+    }
+
+    // ======== Owned addresses ========
+
+    /// Record, before it is added to an interface, that the daemon owns `addr` there.
+    /// An address that was retiring is active again.
+    pub async fn claim_address(
+        &self,
+        addr: Ipv6Addr,
+        interface: &str,
+        network_id: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO owned_addresses (addr, interface, network_id, state, since) \
+             VALUES (?1, ?2, ?3, 'active', ?4) \
+             ON CONFLICT(addr) DO UPDATE SET interface = ?2, network_id = ?3, \
+             state = 'active', since = ?4",
+        )
+        .bind(addr.to_string())
+        .bind(interface)
+        .bind(network_id)
+        .bind(ts(Utc::now()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Mark `addr` as being removed. It stays owned (and so denied) until
+    /// [`Database::forget_address`] confirms it is gone.
+    pub async fn retire_address(
+        &self,
+        addr: Ipv6Addr,
+        interface: &str,
+        network_id: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO owned_addresses (addr, interface, network_id, state, since) \
+             VALUES (?1, ?2, ?3, 'retiring', ?4) \
+             ON CONFLICT(addr) DO UPDATE SET state = 'retiring', \
+             since = CASE WHEN state = 'retiring' THEN since ELSE ?4 END",
+        )
+        .bind(addr.to_string())
+        .bind(interface)
+        .bind(network_id)
+        .bind(ts(Utc::now()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Delete the row of an address that is confirmed off its interface.
+    pub async fn forget_address(&self, addr: Ipv6Addr) -> Result<()> {
+        sqlx::query("DELETE FROM owned_addresses WHERE addr = ?")
+            .bind(addr.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_owned_addresses(&self) -> Result<Vec<OwnedAddress>> {
+        let rows = sqlx::query(
+            "SELECT addr, interface, network_id, state FROM owned_addresses ORDER BY addr",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let addr: String = r.get("addr");
+            let Ok(addr) = addr.parse() else {
+                warn!("Ignoring owned address row with an invalid address: {addr}");
+                continue;
+            };
+            let state: String = r.get("state");
+            out.push(OwnedAddress {
+                addr,
+                interface: r.get("interface"),
+                network_id: r.get("network_id"),
+                retiring: state == "retiring",
+            });
+        }
+        Ok(out)
     }
 
     // ======== Peers ========
@@ -1270,6 +1384,7 @@ mod tests {
             process_name: "proc".into(),
             exe_path: Some("/usr/bin/proc".into()),
             interpreter_arg: None,
+            identity_note: None,
             reviewed: false,
             first_seen: now(),
             last_seen: now(),
@@ -1354,6 +1469,7 @@ mod tests {
                 "apps",
                 "grants",
                 "onion_keys",
+                "owned_addresses",
                 "peer_credentials",
                 "peer_group_members",
                 "peer_groups",
@@ -1632,10 +1748,67 @@ mod tests {
             .fetch_one(&db.pool)
             .await
             .unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, SCHEMA_VERSION);
         assert_eq!(count(&db, "onion_keys").await, 0);
         assert_eq!(db.get_setting("k").await.unwrap().as_deref(), Some("kept"));
         db.migrate().await.expect("idempotent");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn owned_addresses_are_claimed_retired_and_forgotten() {
+        let db = db().await;
+        let a: Ipv6Addr = "300:1::1".parse().unwrap();
+        db.claim_address(a, "ygg0", Some("ygg")).await.unwrap();
+        db.claim_address(a, "ygg0", Some("ygg")).await.unwrap();
+        let rows = db.list_owned_addresses().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].retiring);
+        db.retire_address(a, "ygg0", Some("ygg")).await.unwrap();
+        assert!(db.list_owned_addresses().await.unwrap()[0].retiring);
+        // Retiring an unknown address records it too (adopting a legacy one).
+        let b: Ipv6Addr = "300:1::2".parse().unwrap();
+        db.retire_address(b, "ygg0", None).await.unwrap();
+        assert_eq!(db.list_owned_addresses().await.unwrap().len(), 2);
+        // Claiming again makes it active.
+        db.claim_address(a, "ygg0", Some("ygg")).await.unwrap();
+        assert!(!db.list_owned_addresses().await.unwrap()[0].retiring);
+        db.forget_address(a).await.unwrap();
+        db.forget_address(b).await.unwrap();
+        assert!(db.list_owned_addresses().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn v2_database_migrates_to_v3() {
+        let path = temp_db_path("v2-to-v3");
+        {
+            let opts = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true);
+            let mut c = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::raw_sql(SCHEMA).execute(&mut c).await.unwrap();
+            sqlx::raw_sql(MIGRATION_1_TO_2)
+                .execute(&mut c)
+                .await
+                .unwrap();
+            sqlx::query("PRAGMA user_version = 2")
+                .execute(&mut c)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO apps (id, name, process_name, reviewed, first_seen, last_seen) \
+                 VALUES ('old', 'n', 'p', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            )
+            .execute(&mut c)
+            .await
+            .unwrap();
+        }
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        let app = db.get_app("old").await.unwrap().unwrap();
+        assert_eq!(app.identity_note, None);
+        assert_eq!(db.list_owned_addresses().await.unwrap().len(), 0);
         drop(db);
         let _ = std::fs::remove_file(&path);
     }

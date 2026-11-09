@@ -1,5 +1,5 @@
 //! Process details via the `sysinfo` crate, for the platforms without /proc (Windows,
-//! macOS): the executable path and the full command line.
+//! macOS): the executable path, the full command line and the owning user.
 
 use std::collections::HashMap;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
@@ -8,6 +8,8 @@ pub struct ProcDetails {
     pub exe_path: Option<String>,
     /// argv, `argv[0]` first; None when the process hides it or exited.
     pub cmdline: Option<Vec<String>>,
+    /// The uid on macOS, the owner SID string on Windows.
+    pub uid: Option<String>,
 }
 
 /// Look up `pids` in one refresh.
@@ -21,7 +23,8 @@ pub fn lookup(pids: &[u32]) -> HashMap<u32, ProcDetails> {
         true,
         ProcessRefreshKind::nothing()
             .with_cmd(UpdateKind::Always)
-            .with_exe(UpdateKind::Always),
+            .with_exe(UpdateKind::Always)
+            .with_user(UpdateKind::Always),
     );
     pids.iter()
         .filter_map(|pid| {
@@ -36,6 +39,10 @@ pub fn lookup(pids: &[u32]) -> HashMap<u32, ProcDetails> {
                 ProcDetails {
                     exe_path: p.exe().map(|e| e.to_string_lossy().into_owned()),
                     cmdline: (!cmd.is_empty()).then_some(cmd),
+                    uid: p
+                        .effective_user_id()
+                        .or_else(|| p.user_id())
+                        .map(|u| (**u).to_string()),
                 },
             ))
         })

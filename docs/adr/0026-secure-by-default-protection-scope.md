@@ -35,3 +35,12 @@ ADR 0004 closed only allocated (address, port) pairs inside an otherwise `policy
 ## Amendment (2026-11-09)
 
 Whole-host scopes cover IPv6 only for now. No grant can target an IPv4 address yet (there are no IPv4 locators and IPv4 credentials are rejected), so an IPv4 whole-host scope would cut off the host's IPv4 services with no way to re-allow them. IPv4 whole-host protection returns together with IPv4 grants.
+
+## Amendment (2026-11-09): owned addresses are written ahead and denied until removed
+
+An address could sit on an interface without deny rules: a failed removal was only logged while its row and managed-scope entry were dropped, a crash between the DB update and the removal left an orphan, and an address could be added under an old ruleset when the state for a new one could not be read.
+
+- Schema v3 adds `owned_addresses(addr, interface, network_id, state, since)`, `state` being `active` or `retiring`. An address is inserted `active` before it is added to an interface, set `retiring` before it is taken off, and its row is deleted only after the removal is confirmed (the command succeeded, or the interface no longer holds it).
+- The producer's managed scope is every address of an app plus every owned address, retiring ones included, so a retiring address stays denied until it is really gone.
+- Every reconcile (and startup, after the first apply) sweeps: owned addresses that no app has are retiring and are removed, and failed removals are retried. `disable` retires all owned addresses and keeps the rows of those it could not remove; the disabled daemon keeps retrying.
+- An address is added to an interface only if it is in the managed scope of the last ruleset that was applied successfully. This covers new, re-homed and split addresses, and a state or DB read error before the apply.

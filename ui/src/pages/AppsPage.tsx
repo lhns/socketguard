@@ -121,7 +121,14 @@ function AppDetailCard({ app, networks, peers, groups }: { app: AppDetail; netwo
             {app.exe_path ? ` · ${app.exe_path}` : ""}
           </div>
         </div>
-        {!app.reviewed && <span className="badge badge-pending">pending</span>}
+        <div>
+          {app.identity_note && (
+            <span className="badge badge-pending" title="This app is told apart from other apps by more than its program path">
+              {app.identity_note}
+            </span>
+          )}{" "}
+          {!app.reviewed && <span className="badge badge-pending">pending</span>}
+        </div>
       </div>
 
       <h3 className="section-title">Ports</h3>

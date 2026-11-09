@@ -22,6 +22,11 @@ name: string, process_name: string, exe_path: string | null,
  */
 interpreter_arg: string | null, 
 /**
+ * Why the identity is special (inline code, unrecognized arguments, no executable
+ * path, foreign mount namespace), for the frontends; None for an ordinary app.
+ */
+identity_note: string | null, 
+/**
  * False = pending: no decision has been made about this app yet.
  */
 reviewed: boolean, first_seen: string, last_seen: string, ports: Array<AppPort>, addresses: Array<Address>, };

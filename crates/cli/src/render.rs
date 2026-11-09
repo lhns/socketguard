@@ -343,6 +343,11 @@ pub fn app_detail(d: &AppDetail, names: &Names) -> String {
     if let Some(arg) = &app.interpreter_arg {
         head.push_str(&format!("\n  script      {arg}"));
     }
+    if let Some(note) = &app.identity_note {
+        head.push_str(&format!(
+            "\n  identity    {note} (not shared with other apps)"
+        ));
+    }
     head.push_str(&format!(
         "\n  first seen  {}\n  last seen   {}",
         time(app.first_seen),

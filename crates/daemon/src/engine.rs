@@ -9,21 +9,21 @@
 
 use crate::api::DaemonEvent;
 use crate::backend::{iid_of, same_prefix64, with_prefix64, Ipv6Backend};
-use crate::firewall::{self, DesiredRuleset, DropEvent, Firewall};
+use crate::firewall::{self, DesiredRuleset, DropEvent, Firewall, ScopeMatch};
 use crate::metrics::{CounterKey, Metrics};
 use crate::monitor::{self, SocketMonitor};
 use crate::network::{self, NetworkInterface};
 use crate::networks::{self, IpNetwork, LocatorRequest, NewLocator};
 use crate::ruleset::{self, HostInterface, LockoutRisk, Snapshot};
-use crate::state::{self, Database, NewActivity};
+use crate::state::{self, Database, NewActivity, OwnedAddress};
 use crate::AppState;
 use chrono::Utc;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
 use socketguard_core::{
     app_identity, grant_reach, new_id, normalize_credential, valid_interface_name, ActivityKind,
     ActivityQuery, ActivityRecord, Address, AddressId, AddressMode, App, AppDetail, AppId,
-    Credential, CredentialError, Grant, GrantView, Locator, Network, NetworkKind, NewCredential,
-    NewGrant, Peer, PeerGroup, PortRef, PortSet, Protocol, Settings, Subject,
+    AppIdentity, Credential, CredentialError, Grant, GrantView, Locator, Network, NetworkKind,
+    NewCredential, NewGrant, Peer, PeerGroup, PortRef, PortSet, Protocol, Settings, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
@@ -31,7 +31,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use tokio::sync::watch;
-use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 /// An unchanged ruleset is still re-applied every this many reconcile passes. Drift is
@@ -122,6 +121,8 @@ pub struct Engine {
     unavailable_ifaces: Mutex<HashSet<String>>,
     /// Networks whose last allocation failed (log once per outage).
     alloc_failing: Mutex<HashSet<String>>,
+    /// Owned addresses whose removal failed (log once per outage).
+    removal_failing: Mutex<HashSet<Ipv6Addr>>,
     /// The ruleset last applied successfully, to skip no-op applies.
     last_applied: Mutex<Option<DesiredRuleset>>,
     /// Reconcile passes since the last apply.
@@ -222,6 +223,7 @@ impl Engine {
             ula_global_id,
             unavailable_ifaces: Mutex::default(),
             alloc_failing: Mutex::default(),
+            removal_failing: Mutex::default(),
             last_applied: Mutex::default(),
             passes_since_apply: AtomicU32::new(0),
             apply_failed: AtomicBool::new(false),
@@ -300,6 +302,13 @@ impl Engine {
             groups: db.list_groups().await?,
             grants: db.list_grants().await?,
             protect_host: db.protect_host().await?,
+            // Owned addresses stay denied until they are really off their interface.
+            owned: db
+                .list_owned_addresses()
+                .await?
+                .into_iter()
+                .map(|o| IpAddr::V6(o.addr))
+                .collect(),
         })
     }
 
@@ -454,9 +463,11 @@ impl Engine {
 
     /// Apply, then put missing addresses on their interfaces (the ruleset first).
     async fn apply_and_ensure(&self, state: &AppState) -> anyhow::Result<()> {
-        self.apply_firewall(state).await?;
+        let applied = self.apply_firewall(state).await;
+        // Also after a failed apply: it adds nothing then, but still takes retired
+        // addresses off their interfaces.
         self.ensure_addresses_present(state).await;
-        Ok(())
+        applied
     }
 
     /// Enable (or with an empty list, disable) whole-host protection for `interfaces`.
@@ -724,6 +735,19 @@ impl Engine {
 
     /// Remove a network: its addresses leave the interfaces, then the DB, then the ruleset.
     pub async fn remove_backend_instance(&mut self, state: &AppState, backend_id: &str) {
+        // Write ahead: the addresses are marked retiring before their rows go, and stay
+        // denied until they are really off the interface.
+        let existing: Vec<Address> = state
+            .db
+            .list_addresses()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|a| a.network_id == backend_id)
+            .collect();
+        if let Err(e) = self.retire_addresses(state, &existing).await {
+            error!("Could not record the addresses of '{backend_id}' as retiring: {e}");
+        }
         let deleted = match state.db.delete_addresses_by_network(backend_id).await {
             Ok(d) => d,
             Err(e) => {
@@ -732,16 +756,6 @@ impl Engine {
             }
         };
         self.remove_locators(backend_id, &deleted).await;
-        let iface = self.interface_of(backend_id).map(str::to_string);
-        if let Some(iface) = iface {
-            self.remove_from_interface(
-                deleted
-                    .iter()
-                    .filter_map(|a| a.locator.ipv6().map(|ip| (iface.clone(), ip)))
-                    .collect(),
-            )
-            .await;
-        }
         self.backends.remove(backend_id);
         state
             .config
@@ -751,6 +765,7 @@ impl Engine {
             .retain(|b| b.id != backend_id);
         self.current_backend_ids.retain(|id| id != backend_id);
         let _ = self.apply_firewall(state).await;
+        self.sweep_owned(state).await;
         self.emit(state, DaemonEvent::NetworksChanged);
         self.emit(state, DaemonEvent::AppsChanged);
         self.emit(state, DaemonEvent::GrantsChanged);
@@ -778,19 +793,103 @@ impl Engine {
         }
     }
 
-    async fn remove_from_interface(&self, addrs: Vec<(String, Ipv6Addr)>) {
-        let mut join_set = JoinSet::new();
-        for (iface, addr) in addrs {
-            let network = self.network.clone();
-            join_set.spawn_blocking(move || {
-                if let Err(e) = network.remove_address(&iface, addr) {
-                    warn!("Failed to remove address {addr} from {iface}: {e}");
-                }
-            });
+    /// Write ahead of taking `addresses` off their interfaces: mark them retiring. They
+    /// stay in the ruleset's managed scope until [`Engine::sweep_owned`] has confirmed
+    /// their removal, so no address is ever on an interface without deny rules.
+    async fn retire_addresses(
+        &self,
+        state: &AppState,
+        addresses: &[Address],
+    ) -> anyhow::Result<()> {
+        for a in addresses {
+            if let (Some(ip), Some(iface)) = (a.locator.ipv6(), self.interface_of(&a.network_id)) {
+                state
+                    .db
+                    .retire_address(ip, iface, Some(&a.network_id))
+                    .await?;
+            }
         }
-        while let Some(result) = join_set.join_next().await {
-            if let Err(e) = result {
-                warn!("Remove address task failed: {e}");
+        Ok(())
+    }
+
+    /// Take every owned address that no longer belongs to an app off its interface, and
+    /// retry the ones whose removal failed before. A row is deleted only once the removal
+    /// is confirmed. Run after the ruleset is applied; needs no ruleset itself.
+    async fn sweep_owned(&self, state: &AppState) {
+        let db = &state.db;
+        let (owned, addresses) = match (db.list_owned_addresses().await, db.list_addresses().await)
+        {
+            (Ok(o), Ok(a)) => (o, a),
+            (Err(e), _) | (_, Err(e)) => {
+                // Never sweep on a guess: without the address list everything looks orphaned.
+                warn!("Cannot sweep owned addresses: {e}");
+                return;
+            }
+        };
+        let referenced: HashSet<Ipv6Addr> =
+            addresses.iter().filter_map(|a| a.locator.ipv6()).collect();
+        let disabled = db.disabled().await.unwrap_or(false);
+        let due: Vec<OwnedAddress> = owned
+            .into_iter()
+            .filter(|o| !referenced.contains(&o.addr) || (disabled && o.retiring))
+            .collect();
+        if due.is_empty() {
+            self.removal_failing.lock().unwrap().clear();
+            return;
+        }
+        let due_count = due.len();
+        let failures = release_owned(db, &self.network, due).await;
+        {
+            let mut failing = self.removal_failing.lock().unwrap();
+            let still: HashSet<Ipv6Addr> = failures.iter().map(|(o, _)| o.addr).collect();
+            for (o, e) in &failures {
+                if failing.insert(o.addr) {
+                    warn!(
+                        "Cannot remove {} from {}, it stays denied and the removal is retried: {e}",
+                        o.addr, o.interface
+                    );
+                }
+            }
+            failing.retain(|a| still.contains(a));
+        }
+        if failures.len() < due_count {
+            // Gone for good: the ruleset can stop naming them.
+            let _ = self.apply_firewall_if_changed(state).await;
+        }
+    }
+
+    /// Whether the ruleset that is in force denies `addr` (it is in the managed scope).
+    fn covered_by_applied(&self, addr: Ipv6Addr) -> bool {
+        let applied = self.last_applied.lock().unwrap();
+        applied.as_ref().is_some_and(|rs| {
+            rs.scopes.iter().any(|s| {
+                matches!(&s.matcher, ScopeMatch::Destinations(d) if d.contains(&IpAddr::V6(addr)))
+            })
+        })
+    }
+
+    /// Put `addr` on `iface`: only if the ruleset last applied successfully denies it, and
+    /// recorded as owned before the interface changes. Returns whether it was added.
+    async fn add_to_interface(
+        &self,
+        state: &AppState,
+        iface: &str,
+        network_id: &str,
+        addr: Ipv6Addr,
+    ) -> bool {
+        if !self.covered_by_applied(addr) {
+            debug!("Not adding {addr} to {iface}: the applied ruleset does not cover it");
+            return false;
+        }
+        if let Err(e) = state.db.claim_address(addr, iface, Some(network_id)).await {
+            warn!("Not adding {addr} to {iface}: cannot record it first: {e}");
+            return false;
+        }
+        match self.network.add_address(iface, addr, ADDRESS_PREFIX_LEN) {
+            Ok(()) => true,
+            Err(e) => {
+                warn!("Failed to add {addr} to {iface}: {e}");
+                false
             }
         }
     }
@@ -857,6 +956,7 @@ impl Engine {
             process_name: String,
             exe_path: Option<String>,
             interpreter_arg: Option<String>,
+            identity_note: Option<String>,
             ports: BTreeSet<PortRef>,
         }
         let mut live: BTreeMap<AppId, Live> = BTreeMap::new();
@@ -865,11 +965,12 @@ impl Engine {
             if !config.process_filter.matches(&ls.process_name) {
                 continue;
             }
-            let (id, name, interpreter_arg) = app_identity(
-                &ls.process_name,
-                ls.exe_path.as_deref(),
-                ls.cmdline.as_deref(),
-            );
+            let AppIdentity {
+                id,
+                name,
+                interpreter_arg,
+                note,
+            } = app_identity(ls);
             let port_ref = PortRef {
                 port: ls.port,
                 proto: ls.protocol,
@@ -886,6 +987,7 @@ impl Engine {
                     process_name: ls.process_name.clone(),
                     exe_path: ls.exe_path.clone(),
                     interpreter_arg,
+                    identity_note: note,
                     ports: BTreeSet::new(),
                 })
                 .ports
@@ -917,6 +1019,7 @@ impl Engine {
                     process_name: l.process_name.clone(),
                     exe_path: l.exe_path.clone(),
                     interpreter_arg: l.interpreter_arg.clone(),
+                    identity_note: l.identity_note.clone(),
                     reviewed: false,
                     first_seen: now,
                     last_seen: now,
@@ -1047,10 +1150,11 @@ impl Engine {
     }
 
     /// Re-home stored addresses of prefix-based networks whose /64 changed: keep the
-    /// interface ID, swap the prefix, update the DB, take the old addresses off the
-    /// interface, apply the ruleset that covers the new ones and only then add them.
+    /// interface ID, swap the prefix, update the DB, apply the ruleset that covers the new
+    /// addresses, add them, and only then take the old ones off (they stay denied as
+    /// retiring until then).
     async fn rehome_prefix_changes(&self, state: &AppState) {
-        let mut moves: Vec<(String, Ipv6Addr, Ipv6Addr)> = Vec::new();
+        let mut moves: Vec<(String, String, Ipv6Addr)> = Vec::new();
         let addresses = match state.db.list_addresses().await {
             Ok(a) => a,
             Err(e) => {
@@ -1080,8 +1184,17 @@ impl Engine {
                 }
                 let new = with_prefix64(prefix.addr, iid_of(old));
                 info!("Prefix of backend '{network_id}' changed: moving {old} to {new}");
+                // Write ahead: the old address is retiring before the row stops naming it.
+                if let Err(e) = state
+                    .db
+                    .retire_address(old, iface, Some(network_id.as_str()))
+                    .await
+                {
+                    error!("Failed to record {old} as retiring: {e}");
+                    continue;
+                }
                 match state.db.update_address_ipv6(&a.id, new).await {
-                    Ok(_) => moves.push((iface.to_string(), old, new)),
+                    Ok(_) => moves.push((iface.to_string(), network_id.clone(), new)),
                     Err(e) => error!("Failed to save re-homed address: {e}"),
                 }
             }
@@ -1090,42 +1203,47 @@ impl Engine {
             return;
         }
 
-        // Old addresses leave the interface before the ruleset stops covering them; new
-        // ones are added only once a ruleset that covers them is in place. Without one the
-        // ensure-present pass adds them after the next successful apply.
-        self.remove_from_interface(moves.iter().map(|(i, old, _)| (i.clone(), *old)).collect())
-            .await;
-        // Disabled: the apply was a no-op, and nothing may put addresses back.
-        let applied = self.apply_firewall(state).await.is_ok();
-        if applied && !state.db.disabled().await.unwrap_or(false) {
-            for (iface, _, new) in moves {
-                if let Err(e) = self.network.add_address(&iface, new, ADDRESS_PREFIX_LEN) {
-                    warn!("Failed to add {new} to {iface}: {e}");
-                }
+        // New addresses go on only once a ruleset that covers them is in place; without
+        // one the ensure-present pass adds them after the next successful apply. Disabled:
+        // the apply was a no-op, and nothing may put addresses back.
+        let _ = self.apply_firewall(state).await;
+        if !state.db.disabled().await.unwrap_or(false) {
+            for (iface, network_id, new) in moves {
+                self.add_to_interface(state, &iface, &network_id, new).await;
             }
         }
+        self.sweep_owned(state).await;
         self.emit(state, DaemonEvent::AppsChanged);
     }
 
-    /// Re-add expected addresses that are missing from their interface, e.g. after
-    /// Yggdrasil restarted and recreated its tun. Interfaces that don't exist are skipped.
-    /// Does nothing while the last ruleset apply failed: an address no scope covers would
-    /// be exposed.
+    /// Take retired and orphaned addresses off their interfaces, then re-add expected
+    /// addresses that are missing, e.g. after Yggdrasil restarted and recreated its tun.
+    /// Interfaces that don't exist are skipped. An address is added only if the ruleset
+    /// last applied successfully denies it: otherwise it would be exposed.
     async fn ensure_addresses_present(&self, state: &AppState) {
+        self.sweep_owned(state).await;
         if state.db.disabled().await.unwrap_or(false) {
             return;
         }
-        if self.apply_failed.load(Ordering::Relaxed) {
-            debug!("Not adding addresses: the firewall ruleset is not in place");
-            return;
-        }
-        let mut expected: HashMap<String, Vec<Ipv6Addr>> = HashMap::new();
+        let mut expected: HashMap<String, Vec<(Ipv6Addr, String)>> = HashMap::new();
         for a in state.db.list_addresses().await.unwrap_or_default() {
             if let (Some(addr), Some(iface)) = (a.locator.ipv6(), self.interface_of(&a.network_id))
             {
-                expected.entry(iface.to_string()).or_default().push(addr);
+                expected
+                    .entry(iface.to_string())
+                    .or_default()
+                    .push((addr, a.network_id.clone()));
             }
         }
+        let active: HashSet<Ipv6Addr> = state
+            .db
+            .list_owned_addresses()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|o| !o.retiring)
+            .map(|o| o.addr)
+            .collect();
 
         for (iface, wanted) in expected {
             let present = match self.network.list_addresses(&iface) {
@@ -1146,13 +1264,25 @@ impl Engine {
                     continue;
                 }
             };
-            for addr in wanted {
+            for (addr, network_id) in wanted {
                 if present.contains(&addr) {
+                    // Already there (e.g. from before ownership was recorded): own it.
+                    if !active.contains(&addr) {
+                        if let Err(e) = state
+                            .db
+                            .claim_address(addr, &iface, Some(&network_id))
+                            .await
+                        {
+                            warn!("Cannot record ownership of {addr}: {e}");
+                        }
+                    }
                     continue;
                 }
-                match self.network.add_address(&iface, addr, ADDRESS_PREFIX_LEN) {
-                    Ok(()) => info!("Added address {addr} to {iface}"),
-                    Err(e) => warn!("Failed to add {addr} to {iface}: {e}"),
+                if self
+                    .add_to_interface(state, &iface, &network_id, addr)
+                    .await
+                {
+                    info!("Added address {addr} to {iface}");
                 }
             }
         }
@@ -1534,11 +1664,12 @@ impl Engine {
             .get_app(id)
             .await?
             .ok_or_else(|| EngineError::NotFound(format!("app {id}")))?;
-        self.remove_from_interface(self.interface_addrs(&app.addresses))
-            .await;
+        self.retire_addresses(state, &app.addresses).await?;
         self.remove_app_locators(&app.addresses).await;
         state.db.delete_app(id).await?;
-        self.apply_firewall(state).await?;
+        let applied = self.apply_firewall(state).await;
+        self.sweep_owned(state).await;
+        applied?;
         self.record(
             state,
             NewActivity::new(
@@ -1563,18 +1694,6 @@ impl Engine {
                 .collect();
             self.remove_locators(nid, &of_network).await;
         }
-    }
-
-    fn interface_addrs(&self, addresses: &[Address]) -> Vec<(String, Ipv6Addr)> {
-        addresses
-            .iter()
-            .filter_map(|a| {
-                Some((
-                    self.interface_of(&a.network_id)?.to_string(),
-                    a.locator.ipv6()?,
-                ))
-            })
-            .collect()
     }
 
     /// Give `port` of an app its own address on a network.
@@ -1700,9 +1819,9 @@ impl Engine {
         };
         let keep = picked[0];
         let gone: Vec<Address> = picked[1..].iter().map(|a| (*a).clone()).collect();
-        // The others' addresses leave the interface before their rules go.
-        self.remove_from_interface(self.interface_addrs(&gone))
-            .await;
+        // The others' addresses leave the interface (retiring, so still denied) before
+        // their rules go.
+        self.retire_addresses(state, &gone).await?;
         self.remove_locators(network_id, &gone).await;
         state.db.update_address_ports(&keep.id, &merged).await?;
         for a in &gone {
@@ -2228,29 +2347,71 @@ pub async fn disable_all(
     network: Arc<dyn NetworkInterface>,
 ) -> anyhow::Result<()> {
     db.set_disabled(true).await?;
-    let mut addrs: Vec<(String, Ipv6Addr)> = Vec::new();
     for a in db.list_addresses().await? {
         let Some(ip) = a.locator.ipv6() else {
             continue;
         };
         match interfaces.get(&a.network_id) {
-            Some(iface) => addrs.push((iface.clone(), ip)),
+            // Adopt addresses from before ownership was recorded.
+            Some(iface) => {
+                if let Err(e) = db.retire_address(ip, iface, Some(&a.network_id)).await {
+                    warn!("Cannot record {ip} as retiring: {e}");
+                }
+            }
             None => warn!(
                 "Network '{}' is not configured; cannot remove {ip}",
                 a.network_id
             ),
         }
     }
-    tokio::task::spawn_blocking(move || {
-        // Addresses first: removing the rules first would briefly expose them.
-        for (iface, addr) in addrs {
-            if let Err(e) = network.remove_address(&iface, addr) {
-                warn!("Failed to remove {addr} from {iface}: {e}");
+    // Addresses first: removing the rules first would briefly expose them. A row stays
+    // until its address is confirmed gone.
+    let owned = db.list_owned_addresses().await?;
+    for (o, e) in release_owned(db, &network, owned).await {
+        warn!("Failed to remove {} from {}: {e}", o.addr, o.interface);
+    }
+    tokio::task::spawn_blocking(move || firewall.disable()).await?
+}
+
+/// Take owned addresses off their interfaces: mark each retiring, remove it, and delete its
+/// row only when the removal is confirmed (it succeeded, or the interface no longer has
+/// the address). Returns the ones that are still there.
+async fn release_owned(
+    db: &Database,
+    network: &Arc<dyn NetworkInterface>,
+    rows: Vec<OwnedAddress>,
+) -> Vec<(OwnedAddress, anyhow::Error)> {
+    let mut failures = Vec::new();
+    for o in rows {
+        if !o.retiring {
+            if let Err(e) = db
+                .retire_address(o.addr, &o.interface, o.network_id.as_deref())
+                .await
+            {
+                warn!("Cannot record {} as retiring: {e}", o.addr);
             }
         }
-        firewall.disable()
-    })
-    .await?
+        let net = network.clone();
+        let (iface, addr) = (o.interface.clone(), o.addr);
+        let removed = tokio::task::spawn_blocking(move || match net.remove_address(&iface, addr) {
+            Ok(()) => Ok(()),
+            Err(e) => match net.list_addresses(&iface) {
+                Ok(list) if !list.contains(&addr) => Ok(()),
+                _ => Err(e),
+            },
+        })
+        .await;
+        match removed {
+            Ok(Ok(())) => {
+                if let Err(e) = db.forget_address(o.addr).await {
+                    failures.push((o, e));
+                }
+            }
+            Ok(Err(e)) => failures.push((o, e)),
+            Err(e) => failures.push((o, e.into())),
+        }
+    }
+    failures
 }
 
 /// Take everything of ours off the networks that are not IP networks (the onion services
@@ -2399,6 +2560,7 @@ mod tests {
             process_name: "a".into(),
             exe_path: None,
             interpreter_arg: None,
+            identity_note: None,
             reviewed: false,
             first_seen: now,
             last_seen: now,

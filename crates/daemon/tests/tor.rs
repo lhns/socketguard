@@ -32,6 +32,8 @@ fn socket(port: u16, protocol: Protocol, bind: &str) -> ListeningSocket {
         bind_address: bind.parse::<IpAddr>().unwrap(),
         exe_path: Some("/usr/bin/webapp".into()),
         cmdline: Some(vec!["webapp".into()]),
+        uid: Some("1000".into()),
+        foreign_mntns: false,
     }
 }
 
