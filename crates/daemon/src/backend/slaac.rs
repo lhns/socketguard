@@ -1,77 +1,160 @@
 use super::{Ipv6Backend, Prefix};
+use crate::network::NetworkInterface;
 use anyhow::{bail, Context, Result};
 use rand::Rng;
 use socketguard_core::{AllocatedAddress, BackendType};
 use std::net::Ipv6Addr;
-use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
 /// Maximum retry attempts for collision avoidance
 const MAX_COLLISION_RETRIES: usize = 10;
 
-/// SLAAC backend: generates addresses within an existing /64 prefix
-/// discovered from (or configured for) a physical network interface.
+/// How long a discovered prefix is reused before the interface is read again.
+pub const DISCOVERY_CACHE: Duration = Duration::from_secs(10);
+
+/// SLAAC backend: generates addresses within an existing /64 prefix, either configured
+/// or discovered from the addresses of a network interface. A discovered prefix is
+/// re-read regularly, so a changed ISP prefix is followed.
 pub struct SlaacBackend {
     interface: String,
-    /// The /64 prefix (first 8 bytes of the IPv6 address)
-    prefix: [u8; 8],
+    net: Arc<dyn NetworkInterface>,
+    /// A configured prefix; never rediscovered.
+    fixed: Option<[u8; 8]>,
+    cache_for: Duration,
+    /// The last discovery: when, and the prefix it found.
+    cache: Mutex<Option<(Instant, [u8; 8])>>,
 }
 
 impl SlaacBackend {
-    /// Create a new SLAAC backend.
-    /// If `prefix` is None or "auto", discovers the prefix from the interface.
-    pub fn new(interface: &str, prefix: Option<&str>) -> Result<Self> {
-        let prefix_bytes = match prefix {
-            Some(p) if !p.is_empty() && p != "auto" => parse_prefix(p)?,
-            _ => discover_prefix(interface)?,
+    /// `prefix` None or "auto" discovers the prefix from the interface. Only an invalid
+    /// prefix is an error; an interface without a usable prefix is a runtime condition.
+    pub fn new(
+        interface: &str,
+        prefix: Option<&str>,
+        net: Arc<dyn NetworkInterface>,
+    ) -> Result<Self> {
+        Self::with_cache(interface, prefix, net, DISCOVERY_CACHE)
+    }
+
+    pub fn with_cache(
+        interface: &str,
+        prefix: Option<&str>,
+        net: Arc<dyn NetworkInterface>,
+        cache_for: Duration,
+    ) -> Result<Self> {
+        let fixed = match prefix {
+            Some(p) if !p.is_empty() && p != "auto" => Some(parse_prefix(p)?),
+            _ => None,
         };
-
-        info!(
-            "SLAAC backend initialized: interface={}, prefix={:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}::/64",
-            interface,
-            prefix_bytes[0], prefix_bytes[1], prefix_bytes[2], prefix_bytes[3],
-            prefix_bytes[4], prefix_bytes[5], prefix_bytes[6], prefix_bytes[7],
-        );
-
         Ok(Self {
             interface: interface.to_string(),
-            prefix: prefix_bytes,
+            net,
+            fixed,
+            cache_for,
+            cache: Mutex::new(None),
         })
     }
+
+    /// The /64 to allocate from: the configured one, or the one discovered on the
+    /// interface (cached for `cache_for`).
+    fn prefix(&self) -> Result<[u8; 8]> {
+        if let Some(p) = self.fixed {
+            return Ok(p);
+        }
+        let mut cache = self.cache.lock().unwrap();
+        if let Some((at, p)) = *cache {
+            if at.elapsed() < self.cache_for {
+                return Ok(p);
+            }
+        }
+        let addrs = self.net.list_addresses(&self.interface).with_context(|| {
+            format!("cannot read the addresses of interface {}", self.interface)
+        })?;
+        let Some(found) = pick_prefix(&addrs) else {
+            *cache = None;
+            bail!(
+                "no global or unique-local IPv6 prefix on interface {}",
+                self.interface
+            );
+        };
+        if cache.is_none_or(|(_, old)| old != found) {
+            info!(
+                "SLAAC prefix of {}: {}",
+                self.interface,
+                prefix_addr(&found)
+            );
+        }
+        *cache = Some((Instant::now(), found));
+        Ok(found)
+    }
+}
+
+fn prefix_addr(prefix: &[u8; 8]) -> Ipv6Addr {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(prefix);
+    Ipv6Addr::from(bytes)
+}
+
+/// Choose the /64 to allocate from among the addresses of an interface. Global unicast
+/// (2000::/3) beats unique-local (fc00::/7); link-local, loopback, multicast and
+/// Yggdrasil (200::/7) never count. Within a class the prefix shared by the most
+/// addresses wins, then the lowest.
+pub fn pick_prefix(addrs: &[Ipv6Addr]) -> Option<[u8; 8]> {
+    let rank = |a: &Ipv6Addr| -> Option<u8> {
+        let first = a.octets()[0];
+        if first & 0xe0 == 0x20 {
+            Some(1) // global unicast
+        } else if first & 0xfe == 0xfc {
+            Some(0) // unique-local
+        } else {
+            None
+        }
+    };
+    let mut counts: std::collections::BTreeMap<(u8, [u8; 8]), usize> = Default::default();
+    for a in addrs {
+        if let Some(r) = rank(a) {
+            let mut p = [0u8; 8];
+            p.copy_from_slice(&a.octets()[..8]);
+            *counts.entry((r, p)).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by(|(ka, ca), (kb, cb)| {
+            // Higher class, then more addresses, then the lower prefix.
+            ka.0.cmp(&kb.0).then(ca.cmp(cb)).then(kb.1.cmp(&ka.1))
+        })
+        .map(|((_, p), _)| p)
 }
 
 impl Ipv6Backend for SlaacBackend {
     fn current_prefix(&self) -> Result<Option<Prefix>> {
-        let mut bytes = [0u8; 16];
-        bytes[..8].copy_from_slice(&self.prefix);
-        Ok(Some(Prefix::new(Ipv6Addr::from(bytes), 64)))
+        Ok(Some(Prefix::new(prefix_addr(&self.prefix()?), 64)))
     }
 
     fn allocate(&self, iid: Option<u64>) -> Result<AllocatedAddress> {
+        let prefix = self.prefix()?;
+        let with_iid = |iid: u64| {
+            let mut bytes = [0u8; 16];
+            bytes[..8].copy_from_slice(&prefix);
+            bytes[8..16].copy_from_slice(&iid.to_be_bytes());
+            Ipv6Addr::from(bytes)
+        };
         if let Some(iid) = iid {
             // A stable interface ID is ours already; no collision check.
-            let mut bytes = [0u8; 16];
-            bytes[..8].copy_from_slice(&self.prefix);
-            bytes[8..16].copy_from_slice(&iid.to_be_bytes());
             return Ok(AllocatedAddress {
-                address: Ipv6Addr::from(bytes),
+                address: with_iid(iid),
                 prefix_len: 128,
                 backend: BackendType::Slaac,
             });
         }
         let mut rng = rand::thread_rng();
-
         for attempt in 0..MAX_COLLISION_RETRIES {
-            // Generate random 64-bit interface ID within the prefix
-            let mut bytes = [0u8; 16];
-            bytes[..8].copy_from_slice(&self.prefix);
-            let iface_id: u64 = rng.gen();
-            bytes[8..16].copy_from_slice(&iface_id.to_be_bytes());
-
-            let address = Ipv6Addr::from(bytes);
-
+            let address = with_iid(rng.gen());
             // Check for collision with existing addresses on the interface
-            if !is_address_in_use(&self.interface, address)? {
+            if !self.net.list_addresses(&self.interface)?.contains(&address) {
                 debug!("SLAAC allocated {} (attempt {})", address, attempt + 1);
                 return Ok(AllocatedAddress {
                     address,
@@ -79,14 +162,12 @@ impl Ipv6Backend for SlaacBackend {
                     backend: BackendType::Slaac,
                 });
             }
-
             debug!(
                 "SLAAC address {} already in use, retrying (attempt {})",
                 address,
                 attempt + 1
             );
         }
-
         bail!(
             "failed to allocate unique SLAAC address after {} attempts",
             MAX_COLLISION_RETRIES
@@ -125,222 +206,10 @@ fn parse_prefix(prefix_str: &str) -> Result<[u8; 8]> {
     Ok(prefix)
 }
 
-/// Discover the /64 prefix from an interface by listing its existing IPv6 addresses.
-/// Looks for a global unicast address (2000::/3) assigned via SLAAC.
-#[cfg(target_os = "windows")]
-fn discover_prefix(interface: &str) -> Result<[u8; 8]> {
-    let output = Command::new("netsh")
-        .args([
-            "interface",
-            "ipv6",
-            "show",
-            "address",
-            &format!("interface={interface}"),
-        ])
-        .output()
-        .context("failed to run netsh to discover prefix")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Parse netsh output for global IPv6 addresses
-    // Lines containing IPv6 addresses typically look like:
-    // "Address 2001:db8:1:2:abc:def:1234:5678"
-    for line in stdout.lines() {
-        let line = line.trim();
-        // Look for lines containing an IPv6 address
-        if let Some(addr_str) = extract_ipv6_from_line(line) {
-            if let Ok(addr) = addr_str.parse::<Ipv6Addr>() {
-                let octets = addr.octets();
-                // Check if it's a global unicast address (2000::/3)
-                if (octets[0] & 0xe0) == 0x20 {
-                    let mut prefix = [0u8; 8];
-                    prefix.copy_from_slice(&octets[..8]);
-                    info!(
-                        "Discovered SLAAC prefix from {}: {:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}::/64",
-                        interface,
-                        prefix[0], prefix[1], prefix[2], prefix[3],
-                        prefix[4], prefix[5], prefix[6], prefix[7],
-                    );
-                    return Ok(prefix);
-                }
-            }
-        }
-    }
-
-    bail!(
-        "no global IPv6 address found on interface '{}'. \
-         Make sure the interface has a SLAAC-assigned address or specify the prefix manually.",
-        interface
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn discover_prefix(interface: &str) -> Result<[u8; 8]> {
-    let output = Command::new("ip")
-        .args(["-6", "addr", "show", "dev", interface, "scope", "global"])
-        .output()
-        .context("failed to run ip addr show")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.starts_with("inet6") {
-            // Format: "inet6 2001:db8::1/64 scope global ..."
-            if let Some(addr_cidr) = line.split_whitespace().nth(1) {
-                let addr_str = addr_cidr.split('/').next().unwrap_or(addr_cidr);
-                if let Ok(addr) = addr_str.parse::<Ipv6Addr>() {
-                    let octets = addr.octets();
-                    if (octets[0] & 0xe0) == 0x20 {
-                        let mut prefix = [0u8; 8];
-                        prefix.copy_from_slice(&octets[..8]);
-                        return Ok(prefix);
-                    }
-                }
-            }
-        }
-    }
-
-    bail!(
-        "no global IPv6 address found on interface '{}'. \
-         Make sure the interface has a SLAAC-assigned address or specify the prefix manually.",
-        interface
-    )
-}
-
-#[cfg(target_os = "macos")]
-fn discover_prefix(interface: &str) -> Result<[u8; 8]> {
-    let output = Command::new("ifconfig")
-        .arg(interface)
-        .output()
-        .context("failed to run ifconfig")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.starts_with("inet6") && !line.contains("scopeid") {
-            // Format: "inet6 2001:db8::1 prefixlen 64 ..."
-            if let Some(addr_str) = line.split_whitespace().nth(1) {
-                // Strip %interface suffix if present
-                let addr_str = addr_str.split('%').next().unwrap_or(addr_str);
-                if let Ok(addr) = addr_str.parse::<Ipv6Addr>() {
-                    let octets = addr.octets();
-                    if (octets[0] & 0xe0) == 0x20 {
-                        let mut prefix = [0u8; 8];
-                        prefix.copy_from_slice(&octets[..8]);
-                        return Ok(prefix);
-                    }
-                }
-            }
-        }
-    }
-
-    bail!(
-        "no global IPv6 address found on interface '{}'. \
-         Make sure the interface has a SLAAC-assigned address or specify the prefix manually.",
-        interface
-    )
-}
-
-/// Extract an IPv6 address string from a netsh output line
-#[cfg(target_os = "windows")]
-fn extract_ipv6_from_line(line: &str) -> Option<&str> {
-    // netsh output lines may contain "Address <ipv6>" or just the address
-    for word in line.split_whitespace() {
-        // Quick heuristic: contains ':' and at least one hex char
-        if word.contains(':') && word.chars().any(|c| c.is_ascii_hexdigit()) {
-            // Strip trailing % scope ID
-            let addr = word.split('%').next().unwrap_or(word);
-            return Some(addr);
-        }
-    }
-    None
-}
-
-/// Check if an address is already in use on the specified interface
-#[cfg(target_os = "windows")]
-fn is_address_in_use(interface: &str, addr: Ipv6Addr) -> Result<bool> {
-    let output = Command::new("netsh")
-        .args([
-            "interface",
-            "ipv6",
-            "show",
-            "address",
-            &format!("interface={interface}"),
-        ])
-        .output()
-        .context("failed to check existing addresses")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Check each line for the address
-    for line in stdout.lines() {
-        if let Some(existing) = extract_ipv6_from_line(line.trim()) {
-            if let Ok(existing_addr) = existing.parse::<Ipv6Addr>() {
-                if existing_addr == addr {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-
-    Ok(false)
-}
-
-#[cfg(target_os = "linux")]
-fn is_address_in_use(interface: &str, addr: Ipv6Addr) -> Result<bool> {
-    let output = Command::new("ip")
-        .args(["-6", "addr", "show", "dev", interface])
-        .output()
-        .context("failed to check existing addresses")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let target = addr.to_string();
-
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.starts_with("inet6") {
-            if let Some(addr_cidr) = line.split_whitespace().nth(1) {
-                let existing = addr_cidr.split('/').next().unwrap_or(addr_cidr);
-                if existing == target {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-
-    Ok(false)
-}
-
-#[cfg(target_os = "macos")]
-fn is_address_in_use(interface: &str, addr: Ipv6Addr) -> Result<bool> {
-    let output = Command::new("ifconfig")
-        .arg(interface)
-        .output()
-        .context("failed to check existing addresses")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let addr_str = addr.to_string();
-
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.starts_with("inet6") {
-            if let Some(existing) = line.split_whitespace().nth(1) {
-                let existing = existing.split('%').next().unwrap_or(existing);
-                if existing == addr_str {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-
-    Ok(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::MockNetworkInterface;
 
     #[test]
     fn parse_prefix_with_slash() {
@@ -357,5 +226,114 @@ mod tests {
     #[test]
     fn parse_prefix_invalid() {
         assert!(parse_prefix("not-an-address").is_err());
+    }
+
+    fn ips(list: &[&str]) -> Vec<Ipv6Addr> {
+        list.iter().map(|a| a.parse().unwrap()).collect()
+    }
+
+    fn pick(list: &[&str]) -> Option<String> {
+        pick_prefix(&ips(list)).map(|p| prefix_addr(&p).to_string())
+    }
+
+    #[test]
+    fn pick_prefix_table() {
+        assert_eq!(pick(&[]), None);
+        assert_eq!(
+            pick(&["2001:db8:1:2::5"]).as_deref(),
+            Some("2001:db8:1:2::")
+        );
+        assert_eq!(
+            pick(&["fd3e:1eec:520:582e::5", "fd3e:1eec:520:582e::6"]).as_deref(),
+            Some("fd3e:1eec:520:582e::")
+        );
+        // Global beats unique-local, even when the ULA has more addresses.
+        assert_eq!(
+            pick(&["fd00:1:2:3::1", "fd00:1:2:3::2", "2001:db8::1"]).as_deref(),
+            Some("2001:db8::")
+        );
+        // Link-local, loopback, multicast, Yggdrasil never count.
+        assert_eq!(
+            pick(&["fe80::1", "::1", "ff02::1", "200:1:2:3::1", "300:1:2:3::1"]),
+            None
+        );
+        assert_eq!(
+            pick(&["fe80::1", "::1", "300:1:2:3::1", "fd00:1:2:3::1"]).as_deref(),
+            Some("fd00:1:2:3::")
+        );
+        // The prefix shared by most addresses wins, then the lowest.
+        assert_eq!(
+            pick(&["2001:db8:2::1", "2001:db8:1::1", "2001:db8:2::2"]).as_deref(),
+            Some("2001:db8:2::")
+        );
+        assert_eq!(
+            pick(&["2001:db8:2::1", "2001:db8:1::1"]).as_deref(),
+            Some("2001:db8:1::")
+        );
+    }
+
+    fn mock() -> MockNetworkInterface {
+        MockNetworkInterface::new(Arc::default())
+    }
+
+    fn add(m: &MockNetworkInterface, addr: &str) {
+        m.add_address("eth0", addr.parse().unwrap(), 64).unwrap();
+    }
+
+    #[test]
+    fn discovers_and_follows_the_prefix() {
+        let m = mock();
+        let b =
+            SlaacBackend::with_cache("eth0", None, Arc::new(m.clone()), Duration::ZERO).unwrap();
+        // No addresses: down, with a clear message.
+        let err = b.current_prefix().unwrap_err().to_string();
+        assert!(err.contains("no global or unique-local IPv6 prefix on interface eth0"));
+        assert!(b.allocate(None).is_err());
+
+        // A ULA address makes the interface usable.
+        add(&m, "fd3e:1eec:520:582e::10");
+        let p = b.current_prefix().unwrap().unwrap();
+        assert_eq!(p.addr, "fd3e:1eec:520:582e::".parse::<Ipv6Addr>().unwrap());
+        let a = b.allocate(None).unwrap();
+        assert!(crate::backend::same_prefix64(a.address, p.addr));
+
+        // A global prefix appears and wins; allocation follows.
+        add(&m, "2001:db8:9:9::1");
+        let p = b.current_prefix().unwrap().unwrap();
+        assert_eq!(p.addr, "2001:db8:9:9::".parse::<Ipv6Addr>().unwrap());
+        let a = b.allocate(Some(7)).unwrap();
+        assert_eq!(a.address, "2001:db8:9:9::7".parse::<Ipv6Addr>().unwrap());
+    }
+
+    #[test]
+    fn discovery_is_cached() {
+        let m = mock();
+        add(&m, "2001:db8:1::1");
+        let b =
+            SlaacBackend::with_cache("eth0", None, Arc::new(m.clone()), Duration::from_secs(3600))
+                .unwrap();
+        let first = b.current_prefix().unwrap().unwrap();
+        m.remove_address("eth0", "2001:db8:1::1".parse().unwrap())
+            .unwrap();
+        add(&m, "2001:db8:2::1");
+        assert_eq!(b.current_prefix().unwrap().unwrap(), first);
+    }
+
+    #[test]
+    fn configured_prefix_is_static() {
+        let m = mock();
+        add(&m, "2001:db8:1::1");
+        let b =
+            SlaacBackend::with_cache("eth0", Some("2001:db8:5::/64"), Arc::new(m), Duration::ZERO)
+                .unwrap();
+        assert_eq!(
+            b.current_prefix().unwrap().unwrap().addr,
+            "2001:db8:5::".parse::<Ipv6Addr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn invalid_configured_prefix_is_an_error() {
+        assert!(SlaacBackend::new("eth0", Some("nonsense"), Arc::new(mock())).is_err());
     }
 }

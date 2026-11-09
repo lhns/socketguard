@@ -1,115 +1,83 @@
 # SocketGuard
 
-Per-socket IPv6 access control. Assign each listening socket its own unique IPv6 address with granular, per-socket firewall rules.
+Secure by default, without NAT. Every app on a host gets its own IPv6 address per network,
+everything is closed until you grant access, and access is granted to *peers* (ideally
+identified by public key), not to IP strings.
 
-## Problem
+## Why
 
-Applications open TCP ports that are accessible to anyone on the network. Overlay networks like Yggdrasil create IPv6 addresses derived from public keys, making IPs usable as identity — but installing Yggdrasil exposes **all** application ports to the entire overlay network.
+Without NAT, every listening port is reachable by anyone who can route to the host. Overlay
+networks like Yggdrasil make this worse — installing one exposes every port to the whole
+overlay — but they also make source addresses provable: on Yggdrasil a packet's source is
+cryptographically bound to the sender's key. SocketGuard builds on that:
 
-SocketGuard solves this by giving each listening socket its own unique IPv6 address with independent access control.
+- **Apps, not ports.** Listening processes are grouped into apps (interpreter-aware, stable
+  across upgrades). Each app gets an address per network; ports can be split onto their own
+  address or merged.
+- **Peers, not IPs.** A peer is a label plus credentials: a Yggdrasil key or address, an IP or
+  CIDR, a Tor client key. Each grant shows per network whether it is `verified` by key,
+  `IP only`, or `not reachable` there.
+- **Closed by default.** All SocketGuard addresses and the whole Yggdrasil interface deny
+  inbound traffic unless a grant allows it. Whole-host protection is opt-in, with a guard
+  against locking yourself out of SSH/RDP.
+- **Frozen on stop.** Stopping the daemon keeps rules and addresses in place;
+  `socketguard disable` is the only way to remove them.
 
-## How It Works
+## Networks
 
-```
-1. DETECT   — Daemon polls the OS for listening sockets (process, PID, port)
-2. ASSIGN   — Each new socket gets a unique IPv6 (ULA or Yggdrasil-derived)
-3. BIND     — The IPv6 address is added to the network interface
-4. FIREWALL — Rules block all traffic to that address:port by default
-5. MANAGE   — User configures per-socket ACLs via CLI or desktop app
-```
+| Network | Addresses | Identity of sources |
+|---|---|---|
+| Local (ULA on loopback) | `fd..::/48`, this machine only | — |
+| LAN (SLAAC, DHCPv6) | from the LAN's global or ULA `/64` | IP only |
+| Yggdrasil | `/128`s from the node's `300::/64` | verified by key |
+| Tor | one onion service per address | verified by Tor client key |
+
+WireGuard (existing interfaces) and an mTLS gateway are planned; see ADR 0036/0037.
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│  Tauri App   │────▶│   Daemon     │────▶│  OS Firewall    │
-│  (Desktop)   │     │  (REST API)  │     │  (nft/pf/wfp)   │
-└─────────────┘     │              │     └─────────────────┘
-┌─────────────┐     │  - Socket    │     ┌─────────────────┐
-│    CLI       │────▶│    Monitor   │────▶│  Network Iface  │
-└─────────────┘     │  - IPv6 Mgmt │     │  (add/rm IPv6)  │
-                    │  - ACL Engine│     └─────────────────┘
-                    │  - Config DB │     ┌─────────────────┐
-                    └──────┬───────┘────▶│  IPv6 Backend   │
-                           │             │  (Yggdrasil/ULA)│
-                           ▼             └─────────────────┘
-                    ┌──────────────┐
-                    │  SQLite DB   │
-                    └──────────────┘
+socketguard (CLI) ─┐                    ┌─▶ firewall: nftables / pf / WFP (atomic desired state)
+                   ├─▶ local API ─▶ daemon ─▶ interfaces: add/remove addresses
+desktop UI (Tauri) ┘  (Unix socket /    ├─▶ networks: Local, LAN, Yggdrasil, Tor
+                       named pipe)      └─▶ SQLite (schema v2) + activity log + OpenTelemetry
 ```
-
-The project is a Cargo workspace with three crates plus a Tauri desktop app:
 
 | Crate | Description |
 |-------|-------------|
-| `socketguard-core` | Shared types, config, API types |
-| `socketguard-daemon` | System daemon with monitoring, IPv6 backends, firewall, REST API |
+| `socketguard-core` | Domain model, credentials and reach rules, config, API types |
+| `socketguard-daemon` | Monitor, networks, ruleset producer, firewall backends, API |
 | `socketguard-client` | Typed client for the local API (used by the CLI and the UI) |
 | `socketguard-cli` | The `socketguard` command line, the primary frontend |
-| `socketguard-ui` | Tauri v2 desktop app with React frontend |
+| `socketguard-ui` | Tauri v2 desktop app (Apps, Peers, Activity, Settings) |
 
 ## Building
 
-### Prerequisites
-
-- Rust 1.75+ (install via [rustup](https://rustup.rs))
-- On Windows: Visual Studio Build Tools + Windows SDK
-- On Linux: `nft` (nftables) for firewall rules
-- On macOS: `pfctl` (built-in)
-
-### Build
+Prerequisites: Rust (via [rustup](https://rustup.rs)) and Node.js; on Windows the Visual
+Studio Build Tools; at runtime `nft` on Linux, `pfctl` on macOS. On a fresh clone run
+`cd ui && npm install` once, then:
 
 ```bash
-# Build all crates (daemon + CLI)
-cargo build --release
-
-# The daemon binary
-./target/release/socketguard-daemon
-
-# The CLI binary
-./target/release/socketguard
+./build.sh            # release build: frontend, then all crates
+./build.sh --debug    # debug build
 ```
 
-### Tauri Desktop App
-
-The `custom-protocol` feature (enabled by default) embeds frontend assets into the exe.
-The build.rs automatically rebuilds the frontend (`npm run build`) when source files
-change, using content hashing to detect changes. On a fresh clone, install dependencies
-first:
-
-```bash
-cd ui
-npm install
-
-# Then build via cargo (frontend rebuild is automatic)
-cd ..
-cargo build --release -p socketguard-ui
-
-# Or use the Tauri CLI directly
-cd ui
-npm run tauri build
-```
-
-> **Note:** `cargo build --release` works because `custom-protocol` is a default feature.
-> For dev mode with hot reload, use `npm run tauri dev` (which disables it automatically).
+Binaries: `target/<profile>/socketguard-daemon`, `socketguard` (CLI) and `socketguard-ui`.
 
 ## Usage
 
-### Start the Daemon
-
-The daemon requires elevated privileges to manage firewall rules and network interfaces.
+The daemon needs root / Administrator to manage firewall rules and addresses:
 
 ```bash
-# Linux/macOS
-sudo ./target/release/socketguard-daemon
-
-# Windows (run as Administrator)
-.\target\release\socketguard-daemon.exe
+sudo ./target/release/socketguard-daemon            # Linux/macOS
+.\target\release\socketguard-daemon.exe             # Windows, as Administrator
 ```
 
-The daemon serves a local API on a Unix socket (`/run/socketguard.sock`) or, on Windows, the named pipe `\\.\pipe\socketguard` (see [docs/api.md](docs/api.md) for access control), and begins polling for listening sockets every 2 seconds (configurable via `poll_interval_secs`).
-
-On startup, the daemon cleans up any stale firewall rules left by a previous crash and re-applies rules from the database. On shutdown (Ctrl+C or SIGTERM) rules and addresses stay in place, so the host stays protected; `socketguard disable` (or `socketguard-daemon --disable` with the daemon stopped) removes them and keeps them off until `socketguard enable`.
+It serves the local API on `/run/socketguard.sock` or the named pipe `\.\pipe\socketguard`.
+To use the CLI or UI without elevation, join the `socketguard` group (Unix) or the local group
+`SocketGuard Users` (Windows) — see [docs/api.md](docs/api.md). On start it applies the stored
+state; on stop everything stays in place until `socketguard disable` (or
+`socketguard-daemon --disable` while it is stopped), which keeps it off until `socketguard enable`.
 
 ### CLI
 
@@ -148,57 +116,41 @@ socketguard completions bash                  # also: zsh, fish, powershell, elv
 
 Reach is shown per network as `verified`, `whole subnet`, `IP only`, `open` or `not reachable`. Completions are static (subcommands and options, not app or peer names).
 
-### Policies
+### Desktop app
 
-Each socket has one of three policies:
-
-| Policy | Behavior |
-|--------|----------|
-| `closed` | Block all incoming connections (default for new sockets) |
-| `managed` | Allow only IPs in the socket's ACL |
-| `open` | Allow all incoming connections |
-
-### Desktop App
-
-Launch the Tauri app to get a graphical interface for:
-- Viewing all detected sockets with their assigned IPv6 addresses
-- Toggling policies per socket
-- Adding/removing ACL entries
-- Viewing and editing daemon configuration
+The Tauri app covers the everyday flows: review new apps, grant and revoke with reach badges,
+manage peers, follow the activity feed (including blocked attempts, with "grant this source"),
+and toggle whole-host protection. Everything else is in the CLI.
 
 ## Configuration
 
-The daemon reads `socketguard.json` (or the path in `$SOCKETGUARD_CONFIG`) on startup:
+The daemon reads `socketguard.json` (or `$SOCKETGUARD_CONFIG`). Networks added with
+`socketguard networks add` are written back to this file.
 
 ```json
 {
-  "backend": "ula",
-  "interface": "lo",
   "poll_interval_secs": 2,
   "db_path": "socketguard.db",
-  "log_level": "info"
+  "backends": [
+    { "type": "ula" },
+    { "type": "slaac", "interface": "eth0" },
+    { "type": "yggdrasil", "interface": "ygg0" },
+    { "type": "tor", "control": "127.0.0.1:9051" }
+  ]
 }
 ```
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `api_socket` | Unix socket of the local API | `/run/socketguard.sock` |
-| `api_pipe` | Windows named pipe of the local API | `\\.\pipe\socketguard` |
-| `backend` | IPv6 backend: `ula` or `yggdrasil` | `ula` |
-| `interface` | Network interface for IPv6 addresses | `lo` (Linux), `lo0` (macOS), `Loopback Pseudo-Interface 1` (Windows) |
+| `backends` | Networks; `id` is optional (`ula`, `slaac-eth0`, …) | Local only |
+| `api_socket` / `api_pipe` | Local API endpoint | `/run/socketguard.sock` / `\.\pipe\socketguard` |
 | `poll_interval_secs` | Socket polling interval | `2` |
-| `db_path` | SQLite database path | `socketguard.db` |
-| `log_level` | Log level: `trace`, `debug`, `info`, `warn`, `error` | `info` |
+| `db_path` | SQLite database (an old pre-v1 database is renamed to `.pre-v1`) | `socketguard.db` |
+| `process_filter` | `{"mode": "allowlist"\|"denylist", "patterns": ["nginx*"]}` | deny nothing |
+| `log_level` | `trace` … `error` | `info` |
 
-## IPv6 Backends
-
-### ULA (default)
-
-Generates random addresses in the `fd00::/8` range. No external dependencies. Suitable for local use and testing.
-
-### Yggdrasil
-
-Generates Ed25519 keypairs and derives addresses in the `200::/7` range using Yggdrasil's address derivation algorithm. This enables identity-based access control — allowing a Yggdrasil address is equivalent to allowing the holder of the corresponding private key.
+Telemetry is exported over OTLP when the standard `OTEL_EXPORTER_OTLP_*` variables are set;
+`deploy/otel/` has a local collector, Jaeger and Prometheus stack.
 
 ### Tor (onion services)
 
@@ -220,23 +172,27 @@ The service keys live in the daemon's database (mode 0600 on Unix; on Windows ke
 the service account and Administrators have access). See ADR 0037 and 0039. A Docker end-to-end
 test is in `deploy/e2e/tor-e2e.sh`.
 
-## API
+## Testing
 
-The daemon exposes a local REST API with server-sent events on a Unix socket or Windows named
-pipe; there is no network listener. Routes, error codes, events, access control and the export
-format are in [docs/api.md](docs/api.md).
+- `cargo test --workspace --exclude socketguard-ui` and `cd ui && npm test` — unit, golden,
+  engine and API tests (CI: `.forgejo/workflows/ci.yml`).
+- `SOCKETGUARD_NETNS_TESTS=1 cargo test -p socketguard-daemon --test netns` — real nftables in
+  network namespaces (Linux, root).
+- `deploy/e2e/ygg-e2e.sh`, `deploy/e2e/tor-e2e.sh` — Docker end-to-end tests against real
+  Yggdrasil and Tor.
 
-## Platform Support
+## Platform support
 
 | Component | Linux | Windows | macOS |
 |-----------|-------|---------|-------|
-| Socket Monitor | `/proc/net/tcp6` | `GetExtendedTcpTable` | `lsof` |
-| Firewall | nftables (`nft`) | `netsh advfirewall` | `pfctl` |
-| Network Interface | `ip addr` | `netsh interface ipv6` | `ifconfig` |
+| Socket monitor | `/proc` | `GetExtendedTcpTable` | `lsof` |
+| Firewall | nftables (`inet` table) | Windows Filtering Platform | pf anchor (untested) |
+| Addresses | `ip addr` | IP Helper API | `ifconfig` |
 
-## Architecture Decisions
+## Architecture decisions
 
-Detailed architecture decisions are documented as ADRs in [`docs/adr/`](docs/adr/).
+Architecture decisions are recorded as ADRs in [`docs/adr/`](docs/adr/); the current design is
+ADR 0026–0039.
 
 ## License
 

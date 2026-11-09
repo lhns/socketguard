@@ -3,10 +3,12 @@ pub mod slaac;
 pub mod ula;
 pub mod yggdrasil;
 
+use crate::network::NetworkInterface;
 use anyhow::Result;
 use socketguard_core::config::BackendConfig;
 use socketguard_core::AllocatedAddress;
 use std::net::Ipv6Addr;
+use std::sync::Arc;
 
 /// An IPv6 prefix (network address plus length).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,9 +52,11 @@ pub trait Ipv6Backend: Send + Sync {
 
 /// Create the appropriate backend from config.
 /// `ula_global_id` is the installation's persisted ULA global ID.
+/// Fails only on invalid configuration; anything about the system is checked lazily.
 pub fn create_backend(
     config: &BackendConfig,
     ula_global_id: [u8; 5],
+    net: Arc<dyn NetworkInterface>,
 ) -> Result<Box<dyn Ipv6Backend>> {
     match config {
         BackendConfig::Ula { .. } => Ok(Box::new(ula::UlaBackend::new(ula_global_id))),
@@ -64,8 +68,9 @@ pub fn create_backend(
         BackendConfig::Slaac { interface, prefix } => Ok(Box::new(slaac::SlaacBackend::new(
             interface,
             prefix.as_deref(),
+            net,
         )?)),
-        BackendConfig::Dhcpv6 { interface } => Ok(Box::new(dhcpv6::Dhcpv6Backend::new(interface)?)),
+        BackendConfig::Dhcpv6 { interface } => Ok(Box::new(dhcpv6::Dhcpv6Backend::new(interface))),
         BackendConfig::Tor { .. } => anyhow::bail!("Tor is not an IPv6 backend"),
     }
 }

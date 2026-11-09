@@ -11,6 +11,7 @@ pub mod tor;
 pub mod tor_control;
 
 use crate::backend::{self, Ipv6Backend, Prefix};
+use crate::network::NetworkInterface;
 use crate::ruleset::{served_ports, subject_credentials, Snapshot};
 use anyhow::Result;
 use socketguard_core::config::BackendConfig;
@@ -20,7 +21,8 @@ use socketguard_core::{
 };
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv6Addr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use tracing::{info, warn};
 
 /// What a network can do. `reach()` in core stays the single source of truth for how
 /// well a credential identifies a source; `verifies` is the list of kinds that give
@@ -111,6 +113,10 @@ pub struct IpNetwork {
     kind: NetworkKind,
     grants_apply: bool,
     backend: Box<dyn Ipv6Backend>,
+    /// Why the network is down, once it has been seen to be (to log changes only).
+    down: Mutex<Option<String>>,
+    /// The last allocation failed with this (a DHCPv6 server that does not answer).
+    alloc_error: Mutex<Option<String>>,
 }
 
 impl IpNetwork {
@@ -119,7 +125,20 @@ impl IpNetwork {
             kind,
             grants_apply,
             backend,
+            down: Mutex::new(None),
+            alloc_error: Mutex::new(None),
         }
+    }
+
+    /// Log a change between up and down, not every poll.
+    fn observe(&self, down: Option<&str>) {
+        let mut seen = self.down.lock().unwrap();
+        match (seen.is_some(), down) {
+            (false, Some(reason)) => warn!("{:?} network is down: {reason}", self.kind),
+            (true, None) => info!("{:?} network is up again", self.kind),
+            _ => {}
+        }
+        *seen = down.map(str::to_string);
     }
 
     /// The network for `config` around an already built allocator. Local on loopback is
@@ -150,16 +169,26 @@ impl Network for IpNetwork {
     }
 
     fn status(&self) -> (NetworkStatus, Option<Ipv6Addr>) {
-        match self.backend.current_prefix() {
+        let prefix = self.current_prefix();
+        let (status, addr) = match prefix {
             Ok(Some(p)) if p.len == 64 => (NetworkStatus::Up, Some(p.addr)),
             Ok(_) => (NetworkStatus::Up, None),
             Err(e) => (
                 NetworkStatus::Down {
-                    reason: e.to_string(),
+                    reason: format!("{e:#}"),
                 },
                 None,
             ),
+        };
+        let status = match (status, self.alloc_error.lock().unwrap().clone()) {
+            (NetworkStatus::Up, Some(reason)) => NetworkStatus::Down { reason },
+            (s, _) => s,
+        };
+        match &status {
+            NetworkStatus::Down { reason } => self.observe(Some(reason)),
+            NetworkStatus::Up => self.observe(None),
         }
+        (status, addr)
     }
 
     fn current_prefix(&self) -> Result<Option<Prefix>> {
@@ -167,7 +196,19 @@ impl Network for IpNetwork {
     }
 
     fn ensure_locator(&self, _req: &LocatorRequest) -> Result<NewLocator> {
-        let alloc = self.backend.allocate(None)?;
+        let alloc = match self.backend.allocate(None) {
+            Ok(a) => {
+                *self.alloc_error.lock().unwrap() = None;
+                self.observe(None);
+                a
+            }
+            Err(e) => {
+                let reason = format!("{e:#}");
+                *self.alloc_error.lock().unwrap() = Some(reason.clone());
+                self.observe(Some(&reason));
+                return Err(e);
+            }
+        };
         Ok(NewLocator {
             locator: Locator::Ipv6 {
                 addr: alloc.address,
@@ -194,7 +235,15 @@ impl Network for IpNetwork {
 
 /// Create the network for `config`.
 /// `ula_global_id` is the installation's persisted ULA global ID.
-pub fn create(config: &BackendConfig, ula_global_id: [u8; 5]) -> Result<Arc<dyn Network>> {
+///
+/// Only an invalid configuration is an error. What depends on the system (a missing
+/// prefix, no DHCPv6 server, Yggdrasil or Tor not running) is not: the network is
+/// created, reports `Down` and recovers when the system does.
+pub fn create(
+    config: &BackendConfig,
+    ula_global_id: [u8; 5],
+    net: Arc<dyn NetworkInterface>,
+) -> Result<Arc<dyn Network>> {
     match config {
         BackendConfig::Tor { control, auth } => Ok(Arc::new(tor::TorNetwork::new(
             control,
@@ -203,7 +252,7 @@ pub fn create(config: &BackendConfig, ula_global_id: [u8; 5]) -> Result<Arc<dyn 
         ))),
         ip => Ok(Arc::new(IpNetwork::for_config(
             ip,
-            backend::create_backend(ip, ula_global_id)?,
+            backend::create_backend(ip, ula_global_id, net)?,
         ))),
     }
 }

@@ -137,7 +137,14 @@ async fn disable(config: &DaemonConfig) -> Result<()> {
     for b in &config.backends {
         // Networks without an interface (Tor) hold services outside the firewall.
         if b.backend.interface().is_none() {
-            nets.push((b.id.clone(), networks::create(&b.backend, [0; 5])?));
+            nets.push((
+                b.id.clone(),
+                networks::create(
+                    &b.backend,
+                    [0; 5],
+                    Arc::from(network::create_network_interface()),
+                )?,
+            ));
         }
     }
     engine::disable_networks(&db, nets).await;

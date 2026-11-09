@@ -162,6 +162,22 @@ struct State {
     status: NetworkStatus,
 }
 
+const NOT_CONNECTED: &str = "not connected to Tor yet";
+
+/// Set the status, logging a change between up and down but not a repeated failure.
+fn set_status(current: &mut NetworkStatus, new: NetworkStatus) {
+    let was_down = matches!(current, NetworkStatus::Down { .. });
+    let first = matches!(current, NetworkStatus::Down { reason } if reason == NOT_CONNECTED);
+    match &new {
+        NetworkStatus::Down { reason } if !was_down || first => {
+            warn!("Tor network is down: {reason}")
+        }
+        NetworkStatus::Up if was_down => info!("Tor network is up"),
+        _ => {}
+    }
+    *current = new;
+}
+
 pub struct TorNetwork {
     endpoint: Endpoint,
     auth: TorAuth,
@@ -181,7 +197,7 @@ impl TorNetwork {
                 applied: HashMap::new(),
                 checked: None,
                 status: NetworkStatus::Down {
-                    reason: "not connected to Tor yet".to_string(),
+                    reason: NOT_CONNECTED.to_string(),
                 },
             }),
             io: Mutex::new(()),
@@ -192,9 +208,12 @@ impl TorNetwork {
         match Control::connect(&self.endpoint, &self.auth) {
             Ok(c) => Ok(c),
             Err(e) => {
-                self.state.lock().unwrap().status = NetworkStatus::Down {
-                    reason: format!("{e:#}"),
-                };
+                set_status(
+                    &mut self.state.lock().unwrap().status,
+                    NetworkStatus::Down {
+                        reason: format!("{e:#}"),
+                    },
+                );
                 Err(e)
             }
         }
@@ -236,7 +255,7 @@ impl Network for TorNetwork {
             // Unreachable without the key; enforcement removes it once the address exists.
             warn!("Could not remove the placeholder onion service: {e}");
         }
-        self.state.lock().unwrap().status = NetworkStatus::Up;
+        set_status(&mut self.state.lock().unwrap().status, NetworkStatus::Up);
         let secret = added
             .private_key
             .context("Tor returned no private key for the new onion service")?;
@@ -356,7 +375,7 @@ impl Network for TorNetwork {
         let mut st = self.state.lock().unwrap();
         st.applied = now_applied;
         st.checked = Some(Instant::now());
-        st.status = NetworkStatus::Up;
+        set_status(&mut st.status, NetworkStatus::Up);
         if errors.is_empty() {
             Ok(())
         } else {

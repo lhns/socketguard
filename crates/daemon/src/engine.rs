@@ -163,7 +163,7 @@ impl Engine {
     ) -> anyhow::Result<Self> {
         let mut backends = HashMap::new();
         for inst in &config.backends {
-            let network = networks::create(&inst.backend, ula_global_id)?;
+            let network = networks::create(&inst.backend, ula_global_id, network.clone())?;
             backends.insert(
                 inst.id.clone(),
                 ActiveBackend {
@@ -585,7 +585,7 @@ impl Engine {
 
     /// Add a network and give every app an address on it.
     pub async fn add_backend_instance(&mut self, state: &AppState, inst: &BackendInstanceConfig) {
-        match networks::create(&inst.backend, self.ula_global_id) {
+        match networks::create(&inst.backend, self.ula_global_id, self.network.clone()) {
             Ok(n) => self.add_network_instance(state, inst, n).await,
             Err(e) => error!("Failed to create backend '{}': {e}", inst.id),
         }
@@ -614,7 +614,7 @@ impl Engine {
                 EngineError::Invalid(e)
             }
         })?;
-        let n = networks::create(&inst.backend, self.ula_global_id)
+        let n = networks::create(&inst.backend, self.ula_global_id, self.network.clone())
             .map_err(|e| EngineError::Invalid(format!("cannot create network: {e}")))?;
         self.add_network_instance(state, &inst, n).await;
         self.networks()
@@ -1028,7 +1028,7 @@ impl Engine {
                 Ok(Some(p)) if p.len == 64 => p,
                 Ok(_) => continue,
                 Err(e) => {
-                    warn!("Cannot read current prefix of backend '{network_id}': {e}");
+                    debug!("Cannot read current prefix of backend '{network_id}': {e}");
                     continue;
                 }
             };

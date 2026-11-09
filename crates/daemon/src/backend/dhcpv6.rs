@@ -43,7 +43,8 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(3);
 pub struct Dhcpv6Backend {
     #[allow(dead_code)]
     interface: String,
-    interface_index: u32,
+    /// Resolved on first use, so a missing interface is a runtime condition.
+    interface_index: Mutex<Option<u32>>,
     /// Client DUID (stable across allocations)
     client_duid: Vec<u8>,
     /// Track IAID -> (address, server_duid) for release
@@ -61,9 +62,7 @@ struct Lease {
 }
 
 impl Dhcpv6Backend {
-    pub fn new(interface: &str) -> Result<Self> {
-        let interface_index = get_interface_index(interface)?;
-
+    pub fn new(interface: &str) -> Self {
         // Generate a stable DUID-UUID for this client
         let client_uuid: u128 = rand::thread_rng().gen();
         let mut client_duid = Vec::with_capacity(18);
@@ -72,22 +71,30 @@ impl Dhcpv6Backend {
         // UUID (16 bytes)
         client_duid.extend_from_slice(&client_uuid.to_be_bytes());
 
-        info!(
-            "DHCPv6 backend initialized: interface={} (index={})",
-            interface, interface_index
-        );
-
-        Ok(Self {
+        Self {
             interface: interface.to_string(),
-            interface_index,
+            interface_index: Mutex::new(None),
             client_duid,
             leases: Mutex::new(HashMap::new()),
             next_iaid: Mutex::new(1),
-        })
+        }
+    }
+
+    /// The interface index, looked up once it is needed.
+    fn interface_index(&self) -> Result<u32> {
+        let mut cached = self.interface_index.lock().unwrap();
+        if let Some(i) = *cached {
+            return Ok(i);
+        }
+        let i = get_interface_index(&self.interface)?;
+        info!("DHCPv6 interface {} has index {i}", self.interface);
+        *cached = Some(i);
+        Ok(i)
     }
 
     /// Perform a full DHCPv6 Solicit -> Advertise -> Request -> Reply exchange
     fn request_address(&self) -> Result<(Ipv6Addr, Vec<u8>)> {
+        let interface_index = self.interface_index()?;
         let socket = self.create_socket()?;
         let mut rng = rand::thread_rng();
         let xid: [u8; 3] = [rng.gen(), rng.gen(), rng.gen()];
@@ -100,12 +107,8 @@ impl Dhcpv6Backend {
 
         // Step 1: Send Solicit
         let solicit = self.build_solicit(&xid, iaid);
-        let server_addr = SocketAddrV6::new(
-            ALL_DHCPV6_SERVERS,
-            DHCPV6_SERVER_PORT,
-            0,
-            self.interface_index,
-        );
+        let server_addr =
+            SocketAddrV6::new(ALL_DHCPV6_SERVERS, DHCPV6_SERVER_PORT, 0, interface_index);
 
         let mut server_duid = Vec::new();
         let mut offered_addr: Option<Ipv6Addr> = None;
@@ -169,17 +172,14 @@ impl Dhcpv6Backend {
 
     /// Send a DHCPv6 Release for an address
     fn release_lease(&self, lease: &Lease) -> Result<()> {
+        let interface_index = self.interface_index()?;
         let socket = self.create_socket()?;
         let mut rng = rand::thread_rng();
         let xid: [u8; 3] = [rng.gen(), rng.gen(), rng.gen()];
 
         let release = self.build_release(&xid, lease);
-        let server_addr = SocketAddrV6::new(
-            ALL_DHCPV6_SERVERS,
-            DHCPV6_SERVER_PORT,
-            0,
-            self.interface_index,
-        );
+        let server_addr =
+            SocketAddrV6::new(ALL_DHCPV6_SERVERS, DHCPV6_SERVER_PORT, 0, interface_index);
 
         // Send release (best effort, don't retry much)
         socket
@@ -210,10 +210,10 @@ impl Dhcpv6Backend {
             .context("failed to bind DHCPv6 socket")?;
 
         // Set multicast interface
-        socket.set_multicast_if_v6(self.interface_index)?;
+        socket.set_multicast_if_v6(self.interface_index()?)?;
 
         // Join the all-DHCP multicast group on the right interface
-        socket.join_multicast_v6(&ALL_DHCPV6_SERVERS, self.interface_index)?;
+        socket.join_multicast_v6(&ALL_DHCPV6_SERVERS, self.interface_index()?)?;
 
         socket.set_read_timeout(Some(RECV_TIMEOUT))?;
 

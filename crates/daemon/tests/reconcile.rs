@@ -14,6 +14,7 @@ use socketguard_daemon::engine::{
     ActiveBackend, Engine, EngineError, GrantFilter, ProtectHostError,
 };
 use socketguard_daemon::firewall::{DropEvent, ScopeMatch, Sources};
+use socketguard_daemon::network::NetworkInterface as _;
 use socketguard_daemon::test_support::*;
 use socketguard_daemon::AppState;
 use std::collections::HashMap;
@@ -1377,7 +1378,12 @@ async fn ula_global_id_survives_restart() {
             .unwrap();
         db.migrate().await.unwrap();
         let id = db.ula_global_id().await.unwrap();
-        let b = socketguard_daemon::backend::create_backend(&ula, id).unwrap();
+        let b = socketguard_daemon::backend::create_backend(
+            &ula,
+            id,
+            std::sync::Arc::new(MockNetworkInterface::new(Default::default())),
+        )
+        .unwrap();
         (id, b.allocate(None).unwrap().address.octets())
     };
 
@@ -1388,7 +1394,12 @@ async fn ula_global_id_survives_restart() {
     db.migrate().await.unwrap();
     let id = db.ula_global_id().await.unwrap();
     assert_eq!(id, first.0);
-    let b = socketguard_daemon::backend::create_backend(&ula, id).unwrap();
+    let b = socketguard_daemon::backend::create_backend(
+        &ula,
+        id,
+        std::sync::Arc::new(MockNetworkInterface::new(Default::default())),
+    )
+    .unwrap();
     assert_eq!(
         b.allocate(None).unwrap().address.octets()[..6],
         first.1[..6]
@@ -1747,4 +1758,55 @@ async fn metrics_export_gauges_and_firewall_counters_without_source_addresses() 
         (detail.counters[0].packets, detail.counters[0].bytes),
         (7, 700)
     );
+}
+
+#[tokio::test]
+async fn a_network_that_cannot_initialise_is_down_not_fatal() {
+    // SLAAC on an interface with no usable prefix; the daemon must still start.
+    let cfg = DaemonConfig {
+        backends: vec![BackendInstanceConfig {
+            id: "lan".into(),
+            backend: BackendConfig::Slaac {
+                interface: "eth0".into(),
+                prefix: None,
+            },
+        }],
+        ..DaemonConfig::default()
+    };
+    let net = MockNetworkInterface::new(Default::default());
+    let fw = Arc::new(MockFirewall::new(Default::default()));
+    let monitor = MockSocketMonitor::new(vec![listener("nginx", 80, Protocol::Tcp)]);
+    let engine = Engine::new_with_deps(
+        &cfg,
+        [1, 2, 3, 4, 5],
+        Box::new(monitor),
+        fw,
+        Arc::new(net.clone()),
+    )
+    .expect("a missing prefix is not a startup error");
+    let state = test_app_state(engine, cfg).await;
+
+    let status = || async {
+        let nets = state.engine.read().await.networks();
+        nets.into_iter().next().unwrap().status
+    };
+    state.engine.write().await.reconcile(&state).await.unwrap();
+    match status().await {
+        NetworkStatus::Down { reason } => assert!(reason.contains("no global or unique-local")),
+        s => panic!("expected down, got {s:?}"),
+    }
+    assert!(state.db.list_apps().await.unwrap()[0].addresses.is_empty());
+
+    // The router advertises a prefix; the next reconcile recovers (discovery cache is
+    // not cleared by failures).
+    net.add_address("eth0", "fd3e:1eec:520:582e::1".parse().unwrap(), 64)
+        .unwrap();
+    state.engine.write().await.reconcile(&state).await.unwrap();
+    assert_eq!(status().await, NetworkStatus::Up);
+    let apps = state.db.list_apps().await.unwrap();
+    let addr = Harness::addr_on(&apps[0], "lan");
+    assert!(socketguard_daemon::backend::same_prefix64(
+        addr,
+        "fd3e:1eec:520:582e::".parse().unwrap()
+    ));
 }
