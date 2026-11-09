@@ -96,6 +96,12 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        )
+        .execute(&self.pool)
+        .await?;
+
         // Migration: if old sockets table has assigned_ipv6 column, migrate data
         self.migrate_from_single_backend().await?;
 
@@ -538,13 +544,12 @@ impl Database {
     pub async fn upsert_socket_address(&self, socket_id: &str, addr: &SocketAddress) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO socket_addresses (socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id, policy)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO socket_addresses (socket_id, backend_id, backend_type, address, interface, prefix_len, policy)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(socket_id, backend_id) DO UPDATE SET
                 address = excluded.address,
                 interface = excluded.interface,
                 prefix_len = excluded.prefix_len,
-                keypair_id = excluded.keypair_id,
                 policy = excluded.policy
             "#,
         )
@@ -554,7 +559,6 @@ impl Database {
         .bind(addr.address.to_string())
         .bind(&addr.interface)
         .bind(addr.prefix_len as i64)
-        .bind(&addr.keypair_id)
         .bind(addr.policy.to_string())
         .execute(&self.pool)
         .await?;
@@ -565,7 +569,7 @@ impl Database {
     /// Get all addresses for a socket.
     pub async fn get_socket_addresses(&self, socket_id: &str) -> Result<Vec<SocketAddress>> {
         let rows = sqlx::query_as::<_, SocketAddressRow>(
-            "SELECT backend_id, backend_type, address, interface, prefix_len, keypair_id, policy FROM socket_addresses WHERE socket_id = ?",
+            "SELECT backend_id, backend_type, address, interface, prefix_len, policy FROM socket_addresses WHERE socket_id = ?",
         )
         .bind(socket_id)
         .fetch_all(&self.pool)
@@ -581,7 +585,7 @@ impl Database {
     ) -> Result<Vec<(String, SocketAddress)>> {
         // First fetch them so we can return them for cleanup
         let rows = sqlx::query_as::<_, SocketAddressRowWithSocket>(
-            "SELECT socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id, policy FROM socket_addresses WHERE backend_id = ?",
+            "SELECT socket_id, backend_id, backend_type, address, interface, prefix_len, policy FROM socket_addresses WHERE backend_id = ?",
         )
         .bind(backend_id)
         .fetch_all(&self.pool)
@@ -662,7 +666,7 @@ impl Database {
 
         // Fetch all addresses and group by socket_id
         let addr_rows = sqlx::query_as::<_, SocketAddressRowWithSocket>(
-            "SELECT socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id, policy FROM socket_addresses",
+            "SELECT socket_id, backend_id, backend_type, address, interface, prefix_len, policy FROM socket_addresses",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1113,13 +1117,12 @@ impl Database {
     pub async fn upsert_socket_group_address(&self, addr: &SocketGroupAddress) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO socket_group_addresses (group_id, backend_id, address, interface, prefix_len, keypair_id, policy)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO socket_group_addresses (group_id, backend_id, address, interface, prefix_len, policy)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(group_id, backend_id) DO UPDATE SET
                 address = excluded.address,
                 interface = excluded.interface,
-                prefix_len = excluded.prefix_len,
-                keypair_id = excluded.keypair_id
+                prefix_len = excluded.prefix_len
             "#,
         )
         .bind(&addr.group_id)
@@ -1127,7 +1130,6 @@ impl Database {
         .bind(addr.address.to_string())
         .bind(&addr.interface)
         .bind(addr.prefix_len as i64)
-        .bind(&addr.keypair_id)
         .bind(addr.policy.to_string())
         .execute(&self.pool)
         .await?;
@@ -1234,28 +1236,45 @@ impl Database {
         Ok(())
     }
 
-    // ======== Misc ========
+    // ======== Settings ========
 
-    pub async fn save_keypair(
-        &self,
-        id: &str,
-        public_key: &[u8],
-        private_key: &[u8],
-        derived_ipv6: &str,
-    ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO keypairs (id, public_key, private_key_encrypted, derived_ipv6, created_at) VALUES (?, ?, ?, ?, ?)",
+    pub async fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?,
         )
-        .bind(id)
-        .bind(public_key)
-        .bind(private_key)
-        .bind(derived_ipv6)
-        .bind(chrono::Utc::now().to_rfc3339())
+    }
+
+    pub async fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO settings (key, value) VALUES (?, ?)              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key)
+        .bind(value)
         .execute(&self.pool)
         .await?;
-
         Ok(())
     }
+
+    /// The installation's ULA global ID (40 bits), generated and stored on first use so
+    /// ULA addresses stay in the same /48 across restarts.
+    pub async fn ula_global_id(&self) -> Result<[u8; 5]> {
+        const KEY: &str = "ula_global_id";
+        if let Some(stored) = self.get_setting(KEY).await? {
+            if let Some(id) = parse_global_id(&stored) {
+                return Ok(id);
+            }
+            tracing::warn!("Invalid stored ULA global ID {stored:?}, generating a new one");
+        }
+        let id = crate::backend::ula::UlaBackend::random_global_id();
+        let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
+        self.set_setting(KEY, &hex).await?;
+        Ok(id)
+    }
+
+    // ======== Misc ========
 
     pub async fn stale_sockets(
         &self,
@@ -1356,6 +1375,17 @@ impl SocketRow {
     }
 }
 
+fn parse_global_id(hex: &str) -> Option<[u8; 5]> {
+    if hex.len() != 10 || !hex.is_ascii() {
+        return None;
+    }
+    let mut id = [0u8; 5];
+    for (i, b) in id.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(id)
+}
+
 #[derive(sqlx::FromRow)]
 struct SocketAddressRow {
     backend_id: String,
@@ -1363,7 +1393,6 @@ struct SocketAddressRow {
     address: String,
     interface: String,
     prefix_len: i64,
-    keypair_id: Option<String>,
     policy: String,
 }
 
@@ -1380,7 +1409,6 @@ impl TryFrom<SocketAddressRow> for SocketAddress {
             address: row.address.parse()?,
             interface: row.interface,
             prefix_len: row.prefix_len as u8,
-            keypair_id: row.keypair_id,
             policy: row.policy.parse().map_err(|e: String| anyhow::anyhow!(e))?,
         })
     }
@@ -1394,7 +1422,6 @@ struct SocketAddressRowWithSocket {
     address: String,
     interface: String,
     prefix_len: i64,
-    keypair_id: Option<String>,
     policy: String,
 }
 
@@ -1411,7 +1438,6 @@ impl TryFrom<SocketAddressRowWithSocket> for SocketAddress {
             address: row.address.parse()?,
             interface: row.interface,
             prefix_len: row.prefix_len as u8,
-            keypair_id: row.keypair_id,
             policy: row.policy.parse().map_err(|e: String| anyhow::anyhow!(e))?,
         })
     }
@@ -1522,7 +1548,6 @@ struct SocketGroupAddressRow {
     address: String,
     interface: String,
     prefix_len: i64,
-    keypair_id: Option<String>,
     policy: String,
 }
 
@@ -1536,7 +1561,6 @@ impl TryFrom<SocketGroupAddressRow> for SocketGroupAddress {
             address: row.address.parse()?,
             interface: row.interface,
             prefix_len: row.prefix_len as u8,
-            keypair_id: row.keypair_id,
             policy: row.policy.parse().map_err(|e: String| anyhow::anyhow!(e))?,
         })
     }
@@ -1592,7 +1616,6 @@ mod tests {
                 address: "fd00::1".parse().unwrap(),
                 interface: "lo".to_string(),
                 prefix_len: 128,
-                keypair_id: None,
                 policy: Policy::Closed,
             }],
             policy: Policy::Closed,
@@ -1713,7 +1736,6 @@ mod tests {
             address: "fd00::1".parse().unwrap(),
             interface: "lo".to_string(),
             prefix_len: 128,
-            keypair_id: None,
             policy: Policy::Closed,
         };
         let addr2 = SocketAddress {
@@ -1722,7 +1744,6 @@ mod tests {
             address: "2001:db8::1".parse().unwrap(),
             interface: "Ethernet".to_string(),
             prefix_len: 64,
-            keypair_id: None,
             policy: Policy::Closed,
         };
         db.upsert_socket_address("multi1", &addr1).await.unwrap();
@@ -1776,7 +1797,6 @@ mod tests {
             address: "fd00::1".parse().unwrap(),
             interface: "lo".to_string(),
             prefix_len: 128,
-            keypair_id: None,
             policy: Policy::Closed,
         };
         let addr2 = SocketAddress {
@@ -1785,7 +1805,6 @@ mod tests {
             address: "2001:db8::1".parse().unwrap(),
             interface: "Ethernet".to_string(),
             prefix_len: 64,
-            keypair_id: None,
             policy: Policy::Closed,
         };
         db.upsert_socket_address("multi1", &addr1).await.unwrap();
@@ -1853,13 +1872,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_and_query_keypair() {
+    async fn settings_roundtrip() {
         let db = test_db().await;
-        let pub_key = vec![1u8; 32];
-        let priv_key = vec![2u8; 32];
-        db.save_keypair("kp1", &pub_key, &priv_key, "fd00::1")
-            .await
-            .unwrap();
+        assert_eq!(db.get_setting("k").await.unwrap(), None);
+        db.set_setting("k", "a").await.unwrap();
+        db.set_setting("k", "b").await.unwrap();
+        assert_eq!(db.get_setting("k").await.unwrap().as_deref(), Some("b"));
+    }
+
+    #[tokio::test]
+    async fn ula_global_id_is_stable() {
+        let db = test_db().await;
+        let first = db.ula_global_id().await.unwrap();
+        assert_eq!(db.ula_global_id().await.unwrap(), first);
     }
 
     #[tokio::test]
@@ -1890,7 +1915,6 @@ mod tests {
             address: "fd00::1".parse().unwrap(),
             interface: "lo".to_string(),
             prefix_len: 128,
-            keypair_id: None,
             policy: Policy::Closed,
         };
         let addr2 = SocketAddress {
@@ -1899,7 +1923,6 @@ mod tests {
             address: "2001:db8::1".parse().unwrap(),
             interface: "Ethernet".to_string(),
             prefix_len: 64,
-            keypair_id: None,
             policy: Policy::Open,
         };
 

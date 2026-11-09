@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# End-to-end test of the Yggdrasil subnet backend with two real Yggdrasil nodes in Docker.
+# Runs from Git Bash on Windows or from Linux. See README.md.
+set -u
+export MSYS_NO_PATHCONV=1   # Git Bash: do not rewrite /paths in docker arguments
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"
+# Docker Desktop on Windows needs a Windows-style host path for bind mounts.
+HOST_ROOT="$(cd "$ROOT" && pwd -W 2>/dev/null || pwd)"
+
+IMAGE=sg-e2e-node
+NET=sg-e2e-net
+NODE_A=sg-e2e-a
+NODE_B=sg-e2e-b
+SOCK=unix:///var/run/yggdrasil.sock
+PORT=8080
+failures=0
+
+pass() { echo "PASS  $*"; }
+fail() { echo "FAIL  $*"; failures=$((failures + 1)); }
+step() { # step "description" command...
+  local desc=$1; shift
+  if "$@"; then pass "$desc"; else fail "$desc"; return 1; fi
+}
+# retry SECONDS command...: run until it succeeds or the time is up
+retry() {
+  local secs=$1; shift
+  local end=$((SECONDS + secs))
+  while ! "$@" >/dev/null 2>&1; do
+    [ "$SECONDS" -ge "$end" ] && return 1
+    sleep 1
+  done
+}
+
+A() { docker exec "$NODE_A" "$@"; }
+B() { docker exec "$NODE_B" "$@"; }
+
+cleanup() {
+  if [ "$failures" -ne 0 ]; then
+    echo "--- node A daemon log ---"; docker exec "$NODE_A" tail -n 40 /var/log/sg.log 2>/dev/null
+    echo "--- node A yggdrasil log ---"; docker exec "$NODE_A" tail -n 15 /var/log/ygg.log 2>/dev/null
+  fi
+  docker rm -f "$NODE_A" "$NODE_B" >/dev/null 2>&1
+  docker network rm "$NET" >/dev/null 2>&1
+}
+trap cleanup EXIT
+docker rm -f "$NODE_A" "$NODE_B" >/dev/null 2>&1
+docker network rm "$NET" >/dev/null 2>&1
+
+# ── Build ────────────────────────────────────────────────────────────────────
+docker build -q -t "$IMAGE" "$HOST_ROOT/deploy/e2e" >/dev/null || { fail "build node image"; exit 1; }
+pass "build node image"
+
+# Debug build in the container: binaries stay in the sg-target volume, mounted into the nodes.
+docker run --rm -v "$HOST_ROOT":/work -w /work \
+  -v sg-cargo-registry:/usr/local/cargo/registry -v sg-target:/work/target \
+  -e CARGO_PROFILE_DEV_DEBUG=0 -e CARGO_PROFILE_TEST_DEBUG=0 \
+  rust:1-bookworm cargo build -p socketguard-daemon -p socketguard-cli \
+  || { fail "build daemon and CLI"; exit 1; }
+pass "build daemon and CLI"
+DAEMON=/target/debug/socketguard-daemon
+CLI=/target/debug/socketguard-cli
+
+# ── Nodes ────────────────────────────────────────────────────────────────────
+docker network create "$NET" >/dev/null || { fail "create network"; exit 1; }
+for n in "$NODE_A" "$NODE_B"; do
+  docker run -d --name "$n" --network "$NET" --cap-add NET_ADMIN --device /dev/net/tun \
+    -v sg-target:/target:ro "$IMAGE" sleep infinity >/dev/null || { fail "start $n"; exit 1; }
+done
+
+# Generate a Yggdrasil config once per node (the key must survive restarts).
+ygg_conf() { # ygg_conf container peer-uri
+  docker exec "$1" sh -c '
+    yggdrasil -genconf -json | jq --arg p "$1" "
+      .Listen=[\"tcp://0.0.0.0:9001\"] | .Peers=(if \$p==\"\" then [] else [\$p] end)
+      | .IfName=\"ygg0\" | .AdminListen=\"'"$SOCK"'\" | .MulticastInterfaces=[]" > /etc/ygg.json
+  ' sh "$2"
+}
+ygg_start() { docker exec -d "$1" sh -c 'yggdrasil -useconffile /etc/ygg.json >>/var/log/ygg.log 2>&1'; }
+ygg_ready() { docker exec "$1" sh -c "yggdrasilctl -json -endpoint $SOCK getSelf >/dev/null && ip link show ygg0 >/dev/null"; }
+
+ygg_conf "$NODE_A" "" && ygg_conf "$NODE_B" "tcp://$NODE_A:9001" || { fail "generate Yggdrasil configs"; exit 1; }
+ygg_start "$NODE_A"; ygg_start "$NODE_B"
+step "Yggdrasil up on both nodes" retry 30 ygg_ready "$NODE_A" || exit 1
+retry 30 ygg_ready "$NODE_B" || { fail "Yggdrasil up on B"; exit 1; }
+
+get_self() { A yggdrasilctl -json -endpoint "$SOCK" getSelf; }
+SUBNET="$(get_self | jq -r .subnet)"
+NODE_ADDR="$(get_self | jq -r .address)"
+echo "      node A: address $NODE_ADDR, subnet $SUBNET"
+
+# Test listener and daemon on A.
+A sh -c "mkdir -p /srv/www && echo sg-e2e-ok > /srv/www/index.html"
+docker exec -d "$NODE_A" sh -c "cd /srv/www && exec python3 -m http.server $PORT --bind ::"
+docker exec -i "$NODE_A" sh -c 'cat > /etc/sg.json' <<JSON
+{
+  "listen_addr": "127.0.0.1", "listen_port": 9476, "poll_interval_secs": 2,
+  "db_path": "/var/lib/sg.db", "log_level": "debug",
+  "process_filter": {"mode": "allowlist", "patterns": ["python3*"]},
+  "backends": [{"id": "ygg", "type": "yggdrasil", "interface": "ygg0", "admin_endpoint": "$SOCK"}]
+}
+JSON
+docker exec -d "$NODE_A" sh -c "SOCKETGUARD_CONFIG=/etc/sg.json exec $DAEMON >/var/log/sg.log 2>&1"
+
+# ── Allocation ───────────────────────────────────────────────────────────────
+# The listener's socket, its address, and whether that address is inside A's subnet.
+sock_id()   { A "$CLI" --json list | jq -re '.sockets[] | select(.port == '"$PORT"') | .id'; }
+sock_addr() { A "$CLI" --json list | jq -re '.sockets[] | select(.port == '"$PORT"') | .addresses[0].address'; }
+in_subnet() { A python3 -c 'import ipaddress,sys; sys.exit(0 if ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv[2]) else 1)' "$1" "$2"; }
+on_ygg0()   { A ip -6 -j addr show dev ygg0 | jq -e --arg a "$1" '[.[].addr_info[].local] | index($a)' >/dev/null; }
+
+step "daemon detected the listener" retry 40 sock_addr || exit 1
+SID="$(sock_id)"
+ADDR="$(sock_addr)"
+echo "      socket $SID got $ADDR"
+step "address is inside A's 3xx::/64 subnet" in_subnet "$ADDR" "$SUBNET"
+step "address is configured on ygg0" retry 10 on_ygg0 "$ADDR"
+
+# ── Reachability ─────────────────────────────────────────────────────────────
+fetch_from_b() { B curl -fsS --max-time 5 "http://[$ADDR]:$PORT/" | grep -q sg-e2e-ok; }
+step "open the socket via the CLI" A "$CLI" policy "$SID" open
+step "B can fetch from the new address" retry 60 fetch_from_b
+
+# ── Yggdrasil restart: same key, new tun ─────────────────────────────────────
+A pkill -x yggdrasil
+step "ygg0 disappears with Yggdrasil" retry 15 sh -c "! docker exec $NODE_A ip link show ygg0"
+ygg_start "$NODE_A"
+step "Yggdrasil is back on A with the same subnet" retry 30 sh -c "[ \"\$(docker exec $NODE_A yggdrasilctl -json -endpoint $SOCK getSelf | jq -r .subnet)\" = \"$SUBNET\" ]"
+step "address came back on ygg0" retry 40 on_ygg0 "$ADDR"
+step "B can fetch again" retry 90 fetch_from_b
+
+echo
+if [ "$failures" -eq 0 ]; then echo "ALL STEPS PASSED"; else echo "$failures STEP(S) FAILED"; exit 1; fi

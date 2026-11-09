@@ -34,7 +34,8 @@ async fn main() -> Result<()> {
     db.migrate().await?;
     info!("Database initialized at {}", config.db_path);
 
-    let engine = engine::Engine::new(&config)?;
+    let ula_global_id = db.ula_global_id().await?;
+    let engine = engine::Engine::new(&config, ula_global_id)?;
 
     let (events_tx, _) = broadcast::channel::<api::DaemonEvent>(64);
 

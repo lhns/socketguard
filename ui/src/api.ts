@@ -7,7 +7,6 @@ export interface SocketAddress {
   address: string;
   interface: string;
   prefix_len: number;
-  keypair_id: string | null;
   policy: string;
 }
 
@@ -64,7 +63,6 @@ export interface SocketGroupAddress {
   address: string;
   interface: string;
   prefix_len: number;
-  keypair_id: string | null;
   policy: string;
 }
 

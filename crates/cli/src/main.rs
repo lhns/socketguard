@@ -298,15 +298,8 @@ async fn main() -> Result<()> {
                 println!("\n  Addresses:");
                 for addr in &s.addresses {
                     println!(
-                        "    {} [{}] on {} (/{}){}",
-                        addr.address,
-                        addr.backend_id,
-                        addr.interface,
-                        addr.prefix_len,
-                        addr.keypair_id
-                            .as_ref()
-                            .map(|k| format!(" keypair:{}", k))
-                            .unwrap_or_default()
+                        "    {} [{}] on {} (/{})",
+                        addr.address, addr.backend_id, addr.interface, addr.prefix_len
                     );
                 }
             }
@@ -548,7 +541,10 @@ async fn main() -> Result<()> {
                 use socketguard_core::config::BackendConfig;
                 let backend = match backend_type.as_str() {
                     "ula" => BackendConfig::Ula { interface },
-                    "yggdrasil" => BackendConfig::Yggdrasil { interface },
+                    "yggdrasil" => BackendConfig::Yggdrasil {
+                        interface,
+                        admin_endpoint: None,
+                    },
                     "slaac" => BackendConfig::Slaac { interface, prefix },
                     "dhcpv6" => BackendConfig::Dhcpv6 { interface },
                     other => bail!("unknown backend type: {other}"),

@@ -19,8 +19,6 @@ tower-http = { version = "0.6", features = ["cors"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 rand = "0.8"
 socket2 = "0.6"
-sha2 = "0.10"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
 # OpenTelemetry: these crates are version-locked to each other (0.33 / tracing-opentelemetry 0.34).

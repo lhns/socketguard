@@ -196,7 +196,6 @@ mod tests {
                             "address": "fd00::1",
                             "interface": "lo",
                             "prefix_len": 128,
-                            "keypair_id": null,
                             "policy": "closed"
                         }
                     ],
@@ -240,8 +239,7 @@ mod tests {
                             "backend_id": "ula",
                             "address": "fd00::1",
                             "interface": "lo",
-                            "prefix_len": 128,
-                            "keypair_id": null
+                            "prefix_len": 128
                         }
                     ],
                     "members": ["s1"]

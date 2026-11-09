@@ -14,6 +14,10 @@ pub enum BackendConfig {
     Yggdrasil {
         /// Network interface (e.g. Yggdrasil TUN)
         interface: String,
+        /// Yggdrasil admin socket endpoint (e.g. `unix:///var/run/yggdrasil.sock`).
+        /// None = yggdrasilctl's default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        admin_endpoint: Option<String>,
     },
     Slaac {
         /// Physical network interface connected to the router
@@ -51,7 +55,7 @@ impl BackendConfig {
     pub fn interface(&self) -> &str {
         match self {
             BackendConfig::Ula { interface } => interface,
-            BackendConfig::Yggdrasil { interface } => interface,
+            BackendConfig::Yggdrasil { interface, .. } => interface,
             BackendConfig::Slaac { interface, .. } => interface,
             BackendConfig::Dhcpv6 { interface } => interface,
         }
@@ -280,7 +284,10 @@ fn parse_single_backend(
         let iface = interface.unwrap_or_else(default_loopback);
         match backend_str {
             "ula" => Ok(BackendConfig::Ula { interface: iface }),
-            "yggdrasil" => Ok(BackendConfig::Yggdrasil { interface: iface }),
+            "yggdrasil" => Ok(BackendConfig::Yggdrasil {
+                interface: iface,
+                admin_endpoint: None,
+            }),
             "slaac" => Ok(BackendConfig::Slaac {
                 interface: iface,
                 prefix: None,
@@ -564,6 +571,7 @@ mod tests {
 
         let ygg = BackendConfig::Yggdrasil {
             interface: "tun0".to_string(),
+            admin_endpoint: None,
         };
         assert_eq!(ygg.interface(), "tun0");
 
@@ -674,7 +682,8 @@ mod tests {
         );
         assert_eq!(
             BackendConfig::Yggdrasil {
-                interface: "tun0".into()
+                interface: "tun0".into(),
+                admin_endpoint: None
             }
             .default_id(),
             "yggdrasil"

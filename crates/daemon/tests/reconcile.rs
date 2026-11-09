@@ -271,7 +271,6 @@ async fn stale_socket_gets_cleaned_up() {
         address: "fd00::99".parse().unwrap(),
         interface: "lo".to_string(),
         prefix_len: 128,
-        keypair_id: None,
         policy: Policy::Closed,
     };
     let socket = ManagedSocket {
@@ -518,7 +517,6 @@ async fn startup_reconcile_restores_state() {
         address: "fd00::42".parse().unwrap(),
         interface: "lo".to_string(),
         prefix_len: 128,
-        keypair_id: None,
         policy: Policy::Closed,
     };
     let socket = ManagedSocket {
@@ -587,7 +585,6 @@ async fn shutdown_cleanup_removes_all_addresses() {
             address: format!("fd00::{ip_suffix}").parse().unwrap(),
             interface: "lo".to_string(),
             prefix_len: 128,
-            keypair_id: None,
             policy: Policy::Closed,
         };
         let socket = ManagedSocket {
@@ -1071,7 +1068,6 @@ async fn event_emission_on_new_and_stale_sockets() {
         address: "fd00::99".parse().unwrap(),
         interface: "lo".to_string(),
         prefix_len: 128,
-        keypair_id: None,
         policy: Policy::Closed,
     };
     let stale_socket = ManagedSocket {
@@ -1109,4 +1105,242 @@ async fn event_emission_on_new_and_stale_sockets() {
         event3.is_ok(),
         "SocketsChanged event should be emitted when stale sockets are cleaned up"
     );
+}
+
+// ─── Phase 3: address stability ──────────────────────────────────────────────
+
+/// Engine with one prefix-tracking mock backend ("ygg0") that tests can steer through
+/// the returned handles.
+struct PrefixHarness {
+    state: Arc<socketguard_daemon::AppState>,
+    backend: MockIpv6Backend,
+    net: MockNetworkInterface,
+    fw_calls: Arc<Mutex<Vec<FirewallCall>>>,
+}
+
+async fn prefix_harness(sockets: Vec<ListeningSocket>) -> PrefixHarness {
+    let fw_calls = Arc::new(Mutex::new(Vec::new()));
+    let net = MockNetworkInterface::new(Arc::new(Mutex::new(Vec::new())));
+    let backend = MockIpv6Backend::new("300:1:2:3::", 128, "ygg0");
+    backend.set_prefix("300:1:2:3::");
+    let monitor = MockSocketMonitor::new(sockets);
+
+    let cfg = BackendInstanceConfig {
+        id: "ygg".to_string(),
+        backend: BackendConfig::Yggdrasil {
+            interface: "ygg0".to_string(),
+            admin_endpoint: None,
+        },
+    };
+    let mut backends = HashMap::new();
+    backends.insert(
+        "ygg".to_string(),
+        socketguard_daemon::engine::ActiveBackend {
+            config: cfg.clone(),
+            backend: Box::new(backend.clone()),
+        },
+    );
+    let engine = Engine::new_injectable(
+        Box::new(monitor),
+        Arc::new(MockFirewall::new(fw_calls.clone())),
+        Arc::new(net.clone()),
+        backends,
+        vec!["ygg".to_string()],
+    );
+    let state = test_app_state(
+        engine,
+        DaemonConfig {
+            backends: vec![cfg],
+            ..DaemonConfig::default()
+        },
+    )
+    .await;
+    PrefixHarness {
+        state,
+        backend,
+        net,
+        fw_calls,
+    }
+}
+
+impl PrefixHarness {
+    async fn reconcile(&self) {
+        let mut engine = self.state.engine.write().await;
+        engine.reconcile(&self.state).await.unwrap();
+    }
+}
+
+fn addr(s: &str) -> Ipv6Addr {
+    s.parse().unwrap()
+}
+
+#[tokio::test]
+async fn prefix_change_rehomes_socket_address_keeping_iid() {
+    let h = prefix_harness(vec![listening_socket("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+
+    let sockets = h.state.db.list_sockets().await.unwrap();
+    let sid = sockets[0].id.clone();
+    let old = sockets[0].addresses[0].address;
+    assert_eq!(old, addr("300:1:2:3::1"));
+    assert!(h.net.addresses("ygg0").contains(&old));
+    h.state
+        .db
+        .update_address_policy(&sid, "ygg", Policy::Open)
+        .await
+        .unwrap();
+    h.fw_calls.lock().unwrap().clear();
+
+    h.backend.set_prefix("300:9:9:9::");
+    h.reconcile().await;
+
+    let new = h.state.db.list_sockets().await.unwrap()[0].addresses[0].address;
+    assert_eq!(new, addr("300:9:9:9::1"), "same interface ID, new prefix");
+    let on_iface = h.net.addresses("ygg0");
+    assert!(on_iface.contains(&new));
+    assert!(!on_iface.contains(&old));
+
+    let fw = h.fw_calls.lock().unwrap();
+    assert!(fw.iter().any(
+        |c| matches!(c, FirewallCall::RemoveAcl { dest_ip, port: 80, .. } if *dest_ip == old)
+    ));
+    // Open policy: the firewall was re-applied for the new address.
+    assert!(fw.iter().any(
+        |c| matches!(c, FirewallCall::RemoveAcl { dest_ip, port: 80, .. } if *dest_ip == new)
+    ));
+}
+
+#[tokio::test]
+async fn prefix_change_rehomes_socket_group_address() {
+    let h = prefix_harness(vec![
+        listening_socket("nginx", 80, Protocol::Tcp),
+        listening_socket("nginx", 443, Protocol::Tcp),
+    ])
+    .await;
+    h.reconcile().await;
+    let sockets = h.state.db.list_sockets().await.unwrap();
+    let group = h
+        .state
+        .db
+        .create_socket_group("web", "nginx")
+        .await
+        .unwrap();
+    for s in &sockets {
+        h.state
+            .db
+            .add_socket_to_group(&group.id, &s.id)
+            .await
+            .unwrap();
+    }
+    h.reconcile().await;
+    let old = h
+        .state
+        .db
+        .get_socket_group_addresses(&group.id)
+        .await
+        .unwrap()[0]
+        .address;
+    assert!(h.net.addresses("ygg0").contains(&old));
+
+    h.backend.set_prefix("300:9:9:9::");
+    h.reconcile().await;
+
+    let new = h
+        .state
+        .db
+        .get_socket_group_addresses(&group.id)
+        .await
+        .unwrap()[0]
+        .address;
+    assert_eq!(socketguard_daemon::backend::iid_of(new), 3);
+    assert!(socketguard_daemon::backend::same_prefix64(
+        new,
+        addr("300:9:9:9::")
+    ));
+    assert!(h.net.addresses("ygg0").contains(&new));
+    assert!(!h.net.addresses("ygg0").contains(&old));
+}
+
+#[tokio::test]
+async fn missing_address_is_re_added() {
+    let h = prefix_harness(vec![listening_socket("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let sid = h.state.db.list_sockets().await.unwrap()[0].id.clone();
+    // Closed with no ACL entries is inactive: not expected on the interface.
+    let a = h.state.db.list_sockets().await.unwrap()[0].addresses[0].address;
+    h.net.drop_address("ygg0", a);
+    h.reconcile().await;
+    assert!(
+        !h.net.addresses("ygg0").contains(&a),
+        "inactive address stays off"
+    );
+
+    h.state
+        .db
+        .update_address_policy(&sid, "ygg", Policy::Open)
+        .await
+        .unwrap();
+    h.reconcile().await;
+    assert!(
+        h.net.addresses("ygg0").contains(&a),
+        "active address is restored"
+    );
+}
+
+#[tokio::test]
+async fn missing_interface_is_skipped_then_recovers() {
+    let h = prefix_harness(vec![listening_socket("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
+    let sid = h.state.db.list_sockets().await.unwrap()[0].id.clone();
+    h.state
+        .db
+        .update_address_policy(&sid, "ygg", Policy::Open)
+        .await
+        .unwrap();
+    let a = h.state.db.list_sockets().await.unwrap()[0].addresses[0].address;
+
+    // Yggdrasil is down: the tun is gone. Reconcile must not fail.
+    h.net.set_interface_missing("ygg0", true);
+    h.reconcile().await;
+    assert!(h.net.addresses("ygg0").is_empty());
+
+    // Yggdrasil is back with a fresh tun.
+    h.net.set_interface_missing("ygg0", false);
+    h.reconcile().await;
+    assert!(h.net.addresses("ygg0").contains(&a));
+}
+
+#[tokio::test]
+async fn ula_global_id_survives_restart() {
+    let path = std::env::temp_dir().join(format!("sg-ula-{}.db", uuid::Uuid::new_v4()));
+    let path_str = path.to_str().unwrap();
+    let ula = BackendConfig::Ula {
+        interface: "lo".to_string(),
+    };
+
+    let first = {
+        let db = socketguard_daemon::state::Database::new(path_str)
+            .await
+            .unwrap();
+        db.migrate().await.unwrap();
+        let id = db.ula_global_id().await.unwrap();
+        let b = socketguard_daemon::backend::create_backend(&ula, id).unwrap();
+        (id, b.allocate(None).unwrap().address.octets())
+    };
+
+    // "Restart": reopen the same DB and rebuild the backend.
+    let db = socketguard_daemon::state::Database::new(path_str)
+        .await
+        .unwrap();
+    db.migrate().await.unwrap();
+    let id = db.ula_global_id().await.unwrap();
+    assert_eq!(id, first.0);
+    let b = socketguard_daemon::backend::create_backend(&ula, id).unwrap();
+    assert_eq!(
+        b.allocate(None).unwrap().address.octets()[..6],
+        first.1[..6]
+    );
+
+    drop(db);
+    let _ = std::fs::remove_file(&path);
 }

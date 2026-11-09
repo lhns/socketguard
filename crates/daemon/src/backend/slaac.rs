@@ -1,4 +1,4 @@
-use super::Ipv6Backend;
+use super::{Ipv6Backend, Prefix};
 use anyhow::{bail, Context, Result};
 use rand::Rng;
 use socketguard_core::{AllocatedAddress, BackendType};
@@ -41,7 +41,24 @@ impl SlaacBackend {
 }
 
 impl Ipv6Backend for SlaacBackend {
-    fn allocate_address(&self) -> Result<AllocatedAddress> {
+    fn current_prefix(&self) -> Result<Option<Prefix>> {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&self.prefix);
+        Ok(Some(Prefix::new(Ipv6Addr::from(bytes), 64)))
+    }
+
+    fn allocate(&self, iid: Option<u64>) -> Result<AllocatedAddress> {
+        if let Some(iid) = iid {
+            // A stable interface ID is ours already; no collision check.
+            let mut bytes = [0u8; 16];
+            bytes[..8].copy_from_slice(&self.prefix);
+            bytes[8..16].copy_from_slice(&iid.to_be_bytes());
+            return Ok(AllocatedAddress {
+                address: Ipv6Addr::from(bytes),
+                prefix_len: 128,
+                backend: BackendType::Slaac,
+            });
+        }
         let mut rng = rand::thread_rng();
 
         for attempt in 0..MAX_COLLISION_RETRIES {
@@ -59,7 +76,6 @@ impl Ipv6Backend for SlaacBackend {
                 return Ok(AllocatedAddress {
                     address,
                     prefix_len: 128,
-                    keypair: None,
                     backend: BackendType::Slaac,
                 });
             }

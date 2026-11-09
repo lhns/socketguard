@@ -7,7 +7,9 @@ use windows::Win32::NetworkManagement::IpHelper::{
     GetUnicastIpAddressTable, InitializeUnicastIpAddressEntry, MIB_UNICASTIPADDRESS_ROW,
 };
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
-use windows::Win32::Networking::WinSock::{AF_INET6, SOCKADDR_IN6, SOCKADDR_INET};
+use windows::Win32::Networking::WinSock::{
+    IpDadStatePreferred, AF_INET6, SOCKADDR_IN6, SOCKADDR_INET,
+};
 
 pub struct WindowsNetworkInterface;
 
@@ -109,6 +111,8 @@ impl NetworkInterface for WindowsNetworkInterface {
         row.InterfaceLuid = luid;
         row.Address = sockaddr_from_ipv6(addr);
         row.OnLinkPrefixLength = prefix;
+        // Skip duplicate address detection; our /128s are unique by construction.
+        row.DadState = IpDadStatePreferred;
 
         let err = unsafe { CreateUnicastIpAddressEntry(&row) };
         check_win32(err, &[ERROR_OBJECT_ALREADY_EXISTS])
@@ -146,6 +150,27 @@ impl NetworkInterface for WindowsNetworkInterface {
 
         // Address not found — not an error (may have been removed already)
         Ok(())
+    }
+
+    fn list_addresses(&self, iface: &str) -> Result<Vec<Ipv6Addr>> {
+        let luid = get_interface_luid(iface)?;
+
+        let mut table_ptr = std::ptr::null_mut();
+        let ret = unsafe { GetUnicastIpAddressTable(AF_INET6, &mut table_ptr) };
+        if !ret.is_ok() {
+            anyhow::bail!("GetUnicastIpAddressTable failed: {}", ret.0);
+        }
+
+        let table = unsafe { &*table_ptr };
+        let entries =
+            unsafe { std::slice::from_raw_parts(table.Table.as_ptr(), table.NumEntries as usize) };
+        let addrs = entries
+            .iter()
+            .filter(|e| unsafe { e.InterfaceLuid.Value } == unsafe { luid.Value })
+            .map(|e| Ipv6Addr::from(unsafe { e.Address.Ipv6.sin6_addr.u.Byte }))
+            .collect();
+        unsafe { FreeMibTable(table_ptr as *const _) };
+        Ok(addrs)
     }
 
     fn list_interfaces(&self) -> Result<Vec<String>> {

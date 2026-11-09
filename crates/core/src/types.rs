@@ -138,7 +138,6 @@ pub struct SocketAddress {
     pub address: Ipv6Addr,
     pub interface: String,
     pub prefix_len: u8,
-    pub keypair_id: Option<String>,
     /// Per-address policy (disabled/closed/open). See ADR 0017.
     pub policy: Policy,
 }
@@ -232,7 +231,6 @@ pub struct SocketGroupAddress {
     pub address: Ipv6Addr,
     pub interface: String,
     pub prefix_len: u8,
-    pub keypair_id: Option<String>,
     #[serde(default)]
     pub policy: Policy,
 }
@@ -253,17 +251,7 @@ pub struct SocketGroupAclEntry {
 pub struct AllocatedAddress {
     pub address: Ipv6Addr,
     pub prefix_len: u8,
-    pub keypair: Option<KeyPair>,
     pub backend: BackendType,
-}
-
-/// A keypair (for Yggdrasil backend)
-#[derive(Debug, Clone)]
-pub struct KeyPair {
-    pub id: String,
-    pub public_key: Vec<u8>,
-    pub private_key: Vec<u8>,
-    pub derived_ipv6: Ipv6Addr,
 }
 
 /// Generate a deterministic socket ID from process name, port, and protocol.

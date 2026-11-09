@@ -1,4 +1,4 @@
-use super::Ipv6Backend;
+use super::{Ipv6Backend, Prefix};
 use anyhow::{bail, Context, Result};
 use rand::Rng;
 use socketguard_core::{AllocatedAddress, BackendType};
@@ -312,13 +312,17 @@ impl Dhcpv6Backend {
 }
 
 impl Ipv6Backend for Dhcpv6Backend {
-    fn allocate_address(&self) -> Result<AllocatedAddress> {
+    fn current_prefix(&self) -> Result<Option<Prefix>> {
+        // Leases are individual addresses; there is no /64 to track.
+        Ok(None)
+    }
+
+    fn allocate(&self, _iid: Option<u64>) -> Result<AllocatedAddress> {
         let (address, _server_duid) = self.request_address()?;
 
         Ok(AllocatedAddress {
             address,
             prefix_len: 128,
-            keypair: None,
             backend: BackendType::Dhcpv6,
         })
     }

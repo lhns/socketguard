@@ -45,6 +45,31 @@ impl NetworkInterface for MacosNetworkInterface {
         Ok(())
     }
 
+    fn list_addresses(&self, iface: &str) -> Result<Vec<Ipv6Addr>> {
+        let output = Command::new("ifconfig")
+            .args([iface, "inet6"])
+            .output()
+            .context("failed to run ifconfig")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "ifconfig {iface} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        // Lines look like "	inet6 fe80::1%lo0 prefixlen 64 scopeid 0x1".
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout
+            .lines()
+            .filter_map(|l| {
+                let mut words = l.split_whitespace();
+                (words.next()? == "inet6").then_some(())?;
+                words.next()?.split('%').next()?.parse().ok()
+            })
+            .collect())
+    }
+
     fn list_interfaces(&self) -> Result<Vec<String>> {
         let output = Command::new("ifconfig")
             .args(["-l"])

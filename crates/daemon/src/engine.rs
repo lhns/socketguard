@@ -1,13 +1,15 @@
-use crate::backend::{self, Ipv6Backend};
+use crate::backend::{self, iid_of, same_prefix64, with_prefix64, Ipv6Backend};
 use crate::firewall::{self, Firewall};
 use crate::monitor::{self, SocketMonitor};
 use crate::network::{self, NetworkInterface};
 use crate::AppState;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
-use socketguard_core::{socket_id, AclEntry, ManagedSocket, Policy, SocketAddress};
-use std::collections::HashMap;
+use socketguard_core::{
+    socket_id, AclEntry, ManagedSocket, Policy, SocketAddress, SocketGroupAddress,
+};
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
@@ -24,12 +26,17 @@ pub struct Engine {
     network: Arc<dyn NetworkInterface>,
     /// Track which backend configs the engine was built with (by ID)
     current_backend_ids: Vec<String>,
+    /// Persisted ULA global ID handed to ULA backends.
+    ula_global_id: [u8; 5],
+    /// Interfaces already reported as unavailable (avoids a warning every poll).
+    unavailable_ifaces: Mutex<HashSet<String>>,
 }
 
 impl Engine {
-    pub fn new(config: &DaemonConfig) -> anyhow::Result<Self> {
+    pub fn new(config: &DaemonConfig, ula_global_id: [u8; 5]) -> anyhow::Result<Self> {
         Self::new_with_deps(
             config,
+            ula_global_id,
             monitor::create_monitor(),
             Arc::from(firewall::create_firewall()),
             Arc::from(network::create_network_interface()),
@@ -38,13 +45,14 @@ impl Engine {
 
     pub fn new_with_deps(
         config: &DaemonConfig,
+        ula_global_id: [u8; 5],
         monitor: Box<dyn SocketMonitor>,
         firewall: Arc<dyn Firewall>,
         network: Arc<dyn NetworkInterface>,
     ) -> anyhow::Result<Self> {
         let mut backends = HashMap::new();
         for inst in &config.backends {
-            let b = backend::create_backend(&inst.backend)?;
+            let b = backend::create_backend(&inst.backend, ula_global_id)?;
             backends.insert(
                 inst.id.clone(),
                 ActiveBackend {
@@ -62,6 +70,8 @@ impl Engine {
             firewall,
             network,
             current_backend_ids,
+            ula_global_id,
+            unavailable_ifaces: Mutex::default(),
         })
     }
 
@@ -79,6 +89,8 @@ impl Engine {
             firewall,
             network,
             current_backend_ids: backend_ids,
+            ula_global_id: backend::ula::UlaBackend::random_global_id(),
+            unavailable_ifaces: Mutex::default(),
         }
     }
 
@@ -279,7 +291,7 @@ impl Engine {
 
     /// Add a new backend instance and allocate addresses for all existing sockets.
     pub async fn add_backend_instance(&mut self, state: &AppState, inst: &BackendInstanceConfig) {
-        let b = match backend::create_backend(&inst.backend) {
+        let b = match backend::create_backend(&inst.backend, self.ula_global_id) {
             Ok(b) => b,
             Err(e) => {
                 error!("Failed to create backend '{}': {e}", inst.id);
@@ -308,33 +320,14 @@ impl Engine {
                 continue;
             }
 
-            match b.allocate_address() {
+            match b.allocate(None) {
                 Ok(alloc) => {
-                    let keypair_id = if let Some(ref kp) = alloc.keypair {
-                        if let Err(e) = state
-                            .db
-                            .save_keypair(
-                                &kp.id,
-                                &kp.public_key,
-                                &kp.private_key,
-                                &kp.derived_ipv6.to_string(),
-                            )
-                            .await
-                        {
-                            error!("Failed to save keypair: {e}");
-                        }
-                        Some(kp.id.clone())
-                    } else {
-                        None
-                    };
-
                     let addr = SocketAddress {
                         backend_id: backend_id.clone(),
                         backend_type,
                         address: alloc.address,
                         interface: iface.clone(),
                         prefix_len: alloc.prefix_len,
-                        keypair_id,
                         policy: socket.policy, // inherit socket's default policy
                     };
 
@@ -430,6 +423,7 @@ impl Engine {
         drop(config);
 
         self.check_config_change(&config_snapshot, state).await;
+        self.rehome_prefix_changes(state).await;
 
         // 1. Detect current listening sockets
         let current_sockets = match self.monitor.list_listening_sockets() {
@@ -529,33 +523,14 @@ impl Engine {
 
             let mut addresses = Vec::new();
             for (backend_id, active) in &self.backends {
-                match active.backend.allocate_address() {
+                match active.backend.allocate(None) {
                     Ok(alloc) => {
-                        let keypair_id = if let Some(ref kp) = alloc.keypair {
-                            if let Err(e) = state
-                                .db
-                                .save_keypair(
-                                    &kp.id,
-                                    &kp.public_key,
-                                    &kp.private_key,
-                                    &kp.derived_ipv6.to_string(),
-                                )
-                                .await
-                            {
-                                error!("Failed to save keypair: {e}");
-                            }
-                            Some(kp.id.clone())
-                        } else {
-                            None
-                        };
-
                         let addr = SocketAddress {
                             backend_id: backend_id.clone(),
                             backend_type: alloc.backend,
                             address: alloc.address,
                             interface: active.config.backend.interface().to_string(),
                             prefix_len: alloc.prefix_len,
-                            keypair_id,
                             policy: Policy::Closed,
                         };
                         addresses.push(addr);
@@ -718,11 +693,225 @@ impl Engine {
             }
         }
 
+        self.ensure_addresses_present(state).await;
+
         if had_new_sockets || had_stale {
             let _ = state.events.send(crate::api::DaemonEvent::SocketsChanged);
         }
 
         Ok(())
+    }
+
+    /// Re-home stored addresses of prefix-based backends whose /64 changed: keep the
+    /// interface ID, swap the prefix, move the address on the interface, update the DB and
+    /// re-apply the firewall for the affected sockets and socket groups.
+    async fn rehome_prefix_changes(&self, state: &AppState) {
+        for (backend_id, active) in &self.backends {
+            let prefix = match active.backend.current_prefix() {
+                Ok(Some(p)) if p.len == 64 => p,
+                Ok(_) => continue,
+                Err(e) => {
+                    warn!("Cannot read current prefix of backend '{backend_id}': {e}");
+                    continue;
+                }
+            };
+
+            let sockets = match state.db.list_sockets().await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("Failed to list sockets for prefix check: {e}");
+                    continue;
+                }
+            };
+            for socket in sockets {
+                let mut changed = false;
+                for addr in socket
+                    .addresses
+                    .iter()
+                    .filter(|a| a.backend_id == *backend_id)
+                {
+                    if same_prefix64(addr.address, prefix.addr) {
+                        continue;
+                    }
+                    let new = with_prefix64(prefix.addr, iid_of(addr.address));
+                    info!(
+                        "Prefix of backend '{backend_id}' changed: moving {} to {new}",
+                        addr.address
+                    );
+                    self.move_address(&addr.interface, addr.address, new, addr.prefix_len);
+                    if let Err(e) =
+                        self.firewall
+                            .remove_acl(addr.address, socket.port, socket.protocol)
+                    {
+                        warn!("Failed to remove firewall rules for {}: {e}", addr.address);
+                    }
+                    let updated = SocketAddress {
+                        address: new,
+                        ..addr.clone()
+                    };
+                    match state.db.upsert_socket_address(&socket.id, &updated).await {
+                        Ok(()) => changed = true,
+                        Err(e) => error!("Failed to save re-homed address: {e}"),
+                    }
+                }
+                if changed {
+                    if let Err(e) = self.apply_socket_acl(state, &socket.id).await {
+                        warn!("Failed to re-apply firewall for {}: {e}", socket.id);
+                    }
+                }
+            }
+
+            let groups = state.db.list_socket_groups().await.unwrap_or_default();
+            for group in groups {
+                let addrs = state
+                    .db
+                    .get_socket_group_addresses(&group.id)
+                    .await
+                    .unwrap_or_default();
+                let members = state
+                    .db
+                    .get_socket_group_members(&group.id)
+                    .await
+                    .unwrap_or_default();
+                let member = match members.first() {
+                    Some(sid) => state.db.get_socket(sid).await.ok().flatten(),
+                    None => None,
+                };
+                let mut changed = false;
+                for addr in addrs.iter().filter(|a| a.backend_id == *backend_id) {
+                    if same_prefix64(addr.address, prefix.addr) {
+                        continue;
+                    }
+                    let new = with_prefix64(prefix.addr, iid_of(addr.address));
+                    info!(
+                        "Prefix of backend '{backend_id}' changed: moving group {} address {} to {new}",
+                        group.id, addr.address
+                    );
+                    self.move_address(&addr.interface, addr.address, new, addr.prefix_len);
+                    if let Some(m) = &member {
+                        let _ = self.firewall.remove_acl(addr.address, m.port, m.protocol);
+                    }
+                    let updated = SocketGroupAddress {
+                        address: new,
+                        ..addr.clone()
+                    };
+                    match state.db.upsert_socket_group_address(&updated).await {
+                        Ok(()) => changed = true,
+                        Err(e) => error!("Failed to save re-homed group address: {e}"),
+                    }
+                }
+                if changed {
+                    if let Err(e) = self.apply_socket_group_acl(state, &group.id).await {
+                        warn!("Failed to re-apply firewall for group {}: {e}", group.id);
+                    }
+                }
+            }
+        }
+    }
+
+    fn move_address(&self, iface: &str, old: Ipv6Addr, new: Ipv6Addr, prefix_len: u8) {
+        if let Err(e) = self.network.remove_address(iface, old) {
+            warn!("Failed to remove {old} from {iface}: {e}");
+        }
+        if let Err(e) = self.network.add_address(iface, new, prefix_len) {
+            // The ensure-present pass retries.
+            warn!("Failed to add {new} to {iface}: {e}");
+        }
+    }
+
+    /// Whether an address should be on its interface: not a closed address without ACL
+    /// entries (same rule as startup reconciliation).
+    async fn is_address_active(
+        &self,
+        state: &AppState,
+        socket: &ManagedSocket,
+        addr: &SocketAddress,
+    ) -> bool {
+        let effective = state
+            .db
+            .resolve_effective_policy(&socket.id, &addr.backend_id)
+            .await
+            .map(|(p, _)| p)
+            .unwrap_or(addr.policy);
+        if effective != Policy::Closed {
+            return true;
+        }
+        let acl = if addr.policy == Policy::Group {
+            match state.db.get_acl_group_for_socket(&socket.id).await {
+                Ok(Some(gid)) => state
+                    .db
+                    .get_acl_group_entries_for_backend(&gid, &addr.backend_id)
+                    .await
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            }
+        } else {
+            state
+                .db
+                .get_acl_for_backend(&socket.id, &addr.backend_id)
+                .await
+                .unwrap_or_default()
+        };
+        !acl.is_empty()
+    }
+
+    /// Re-add expected addresses that are missing from their interface, e.g. after
+    /// Yggdrasil restarted and recreated its tun. Interfaces that don't exist are skipped.
+    async fn ensure_addresses_present(&self, state: &AppState) {
+        let mut expected: HashMap<String, Vec<(Ipv6Addr, u8)>> = HashMap::new();
+        for socket in state.db.list_sockets().await.unwrap_or_default() {
+            for addr in &socket.addresses {
+                if self.is_address_active(state, &socket, addr).await {
+                    expected
+                        .entry(addr.interface.clone())
+                        .or_default()
+                        .push((addr.address, addr.prefix_len));
+                }
+            }
+        }
+        for group in state.db.list_socket_groups().await.unwrap_or_default() {
+            for addr in state
+                .db
+                .get_socket_group_addresses(&group.id)
+                .await
+                .unwrap_or_default()
+            {
+                expected
+                    .entry(addr.interface.clone())
+                    .or_default()
+                    .push((addr.address, addr.prefix_len));
+            }
+        }
+
+        for (iface, wanted) in expected {
+            let present = match self.network.list_addresses(&iface) {
+                Ok(p) => {
+                    self.unavailable_ifaces.lock().unwrap().remove(&iface);
+                    p
+                }
+                Err(e) => {
+                    // Log once per outage, not on every poll.
+                    if self
+                        .unavailable_ifaces
+                        .lock()
+                        .unwrap()
+                        .insert(iface.clone())
+                    {
+                        warn!("Interface {iface} unavailable, skipping address check: {e}");
+                    }
+                    continue;
+                }
+            };
+            for (addr, prefix_len) in wanted {
+                if present.contains(&addr) {
+                    continue;
+                }
+                match self.network.add_address(&iface, addr, prefix_len) {
+                    Ok(()) => info!("Re-added missing address {addr} to {iface}"),
+                    Err(e) => warn!("Failed to re-add {addr} to {iface}: {e}"),
+                }
+            }
+        }
     }
 
     /// Apply firewall rules for a socket based on its current policy and ACL entries.
@@ -817,33 +1006,14 @@ impl Engine {
                 continue;
             }
 
-            match active.backend.allocate_address() {
+            match active.backend.allocate(None) {
                 Ok(alloc) => {
-                    let keypair_id = if let Some(ref kp) = alloc.keypair {
-                        if let Err(e) = state
-                            .db
-                            .save_keypair(
-                                &kp.id,
-                                &kp.public_key,
-                                &kp.private_key,
-                                &kp.derived_ipv6.to_string(),
-                            )
-                            .await
-                        {
-                            error!("Failed to save keypair for socket group address: {e}");
-                        }
-                        Some(kp.id.clone())
-                    } else {
-                        None
-                    };
-
                     let sg_addr = SocketGroupAddress {
                         group_id: group_id.to_string(),
                         backend_id: backend_id.clone(),
                         address: alloc.address,
                         interface: active.config.backend.interface().to_string(),
                         prefix_len: alloc.prefix_len,
-                        keypair_id,
                         policy: Policy::Closed,
                     };
 
@@ -1072,7 +1242,6 @@ mod tests {
                 address: "fd00::1".parse().unwrap(),
                 interface: "lo".to_string(),
                 prefix_len: 128,
-                keypair_id: None,
                 policy,
             }],
             policy,
@@ -1099,7 +1268,6 @@ mod tests {
                     address: "fd00::1".parse().unwrap(),
                     interface: "lo".to_string(),
                     prefix_len: 128,
-                    keypair_id: None,
                     policy,
                 },
                 SocketAddress {
@@ -1108,7 +1276,6 @@ mod tests {
                     address: "2001:db8::1".parse().unwrap(),
                     interface: "Ethernet".to_string(),
                     prefix_len: 64,
-                    keypair_id: None,
                     policy,
                 },
             ],
