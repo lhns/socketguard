@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted (extended by ADR 0035)
 
 ## Context
 

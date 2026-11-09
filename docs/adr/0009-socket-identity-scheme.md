@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (revised)
+Superseded by ADR 0027
 
 ## Date
 

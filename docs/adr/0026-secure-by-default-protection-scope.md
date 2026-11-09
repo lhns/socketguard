@@ -1,0 +1,34 @@
+# ADR 0026: Secure-by-Default Protection Scope and Daemon-Stop Semantics
+
+## Status
+
+Accepted. Supersedes ADR 0004, and the startup and shutdown cleanup of ADR 0012.
+
+## Date
+
+2026-11-09
+
+## Context
+
+ADR 0004 closed only allocated (address, port) pairs inside an otherwise `policy accept` chain. An app bound to `[::]:8080` stayed reachable on the node's own Yggdrasil address and its global addresses. A closed socket lost its drop rule on the next poll while keeping its address, and socket-group addresses never got a block rule. ADR 0012 flushed all rules on start and stop, so the host was open whenever the daemon was not running.
+
+## Decision
+
+- **Default protected scope:**
+  - every SocketGuard-allocated address, all ports;
+  - the entire Yggdrasil interface, because the overlay is an untrusted network and protecting it is the project's promise.
+- **Whole-host mode is opt-in.** "Protect this whole host" is an API setting (so both frontends get it), offered at first run. It covers all non-loopback inbound traffic, IPv6 and IPv4, on a chosen subset of interfaces. The setting stores the list; the default selection is every non-loopback interface that has a LAN network.
+- **Inside a scope everything is denied** unless a grant allows it (ADR 0027). There are no per-address policies.
+- **Always allowed:** `iif lo`; established/related; the ICMPv6 types needed for NDP, MLD and PMTU, plus rate-limited echo; DHCPv6 client replies (udp 547 to 546).
+- **Link-local destinations are not exempt.** Inside a protected scope they are default-deny too; otherwise a wildcard bind stays reachable from the LAN via `fe80::`.
+- **Lockout guard (daemon side):** enabling whole-host mode is refused if a remote-admin listener (sshd, RDP) has no grant, unless the request sets `force`. Both frontends show the check.
+- **Closing the Yggdrasil interface on install is intended**: services exposed to the whole overlay should not stay exposed. Mitigation: `socketguard init` and the daemon's first start detect remote-admin listeners (sshd, RDP) and record an Activity entry plus a log warning; `init` offers to grant them to a peer. Established connections survive.
+- **Daemon stop freezes state.** The firewall table/filters and the addresses stay, so services stay reachable for granted peers and closed for everyone else. A restart is not an outage: start-up replaces the ruleset atomically (ADR 0029) instead of flushing it.
+- **Only `socketguard disable` or the uninstaller** removes the nftables table, the pf anchor, the WFP filters and the addresses.
+
+## Consequences
+
+- An app listening on all addresses is unreachable on the node's Yggdrasil, global and link-local addresses until granted.
+- A stopped or crashed daemon fails closed. Without `disable` and the uninstaller, a user who stops the daemon could be locked out, so both are release blockers.
+- Remote admin over Yggdrasil (e.g. sshd on the node's `200:` address) stops accepting new connections on install until granted; the user is warned instead of blocked, since the whole-host lockout guard does not apply here.
+- LAN and IPv4 traffic to non-managed addresses stays open unless the user opts into whole-host mode. IPv4 never gets per-app addresses (ADR 0036).

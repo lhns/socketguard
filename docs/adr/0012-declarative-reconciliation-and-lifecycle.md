@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted (startup and shutdown cleanup superseded by ADR 0026)
 
 ## Date
 

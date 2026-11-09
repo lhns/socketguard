@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted (transport, CORS and endpoint list superseded by ADR 0032)
 
 ## Date
 
