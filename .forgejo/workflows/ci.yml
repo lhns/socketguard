@@ -1,0 +1,58 @@
+# CI for Forgejo Actions (GitHub-Actions-compatible syntax).
+# Runner availability is unverified: the `rust` and `ui` jobs need a Linux runner with the
+# `docker` label (adjust `runs-on` to your runner labels); `netns` needs a privileged one.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      # The Tauri crate (ui/src-tauri, package socketguard-ui) is excluded: it needs
+      # webkit2gtk & co. and its build script runs the frontend build. The `ui` job and
+      # ./build.sh cover it. Remove --exclude once the runner image has those deps.
+      - run: cargo clippy --workspace --exclude socketguard-ui --all-targets -- -D warnings
+      - run: cargo test --workspace --exclude socketguard-ui
+
+  ui:
+    runs-on: docker
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  # Linux network-namespace tests. Needs CAP_NET_ADMIN (root + `ip netns`), which normal
+  # container runners do not give. Requires a self-hosted runner labelled `privileged`;
+  # until one exists this job may stay queued or fail without blocking the others.
+  netns:
+    runs-on: [self-hosted, privileged]
+    continue-on-error: true
+    env:
+      SOCKETGUARD_NETNS_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p socketguard-daemon --test netns -- --nocapture

@@ -9,8 +9,14 @@ fn main() {
     // Re-run this build script if any frontend source or dist file changes
     println!("cargo:rerun-if-changed={}", src_dir.display());
     println!("cargo:rerun-if-changed={}", dist_dir.display());
-    println!("cargo:rerun-if-changed={}", ui_dir.join("index.html").display());
-    println!("cargo:rerun-if-changed={}", ui_dir.join("package.json").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        ui_dir.join("index.html").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        ui_dir.join("package.json").display()
+    );
 
     if !dist_dir.join("index.html").exists() {
         println!("cargo:warning=Frontend dist/ not found, running npm build...");
@@ -24,7 +30,10 @@ fn main() {
             .expect("Failed to run npm build. Is npm installed?");
 
         if !status.success() {
-            panic!("Frontend build failed (npm run build exited with {})", status);
+            panic!(
+                "Frontend build failed (npm run build exited with {})",
+                status
+            );
         }
     }
 

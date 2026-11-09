@@ -25,8 +25,6 @@ pub fn create_backend(config: &BackendConfig) -> Result<Box<dyn Ipv6Backend>> {
             interface,
             prefix.as_deref(),
         )?)),
-        BackendConfig::Dhcpv6 { interface } => {
-            Ok(Box::new(dhcpv6::Dhcpv6Backend::new(interface)?))
-        }
+        BackendConfig::Dhcpv6 { interface } => Ok(Box::new(dhcpv6::Dhcpv6Backend::new(interface)?)),
     }
 }

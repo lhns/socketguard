@@ -53,7 +53,8 @@ impl Engine {
                 },
             );
         }
-        let current_backend_ids: Vec<String> = config.backends.iter().map(|b| b.id.clone()).collect();
+        let current_backend_ids: Vec<String> =
+            config.backends.iter().map(|b| b.id.clone()).collect();
 
         Ok(Self {
             monitor,
@@ -102,15 +103,26 @@ impl Engine {
         };
 
         // Pre-fetch per-backend ACL data with group resolution
-        let mut socket_acls: Vec<(ManagedSocket, HashMap<String, Vec<Ipv6Addr>>, HashMap<String, Policy>)> = Vec::new();
+        let mut socket_acls: Vec<(
+            ManagedSocket,
+            HashMap<String, Vec<Ipv6Addr>>,
+            HashMap<String, Policy>,
+        )> = Vec::new();
         for socket in &sockets {
             let mut acl_map: HashMap<String, Vec<Ipv6Addr>> = HashMap::new();
             let mut resolved_policies: HashMap<String, Policy> = HashMap::new();
             for addr in &socket.addresses {
-                let (effective_policy, _source) = match state.db.resolve_effective_policy(&socket.id, &addr.backend_id).await {
+                let (effective_policy, _source) = match state
+                    .db
+                    .resolve_effective_policy(&socket.id, &addr.backend_id)
+                    .await
+                {
                     Ok(r) => r,
                     Err(e) => {
-                        warn!("Failed to resolve policy for {}:{}: {e}", socket.id, addr.backend_id);
+                        warn!(
+                            "Failed to resolve policy for {}:{}: {e}",
+                            socket.id, addr.backend_id
+                        );
                         (addr.policy, "address".to_string())
                     }
                 };
@@ -120,13 +132,24 @@ impl Engine {
                     let acl = if addr.policy == Policy::Group {
                         // Get ACL entries from group
                         match state.db.get_acl_group_for_socket(&socket.id).await {
-                            Ok(Some(group_id)) => state.db.get_acl_group_entries_for_backend(&group_id, &addr.backend_id).await.unwrap_or_default(),
+                            Ok(Some(group_id)) => state
+                                .db
+                                .get_acl_group_entries_for_backend(&group_id, &addr.backend_id)
+                                .await
+                                .unwrap_or_default(),
                             _ => Vec::new(),
                         }
                     } else {
-                        state.db.get_acl_for_backend(&socket.id, &addr.backend_id).await.unwrap_or_default()
+                        state
+                            .db
+                            .get_acl_for_backend(&socket.id, &addr.backend_id)
+                            .await
+                            .unwrap_or_default()
                     };
-                    let allowed = acl.iter().filter_map(|e| e.allowed_ip.parse().ok()).collect();
+                    let allowed = acl
+                        .iter()
+                        .filter_map(|e| e.allowed_ip.parse().ok())
+                        .collect();
                     acl_map.insert(addr.backend_id.clone(), allowed);
                 }
             }
@@ -140,15 +163,23 @@ impl Engine {
             let firewall = self.firewall.clone();
             join_set.spawn_blocking(move || {
                 for addr in &socket.addresses {
-                    let effective = resolved_policies.get(&addr.backend_id).copied().unwrap_or(addr.policy);
+                    let effective = resolved_policies
+                        .get(&addr.backend_id)
+                        .copied()
+                        .unwrap_or(addr.policy);
                     // Closed with no ACL = inactive, don't add to interface
                     if effective == Policy::Closed {
-                        let has_acl = acl_map.get(&addr.backend_id).map(|v| !v.is_empty()).unwrap_or(false);
+                        let has_acl = acl_map
+                            .get(&addr.backend_id)
+                            .map(|v| !v.is_empty())
+                            .unwrap_or(false);
                         if !has_acl {
                             continue;
                         }
                     }
-                    if let Err(e) = network.add_address(&addr.interface, addr.address, addr.prefix_len) {
+                    if let Err(e) =
+                        network.add_address(&addr.interface, addr.address, addr.prefix_len)
+                    {
                         warn!(
                             "Failed to re-add IPv6 {} for socket {}: {e}",
                             addr.address, socket.id
@@ -156,7 +187,9 @@ impl Engine {
                     }
                 }
 
-                if let Err(e) = apply_firewall_sync(&*firewall, &socket, &acl_map, &resolved_policies) {
+                if let Err(e) =
+                    apply_firewall_sync(&*firewall, &socket, &acl_map, &resolved_policies)
+                {
                     warn!("Failed to re-apply firewall for socket {}: {e}", socket.id);
                 }
             });
@@ -222,8 +255,7 @@ impl Engine {
 
         let old_ids: std::collections::HashSet<String> =
             self.current_backend_ids.iter().cloned().collect();
-        let new_id_set: std::collections::HashSet<String> =
-            new_ids.iter().cloned().collect();
+        let new_id_set: std::collections::HashSet<String> = new_ids.iter().cloned().collect();
 
         // Removed backends: clean up addresses
         let removed: Vec<String> = old_ids.difference(&new_id_set).cloned().collect();
@@ -267,7 +299,8 @@ impl Engine {
         let backend_id = inst.id.clone();
         let backend_type = inst.backend.backend_type();
 
-        let mut new_addresses: Vec<(String, SocketAddress, u16, socketguard_core::Protocol)> = Vec::new();
+        let mut new_addresses: Vec<(String, SocketAddress, u16, socketguard_core::Protocol)> =
+            Vec::new();
 
         for socket in &sockets {
             // Skip if socket already has an address from this backend
@@ -278,12 +311,16 @@ impl Engine {
             match b.allocate_address() {
                 Ok(alloc) => {
                     let keypair_id = if let Some(ref kp) = alloc.keypair {
-                        if let Err(e) = state.db.save_keypair(
-                            &kp.id,
-                            &kp.public_key,
-                            &kp.private_key,
-                            &kp.derived_ipv6.to_string(),
-                        ).await {
+                        if let Err(e) = state
+                            .db
+                            .save_keypair(
+                                &kp.id,
+                                &kp.public_key,
+                                &kp.private_key,
+                                &kp.derived_ipv6.to_string(),
+                            )
+                            .await
+                        {
                             error!("Failed to save keypair: {e}");
                         }
                         Some(kp.id.clone())
@@ -354,7 +391,10 @@ impl Engine {
         let deleted = match state.db.delete_addresses_by_backend(backend_id).await {
             Ok(d) => d,
             Err(e) => {
-                error!("Failed to delete addresses for backend '{}': {e}", backend_id);
+                error!(
+                    "Failed to delete addresses for backend '{}': {e}",
+                    backend_id
+                );
                 Vec::new()
             }
         };
@@ -365,7 +405,10 @@ impl Engine {
             let network = self.network.clone();
             join_set.spawn_blocking(move || {
                 if let Err(e) = network.remove_address(&addr.interface, addr.address) {
-                    warn!("Failed to remove address {} from {}: {e}", addr.address, addr.interface);
+                    warn!(
+                        "Failed to remove address {} from {}: {e}",
+                        addr.address, addr.interface
+                    );
                 }
             });
         }
@@ -438,20 +481,34 @@ impl Engine {
                 let mut acl_map: HashMap<String, Vec<Ipv6Addr>> = HashMap::new();
                 let mut resolved_policies: HashMap<String, Policy> = HashMap::new();
                 for addr in &existing.addresses {
-                    let (effective_policy, _) = state.db.resolve_effective_policy(&existing.id, &addr.backend_id)
-                        .await.unwrap_or((addr.policy, "address".to_string()));
+                    let (effective_policy, _) = state
+                        .db
+                        .resolve_effective_policy(&existing.id, &addr.backend_id)
+                        .await
+                        .unwrap_or((addr.policy, "address".to_string()));
                     resolved_policies.insert(addr.backend_id.clone(), effective_policy);
 
                     if effective_policy == Policy::Closed {
                         let acl: Vec<AclEntry> = if addr.policy == Policy::Group {
                             match state.db.get_acl_group_for_socket(&existing.id).await {
-                                Ok(Some(group_id)) => state.db.get_acl_group_entries_for_backend(&group_id, &addr.backend_id).await.unwrap_or_default(),
+                                Ok(Some(group_id)) => state
+                                    .db
+                                    .get_acl_group_entries_for_backend(&group_id, &addr.backend_id)
+                                    .await
+                                    .unwrap_or_default(),
                                 _ => Vec::new(),
                             }
                         } else {
-                            state.db.get_acl_for_backend(&existing.id, &addr.backend_id).await.unwrap_or_default()
+                            state
+                                .db
+                                .get_acl_for_backend(&existing.id, &addr.backend_id)
+                                .await
+                                .unwrap_or_default()
                         };
-                        let allowed = acl.iter().filter_map(|e| e.allowed_ip.parse().ok()).collect();
+                        let allowed = acl
+                            .iter()
+                            .filter_map(|e| e.allowed_ip.parse().ok())
+                            .collect();
                         acl_map.insert(addr.backend_id.clone(), allowed);
                     }
                 }
@@ -553,7 +610,12 @@ impl Engine {
         for update in existing_updates {
             let firewall = self.firewall.clone();
             join_set.spawn_blocking(move || {
-                if let Err(e) = apply_firewall_sync(&*firewall, &update.socket, &update.acl_map, &update.resolved_policies) {
+                if let Err(e) = apply_firewall_sync(
+                    &*firewall,
+                    &update.socket,
+                    &update.acl_map,
+                    &update.resolved_policies,
+                ) {
                     warn!("Failed to reconcile firewall for {}: {e}", update.socket.id);
                 }
             });
@@ -564,7 +626,9 @@ impl Engine {
             let firewall = self.firewall.clone();
             join_set.spawn_blocking(move || {
                 for addr in &prov.socket.addresses {
-                    if let Err(e) = network.add_address(&addr.interface, addr.address, addr.prefix_len) {
+                    if let Err(e) =
+                        network.add_address(&addr.interface, addr.address, addr.prefix_len)
+                    {
                         error!(
                             "Failed to add IPv6 {} to {}: {e}",
                             addr.address, addr.interface
@@ -572,7 +636,8 @@ impl Engine {
                         continue;
                     }
 
-                    if let Err(e) = firewall.block_all(addr.address, prov.socket.port, prov.socket.protocol)
+                    if let Err(e) =
+                        firewall.block_all(addr.address, prov.socket.port, prov.socket.protocol)
                     {
                         warn!("Failed to apply firewall rule: {e}");
                     }
@@ -637,10 +702,17 @@ impl Engine {
         // 4. Ensure socket groups have addresses allocated for all active backends
         if let Ok(groups) = state.db.list_socket_groups().await {
             for group in &groups {
-                let members = state.db.get_socket_group_members(&group.id).await.unwrap_or_default();
+                let members = state
+                    .db
+                    .get_socket_group_members(&group.id)
+                    .await
+                    .unwrap_or_default();
                 if !members.is_empty() {
                     if let Err(e) = self.ensure_socket_group_addresses(state, &group.id).await {
-                        warn!("Failed to ensure socket group addresses for {}: {e}", group.id);
+                        warn!(
+                            "Failed to ensure socket group addresses for {}: {e}",
+                            group.id
+                        );
                     }
                 }
             }
@@ -672,17 +744,28 @@ impl Engine {
         socket: &ManagedSocket,
     ) -> anyhow::Result<()> {
         for addr in &socket.addresses {
-            let (effective_policy, _source) = state.db.resolve_effective_policy(&socket.id, &addr.backend_id).await?;
+            let (effective_policy, _source) = state
+                .db
+                .resolve_effective_policy(&socket.id, &addr.backend_id)
+                .await?;
 
             match effective_policy {
                 Policy::Closed => {
                     let acl: Vec<AclEntry> = if addr.policy == Policy::Group {
                         match state.db.get_acl_group_for_socket(&socket.id).await? {
-                            Some(group_id) => state.db.get_acl_group_entries_for_backend(&group_id, &addr.backend_id).await?,
+                            Some(group_id) => {
+                                state
+                                    .db
+                                    .get_acl_group_entries_for_backend(&group_id, &addr.backend_id)
+                                    .await?
+                            }
                             None => Vec::new(),
                         }
                     } else {
-                        state.db.get_acl_for_backend(&socket.id, &addr.backend_id).await?
+                        state
+                            .db
+                            .get_acl_for_backend(&socket.id, &addr.backend_id)
+                            .await?
                     };
                     let allowed: Vec<Ipv6Addr> = acl
                         .iter()
@@ -690,7 +773,9 @@ impl Engine {
                         .collect();
                     if allowed.is_empty() {
                         // Closed + no ACL = inactive. Remove any stale firewall rules.
-                        let _ = self.firewall.remove_acl(addr.address, socket.port, socket.protocol);
+                        let _ =
+                            self.firewall
+                                .remove_acl(addr.address, socket.port, socket.protocol);
                     } else {
                         self.firewall.apply_acl(
                             addr.address,
@@ -706,7 +791,9 @@ impl Engine {
                 }
                 Policy::Group => {
                     // Should not reach here — resolve_effective_policy returns Closed or Open
-                    let _ = self.firewall.remove_acl(addr.address, socket.port, socket.protocol);
+                    let _ = self
+                        .firewall
+                        .remove_acl(addr.address, socket.port, socket.protocol);
                 }
             }
         }
@@ -719,10 +806,11 @@ impl Engine {
         state: &AppState,
         group_id: &str,
     ) -> anyhow::Result<()> {
-        use socketguard_core::{SocketGroupAddress, Policy};
+        use socketguard_core::{Policy, SocketGroupAddress};
 
         let existing = state.db.get_socket_group_addresses(group_id).await?;
-        let existing_backend_ids: Vec<&str> = existing.iter().map(|a| a.backend_id.as_str()).collect();
+        let existing_backend_ids: Vec<&str> =
+            existing.iter().map(|a| a.backend_id.as_str()).collect();
 
         for (backend_id, active) in &self.backends {
             if existing_backend_ids.contains(&backend_id.as_str()) {
@@ -763,8 +851,15 @@ impl Engine {
                         error!("Failed to save socket group address: {e}");
                     } else {
                         // Add the address to the network interface
-                        if let Err(e) = self.network.add_address(&sg_addr.interface, sg_addr.address, sg_addr.prefix_len) {
-                            error!("Failed to add socket group IPv6 {} to {}: {e}", sg_addr.address, sg_addr.interface);
+                        if let Err(e) = self.network.add_address(
+                            &sg_addr.interface,
+                            sg_addr.address,
+                            sg_addr.prefix_len,
+                        ) {
+                            error!(
+                                "Failed to add socket group IPv6 {} to {}: {e}",
+                                sg_addr.address, sg_addr.interface
+                            );
                         } else {
                             info!(
                                 "Allocated {} ({}) for socket group {}",
@@ -774,7 +869,10 @@ impl Engine {
                     }
                 }
                 Err(e) => {
-                    error!("Failed to allocate IPv6 from backend '{}' for socket group: {e}", backend_id);
+                    error!(
+                        "Failed to allocate IPv6 from backend '{}' for socket group: {e}",
+                        backend_id
+                    );
                 }
             }
         }
@@ -822,7 +920,8 @@ impl Engine {
                     if backend_acl.is_empty() {
                         let _ = self.firewall.remove_acl(addr.address, port, protocol);
                     } else {
-                        self.firewall.apply_acl(addr.address, port, protocol, &backend_acl)?;
+                        self.firewall
+                            .apply_acl(addr.address, port, protocol, &backend_acl)?;
                     }
                 }
                 Policy::Group => {
@@ -837,20 +936,31 @@ impl Engine {
                                         self.firewall.allow_all(addr.address, port, protocol)?;
                                     }
                                     Policy::Closed => {
-                                        let group_entries = state.db.get_acl_group_entries(acl_gid).await?;
+                                        let group_entries =
+                                            state.db.get_acl_group_entries(acl_gid).await?;
                                         let group_acl: Vec<Ipv6Addr> = group_entries
                                             .iter()
                                             .filter(|e| e.backend_id == addr.backend_id)
                                             .filter_map(|e| e.allowed_ip.parse().ok())
                                             .collect();
                                         if group_acl.is_empty() {
-                                            let _ = self.firewall.remove_acl(addr.address, port, protocol);
+                                            let _ = self.firewall.remove_acl(
+                                                addr.address,
+                                                port,
+                                                protocol,
+                                            );
                                         } else {
-                                            self.firewall.apply_acl(addr.address, port, protocol, &group_acl)?;
+                                            self.firewall.apply_acl(
+                                                addr.address,
+                                                port,
+                                                protocol,
+                                                &group_acl,
+                                            )?;
                                         }
                                     }
                                     Policy::Group => {
-                                        let _ = self.firewall.remove_acl(addr.address, port, protocol);
+                                        let _ =
+                                            self.firewall.remove_acl(addr.address, port, protocol);
                                     }
                                 }
                                 continue;
@@ -878,13 +988,17 @@ fn apply_firewall_sync(
     resolved_policies: &HashMap<String, Policy>,
 ) -> anyhow::Result<()> {
     for addr in &socket.addresses {
-        let effective = resolved_policies.get(&addr.backend_id).copied().unwrap_or(addr.policy);
+        let effective = resolved_policies
+            .get(&addr.backend_id)
+            .copied()
+            .unwrap_or(addr.policy);
         match effective {
             Policy::Open => {
                 firewall.allow_all(addr.address, socket.port, socket.protocol)?;
             }
             Policy::Closed => {
-                let allowed = acl_by_backend.get(&addr.backend_id)
+                let allowed = acl_by_backend
+                    .get(&addr.backend_id)
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
                 if allowed.is_empty() {
@@ -938,7 +1052,11 @@ mod tests {
     use std::sync::{Arc as StdArc, Mutex as StdMutex};
 
     fn resolved_map(socket: &ManagedSocket) -> HashMap<String, Policy> {
-        socket.addresses.iter().map(|a| (a.backend_id.clone(), a.policy)).collect()
+        socket
+            .addresses
+            .iter()
+            .map(|a| (a.backend_id.clone(), a.policy))
+            .collect()
     }
 
     fn test_socket(policy: Policy) -> ManagedSocket {
@@ -1032,8 +1150,7 @@ mod tests {
         let calls = StdArc::new(StdMutex::new(Vec::new()));
         let fw = MockFirewall::new(calls.clone());
         let socket = test_socket(Policy::Closed);
-        let allowed: Vec<Ipv6Addr> =
-            vec!["fd00::10".parse().unwrap(), "fd00::20".parse().unwrap()];
+        let allowed: Vec<Ipv6Addr> = vec!["fd00::10".parse().unwrap(), "fd00::20".parse().unwrap()];
         let acl_map: HashMap<String, Vec<Ipv6Addr>> = [("ula".to_string(), allowed.clone())].into();
         let resolved = resolved_map(&socket);
 
@@ -1080,11 +1197,13 @@ mod tests {
         let fw = MockFirewall::new(calls.clone());
         let mut socket = test_socket_multi_addr(Policy::Closed);
         // Set different policies per address
-        socket.addresses[0].policy = Policy::Open;       // ula: open
-        socket.addresses[1].policy = Policy::Closed;     // slaac: closed
-        let acl_map: HashMap<String, Vec<Ipv6Addr>> = [
-            ("slaac-Ethernet".to_string(), vec!["fd00::10".parse().unwrap()]),
-        ].into();
+        socket.addresses[0].policy = Policy::Open; // ula: open
+        socket.addresses[1].policy = Policy::Closed; // slaac: closed
+        let acl_map: HashMap<String, Vec<Ipv6Addr>> = [(
+            "slaac-Ethernet".to_string(),
+            vec!["fd00::10".parse().unwrap()],
+        )]
+        .into();
         let resolved = resolved_map(&socket);
 
         apply_firewall_sync(&fw, &socket, &acl_map, &resolved).unwrap();
@@ -1104,8 +1223,12 @@ mod tests {
         let socket = test_socket_multi_addr(Policy::Closed);
         let acl_map: HashMap<String, Vec<Ipv6Addr>> = [
             ("ula".to_string(), vec!["fd00::10".parse().unwrap()]),
-            ("slaac-Ethernet".to_string(), vec!["fd00::10".parse().unwrap()]),
-        ].into();
+            (
+                "slaac-Ethernet".to_string(),
+                vec!["fd00::10".parse().unwrap()],
+            ),
+        ]
+        .into();
         let resolved = resolved_map(&socket);
 
         apply_firewall_sync(&fw, &socket, &acl_map, &resolved).unwrap();

@@ -44,7 +44,10 @@ impl Firewall for WfpFirewall {
         if allowed.is_empty() {
             Command::new("netsh")
                 .args([
-                    "advfirewall", "firewall", "add", "rule",
+                    "advfirewall",
+                    "firewall",
+                    "add",
+                    "rule",
                     &format!("name={block_name}"),
                     "dir=in",
                     "action=block",
@@ -60,7 +63,10 @@ impl Firewall for WfpFirewall {
                 let allow_name = Self::allow_rule_name(&dest_ip, dest_port, &protocol, src_ip);
                 Command::new("netsh")
                     .args([
-                        "advfirewall", "firewall", "add", "rule",
+                        "advfirewall",
+                        "firewall",
+                        "add",
+                        "rule",
                         &format!("name={allow_name}"),
                         "dir=in",
                         "action=allow",
@@ -76,7 +82,10 @@ impl Firewall for WfpFirewall {
 
             Command::new("netsh")
                 .args([
-                    "advfirewall", "firewall", "add", "rule",
+                    "advfirewall",
+                    "firewall",
+                    "add",
+                    "rule",
                     &format!("name={block_name}"),
                     "dir=in",
                     "action=block",
@@ -98,7 +107,10 @@ impl Firewall for WfpFirewall {
         // Delete the block rule by exact name
         let _ = Command::new("netsh")
             .args([
-                "advfirewall", "firewall", "delete", "rule",
+                "advfirewall",
+                "firewall",
+                "delete",
+                "rule",
                 &format!("name={block_name}"),
             ])
             .output();
@@ -108,7 +120,10 @@ impl Firewall for WfpFirewall {
         let proto = protocol.to_string();
         let _ = Command::new("netsh")
             .args([
-                "advfirewall", "firewall", "delete", "rule",
+                "advfirewall",
+                "firewall",
+                "delete",
+                "rule",
                 "dir=in",
                 &format!("protocol={proto}"),
                 &format!("localip={dest_ip}"),
@@ -123,7 +138,10 @@ impl Firewall for WfpFirewall {
         // Delete all rules in the SocketGuard group in one call
         let _ = Command::new("netsh")
             .args([
-                "advfirewall", "firewall", "delete", "rule",
+                "advfirewall",
+                "firewall",
+                "delete",
+                "rule",
                 &format!("group={RULE_GROUP}"),
             ])
             .output();

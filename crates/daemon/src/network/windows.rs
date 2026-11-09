@@ -125,9 +125,8 @@ impl NetworkInterface for WindowsNetworkInterface {
         }
 
         let table = unsafe { &*table_ptr };
-        let entries = unsafe {
-            std::slice::from_raw_parts(table.Table.as_ptr(), table.NumEntries as usize)
-        };
+        let entries =
+            unsafe { std::slice::from_raw_parts(table.Table.as_ptr(), table.NumEntries as usize) };
 
         let luid = get_interface_luid(iface)?;
 

@@ -49,24 +49,19 @@ pub struct ListeningSocket {
 /// When used on `SocketAddress`, controls the per-backend behavior.
 /// When used on `ManagedSocket.policy`, serves as the default policy for
 /// newly added backend addresses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Policy {
     /// ACL-based access control (default).
     /// With no ACL entries: blocks all incoming connections (inactive — address not added to OS).
     /// With ACL entries: allows only whitelisted source IPs.
+    #[default]
     Closed,
     /// Allow all incoming connections (no restrictions)
     Open,
     /// Inherit policy and ACL from the socket's ACL group (ADR 0018).
     /// If the socket is not in any group, treated as closed with no ACL (= inactive).
     Group,
-}
-
-impl Default for Policy {
-    fn default() -> Self {
-        Self::Closed
-    }
 }
 
 impl std::fmt::Display for Policy {
@@ -360,7 +355,10 @@ mod tests {
             BackendType::Yggdrasil
         );
         assert_eq!("slaac".parse::<BackendType>().unwrap(), BackendType::Slaac);
-        assert_eq!("dhcpv6".parse::<BackendType>().unwrap(), BackendType::Dhcpv6);
+        assert_eq!(
+            "dhcpv6".parse::<BackendType>().unwrap(),
+            BackendType::Dhcpv6
+        );
         assert!("invalid".parse::<BackendType>().is_err());
     }
 
@@ -389,7 +387,12 @@ mod tests {
 
     #[test]
     fn backend_type_serde_roundtrip() {
-        for backend in [BackendType::Ula, BackendType::Yggdrasil, BackendType::Slaac, BackendType::Dhcpv6] {
+        for backend in [
+            BackendType::Ula,
+            BackendType::Yggdrasil,
+            BackendType::Slaac,
+            BackendType::Dhcpv6,
+        ] {
             let json = serde_json::to_string(&backend).unwrap();
             let parsed: BackendType = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, backend);

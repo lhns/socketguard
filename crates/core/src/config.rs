@@ -59,7 +59,10 @@ impl BackendConfig {
 
     /// Whether this backend type is a singleton (at most one instance allowed)
     pub fn is_singleton(&self) -> bool {
-        matches!(self, BackendConfig::Ula { .. } | BackendConfig::Yggdrasil { .. })
+        matches!(
+            self,
+            BackendConfig::Ula { .. } | BackendConfig::Yggdrasil { .. }
+        )
     }
 
     /// Generate a default instance ID from the backend type and interface
@@ -81,17 +84,12 @@ pub struct BackendInstanceConfig {
 }
 
 /// Process filter mode
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FilterMode {
     Allowlist,
+    #[default]
     Denylist,
-}
-
-impl Default for FilterMode {
-    fn default() -> Self {
-        FilterMode::Denylist
-    }
 }
 
 /// Process filter: controls which processes get IPv6 addresses assigned.
@@ -408,7 +406,10 @@ mod tests {
         let json = r#"{"backend": "yggdrasil", "interface": "tun0"}"#;
         let config: DaemonConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.backends.len(), 1);
-        assert_eq!(config.backends[0].backend.backend_type(), BackendType::Yggdrasil);
+        assert_eq!(
+            config.backends[0].backend.backend_type(),
+            BackendType::Yggdrasil
+        );
         assert_eq!(config.backends[0].backend.interface(), "tun0");
         assert_eq!(config.backends[0].id, "yggdrasil");
         assert_eq!(config.listen_addr, "127.0.0.1");
@@ -422,7 +423,10 @@ mod tests {
         }"#;
         let config: DaemonConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.backends.len(), 1);
-        assert_eq!(config.backends[0].backend.backend_type(), BackendType::Slaac);
+        assert_eq!(
+            config.backends[0].backend.backend_type(),
+            BackendType::Slaac
+        );
         assert_eq!(config.backends[0].backend.interface(), "Ethernet");
         assert_eq!(config.backends[0].id, "slaac-Ethernet");
         match &config.backends[0].backend {
@@ -446,7 +450,10 @@ mod tests {
         assert_eq!(config.backends[0].id, "ula");
         assert_eq!(config.backends[0].backend.backend_type(), BackendType::Ula);
         assert_eq!(config.backends[1].id, "slaac-eth");
-        assert_eq!(config.backends[1].backend.backend_type(), BackendType::Slaac);
+        assert_eq!(
+            config.backends[1].backend.backend_type(),
+            BackendType::Slaac
+        );
         assert_eq!(config.backends[1].backend.interface(), "Ethernet");
     }
 
@@ -491,11 +498,15 @@ mod tests {
         let result = DaemonConfig::validate_backends(&[
             BackendInstanceConfig {
                 id: "ula1".into(),
-                backend: BackendConfig::Ula { interface: "lo".into() },
+                backend: BackendConfig::Ula {
+                    interface: "lo".into(),
+                },
             },
             BackendInstanceConfig {
                 id: "ula2".into(),
-                backend: BackendConfig::Ula { interface: "lo".into() },
+                backend: BackendConfig::Ula {
+                    interface: "lo".into(),
+                },
             },
         ]);
         assert!(result.is_err());
@@ -507,11 +518,17 @@ mod tests {
         let result = DaemonConfig::validate_backends(&[
             BackendInstanceConfig {
                 id: "slaac-eth".into(),
-                backend: BackendConfig::Slaac { interface: "Ethernet".into(), prefix: None },
+                backend: BackendConfig::Slaac {
+                    interface: "Ethernet".into(),
+                    prefix: None,
+                },
             },
             BackendInstanceConfig {
                 id: "slaac-wifi".into(),
-                backend: BackendConfig::Slaac { interface: "Wi-Fi".into(), prefix: None },
+                backend: BackendConfig::Slaac {
+                    interface: "Wi-Fi".into(),
+                    prefix: None,
+                },
             },
         ]);
         assert!(result.is_ok());
@@ -531,7 +548,10 @@ mod tests {
     fn config_deserialize_dhcpv6() {
         let json = r#"{"backend": {"type": "dhcpv6", "interface": "Ethernet"}}"#;
         let config: DaemonConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.backends[0].backend.backend_type(), BackendType::Dhcpv6);
+        assert_eq!(
+            config.backends[0].backend.backend_type(),
+            BackendType::Dhcpv6
+        );
         assert_eq!(config.backends[0].backend.interface(), "Ethernet");
     }
 
@@ -645,17 +665,33 @@ mod tests {
 
     #[test]
     fn backend_default_id() {
-        assert_eq!(BackendConfig::Ula { interface: "lo".into() }.default_id(), "ula");
         assert_eq!(
-            BackendConfig::Yggdrasil { interface: "tun0".into() }.default_id(),
+            BackendConfig::Ula {
+                interface: "lo".into()
+            }
+            .default_id(),
+            "ula"
+        );
+        assert_eq!(
+            BackendConfig::Yggdrasil {
+                interface: "tun0".into()
+            }
+            .default_id(),
             "yggdrasil"
         );
         assert_eq!(
-            BackendConfig::Slaac { interface: "Ethernet".into(), prefix: None }.default_id(),
+            BackendConfig::Slaac {
+                interface: "Ethernet".into(),
+                prefix: None
+            }
+            .default_id(),
             "slaac-Ethernet"
         );
         assert_eq!(
-            BackendConfig::Dhcpv6 { interface: "eth0".into() }.default_id(),
+            BackendConfig::Dhcpv6 {
+                interface: "eth0".into()
+            }
+            .default_id(),
             "dhcpv6-eth0"
         );
     }

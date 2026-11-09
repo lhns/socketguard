@@ -54,12 +54,7 @@ impl Firewall for MockFirewall {
         Ok(())
     }
 
-    fn remove_acl(
-        &self,
-        dest_ip: Ipv6Addr,
-        dest_port: u16,
-        protocol: Protocol,
-    ) -> Result<()> {
+    fn remove_acl(&self, dest_ip: Ipv6Addr, dest_port: u16, protocol: Protocol) -> Result<()> {
         self.calls.lock().unwrap().push(FirewallCall::RemoveAcl {
             dest_ip,
             port: dest_port,
@@ -169,7 +164,9 @@ impl MockIpv6Backend {
 
 impl Ipv6Backend for MockIpv6Backend {
     fn allocate_address(&self) -> Result<AllocatedAddress> {
-        let n = self.counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let n = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let addr = Ipv6Addr::from(self.prefix | n as u128);
         Ok(AllocatedAddress {
             address: addr,
@@ -231,10 +228,7 @@ impl NetworkInterface for FailingNetworkInterface {
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
-pub async fn test_app_state(
-    engine: crate::engine::Engine,
-    config: DaemonConfig,
-) -> Arc<AppState> {
+pub async fn test_app_state(engine: crate::engine::Engine, config: DaemonConfig) -> Arc<AppState> {
     let db = crate::state::Database::new(":memory:").await.unwrap();
     db.migrate().await.unwrap();
 

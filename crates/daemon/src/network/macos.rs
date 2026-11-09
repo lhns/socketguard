@@ -8,7 +8,14 @@ pub struct MacosNetworkInterface;
 impl NetworkInterface for MacosNetworkInterface {
     fn add_address(&self, iface: &str, addr: Ipv6Addr, prefix: u8) -> Result<()> {
         let output = Command::new("ifconfig")
-            .args([iface, "inet6", &format!("{addr}"), "prefixlen", &prefix.to_string(), "alias"])
+            .args([
+                iface,
+                "inet6",
+                &format!("{addr}"),
+                "prefixlen",
+                &prefix.to_string(),
+                "alias",
+            ])
             .output()
             .context("failed to run ifconfig add")?;
 

@@ -23,6 +23,20 @@ sha2 = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
+# OpenTelemetry: these crates are version-locked to each other (0.33 / tracing-opentelemetry 0.34).
+# OTLP over HTTP/protobuf (reqwest-blocking, on the SDK export threads) avoids the
+# tonic/protoc toolchain, which is the harder build on Windows.
+opentelemetry = "0.33"
+opentelemetry_sdk = { version = "0.33", features = ["logs", "metrics"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "logs", "metrics"] }
+opentelemetry-appender-tracing = "0.33"
+tracing-opentelemetry = "0.34"
+
+[dev-dependencies]
+insta = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

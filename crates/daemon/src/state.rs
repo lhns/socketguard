@@ -1,5 +1,8 @@
 use anyhow::Result;
-use socketguard_core::{AclEntry, AclGroup, ManagedSocket, Policy, SocketAddress, SocketGroup, SocketGroupAclEntry, SocketGroupAddress};
+use socketguard_core::{
+    AclEntry, AclGroup, ManagedSocket, Policy, SocketAddress, SocketGroup, SocketGroupAclEntry,
+    SocketGroupAddress,
+};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -10,6 +13,8 @@ pub struct Database {
 
 impl Database {
     pub async fn new(path: &str) -> Result<Self> {
+        // sqlx maps ":memory:" to a uniquely named shared-cache in-memory DB, so every
+        // pooled connection sees the same data (covered by memory_pool_tests).
         let options = SqliteConnectOptions::from_str(&format!("sqlite:{path}?mode=rwc"))?;
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
@@ -208,9 +213,11 @@ impl Database {
 
         // Step 1: Add policy column to socket_addresses
         if !has_addr_policy {
-            sqlx::query("ALTER TABLE socket_addresses ADD COLUMN policy TEXT NOT NULL DEFAULT 'closed'")
-                .execute(&self.pool)
-                .await?;
+            sqlx::query(
+                "ALTER TABLE socket_addresses ADD COLUMN policy TEXT NOT NULL DEFAULT 'closed'",
+            )
+            .execute(&self.pool)
+            .await?;
 
             // Copy existing socket-level policy to each address
             sqlx::query(
@@ -528,11 +535,7 @@ impl Database {
     }
 
     /// Save or update a socket address for a specific backend instance.
-    pub async fn upsert_socket_address(
-        &self,
-        socket_id: &str,
-        addr: &SocketAddress,
-    ) -> Result<()> {
+    pub async fn upsert_socket_address(&self, socket_id: &str, addr: &SocketAddress) -> Result<()> {
         sqlx::query(
             r#"
             INSERT INTO socket_addresses (socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id, policy)
@@ -572,7 +575,10 @@ impl Database {
     }
 
     /// Delete all addresses for a specific backend instance across all sockets.
-    pub async fn delete_addresses_by_backend(&self, backend_id: &str) -> Result<Vec<(String, SocketAddress)>> {
+    pub async fn delete_addresses_by_backend(
+        &self,
+        backend_id: &str,
+    ) -> Result<Vec<(String, SocketAddress)>> {
         // First fetch them so we can return them for cleanup
         let rows = sqlx::query_as::<_, SocketAddressRowWithSocket>(
             "SELECT socket_id, backend_id, backend_type, address, interface, prefix_len, keypair_id, policy FROM socket_addresses WHERE backend_id = ?",
@@ -610,13 +616,20 @@ impl Database {
     }
 
     /// Update the policy of a specific socket address (per-backend).
-    pub async fn update_address_policy(&self, socket_id: &str, backend_id: &str, policy: Policy) -> Result<()> {
-        sqlx::query("UPDATE socket_addresses SET policy = ? WHERE socket_id = ? AND backend_id = ?")
-            .bind(policy.to_string())
-            .bind(socket_id)
-            .bind(backend_id)
-            .execute(&self.pool)
-            .await?;
+    pub async fn update_address_policy(
+        &self,
+        socket_id: &str,
+        backend_id: &str,
+        policy: Policy,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE socket_addresses SET policy = ? WHERE socket_id = ? AND backend_id = ?",
+        )
+        .bind(policy.to_string())
+        .bind(socket_id)
+        .bind(backend_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -704,7 +717,11 @@ impl Database {
                 let addresses = self.get_socket_addresses(id).await?;
                 let acl_group_id = self.get_acl_group_for_socket(id).await?;
                 let socket_group_ids = self.get_socket_group_ids_for_socket(id).await?;
-                Ok(Some(r.into_managed_socket(addresses, acl_group_id, socket_group_ids)?))
+                Ok(Some(r.into_managed_socket(
+                    addresses,
+                    acl_group_id,
+                    socket_group_ids,
+                )?))
             }
             None => Ok(None),
         }
@@ -721,7 +738,11 @@ impl Database {
     // ======== ACL Entries (per-socket) ========
 
     /// Get ACL entries for a specific socket+backend pair.
-    pub async fn get_acl_for_backend(&self, socket_id: &str, backend_id: &str) -> Result<Vec<AclEntry>> {
+    pub async fn get_acl_for_backend(
+        &self,
+        socket_id: &str,
+        backend_id: &str,
+    ) -> Result<Vec<AclEntry>> {
         let rows = sqlx::query_as::<_, AclRow>(
             "SELECT * FROM acl_entries WHERE socket_id = ? AND backend_id = ? ORDER BY created_at",
         )
@@ -790,7 +811,9 @@ impl Database {
         let addresses = self.get_socket_addresses(socket_id).await?;
         let mut entries = Vec::new();
         for addr in &addresses {
-            let entry = self.add_acl_entry(socket_id, &addr.backend_id, allowed_ip, label).await?;
+            let entry = self
+                .add_acl_entry(socket_id, &addr.backend_id, allowed_ip, label)
+                .await?;
             entries.push(entry);
         }
         Ok(entries)
@@ -838,15 +861,18 @@ impl Database {
     }
 
     pub async fn list_acl_groups(&self) -> Result<Vec<AclGroup>> {
-        let rows = sqlx::query_as::<_, AclGroupRow>(
-            "SELECT * FROM acl_groups ORDER BY label",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query_as::<_, AclGroupRow>("SELECT * FROM acl_groups ORDER BY label")
+            .fetch_all(&self.pool)
+            .await?;
         rows.into_iter().map(|r| r.try_into()).collect()
     }
 
-    pub async fn update_acl_group(&self, id: &str, label: Option<&str>, policy: Option<Policy>) -> Result<()> {
+    pub async fn update_acl_group(
+        &self,
+        id: &str,
+        label: Option<&str>,
+        policy: Option<Policy>,
+    ) -> Result<()> {
         if let Some(label) = label {
             sqlx::query("UPDATE acl_groups SET label = ? WHERE id = ?")
                 .bind(label)
@@ -875,24 +901,20 @@ impl Database {
     // ACL group members
 
     pub async fn add_to_acl_group(&self, group_id: &str, socket_id: &str) -> Result<()> {
-        sqlx::query(
-            "INSERT OR REPLACE INTO acl_group_members (group_id, socket_id) VALUES (?, ?)",
-        )
-        .bind(group_id)
-        .bind(socket_id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("INSERT OR REPLACE INTO acl_group_members (group_id, socket_id) VALUES (?, ?)")
+            .bind(group_id)
+            .bind(socket_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     pub async fn remove_from_acl_group(&self, group_id: &str, socket_id: &str) -> Result<()> {
-        sqlx::query(
-            "DELETE FROM acl_group_members WHERE group_id = ? AND socket_id = ?",
-        )
-        .bind(group_id)
-        .bind(socket_id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("DELETE FROM acl_group_members WHERE group_id = ? AND socket_id = ?")
+            .bind(group_id)
+            .bind(socket_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -970,7 +992,11 @@ impl Database {
     }
 
     /// Get group ACL entries for a specific backend.
-    pub async fn get_acl_group_entries_for_backend(&self, group_id: &str, backend_id: &str) -> Result<Vec<AclEntry>> {
+    pub async fn get_acl_group_entries_for_backend(
+        &self,
+        group_id: &str,
+        backend_id: &str,
+    ) -> Result<Vec<AclEntry>> {
         let rows = sqlx::query_as::<_, AclGroupEntryRow>(
             "SELECT * FROM acl_group_entries WHERE group_id = ? AND backend_id = ? ORDER BY created_at",
         )
@@ -1006,12 +1032,10 @@ impl Database {
     }
 
     pub async fn get_socket_group(&self, id: &str) -> Result<Option<SocketGroup>> {
-        let row = sqlx::query_as::<_, SocketGroupRow>(
-            "SELECT * FROM socket_groups WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row = sqlx::query_as::<_, SocketGroupRow>("SELECT * FROM socket_groups WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         match row {
             Some(r) => Ok(Some(r.try_into()?)),
             None => Ok(None),
@@ -1056,13 +1080,11 @@ impl Database {
     }
 
     pub async fn remove_socket_from_group(&self, group_id: &str, socket_id: &str) -> Result<()> {
-        sqlx::query(
-            "DELETE FROM socket_group_members WHERE group_id = ? AND socket_id = ?",
-        )
-        .bind(group_id)
-        .bind(socket_id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("DELETE FROM socket_group_members WHERE group_id = ? AND socket_id = ?")
+            .bind(group_id)
+            .bind(socket_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -1112,7 +1134,10 @@ impl Database {
         Ok(())
     }
 
-    pub async fn get_socket_group_addresses(&self, group_id: &str) -> Result<Vec<SocketGroupAddress>> {
+    pub async fn get_socket_group_addresses(
+        &self,
+        group_id: &str,
+    ) -> Result<Vec<SocketGroupAddress>> {
         let rows = sqlx::query_as::<_, SocketGroupAddressRow>(
             "SELECT * FROM socket_group_addresses WHERE group_id = ?",
         )
@@ -1124,7 +1149,12 @@ impl Database {
 
     // Socket group address policy & ACL
 
-    pub async fn set_socket_group_address_policy(&self, group_id: &str, backend_id: &str, policy: &str) -> Result<()> {
+    pub async fn set_socket_group_address_policy(
+        &self,
+        group_id: &str,
+        backend_id: &str,
+        policy: &str,
+    ) -> Result<()> {
         sqlx::query(
             "UPDATE socket_group_addresses SET policy = ? WHERE group_id = ? AND backend_id = ?",
         )
@@ -1176,7 +1206,10 @@ impl Database {
         Ok(())
     }
 
-    pub async fn get_socket_group_acl_entries(&self, group_id: &str) -> Result<Vec<SocketGroupAclEntry>> {
+    pub async fn get_socket_group_acl_entries(
+        &self,
+        group_id: &str,
+    ) -> Result<Vec<SocketGroupAclEntry>> {
         let rows = sqlx::query_as::<_, SocketGroupAclEntryRow>(
             "SELECT * FROM socket_group_acl_entries WHERE group_id = ? ORDER BY backend_id, created_at",
         )
@@ -1188,7 +1221,11 @@ impl Database {
 
     // ======== Socket Group ACL Group (ADR 0020) ========
 
-    pub async fn set_socket_group_acl_group(&self, group_id: &str, acl_group_id: Option<&str>) -> Result<()> {
+    pub async fn set_socket_group_acl_group(
+        &self,
+        group_id: &str,
+        acl_group_id: Option<&str>,
+    ) -> Result<()> {
         sqlx::query("UPDATE socket_groups SET acl_group_id = ? WHERE id = ?")
             .bind(acl_group_id)
             .bind(group_id)
@@ -1220,13 +1257,14 @@ impl Database {
         Ok(())
     }
 
-    pub async fn stale_sockets(&self, before: chrono::DateTime<chrono::Utc>) -> Result<Vec<ManagedSocket>> {
-        let rows = sqlx::query_as::<_, SocketRow>(
-            "SELECT * FROM sockets WHERE last_seen < ?",
-        )
-        .bind(before.to_rfc3339())
-        .fetch_all(&self.pool)
-        .await?;
+    pub async fn stale_sockets(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<ManagedSocket>> {
+        let rows = sqlx::query_as::<_, SocketRow>("SELECT * FROM sockets WHERE last_seen < ?")
+            .bind(before.to_rfc3339())
+            .fetch_all(&self.pool)
+            .await?;
 
         let mut result = Vec::new();
         for r in rows {
@@ -1286,15 +1324,26 @@ struct SocketRow {
 }
 
 impl SocketRow {
-    fn into_managed_socket(self, addresses: Vec<SocketAddress>, acl_group_id: Option<String>, socket_group_ids: Vec<String>) -> Result<ManagedSocket> {
+    fn into_managed_socket(
+        self,
+        addresses: Vec<SocketAddress>,
+        acl_group_id: Option<String>,
+        socket_group_ids: Vec<String>,
+    ) -> Result<ManagedSocket> {
         Ok(ManagedSocket {
             id: self.id,
             pid: self.pid as u32,
             process_name: self.process_name,
             port: self.port as u16,
-            protocol: self.protocol.parse().map_err(|e: String| anyhow::anyhow!(e))?,
+            protocol: self
+                .protocol
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?,
             addresses,
-            policy: self.policy.parse().map_err(|e: String| anyhow::anyhow!(e))?,
+            policy: self
+                .policy
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?,
             exe_path: self.exe_path,
             cmdline: self.cmdline,
             first_seen: chrono::DateTime::parse_from_rfc3339(&self.first_seen)?
@@ -1324,7 +1373,10 @@ impl TryFrom<SocketAddressRow> for SocketAddress {
     fn try_from(row: SocketAddressRow) -> Result<Self> {
         Ok(SocketAddress {
             backend_id: row.backend_id,
-            backend_type: row.backend_type.parse().map_err(|e: String| anyhow::anyhow!(e))?,
+            backend_type: row
+                .backend_type
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?,
             address: row.address.parse()?,
             interface: row.interface,
             prefix_len: row.prefix_len as u8,
@@ -1352,7 +1404,10 @@ impl TryFrom<SocketAddressRowWithSocket> for SocketAddress {
     fn try_from(row: SocketAddressRowWithSocket) -> Result<Self> {
         Ok(SocketAddress {
             backend_id: row.backend_id,
-            backend_type: row.backend_type.parse().map_err(|e: String| anyhow::anyhow!(e))?,
+            backend_type: row
+                .backend_type
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?,
             address: row.address.parse()?,
             interface: row.interface,
             prefix_len: row.prefix_len as u8,
@@ -1382,7 +1437,8 @@ impl TryFrom<AclRow> for AclEntry {
             backend_id: row.backend_id,
             allowed_ip: row.allowed_ip,
             label: row.label,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?.with_timezone(&chrono::Utc),
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?
+                .with_timezone(&chrono::Utc),
         })
     }
 }
@@ -1403,7 +1459,8 @@ impl TryFrom<AclGroupRow> for AclGroup {
             id: row.id,
             label: row.label,
             policy: row.policy.parse().map_err(|e: String| anyhow::anyhow!(e))?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?.with_timezone(&chrono::Utc),
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?
+                .with_timezone(&chrono::Utc),
         })
     }
 }
@@ -1428,7 +1485,8 @@ impl TryFrom<AclGroupEntryRow> for AclEntry {
             backend_id: row.backend_id,
             allowed_ip: row.allowed_ip,
             label: row.label,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?.with_timezone(&chrono::Utc),
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?
+                .with_timezone(&chrono::Utc),
         })
     }
 }
@@ -1451,7 +1509,8 @@ impl TryFrom<SocketGroupRow> for SocketGroup {
             label: row.label,
             app_name: row.app_name,
             acl_group_id: row.acl_group_id,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?.with_timezone(&chrono::Utc),
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?
+                .with_timezone(&chrono::Utc),
         })
     }
 }
@@ -1503,7 +1562,8 @@ impl TryFrom<SocketGroupAclEntryRow> for SocketGroupAclEntry {
             backend_id: row.backend_id,
             allowed_ip: row.allowed_ip,
             label: row.label,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?.with_timezone(&chrono::Utc),
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.created_at)?
+                .with_timezone(&chrono::Utc),
         })
     }
 }
@@ -1628,11 +1688,15 @@ mod tests {
         let db = test_db().await;
         insert_test_socket(&db, "abc123", "nginx", 80).await;
 
-        db.update_address_policy("abc123", "ula", Policy::Open).await.unwrap();
+        db.update_address_policy("abc123", "ula", Policy::Open)
+            .await
+            .unwrap();
         let socket = db.get_socket("abc123").await.unwrap().unwrap();
         assert_eq!(socket.addresses[0].policy, Policy::Open);
 
-        db.update_address_policy("abc123", "ula", Policy::Group).await.unwrap();
+        db.update_address_policy("abc123", "ula", Policy::Group)
+            .await
+            .unwrap();
         let socket = db.get_socket("abc123").await.unwrap().unwrap();
         assert_eq!(socket.addresses[0].policy, Policy::Group);
     }
@@ -1664,7 +1728,9 @@ mod tests {
         db.upsert_socket_address("multi1", &addr1).await.unwrap();
         db.upsert_socket_address("multi1", &addr2).await.unwrap();
 
-        db.update_policy_all_backends("multi1", Policy::Open).await.unwrap();
+        db.update_policy_all_backends("multi1", Policy::Open)
+            .await
+            .unwrap();
 
         let retrieved = db.get_socket("multi1").await.unwrap().unwrap();
         assert_eq!(retrieved.policy, Policy::Open); // default policy updated
@@ -1678,7 +1744,10 @@ mod tests {
         let db = test_db().await;
         insert_test_socket(&db, "abc123", "nginx", 80).await;
 
-        let entry = db.add_acl_entry("abc123", "ula", "fd00::100", Some("laptop")).await.unwrap();
+        let entry = db
+            .add_acl_entry("abc123", "ula", "fd00::100", Some("laptop"))
+            .await
+            .unwrap();
         assert_eq!(entry.allowed_ip, "fd00::100");
         assert_eq!(entry.backend_id, "ula");
         assert_eq!(entry.label, Some("laptop".to_string()));
@@ -1722,13 +1791,19 @@ mod tests {
         db.upsert_socket_address("multi1", &addr1).await.unwrap();
         db.upsert_socket_address("multi1", &addr2).await.unwrap();
 
-        let entries = db.add_acl_entry_all_backends("multi1", "fd00::100", Some("peer")).await.unwrap();
+        let entries = db
+            .add_acl_entry_all_backends("multi1", "fd00::100", Some("peer"))
+            .await
+            .unwrap();
         assert_eq!(entries.len(), 2);
 
         // Each backend should have one entry
         let acl_ula = db.get_acl_for_backend("multi1", "ula").await.unwrap();
         assert_eq!(acl_ula.len(), 1);
-        let acl_slaac = db.get_acl_for_backend("multi1", "slaac-Ethernet").await.unwrap();
+        let acl_slaac = db
+            .get_acl_for_backend("multi1", "slaac-Ethernet")
+            .await
+            .unwrap();
         assert_eq!(acl_slaac.len(), 1);
 
         // get_acl returns all
@@ -1765,8 +1840,12 @@ mod tests {
     async fn cascade_delete_removes_acl() {
         let db = test_db().await;
         insert_test_socket(&db, "abc123", "nginx", 80).await;
-        db.add_acl_entry("abc123", "ula", "fd00::1", None).await.unwrap();
-        db.add_acl_entry("abc123", "ula", "fd00::2", None).await.unwrap();
+        db.add_acl_entry("abc123", "ula", "fd00::1", None)
+            .await
+            .unwrap();
+        db.add_acl_entry("abc123", "ula", "fd00::2", None)
+            .await
+            .unwrap();
 
         db.delete_socket("abc123").await.unwrap();
         let acl = db.get_acl("abc123").await.unwrap();
@@ -1778,7 +1857,9 @@ mod tests {
         let db = test_db().await;
         let pub_key = vec![1u8; 32];
         let priv_key = vec![2u8; 32];
-        db.save_keypair("kp1", &pub_key, &priv_key, "fd00::1").await.unwrap();
+        db.save_keypair("kp1", &pub_key, &priv_key, "fd00::1")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1828,8 +1909,16 @@ mod tests {
         let retrieved = db.get_socket("multi1").await.unwrap().unwrap();
         assert_eq!(retrieved.addresses.len(), 2);
         // Verify per-address policies
-        let ula = retrieved.addresses.iter().find(|a| a.backend_id == "ula").unwrap();
-        let slaac = retrieved.addresses.iter().find(|a| a.backend_id == "slaac-Ethernet").unwrap();
+        let ula = retrieved
+            .addresses
+            .iter()
+            .find(|a| a.backend_id == "ula")
+            .unwrap();
+        let slaac = retrieved
+            .addresses
+            .iter()
+            .find(|a| a.backend_id == "slaac-Ethernet")
+            .unwrap();
         assert_eq!(ula.policy, Policy::Closed);
         assert_eq!(slaac.policy, Policy::Open);
     }
@@ -1852,7 +1941,9 @@ mod tests {
     async fn delete_address_cascades_acl() {
         let db = test_db().await;
         insert_test_socket(&db, "abc123", "nginx", 80).await;
-        db.add_acl_entry("abc123", "ula", "fd00::100", None).await.unwrap();
+        db.add_acl_entry("abc123", "ula", "fd00::100", None)
+            .await
+            .unwrap();
 
         db.delete_socket_address("abc123", "ula").await.unwrap();
 
@@ -1873,7 +1964,9 @@ mod tests {
         let fetched = db.get_acl_group(&group.id).await.unwrap().unwrap();
         assert_eq!(fetched.label, "Web Servers");
 
-        db.update_acl_group(&group.id, Some("HTTP Servers"), Some(Policy::Open)).await.unwrap();
+        db.update_acl_group(&group.id, Some("HTTP Servers"), Some(Policy::Open))
+            .await
+            .unwrap();
         let updated = db.get_acl_group(&group.id).await.unwrap().unwrap();
         assert_eq!(updated.label, "HTTP Servers");
         assert_eq!(updated.policy, Policy::Open);
@@ -1898,7 +1991,10 @@ mod tests {
         let members = db.get_acl_group_members(&group.id).await.unwrap();
         assert_eq!(members.len(), 2);
 
-        assert_eq!(db.get_acl_group_for_socket("s1").await.unwrap(), Some(group.id.clone()));
+        assert_eq!(
+            db.get_acl_group_for_socket("s1").await.unwrap(),
+            Some(group.id.clone())
+        );
 
         db.remove_from_acl_group(&group.id, "s1").await.unwrap();
         let members = db.get_acl_group_members(&group.id).await.unwrap();
@@ -1910,13 +2006,19 @@ mod tests {
         let db = test_db().await;
         let group = db.create_acl_group("Test").await.unwrap();
 
-        let entry = db.add_acl_group_entry(&group.id, "ula", "fd00::100", Some("peer")).await.unwrap();
+        let entry = db
+            .add_acl_group_entry(&group.id, "ula", "fd00::100", Some("peer"))
+            .await
+            .unwrap();
         assert_eq!(entry.allowed_ip, "fd00::100");
 
         let entries = db.get_acl_group_entries(&group.id).await.unwrap();
         assert_eq!(entries.len(), 1);
 
-        let by_backend = db.get_acl_group_entries_for_backend(&group.id, "ula").await.unwrap();
+        let by_backend = db
+            .get_acl_group_entries_for_backend(&group.id, "ula")
+            .await
+            .unwrap();
         assert_eq!(by_backend.len(), 1);
 
         db.remove_acl_group_entry(entry.id).await.unwrap();
@@ -1974,7 +2076,9 @@ mod tests {
         assert_eq!(policy, Policy::Closed);
         assert_eq!(source, "address");
 
-        db.update_address_policy("s1", "ula", Policy::Open).await.unwrap();
+        db.update_address_policy("s1", "ula", Policy::Open)
+            .await
+            .unwrap();
         let (policy, source) = db.resolve_effective_policy("s1", "ula").await.unwrap();
         assert_eq!(policy, Policy::Open);
         assert_eq!(source, "address");
@@ -1986,10 +2090,14 @@ mod tests {
         insert_test_socket(&db, "s1", "nginx", 80).await;
 
         let group = db.create_acl_group("Web").await.unwrap();
-        db.update_acl_group(&group.id, None, Some(Policy::Open)).await.unwrap();
+        db.update_acl_group(&group.id, None, Some(Policy::Open))
+            .await
+            .unwrap();
         db.add_to_acl_group(&group.id, "s1").await.unwrap();
 
-        db.update_address_policy("s1", "ula", Policy::Group).await.unwrap();
+        db.update_address_policy("s1", "ula", Policy::Group)
+            .await
+            .unwrap();
 
         let (policy, source) = db.resolve_effective_policy("s1", "ula").await.unwrap();
         assert_eq!(policy, Policy::Open);
@@ -2001,11 +2109,52 @@ mod tests {
         let db = test_db().await;
         insert_test_socket(&db, "s1", "nginx", 80).await;
 
-        db.update_address_policy("s1", "ula", Policy::Group).await.unwrap();
+        db.update_address_policy("s1", "ula", Policy::Group)
+            .await
+            .unwrap();
 
         // Not in any group → defaults to closed
         let (policy, source) = db.resolve_effective_policy("s1", "ula").await.unwrap();
         assert_eq!(policy, Policy::Closed);
         assert_eq!(source, "default");
+    }
+}
+
+#[cfg(test)]
+mod memory_pool_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn memory_pool_shares_one_database() {
+        let db = Database::new(":memory:").await.unwrap();
+        let mut a = db.pool.acquire().await.unwrap();
+        let mut b = db.pool.acquire().await.unwrap();
+        sqlx::query("CREATE TABLE t (x INTEGER)")
+            .execute(&mut *a)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t VALUES (1)")
+            .execute(&mut *a)
+            .await
+            .unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM t")
+            .fetch_one(&mut *b)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn memory_databases_are_isolated_from_each_other() {
+        let a = Database::new(":memory:").await.unwrap();
+        let b = Database::new(":memory:").await.unwrap();
+        sqlx::query("CREATE TABLE t (x INTEGER)")
+            .execute(&a.pool)
+            .await
+            .unwrap();
+        assert!(sqlx::query("SELECT * FROM t")
+            .fetch_all(&b.pool)
+            .await
+            .is_err());
     }
 }

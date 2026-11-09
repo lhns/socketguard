@@ -121,19 +121,21 @@ fn find_pid_by_inode(inode: u64) -> ProcInfo {
                     for fd in fds.flatten() {
                         if let Ok(link) = std::fs::read_link(fd.path()) {
                             if link.to_string_lossy() == target {
-                                let process_name = std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                                    .unwrap_or_default()
-                                    .trim()
-                                    .to_string();
+                                let process_name =
+                                    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                                        .unwrap_or_default()
+                                        .trim()
+                                        .to_string();
 
                                 let exe_path = std::fs::read_link(format!("/proc/{pid}/exe"))
                                     .ok()
                                     .map(|p| p.to_string_lossy().to_string());
 
-                                let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-                                    .ok()
-                                    .map(|s| s.replace('\0', " ").trim().to_string())
-                                    .filter(|s| !s.is_empty());
+                                let cmdline =
+                                    std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+                                        .ok()
+                                        .map(|s| s.replace('\0', " ").trim().to_string())
+                                        .filter(|s| !s.is_empty());
 
                                 return ProcInfo {
                                     pid,

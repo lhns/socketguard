@@ -11,17 +11,21 @@ async fn main() -> Result<()> {
     let config = load_config_sync();
 
     let log_directive = format!("socketguard={}", config.log_level);
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(log_directive.parse().unwrap_or_else(|_| {
-                    "socketguard=info".parse().unwrap()
-                })),
-        )
-        .init();
+    let telemetry = telemetry::init(
+        tracing_subscriber::EnvFilter::from_default_env().add_directive(
+            log_directive
+                .parse()
+                .unwrap_or_else(|_| "socketguard=info".parse().unwrap()),
+        ),
+    );
     info!("Starting SocketGuard daemon");
     for inst in &config.backends {
-        info!("Backend '{}': {} on interface {}", inst.id, inst.backend.backend_type(), inst.backend.interface());
+        info!(
+            "Backend '{}': {} on interface {}",
+            inst.id,
+            inst.backend.backend_type(),
+            inst.backend.interface()
+        );
     }
 
     let api_token = auth::generate_and_store_token()?;
@@ -96,11 +100,7 @@ async fn main() -> Result<()> {
     let _ = shutdown_tx.send(true);
 
     // Wait for reconciliation loop to finish
-    let _ = tokio::time::timeout(
-        tokio::time::Duration::from_secs(5),
-        recon_handle,
-    )
-    .await;
+    let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), recon_handle).await;
 
     // Graceful cleanup: remove firewall rules and IPv6 addresses
     {
@@ -111,6 +111,8 @@ async fn main() -> Result<()> {
     auth::cleanup_token_file();
 
     info!("SocketGuard daemon stopped");
+    // Flush pending OTel data; the exporters block, so keep them off the runtime threads.
+    let _ = tokio::task::spawn_blocking(move || telemetry.shutdown()).await;
     Ok(())
 }
 
@@ -119,9 +121,8 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => {}
             _ = sigterm.recv() => {}
@@ -145,7 +146,9 @@ fn load_config_sync() -> DaemonConfig {
                 config
             }
             Err(e) => {
-                eprintln!("[socketguard] Failed to parse config {config_path}: {e}, using defaults");
+                eprintln!(
+                    "[socketguard] Failed to parse config {config_path}: {e}, using defaults"
+                );
                 DaemonConfig::default()
             }
         }

@@ -1,5 +1,8 @@
 use crate::config::{BackendConfig, BackendInstanceConfig, ProcessFilter};
-use crate::types::{AclEntry, AclGroup, BackendType, ManagedSocket, Policy, SocketGroup, SocketGroupAclEntry, SocketGroupAddress};
+use crate::types::{
+    AclEntry, AclGroup, BackendType, ManagedSocket, Policy, SocketGroup, SocketGroupAclEntry,
+    SocketGroupAddress,
+};
 use serde::{Deserialize, Serialize};
 
 /// Response for listing sockets

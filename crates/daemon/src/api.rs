@@ -32,9 +32,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sockets/{id}/acl/{entry_id}", delete(remove_acl_entry))
         .route("/api/sockets/{id}/policy", put(update_policy_all))
         // Per-backend routes (ADR 0017)
-        .route("/api/sockets/{id}/backends/{backend_id}/policy", put(update_backend_policy))
-        .route("/api/sockets/{id}/backends/{backend_id}/acl/allow", post(allow_backend_ip))
-        .route("/api/sockets/{id}/backends/{backend_id}/acl/{entry_id}", delete(remove_acl_entry))
+        .route(
+            "/api/sockets/{id}/backends/{backend_id}/policy",
+            put(update_backend_policy),
+        )
+        .route(
+            "/api/sockets/{id}/backends/{backend_id}/acl/allow",
+            post(allow_backend_ip),
+        )
+        .route(
+            "/api/sockets/{id}/backends/{backend_id}/acl/{entry_id}",
+            delete(remove_acl_entry),
+        )
         // ACL group routes (ADR 0018)
         .route("/api/acl-groups", get(list_acl_groups))
         .route("/api/acl-groups", post(create_acl_group))
@@ -42,20 +51,44 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/acl-groups/{id}", put(update_acl_group))
         .route("/api/acl-groups/{id}", delete(delete_acl_group))
         .route("/api/acl-groups/{id}/members", post(add_acl_group_members))
-        .route("/api/acl-groups/{id}/members/{socket_id}", delete(remove_acl_group_member))
+        .route(
+            "/api/acl-groups/{id}/members/{socket_id}",
+            delete(remove_acl_group_member),
+        )
         .route("/api/acl-groups/{id}/acl", post(add_acl_group_entry))
-        .route("/api/acl-groups/{id}/acl/{entry_id}", delete(remove_acl_group_entry))
+        .route(
+            "/api/acl-groups/{id}/acl/{entry_id}",
+            delete(remove_acl_group_entry),
+        )
         // Socket group routes (ADR 0018)
         .route("/api/socket-groups", get(list_socket_groups))
         .route("/api/socket-groups", post(create_socket_group))
         .route("/api/socket-groups/{id}", put(update_socket_group))
         .route("/api/socket-groups/{id}", delete(delete_socket_group))
-        .route("/api/socket-groups/{id}/members", post(add_socket_group_members))
-        .route("/api/socket-groups/{id}/members/{socket_id}", delete(remove_socket_group_member))
-        .route("/api/socket-groups/{id}/backends/{backend_id}/policy", put(set_socket_group_address_policy))
-        .route("/api/socket-groups/{id}/backends/{backend_id}/acl", post(add_socket_group_acl_entry))
-        .route("/api/socket-groups/{id}/acl/{entry_id}", delete(remove_socket_group_acl_entry))
-        .route("/api/socket-groups/{id}/acl-group", put(set_socket_group_acl_group))
+        .route(
+            "/api/socket-groups/{id}/members",
+            post(add_socket_group_members),
+        )
+        .route(
+            "/api/socket-groups/{id}/members/{socket_id}",
+            delete(remove_socket_group_member),
+        )
+        .route(
+            "/api/socket-groups/{id}/backends/{backend_id}/policy",
+            put(set_socket_group_address_policy),
+        )
+        .route(
+            "/api/socket-groups/{id}/backends/{backend_id}/acl",
+            post(add_socket_group_acl_entry),
+        )
+        .route(
+            "/api/socket-groups/{id}/acl/{entry_id}",
+            delete(remove_socket_group_acl_entry),
+        )
+        .route(
+            "/api/socket-groups/{id}/acl-group",
+            put(set_socket_group_acl_group),
+        )
         // Config, backends, interfaces, events
         .route("/api/config", get(get_config))
         .route("/api/config", put(update_config))
@@ -129,37 +162,23 @@ async fn sse_events(
 fn bad_request(msg: impl Into<String>) -> impl IntoResponse {
     (
         StatusCode::BAD_REQUEST,
-        Json(ApiError {
-            error: msg.into(),
-        }),
+        Json(ApiError { error: msg.into() }),
     )
 }
 
 fn not_found(msg: impl Into<String>) -> impl IntoResponse {
-    (
-        StatusCode::NOT_FOUND,
-        Json(ApiError {
-            error: msg.into(),
-        }),
-    )
+    (StatusCode::NOT_FOUND, Json(ApiError { error: msg.into() }))
 }
 
 fn internal_error(msg: impl Into<String>) -> impl IntoResponse {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiError {
-            error: msg.into(),
-        }),
+        Json(ApiError { error: msg.into() }),
     )
 }
 
 fn conflict(msg: impl Into<String>) -> impl IntoResponse {
-    (
-        StatusCode::CONFLICT,
-        Json(ApiError {
-            error: msg.into(),
-        }),
-    )
+    (StatusCode::CONFLICT, Json(ApiError { error: msg.into() }))
 }
 
 // ======== Socket endpoints ========
@@ -180,7 +199,12 @@ async fn list_sockets(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         Err(e) => return internal_error(e.to_string()).into_response(),
     };
 
-    Json(SocketListResponse { sockets, acl_groups, socket_groups }).into_response()
+    Json(SocketListResponse {
+        sockets,
+        acl_groups,
+        socket_groups,
+    })
+    .into_response()
 }
 
 async fn build_acl_group_responses(state: &AppState) -> anyhow::Result<Vec<AclGroupResponse>> {
@@ -189,12 +213,18 @@ async fn build_acl_group_responses(state: &AppState) -> anyhow::Result<Vec<AclGr
     for group in groups {
         let entries = state.db.get_acl_group_entries(&group.id).await?;
         let members = state.db.get_acl_group_members(&group.id).await?;
-        responses.push(AclGroupResponse { group, entries, members });
+        responses.push(AclGroupResponse {
+            group,
+            entries,
+            members,
+        });
     }
     Ok(responses)
 }
 
-async fn build_socket_group_responses(state: &AppState) -> anyhow::Result<Vec<SocketGroupResponse>> {
+async fn build_socket_group_responses(
+    state: &AppState,
+) -> anyhow::Result<Vec<SocketGroupResponse>> {
     let groups = state.db.list_socket_groups().await?;
     let mut responses = Vec::new();
     for group in groups {
@@ -202,7 +232,13 @@ async fn build_socket_group_responses(state: &AppState) -> anyhow::Result<Vec<So
         let members = state.db.get_socket_group_members(&group.id).await?;
         let acl_entries = state.db.get_socket_group_acl_entries(&group.id).await?;
         let acl_group_id = group.acl_group_id.clone();
-        responses.push(SocketGroupResponse { group, addresses, members, acl_entries, acl_group_id });
+        responses.push(SocketGroupResponse {
+            group,
+            addresses,
+            members,
+            acl_entries,
+            acl_group_id,
+        });
     }
     Ok(responses)
 }
@@ -224,7 +260,12 @@ async fn get_socket(
 
     let acl_group_id = socket.acl_group_id.clone();
 
-    Json(SocketDetailResponse { socket, acl, acl_group_id }).into_response()
+    Json(SocketDetailResponse {
+        socket,
+        acl,
+        acl_group_id,
+    })
+    .into_response()
 }
 
 /// Add ACL entry to ALL backends for a socket (fan-out, legacy compat).
@@ -249,7 +290,13 @@ async fn allow_ip_all(
         .await
     {
         Ok(entries) => {
-            if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
+            if let Err(e) = state
+                .engine
+                .read()
+                .await
+                .apply_socket_acl(&state, &id)
+                .await
+            {
                 tracing::warn!("Firewall update failed after adding ACL entries: {e}");
             }
             let _ = state.events.send(DaemonEvent::SocketsChanged);
@@ -281,7 +328,13 @@ async fn allow_backend_ip(
         .await
     {
         Ok(entry) => {
-            if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
+            if let Err(e) = state
+                .engine
+                .read()
+                .await
+                .apply_socket_acl(&state, &id)
+                .await
+            {
                 tracing::warn!("Firewall update failed after adding ACL entry: {e}");
             }
             let _ = state.events.send(DaemonEvent::SocketsChanged);
@@ -303,7 +356,13 @@ async fn remove_acl_entry(
 
     match state.db.delete_acl_entry(entry_id).await {
         Ok(_) => {
-            if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
+            if let Err(e) = state
+                .engine
+                .read()
+                .await
+                .apply_socket_acl(&state, &id)
+                .await
+            {
                 tracing::warn!("Firewall update failed after removing ACL entry: {e}");
             }
             let _ = state.events.send(DaemonEvent::SocketsChanged);
@@ -327,7 +386,13 @@ async fn update_policy_all(
 
     match state.db.update_policy_all_backends(&id, req.policy).await {
         Ok(_) => {
-            if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
+            if let Err(e) = state
+                .engine
+                .read()
+                .await
+                .apply_socket_acl(&state, &id)
+                .await
+            {
                 return internal_error(format!("Policy saved but firewall update failed: {e}"))
                     .into_response();
             }
@@ -350,9 +415,19 @@ async fn update_backend_policy(
         Err(e) => return internal_error(e.to_string()).into_response(),
     }
 
-    match state.db.update_address_policy(&id, &backend_id, req.policy).await {
+    match state
+        .db
+        .update_address_policy(&id, &backend_id, req.policy)
+        .await
+    {
         Ok(_) => {
-            if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &id).await {
+            if let Err(e) = state
+                .engine
+                .read()
+                .await
+                .apply_socket_acl(&state, &id)
+                .await
+            {
                 return internal_error(format!("Policy saved but firewall update failed: {e}"))
                     .into_response();
             }
@@ -382,11 +457,15 @@ async fn create_acl_group(
     match state.db.create_acl_group(&req.label).await {
         Ok(group) => {
             let _ = state.events.send(DaemonEvent::SocketsChanged);
-            (StatusCode::CREATED, Json(AclGroupResponse {
-                group,
-                entries: vec![],
-                members: vec![],
-            })).into_response()
+            (
+                StatusCode::CREATED,
+                Json(AclGroupResponse {
+                    group,
+                    entries: vec![],
+                    members: vec![],
+                }),
+            )
+                .into_response()
         }
         Err(e) => internal_error(e.to_string()).into_response(),
     }
@@ -409,7 +488,12 @@ async fn get_acl_group(
         Ok(m) => m,
         Err(e) => return internal_error(e.to_string()).into_response(),
     };
-    Json(AclGroupResponse { group, entries, members }).into_response()
+    Json(AclGroupResponse {
+        group,
+        entries,
+        members,
+    })
+    .into_response()
 }
 
 async fn update_acl_group(
@@ -423,7 +507,11 @@ async fn update_acl_group(
         Err(e) => return internal_error(e.to_string()).into_response(),
     }
 
-    match state.db.update_acl_group(&id, req.label.as_deref(), req.policy).await {
+    match state
+        .db
+        .update_acl_group(&id, req.label.as_deref(), req.policy)
+        .await
+    {
         Ok(_) => {
             // Re-apply firewall for all member sockets
             if let Ok(members) = state.db.get_acl_group_members(&id).await {
@@ -452,7 +540,11 @@ async fn delete_acl_group(
     }
 
     // Get members before deleting so we can re-apply firewall
-    let members = state.db.get_acl_group_members(&id).await.unwrap_or_default();
+    let members = state
+        .db
+        .get_acl_group_members(&id)
+        .await
+        .unwrap_or_default();
 
     match state.db.delete_acl_group(&id).await {
         Ok(_) => {
@@ -482,7 +574,8 @@ async fn add_acl_group_members(
 
     for socket_id in &req.socket_ids {
         if let Err(e) = state.db.add_to_acl_group(&id, socket_id).await {
-            return internal_error(format!("Failed to add socket {socket_id}: {e}")).into_response();
+            return internal_error(format!("Failed to add socket {socket_id}: {e}"))
+                .into_response();
         }
     }
 
@@ -504,7 +597,13 @@ async fn remove_acl_group_member(
 ) -> impl IntoResponse {
     match state.db.remove_from_acl_group(&id, &socket_id).await {
         Ok(_) => {
-            if let Err(e) = state.engine.read().await.apply_socket_acl(&state, &socket_id).await {
+            if let Err(e) = state
+                .engine
+                .read()
+                .await
+                .apply_socket_acl(&state, &socket_id)
+                .await
+            {
                 tracing::warn!("Failed to update firewall for socket {socket_id}: {e}");
             }
             let _ = state.events.send(DaemonEvent::SocketsChanged);
@@ -529,7 +628,11 @@ async fn add_acl_group_entry(
         Err(e) => return internal_error(e.to_string()).into_response(),
     }
 
-    match state.db.add_acl_group_entry(&id, &req.backend_id, &req.allowed_ip, req.label.as_deref()).await {
+    match state
+        .db
+        .add_acl_group_entry(&id, &req.backend_id, &req.allowed_ip, req.label.as_deref())
+        .await
+    {
         Ok(entry) => {
             // Re-apply firewall for all members
             if let Ok(members) = state.db.get_acl_group_members(&id).await {
@@ -590,24 +693,39 @@ async fn create_socket_group(
     if req.label.trim().is_empty() {
         return bad_request("label must not be empty").into_response();
     }
-    match state.db.create_socket_group(&req.label, &req.app_name).await {
+    match state
+        .db
+        .create_socket_group(&req.label, &req.app_name)
+        .await
+    {
         Ok(group) => {
             // Allocate addresses immediately so UI can show policy/ACL controls
             {
                 let engine = state.engine.read().await;
-                if let Err(e) = engine.ensure_socket_group_addresses(&state, &group.id).await {
+                if let Err(e) = engine
+                    .ensure_socket_group_addresses(&state, &group.id)
+                    .await
+                {
                     tracing::warn!("Failed to allocate socket group addresses on creation: {e}");
                 }
             }
-            let addresses = state.db.get_socket_group_addresses(&group.id).await.unwrap_or_default();
+            let addresses = state
+                .db
+                .get_socket_group_addresses(&group.id)
+                .await
+                .unwrap_or_default();
             let _ = state.events.send(DaemonEvent::SocketsChanged);
-            (StatusCode::CREATED, Json(SocketGroupResponse {
-                acl_group_id: None,
-                group,
-                addresses,
-                members: vec![],
-                acl_entries: vec![],
-            })).into_response()
+            (
+                StatusCode::CREATED,
+                Json(SocketGroupResponse {
+                    acl_group_id: None,
+                    group,
+                    addresses,
+                    members: vec![],
+                    acl_entries: vec![],
+                }),
+            )
+                .into_response()
         }
         Err(e) => internal_error(e.to_string()).into_response(),
     }
@@ -660,7 +778,8 @@ async fn add_socket_group_members(
 ) -> impl IntoResponse {
     for socket_id in &req.socket_ids {
         if let Err(e) = state.db.add_socket_to_group(&id, socket_id).await {
-            return internal_error(format!("Failed to add socket {socket_id}: {e}")).into_response();
+            return internal_error(format!("Failed to add socket {socket_id}: {e}"))
+                .into_response();
         }
     }
 
@@ -701,9 +820,19 @@ async fn set_socket_group_address_policy(
             tracing::warn!("Failed to ensure socket group addresses before policy change: {e}");
         }
     }
-    match state.db.set_socket_group_address_policy(&id, &backend_id, &req.policy.to_string()).await {
+    match state
+        .db
+        .set_socket_group_address_policy(&id, &backend_id, &req.policy.to_string())
+        .await
+    {
         Ok(_) => {
-            if let Err(e) = state.engine.read().await.apply_socket_group_acl(&state, &id).await {
+            if let Err(e) = state
+                .engine
+                .read()
+                .await
+                .apply_socket_group_acl(&state, &id)
+                .await
+            {
                 tracing::warn!("Firewall update failed after socket group policy change: {e}");
             }
             let _ = state.events.send(DaemonEvent::SocketsChanged);
@@ -730,9 +859,19 @@ async fn add_socket_group_acl_entry(
         }
     }
 
-    match state.db.add_socket_group_acl_entry(&id, &backend_id, &req.allowed_ip, req.label.as_deref()).await {
+    match state
+        .db
+        .add_socket_group_acl_entry(&id, &backend_id, &req.allowed_ip, req.label.as_deref())
+        .await
+    {
         Ok(entry) => {
-            if let Err(e) = state.engine.read().await.apply_socket_group_acl(&state, &id).await {
+            if let Err(e) = state
+                .engine
+                .read()
+                .await
+                .apply_socket_group_acl(&state, &id)
+                .await
+            {
                 tracing::warn!("Firewall update failed after adding socket group ACL entry: {e}");
             }
             let _ = state.events.send(DaemonEvent::SocketsChanged);
@@ -748,7 +887,13 @@ async fn remove_socket_group_acl_entry(
 ) -> impl IntoResponse {
     match state.db.remove_socket_group_acl_entry(entry_id).await {
         Ok(_) => {
-            if let Err(e) = state.engine.read().await.apply_socket_group_acl(&state, &id).await {
+            if let Err(e) = state
+                .engine
+                .read()
+                .await
+                .apply_socket_group_acl(&state, &id)
+                .await
+            {
                 tracing::warn!("Firewall update failed after removing socket group ACL entry: {e}");
             }
             let _ = state.events.send(DaemonEvent::SocketsChanged);
@@ -763,9 +908,19 @@ async fn set_socket_group_acl_group(
     Path(id): Path<String>,
     Json(req): Json<SetSocketGroupAclGroupRequest>,
 ) -> impl IntoResponse {
-    match state.db.set_socket_group_acl_group(&id, req.acl_group_id.as_deref()).await {
+    match state
+        .db
+        .set_socket_group_acl_group(&id, req.acl_group_id.as_deref())
+        .await
+    {
         Ok(_) => {
-            if let Err(e) = state.engine.read().await.apply_socket_group_acl(&state, &id).await {
+            if let Err(e) = state
+                .engine
+                .read()
+                .await
+                .apply_socket_group_acl(&state, &id)
+                .await
+            {
                 tracing::warn!("Firewall update failed after setting socket group ACL group: {e}");
             }
             let _ = state.events.send(DaemonEvent::SocketsChanged);
@@ -823,25 +978,31 @@ async fn list_backends(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         available_types: vec![
             BackendInfo {
                 name: socketguard_core::BackendType::Ula,
-                description: "Random ULA addresses (fd00::/8) - local only, no external dependencies".to_string(),
+                description:
+                    "Random ULA addresses (fd00::/8) - local only, no external dependencies"
+                        .to_string(),
                 available: true,
                 singleton: true,
             },
             BackendInfo {
                 name: socketguard_core::BackendType::Yggdrasil,
-                description: "Yggdrasil-derived addresses (200::/7) - routable on Yggdrasil overlay".to_string(),
+                description:
+                    "Yggdrasil-derived addresses (200::/7) - routable on Yggdrasil overlay"
+                        .to_string(),
                 available: true,
                 singleton: true,
             },
             BackendInfo {
                 name: socketguard_core::BackendType::Slaac,
-                description: "SLAAC addresses from existing /64 prefix - routable on LAN".to_string(),
+                description: "SLAAC addresses from existing /64 prefix - routable on LAN"
+                    .to_string(),
                 available: true,
                 singleton: false,
             },
             BackendInfo {
                 name: socketguard_core::BackendType::Dhcpv6,
-                description: "DHCPv6 addresses from a DHCPv6 server - server-managed, routable".to_string(),
+                description: "DHCPv6 addresses from a DHCPv6 server - server-managed, routable"
+                    .to_string(),
                 available: true,
                 singleton: false,
             },

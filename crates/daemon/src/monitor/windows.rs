@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use windows::Win32::Foundation::FALSE;
 use windows::Win32::NetworkManagement::IpHelper::{
-    GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6TABLE_OWNER_PID,
-    MIB_TCPTABLE_OWNER_PID, MIB_UDP6TABLE_OWNER_PID, MIB_UDPTABLE_OWNER_PID,
-    TCP_TABLE_OWNER_PID_LISTENER, UDP_TABLE_OWNER_PID,
+    GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6TABLE_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
+    MIB_UDP6TABLE_OWNER_PID, MIB_UDPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+    UDP_TABLE_OWNER_PID,
 };
 use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
@@ -281,11 +281,23 @@ fn resolve_processes(pids: &[u32]) -> HashMap<u32, ProcessInfo> {
 
     for &pid in pids {
         if pid == 0 {
-            map.insert(pid, ProcessInfo { name: "System Idle".to_string(), exe_path: None });
+            map.insert(
+                pid,
+                ProcessInfo {
+                    name: "System Idle".to_string(),
+                    exe_path: None,
+                },
+            );
             continue;
         }
         if pid == 4 {
-            map.insert(pid, ProcessInfo { name: "System".to_string(), exe_path: None });
+            map.insert(
+                pid,
+                ProcessInfo {
+                    name: "System".to_string(),
+                    exe_path: None,
+                },
+            );
             continue;
         }
 
@@ -294,15 +306,28 @@ fn resolve_processes(pids: &[u32]) -> HashMap<u32, ProcessInfo> {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            map.insert(pid, ProcessInfo { name, exe_path: Some(exe_path) });
+            map.insert(
+                pid,
+                ProcessInfo {
+                    name,
+                    exe_path: Some(exe_path),
+                },
+            );
         } else {
             // Fallback: process may be protected/system, try to get at least a name
-            map.insert(pid, ProcessInfo { name: "unknown".to_string(), exe_path: None });
+            map.insert(
+                pid,
+                ProcessInfo {
+                    name: "unknown".to_string(),
+                    exe_path: None,
+                },
+            );
         }
     }
 
     // For any PIDs we couldn't resolve, try tasklist as batch fallback
-    let unresolved: Vec<u32> = pids.iter()
+    let unresolved: Vec<u32> = pids
+        .iter()
         .filter(|pid| map.get(pid).map_or(true, |info| info.name == "unknown"))
         .copied()
         .collect();
@@ -335,11 +360,11 @@ fn resolve_processes(pids: &[u32]) -> HashMap<u32, ProcessInfo> {
 /// Use Windows API QueryFullProcessImageNameW to get the exe path for a PID.
 /// Returns None if the process can't be opened (access denied, exited, etc).
 fn query_process_image_name(pid: u32) -> Option<String> {
-    use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
-        PROCESS_NAME_WIN32,
-    };
     use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;

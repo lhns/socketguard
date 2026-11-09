@@ -417,8 +417,7 @@ impl<'a> Iterator for OptionIter<'a> {
         if self.pos + 4 > self.data.len() {
             return None;
         }
-        let opt_type =
-            u16::from_be_bytes([self.data[self.pos], self.data[self.pos + 1]]);
+        let opt_type = u16::from_be_bytes([self.data[self.pos], self.data[self.pos + 1]]);
         let opt_len =
             u16::from_be_bytes([self.data[self.pos + 2], self.data[self.pos + 3]]) as usize;
         self.pos += 4;

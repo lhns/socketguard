@@ -1,0 +1,11 @@
+---
+source: crates/core/tests/snapshot_example.rs
+expression: out
+---
+*        anything   true
+ssh*     sshd       true
+ssh*     xsshd      false
+*.exe    node.exe   true
+*.exe    node       false
+n?de     node       true
+n?de     nde        false

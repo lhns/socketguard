@@ -173,10 +173,12 @@ fn read_token_file() -> Result<String> {
     let path = socketguard_core::api_token_path();
     std::fs::read_to_string(&path)
         .map(|s| s.trim().to_string())
-        .with_context(|| format!(
-            "failed to read API token from {} — is the daemon running?",
-            path.display()
-        ))
+        .with_context(|| {
+            format!(
+                "failed to read API token from {} — is the daemon running?",
+                path.display()
+            )
+        })
 }
 
 #[tokio::main]
@@ -189,8 +191,7 @@ async fn main() -> Result<()> {
     let mut default_headers = HeaderMap::new();
     default_headers.insert(
         AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {token}"))
-            .context("invalid token value")?,
+        HeaderValue::from_str(&format!("Bearer {token}")).context("invalid token value")?,
     );
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -224,12 +225,10 @@ async fn main() -> Result<()> {
                 .into_iter()
                 .map(|s| {
                     let (ipv6, backend) = if verbose && s.addresses.len() > 1 {
-                        let addrs: Vec<String> = s.addresses.iter()
-                            .map(|a| a.address.to_string())
-                            .collect();
-                        let backends: Vec<String> = s.addresses.iter()
-                            .map(|a| a.backend_id.clone())
-                            .collect();
+                        let addrs: Vec<String> =
+                            s.addresses.iter().map(|a| a.address.to_string()).collect();
+                        let backends: Vec<String> =
+                            s.addresses.iter().map(|a| a.backend_id.clone()).collect();
                         (addrs.join(", "), backends.join(", "))
                     } else if let Some(primary) = s.primary_address() {
                         let extra = if s.addresses.len() > 1 {
@@ -304,7 +303,10 @@ async fn main() -> Result<()> {
                         addr.backend_id,
                         addr.interface,
                         addr.prefix_len,
-                        addr.keypair_id.as_ref().map(|k| format!(" keypair:{}", k)).unwrap_or_default()
+                        addr.keypair_id
+                            .as_ref()
+                            .map(|k| format!(" keypair:{}", k))
+                            .unwrap_or_default()
                     );
                 }
             }
@@ -431,39 +433,37 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Status => {
-            match client.get(format!("{base}/api/sockets")).send().await {
-                Ok(resp) => {
-                    let list: SocketListResponse = resp.json().await?;
-                    if json_mode {
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&serde_json::json!({
-                                "status": "running",
-                                "api": base,
-                                "sockets": list.sockets.len()
-                            }))?
-                        );
-                    } else {
-                        println!("Daemon is running on {base}");
-                        println!("  {} sockets managed", list.sockets.len());
-                    }
-                }
-                Err(_) => {
-                    if json_mode {
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&serde_json::json!({
-                                "status": "unreachable",
-                                "api": base
-                            }))?
-                        );
-                    } else {
-                        bail!("Daemon is not reachable at {base}");
-                    }
+        Commands::Status => match client.get(format!("{base}/api/sockets")).send().await {
+            Ok(resp) => {
+                let list: SocketListResponse = resp.json().await?;
+                if json_mode {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "status": "running",
+                            "api": base,
+                            "sockets": list.sockets.len()
+                        }))?
+                    );
+                } else {
+                    println!("Daemon is running on {base}");
+                    println!("  {} sockets managed", list.sockets.len());
                 }
             }
-        }
+            Err(_) => {
+                if json_mode {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "status": "unreachable",
+                            "api": base
+                        }))?
+                    );
+                } else {
+                    bail!("Daemon is not reachable at {base}");
+                }
+            }
+        },
 
         Commands::Config => {
             let resp: ConfigResponse = client
@@ -492,107 +492,113 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Backends { command } => {
-            match command {
-                None | Some(BackendsCommands::List) => {
-                    let resp: BackendsResponse = client
-                        .get(format!("{base}/api/backends"))
-                        .send()
-                        .await
-                        .context("failed to connect to daemon")?
-                        .json()
-                        .await?;
+        Commands::Backends { command } => match command {
+            None | Some(BackendsCommands::List) => {
+                let resp: BackendsResponse = client
+                    .get(format!("{base}/api/backends"))
+                    .send()
+                    .await
+                    .context("failed to connect to daemon")?
+                    .json()
+                    .await?;
 
-                    if json_mode {
-                        println!("{}", serde_json::to_string_pretty(&resp)?);
-                        return Ok(());
-                    }
-
-                    println!("Active backend instances:");
-                    if resp.active_instances.is_empty() {
-                        println!("  (none)");
-                    } else {
-                        let rows: Vec<BackendInstanceRow> = resp
-                            .active_instances
-                            .into_iter()
-                            .map(|inst| BackendInstanceRow {
-                                id: inst.id,
-                                backend_type: inst.backend.backend_type().to_string(),
-                                interface: inst.backend.interface().to_string(),
-                            })
-                            .collect();
-                        println!("{}", Table::new(rows));
-                    }
-
-                    println!("\nAvailable backend types:");
-                    for b in resp.available_types {
-                        let status = if b.available { "available" } else { "unavailable" };
-                        let kind = if b.singleton { "singleton" } else { "multi-instance" };
-                        println!("  {} - {} [{}, {}]", b.name, b.description, status, kind);
-                    }
+                if json_mode {
+                    println!("{}", serde_json::to_string_pretty(&resp)?);
+                    return Ok(());
                 }
 
-                Some(BackendsCommands::Add {
-                    backend_type,
-                    interface,
-                    id,
-                    prefix,
-                }) => {
-                    use socketguard_core::config::BackendConfig;
-                    let backend = match backend_type.as_str() {
-                        "ula" => BackendConfig::Ula { interface },
-                        "yggdrasil" => BackendConfig::Yggdrasil { interface },
-                        "slaac" => BackendConfig::Slaac { interface, prefix },
-                        "dhcpv6" => BackendConfig::Dhcpv6 { interface },
-                        other => bail!("unknown backend type: {other}"),
+                println!("Active backend instances:");
+                if resp.active_instances.is_empty() {
+                    println!("  (none)");
+                } else {
+                    let rows: Vec<BackendInstanceRow> = resp
+                        .active_instances
+                        .into_iter()
+                        .map(|inst| BackendInstanceRow {
+                            id: inst.id,
+                            backend_type: inst.backend.backend_type().to_string(),
+                            interface: inst.backend.interface().to_string(),
+                        })
+                        .collect();
+                    println!("{}", Table::new(rows));
+                }
+
+                println!("\nAvailable backend types:");
+                for b in resp.available_types {
+                    let status = if b.available {
+                        "available"
+                    } else {
+                        "unavailable"
                     };
-
-                    let req = AddBackendRequest { id, backend };
-                    let resp = client
-                        .post(format!("{base}/api/backends"))
-                        .json(&req)
-                        .send()
-                        .await
-                        .context("failed to connect to daemon")?;
-
-                    if resp.status().is_success() {
-                        if json_mode {
-                            let body: serde_json::Value = resp.json().await?;
-                            println!("{}", serde_json::to_string_pretty(&body)?);
-                        } else {
-                            let inst: socketguard_core::config::BackendInstanceConfig =
-                                resp.json().await?;
-                            println!(
-                                "Added backend '{}' ({} on {})",
-                                inst.id,
-                                inst.backend.backend_type(),
-                                inst.backend.interface()
-                            );
-                        }
+                    let kind = if b.singleton {
+                        "singleton"
                     } else {
-                        let err: ApiError = resp.json().await?;
-                        bail!("{}", err.error);
-                    }
-                }
-
-                Some(BackendsCommands::Remove { id }) => {
-                    let resp = client
-                        .delete(format!("{base}/api/backends/{id}"))
-                        .send()
-                        .await
-                        .context("failed to connect to daemon")?;
-
-                    if resp.status().is_success() {
-                        if !json_mode {
-                            println!("Removed backend '{id}'");
-                        }
-                    } else {
-                        let err: ApiError = resp.json().await?;
-                        bail!("{}", err.error);
-                    }
+                        "multi-instance"
+                    };
+                    println!("  {} - {} [{}, {}]", b.name, b.description, status, kind);
                 }
             }
-        }
+
+            Some(BackendsCommands::Add {
+                backend_type,
+                interface,
+                id,
+                prefix,
+            }) => {
+                use socketguard_core::config::BackendConfig;
+                let backend = match backend_type.as_str() {
+                    "ula" => BackendConfig::Ula { interface },
+                    "yggdrasil" => BackendConfig::Yggdrasil { interface },
+                    "slaac" => BackendConfig::Slaac { interface, prefix },
+                    "dhcpv6" => BackendConfig::Dhcpv6 { interface },
+                    other => bail!("unknown backend type: {other}"),
+                };
+
+                let req = AddBackendRequest { id, backend };
+                let resp = client
+                    .post(format!("{base}/api/backends"))
+                    .json(&req)
+                    .send()
+                    .await
+                    .context("failed to connect to daemon")?;
+
+                if resp.status().is_success() {
+                    if json_mode {
+                        let body: serde_json::Value = resp.json().await?;
+                        println!("{}", serde_json::to_string_pretty(&body)?);
+                    } else {
+                        let inst: socketguard_core::config::BackendInstanceConfig =
+                            resp.json().await?;
+                        println!(
+                            "Added backend '{}' ({} on {})",
+                            inst.id,
+                            inst.backend.backend_type(),
+                            inst.backend.interface()
+                        );
+                    }
+                } else {
+                    let err: ApiError = resp.json().await?;
+                    bail!("{}", err.error);
+                }
+            }
+
+            Some(BackendsCommands::Remove { id }) => {
+                let resp = client
+                    .delete(format!("{base}/api/backends/{id}"))
+                    .send()
+                    .await
+                    .context("failed to connect to daemon")?;
+
+                if resp.status().is_success() {
+                    if !json_mode {
+                        println!("Removed backend '{id}'");
+                    }
+                } else {
+                    let err: ApiError = resp.json().await?;
+                    bail!("{}", err.error);
+                }
+            }
+        },
 
         Commands::Completions { shell } => {
             clap_complete::generate(
