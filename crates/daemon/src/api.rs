@@ -667,7 +667,9 @@ async fn check_tor_settings(state: &AppState, backend: &BackendConfig) -> Result
         return Ok(());
     }
     Err(ApiErr::invalid(
-        "a Tor network made through the API uses the default control port and authentication;          other settings (control address, auth, cookie_path, ...) go in the config file, which          only an administrator can edit",
+        "a Tor network made through the API uses the default control port and authentication; \
+         other settings (control address, auth, cookie_path, ...) go in the config file, which \
+         only an administrator can edit",
     ))
 }
 

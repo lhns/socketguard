@@ -232,7 +232,8 @@ impl Engine {
                 ),
                 Err(e) => {
                     return Err(EngineError::Conflict(format!(
-                        "Tor services are still being removed; retry when Tor is reachable, or                          use --force ({e:#})"
+                        "Tor services are still being removed; retry when Tor is reachable, or \
+                         use --force ({e:#})"
                     )))
                 }
             }
