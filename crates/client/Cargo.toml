@@ -18,16 +18,7 @@ bytes = "1"
 futures-util = "0.3"
 percent-encoding = "2"
 serde_urlencoded = "0.7"
-opentelemetry = { version = "0.33", optional = true }
-
-[features]
-# Inject the W3C trace context of the current OpenTelemetry context into every request
-# (needs a text-map propagator installed globally).
-otel = ["dep:opentelemetry"]
 
 [target.'cfg(windows)'.dependencies]
 # Reading the owner of the pipe, to tell the SocketGuard service from a squatter.
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization"] }
-
-[dev-dependencies]
-opentelemetry_sdk = { version = "0.33", features = ["trace"] }

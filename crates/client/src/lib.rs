@@ -2,8 +2,8 @@
 //! the Tauri backend. It speaks HTTP/1.1 over the platform transport (Unix socket or Windows
 //! named pipe), one connection per request, and has one method per route of the API.
 //!
-//! The endpoint is `SOCKETGUARD_SOCKET` if set, else the platform default. With the `otel`
-//! feature every request carries the `traceparent` of the current OpenTelemetry context.
+//! [`Client::from_env`] takes the endpoint from `SOCKETGUARD_SOCKET` if set, else the
+//! platform default ([`default_endpoint`]).
 
 mod routes;
 mod sse;
@@ -11,23 +11,23 @@ mod transport;
 
 pub use routes::{Route, CLIENT_ROUTES};
 pub use socketguard_core::api_types::ApiEvent;
-pub use sse::{EventStream, SseParser, SseRaw};
+pub use sse::EventStream;
 
 use bytes::Bytes;
-use http::{header, HeaderMap, HeaderValue, Request, StatusCode};
+use http::{header, HeaderValue, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use serde::{de::DeserializeOwned, Serialize};
 use socketguard_core::api_types::{
-    ApiError, ApplyRequest, ApplyResponse, DisableRequest, Enforcement, ExportDocument,
-    MergeRequest, NewGroup, NewNetwork, NewPeer, ProtectHostRequest, ProtectHostResponse,
-    ReviewRequest, SetMembers, SplitRequest, StatusResponse, UpdateLabel, UpdateSettings,
+    ApiError, ApplyRequest, ApplyResponse, DisableRequest, Enforcement, EnforcementNotice,
+    ExportDocument, MergeRequest, NewGroup, NewNetwork, NewPeer, ProtectHostRequest,
+    ProtectHostResponse, ReviewRequest, SetMembers, SplitRequest, StatusResponse, UpdateLabel,
+    UpdateSettings,
 };
 use socketguard_core::{
     ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
     NewCredential, NewGrant, Peer, PeerGroup, Settings,
 };
-use std::sync::Arc;
 
 /// Environment variable that overrides the endpoint (socket path or pipe name).
 pub const ENDPOINT_ENV: &str = "SOCKETGUARD_SOCKET";
@@ -88,13 +88,10 @@ pub struct Saved<T> {
     pub enforcement: Option<Enforcement>,
 }
 
-type HeaderHook = Arc<dyn Fn(&mut HeaderMap) + Send + Sync>;
-
 /// Client for one daemon endpoint. Cheap to clone.
 #[derive(Clone)]
 pub struct Client {
     endpoint: String,
-    hook: Option<HeaderHook>,
 }
 
 /// Filter for [`Client::list_grants`].
@@ -108,48 +105,26 @@ pub struct GrantQuery {
     pub group: Option<String>,
 }
 
-#[derive(Serialize)]
-struct ActivityParams<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    since: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kind: Option<socketguard_core::ActivityKind>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    app: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    peer: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    limit: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    before: Option<i64>,
-}
-
 impl Client {
     /// A client for an explicit socket path (Unix) or pipe name (Windows).
     pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
             endpoint: endpoint.into(),
-            hook: default_hook(),
         }
     }
 
     /// The endpoint from `SOCKETGUARD_SOCKET`, else the platform default.
     pub fn from_env() -> Self {
-        Self::new(default_endpoint())
+        let from_env = std::env::var(ENDPOINT_ENV).ok();
+        Self::new(
+            from_env
+                .filter(|p| !p.trim().is_empty())
+                .unwrap_or_else(default_endpoint),
+        )
     }
 
     pub fn endpoint(&self) -> &str {
         &self.endpoint
-    }
-
-    /// Run `hook` on the headers of every request, e.g. to inject trace context. Replaces
-    /// the default hook.
-    pub fn with_header_hook(
-        mut self,
-        hook: impl Fn(&mut HeaderMap) + Send + Sync + 'static,
-    ) -> Self {
-        self.hook = Some(Arc::new(hook));
-        self
     }
 
     async fn send(
@@ -167,21 +142,14 @@ impl Client {
         let mut builder = Request::builder()
             .method(route.method.clone())
             .uri(uri)
-            .header(header::HOST, "localhost");
-        let has_body = body.is_some();
-        if has_body {
+            .header(header::HOST, "localhost")
+            .header(header::ACCEPT, HeaderValue::from_static("*/*"));
+        if body.is_some() {
             builder = builder.header(header::CONTENT_TYPE, "application/json");
         }
-        let mut req = builder
+        let req = builder
             .body(Full::new(Bytes::from(body.unwrap_or_default())))
             .map_err(|e| Error::Protocol(e.to_string()))?;
-        if let Some(hook) = &self.hook {
-            hook(req.headers_mut());
-        }
-        if !req.headers().contains_key(header::ACCEPT) {
-            req.headers_mut()
-                .insert(header::ACCEPT, HeaderValue::from_static("*/*"));
-        }
 
         let stream = transport::connect(&self.endpoint)
             .await
@@ -222,17 +190,16 @@ impl Client {
     ) -> Result<(StatusCode, Bytes)> {
         let resp = self.send(route, params, query, body).await?;
         let status = resp.status();
+        if !status.is_success() {
+            return Err(read_error(resp).await);
+        }
         let bytes = resp
             .into_body()
             .collect()
             .await
             .map_err(|e| Error::Protocol(e.to_string()))?
             .to_bytes();
-        if status.is_success() {
-            Ok((status, bytes))
-        } else {
-            Err(api_error(status, &bytes))
-        }
+        Ok((status, bytes))
     }
 
     async fn call<T: DeserializeOwned>(
@@ -250,7 +217,8 @@ impl Client {
         self.call_raw(route, params, None, body).await.map(|_| ())
     }
 
-    /// A call whose answer may carry a pending-enforcement notice (HTTP 202).
+    /// A call whose answer may carry a pending-enforcement notice (HTTP 202): the body of
+    /// the change with an `enforcement` field, or the notice alone for a delete.
     async fn call_saved<T: DeserializeOwned>(
         &self,
         route: &Route,
@@ -259,33 +227,23 @@ impl Client {
     ) -> Result<Saved<T>> {
         let (status, bytes) = self.call_status(route, params, None, body).await?;
         let bad = |e: serde_json::Error| Error::Protocol(format!("bad response: {e}"));
+        // An empty body (204) is the unit value.
+        let mut doc = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).map_err(bad)?
+        };
         let enforcement = if status == StatusCode::ACCEPTED {
-            #[derive(serde::Deserialize)]
-            struct Notice {
-                enforcement: Enforcement,
+            let notice: EnforcementNotice = serde_json::from_value(doc.clone()).map_err(bad)?;
+            // Nothing but the notice: there is no value to read.
+            if doc.as_object().is_some_and(|o| o.len() == 1) {
+                doc = serde_json::Value::Null;
             }
-            Some(
-                serde_json::from_slice::<Notice>(&bytes)
-                    .map_err(bad)?
-                    .enforcement,
-            )
+            Some(notice.enforcement)
         } else {
             None
         };
-        // An empty body (204) is the unit value.
-        let value = if bytes.is_empty() {
-            serde_json::from_value(serde_json::Value::Null)
-        } else {
-            serde_json::from_slice(&bytes)
-        };
-        // A 202 to a delete carries only the notice, which is not a `()`.
-        let value = match value {
-            Ok(v) => v,
-            Err(_) if enforcement.is_some() => {
-                serde_json::from_value(serde_json::Value::Null).map_err(bad)?
-            }
-            Err(e) => return Err(bad(e)),
-        };
+        let value = serde_json::from_value(doc).map_err(bad)?;
         Ok(Saved { value, enforcement })
     }
 
@@ -298,15 +256,8 @@ impl Client {
     /// Subscribe to the push events. The stream ends when the daemon closes the connection.
     pub async fn events(&self) -> Result<EventStream> {
         let resp = self.send(&routes::EVENTS, &[], None, None).await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let bytes = resp
-                .into_body()
-                .collect()
-                .await
-                .map_err(|e| Error::Protocol(e.to_string()))?
-                .to_bytes();
-            return Err(api_error(status, &bytes));
+        if !resp.status().is_success() {
+            return Err(read_error(resp).await);
         }
         Ok(sse::stream(resp.into_body()))
     }
@@ -480,15 +431,7 @@ impl Client {
     // ─── Activity, export, maintenance ───────────────────────────────────────
 
     pub async fn activity(&self, query: &ActivityQuery) -> Result<Vec<ActivityRecord>> {
-        let params = ActivityParams {
-            since: query.since,
-            kind: query.kind,
-            app: query.app_id.as_deref(),
-            peer: query.peer_id.as_deref(),
-            limit: query.limit,
-            before: query.before,
-        };
-        let q = serde_urlencoded::to_string(&params).ok();
+        let q = serde_urlencoded::to_string(query).ok();
         self.call(&routes::ACTIVITY, &[], q, None).await
     }
 
@@ -519,6 +462,15 @@ fn json<T: Serialize>(v: &T) -> Option<Vec<u8>> {
     serde_json::to_vec(v).ok()
 }
 
+/// The error of a response whose status is not a success: its body, read in full.
+async fn read_error(resp: hyper::Response<hyper::body::Incoming>) -> Error {
+    let status = resp.status();
+    match resp.into_body().collect().await {
+        Ok(body) => api_error(status, &body.to_bytes()),
+        Err(e) => Error::Protocol(e.to_string()),
+    }
+}
+
 fn api_error(status: StatusCode, body: &[u8]) -> Error {
     match serde_json::from_slice::<ApiError>(body) {
         Ok(e) => Error::Api {
@@ -542,13 +494,9 @@ fn api_error(status: StatusCode, body: &[u8]) -> Error {
     }
 }
 
-/// The endpoint to use when none is given.
+/// The platform's default endpoint (the daemon's default socket or pipe), whatever the
+/// environment says.
 pub fn default_endpoint() -> String {
-    if let Ok(p) = std::env::var(ENDPOINT_ENV) {
-        if !p.trim().is_empty() {
-            return p;
-        }
-    }
     if cfg!(windows) {
         socketguard_core::config::DEFAULT_API_PIPE.to_string()
     } else {
@@ -556,63 +504,44 @@ pub fn default_endpoint() -> String {
     }
 }
 
-#[cfg(feature = "otel")]
-fn default_hook() -> Option<HeaderHook> {
-    Some(Arc::new(inject_trace_context))
-}
-
-#[cfg(not(feature = "otel"))]
-fn default_hook() -> Option<HeaderHook> {
-    None
-}
-
-/// Add `traceparent` (and `tracestate`) from the current OpenTelemetry context, using the
-/// globally installed text-map propagator.
-#[cfg(feature = "otel")]
-pub fn inject_trace_context(headers: &mut HeaderMap) {
-    struct Injector<'a>(&'a mut HeaderMap);
-    impl opentelemetry::propagation::Injector for Injector<'_> {
-        fn set(&mut self, key: &str, value: String) {
-            if let (Ok(k), Ok(v)) = (
-                header::HeaderName::from_bytes(key.as_bytes()),
-                HeaderValue::from_str(&value),
-            ) {
-                self.0.insert(k, v);
-            }
-        }
-    }
-    opentelemetry::global::get_text_map_propagator(|p| {
-        p.inject_context(&opentelemetry::Context::current(), &mut Injector(headers))
-    });
-}
-
-#[cfg(all(test, feature = "otel"))]
-mod otel_tests {
+#[cfg(test)]
+mod tests {
     use super::*;
-    use opentelemetry::trace::{
-        SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
-    };
+    use socketguard_core::{ActivityKind, ActivityQuery};
 
     #[test]
-    fn the_current_context_becomes_a_traceparent_header() {
-        opentelemetry::global::set_text_map_propagator(
-            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
-        );
-        let cx = opentelemetry::Context::current().with_remote_span_context(SpanContext::new(
-            TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap(),
-            SpanId::from_hex("b7ad6b7169203331").unwrap(),
-            TraceFlags::SAMPLED,
-            true,
-            TraceState::default(),
-        ));
-        let _guard = cx.attach();
-        let mut headers = HeaderMap::new();
-        inject_trace_context(&mut headers);
+    fn the_activity_query_is_its_own_query_string() {
         assert_eq!(
-            headers["traceparent"],
-            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+            serde_urlencoded::to_string(ActivityQuery::default()).unwrap(),
+            ""
         );
-        // A client built with the feature uses it by default.
-        assert!(Client::new("x").hook.is_some());
+        let q = ActivityQuery {
+            kind: Some(ActivityKind::Blocked),
+            app_id: Some("a 1".into()),
+            peer_id: Some("p1".into()),
+            before: Some(7),
+            limit: Some(50),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_urlencoded::to_string(&q).unwrap(),
+            "kind=blocked&app_id=a+1&peer_id=p1&before=7&limit=50"
+        );
+        // And back: this is what the daemon extracts.
+        let back: ActivityQuery =
+            serde_urlencoded::from_str("kind=blocked&app_id=a+1&peer_id=p1&before=7&limit=50")
+                .unwrap();
+        assert_eq!(back, q);
+    }
+
+    #[test]
+    fn the_endpoint_comes_from_the_environment_or_the_platform_default() {
+        // One test: the environment is shared by the threads of the test binary.
+        std::env::set_var(ENDPOINT_ENV, "/tmp/custom.sock");
+        assert_eq!(Client::from_env().endpoint(), "/tmp/custom.sock");
+        std::env::set_var(ENDPOINT_ENV, "  ");
+        assert_eq!(Client::from_env().endpoint(), default_endpoint());
+        std::env::remove_var(ENDPOINT_ENV);
+        assert_eq!(Client::from_env().endpoint(), default_endpoint());
     }
 }

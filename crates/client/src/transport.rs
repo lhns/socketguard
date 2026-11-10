@@ -30,7 +30,7 @@ const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
 /// Set to `1` to talk to a pipe server that is not SYSTEM or an administrator (a daemon
 /// started by hand from a normal account). For tests and development only.
 #[cfg(windows)]
-pub const TRUST_PIPE_SERVER_ENV: &str = "SOCKETGUARD_TRUST_PIPE_SERVER";
+const TRUST_PIPE_SERVER_ENV: &str = "SOCKETGUARD_TRUST_PIPE_SERVER";
 
 /// SYSTEM and BUILTIN\Administrators.
 #[cfg(windows)]

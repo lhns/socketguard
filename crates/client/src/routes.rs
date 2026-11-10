@@ -1,12 +1,14 @@
 //! The routes the client implements. Each client method takes its path from one of these
-//! constants, and [`CLIENT_ROUTES`] lists all of them, so the daemon's coverage test can
-//! compare the two tables.
+//! constants, and [`CLIENT_ROUTES`] lists all of them with the name of the client method, so
+//! the coverage tests can compare them with the daemon's routes and the CLI's commands.
 
 use http::Method;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
-/// One route: an HTTP method and a path template with `{name}` segments.
+/// One route: the name of the client method that calls it, an HTTP method and a path
+/// template with `{name}` segments.
 pub struct Route {
+    pub name: &'static str,
     pub method: Method,
     pub path: &'static str,
 }
@@ -32,50 +34,58 @@ impl Route {
 }
 
 macro_rules! routes {
-    ($($name:ident: $method:ident $path:literal,)*) => {
-        $(pub(crate) const $name: Route = Route { method: Method::$method, path: $path };)*
+    ($($name:ident = $client_method:ident: $method:ident $path:literal,)*) => {
+        $(pub(crate) const $name: Route = Route {
+            name: stringify!($client_method),
+            method: Method::$method,
+            path: $path,
+        };)*
 
         /// Every route the client has a method for.
-        pub const CLIENT_ROUTES: &[(Method, &str)] = &[$((Method::$method, $path),)*];
+        pub const CLIENT_ROUTES: &[Route] = &[$(Route {
+            name: stringify!($client_method),
+            method: Method::$method,
+            path: $path,
+        },)*];
     };
 }
 
 routes! {
-    STATUS: GET "/api/status",
-    EVENTS: GET "/api/events",
-    LIST_APPS: GET "/api/apps",
-    GET_APP: GET "/api/apps/{id}",
-    DELETE_APP: DELETE "/api/apps/{id}",
-    REVIEW_APP: POST "/api/apps/{id}/review",
-    SPLIT_APP: POST "/api/apps/{id}/split",
-    MERGE_APP: POST "/api/apps/{id}/merge",
-    LIST_PEERS: GET "/api/peers",
-    CREATE_PEER: POST "/api/peers",
-    GET_PEER: GET "/api/peers/{id}",
-    UPDATE_PEER: PATCH "/api/peers/{id}",
-    DELETE_PEER: DELETE "/api/peers/{id}",
-    ADD_CREDENTIAL: POST "/api/peers/{id}/credentials",
-    REMOVE_CREDENTIAL: DELETE "/api/peers/{id}/credentials/{cred_id}",
-    LIST_GROUPS: GET "/api/peer-groups",
-    CREATE_GROUP: POST "/api/peer-groups",
-    GET_GROUP: GET "/api/peer-groups/{id}",
-    UPDATE_GROUP: PATCH "/api/peer-groups/{id}",
-    DELETE_GROUP: DELETE "/api/peer-groups/{id}",
-    SET_GROUP_MEMBERS: PUT "/api/peer-groups/{id}/members",
-    LIST_GRANTS: GET "/api/grants",
-    CREATE_GRANT: POST "/api/grants",
-    DELETE_GRANT: DELETE "/api/grants/{id}",
-    LIST_NETWORKS: GET "/api/networks",
-    ADD_NETWORK: POST "/api/networks",
-    DELETE_NETWORK: DELETE "/api/networks/{id}",
-    GET_SETTINGS: GET "/api/settings",
-    UPDATE_SETTINGS: PUT "/api/settings",
-    SET_PROTECT_HOST: PUT "/api/settings/protect-host",
-    ACTIVITY: GET "/api/activity",
-    EXPORT: GET "/api/export",
-    APPLY: POST "/api/apply",
-    DISABLE: POST "/api/disable",
-    ENABLE: POST "/api/enable",
+    STATUS = status: GET "/api/status",
+    EVENTS = events: GET "/api/events",
+    LIST_APPS = list_apps: GET "/api/apps",
+    GET_APP = get_app: GET "/api/apps/{id}",
+    DELETE_APP = delete_app: DELETE "/api/apps/{id}",
+    REVIEW_APP = review_app: POST "/api/apps/{id}/review",
+    SPLIT_APP = split_app: POST "/api/apps/{id}/split",
+    MERGE_APP = merge_app: POST "/api/apps/{id}/merge",
+    LIST_PEERS = list_peers: GET "/api/peers",
+    CREATE_PEER = create_peer: POST "/api/peers",
+    GET_PEER = get_peer: GET "/api/peers/{id}",
+    UPDATE_PEER = update_peer: PATCH "/api/peers/{id}",
+    DELETE_PEER = delete_peer: DELETE "/api/peers/{id}",
+    ADD_CREDENTIAL = add_credential: POST "/api/peers/{id}/credentials",
+    REMOVE_CREDENTIAL = remove_credential: DELETE "/api/peers/{id}/credentials/{cred_id}",
+    LIST_GROUPS = list_groups: GET "/api/peer-groups",
+    CREATE_GROUP = create_group: POST "/api/peer-groups",
+    GET_GROUP = get_group: GET "/api/peer-groups/{id}",
+    UPDATE_GROUP = update_group: PATCH "/api/peer-groups/{id}",
+    DELETE_GROUP = delete_group: DELETE "/api/peer-groups/{id}",
+    SET_GROUP_MEMBERS = set_group_members: PUT "/api/peer-groups/{id}/members",
+    LIST_GRANTS = list_grants: GET "/api/grants",
+    CREATE_GRANT = create_grant: POST "/api/grants",
+    DELETE_GRANT = delete_grant: DELETE "/api/grants/{id}",
+    LIST_NETWORKS = list_networks: GET "/api/networks",
+    ADD_NETWORK = add_network: POST "/api/networks",
+    DELETE_NETWORK = delete_network: DELETE "/api/networks/{id}",
+    GET_SETTINGS = get_settings: GET "/api/settings",
+    UPDATE_SETTINGS = update_settings: PUT "/api/settings",
+    SET_PROTECT_HOST = set_protect_host: PUT "/api/settings/protect-host",
+    ACTIVITY = activity: GET "/api/activity",
+    EXPORT = export: GET "/api/export",
+    APPLY = apply: POST "/api/apply",
+    DISABLE = disable: POST "/api/disable",
+    ENABLE = enable: POST "/api/enable",
 }
 
 #[cfg(test)]
@@ -93,9 +103,14 @@ mod tests {
 
     #[test]
     fn route_constants_match_the_table() {
-        assert_eq!(CLIENT_ROUTES.len(), 35);
         assert!(CLIENT_ROUTES
             .iter()
-            .any(|(m, p)| *m == Method::PUT && *p == "/api/settings/protect-host"));
+            .any(|r| r.method == Method::PUT && r.path == "/api/settings/protect-host"));
+        // Every route is listed once, under the name of its constant.
+        let mut seen = std::collections::BTreeSet::new();
+        for r in CLIENT_ROUTES {
+            assert!(seen.insert((r.method.to_string(), r.path)), "{}", r.path);
+            assert_eq!(r.name, r.name.to_lowercase());
+        }
     }
 }
