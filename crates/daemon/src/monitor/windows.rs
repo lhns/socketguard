@@ -62,14 +62,19 @@ impl SocketMonitor for WindowsSocketMonitor {
             }
         }
 
-        // A socket whose owner cannot be told gets no app and no addresses: merging all of
-        // them into one "unknown" app would let any of them inherit the others' grants.
-        let before = sockets.len();
-        sockets.retain(|s| s.pid != 0 && s.process_name != "unknown");
-        if sockets.len() != before && !LOGGED_UNATTRIBUTABLE.swap(true, Ordering::Relaxed) {
+        // PID 0 is no process. A socket whose owner cannot be told becomes an app of its own,
+        // `unknown:<proto>/<port>` (ADR 0046): each is separate, so none inherits another's
+        // grants, and no listener is invisible.
+        sockets.retain(|s| s.pid != 0);
+        let mut unidentified = 0;
+        for socket in sockets.iter_mut().filter(|s| s.process_name == "unknown") {
+            socket.unidentified = true;
+            unidentified += 1;
+        }
+        if unidentified > 0 && !LOGGED_UNATTRIBUTABLE.swap(true, Ordering::Relaxed) {
             tracing::debug!(
-                "Skipping {} sockets with no attributable process (further ones are not logged)",
-                before - sockets.len()
+                "{unidentified} listening sockets have no identifiable process; they are listed \
+                 as unknown apps (further ones are not logged)"
             );
         }
 

@@ -16,14 +16,14 @@ export const networks: Network[] = [
 
 export const app1: App = {
   id: "a1", name: "nginx", process_name: "nginx", exe_path: "/usr/sbin/nginx", interpreter_arg: null, identity_note: null,
-  reviewed: false, first_seen: "2026-01-01T00:00:00Z", last_seen: "2026-01-01T00:00:00Z",
+  reviewed: false, system: false, first_seen: "2026-01-01T00:00:00Z", last_seen: "2026-01-01T00:00:00Z",
   ports: [{ port: 8080, proto: "tcp", listening: true, last_seen: "2026-01-01T00:00:00Z", family: "dual" }],
   addresses: [
     { id: "ad1", app_id: "a1", network_id: "n-ygg", ports: "all", locator: { kind: "ipv6", addr: "302::1" }, created_at: "2026-01-01T00:00:00Z" },
   ],
 };
 
-export const appDetail: AppDetail = { ...app1, grants: [], counters: [] };
+export const appDetail: AppDetail = { ...app1, grants: [], access: [], tags: [], counters: [] };
 
 export const alice: Peer = {
   id: "p1", label: "alice", groups: [], created_at: "2026-01-01T00:00:00Z",
@@ -38,7 +38,7 @@ export const status: StatusResponse = {
 };
 
 export const grantView = (over: Partial<GrantView> = {}): GrantView => ({
-  id: "g1", app_id: "a1", port: null, network_id: null, subject: { kind: "peer", id: "p1" },
+  id: "g1", target: { kind: "app", id: "a1" }, port: null, network_id: null, subject: { kind: "peer", id: "p1" },
   created_at: "2026-01-01T00:00:00Z", reach: [{ network_id: "n-ygg", reach: "verified" }], ...over,
 });
 

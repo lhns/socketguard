@@ -53,10 +53,11 @@ impl SocketMonitor for LinuxSocketMonitor {
                 .filter(|p| p.valid)
                 .collect();
             let Some(p) = pick_owner(&candidates) else {
-                // Not attributable to one program: it gets no app and no addresses.
+                // Not attributable to one program: it becomes an app of its own,
+                // `unknown:<proto>/<port>` (ADR 0046), instead of a gap.
                 if !LOGGED_UNATTRIBUTABLE.swap(true, Ordering::Relaxed) {
                     debug!(
-                        "Skipping socket on port {} {}: {} (further ones are not logged)",
+                        "Socket on port {} {} has no single owner: {} (listed as an unknown app; further ones are not logged)",
                         r.port,
                         r.protocol,
                         if candidates.is_empty() {
@@ -66,6 +67,10 @@ impl SocketMonitor for LinuxSocketMonitor {
                         }
                     );
                 }
+                let mut unknown = ListeningSocket::new(0, r.port, r.protocol, r.bind_address)
+                    .with_process_name("unknown");
+                unknown.unidentified = true;
+                sockets.push(unknown);
                 continue;
             };
             sockets.push(
@@ -75,7 +80,8 @@ impl SocketMonitor for LinuxSocketMonitor {
                     .with_cmdline(p.cmdline.clone())
                     .with_uid(p.uid.clone())
                     .with_foreign_mntns(p.foreign_mntns)
-                    .with_cwd(p.cwd.clone()),
+                    .with_cwd(p.cwd.clone())
+                    .with_in_service_unit(p.in_service_unit),
             );
         }
         Ok(sockets)
@@ -151,6 +157,8 @@ struct Proc {
     uid: Option<String>,
     foreign_mntns: bool,
     cwd: Option<String>,
+    /// Runs in a systemd service unit (`/proc/<pid>/cgroup`).
+    in_service_unit: bool,
 }
 
 /// One pass over /proc: which processes hold each of the `wanted` socket inodes.
@@ -208,6 +216,7 @@ fn read_proc(pid: u32) -> Proc {
             uid: None,
             foreign_mntns: false,
             cwd: None,
+            in_service_unit: false,
         };
     };
     // A binary replaced by an upgrade shows as "... (deleted)".
@@ -235,7 +244,17 @@ fn read_proc(pid: u32) -> Proc {
         uid: parse_status_uid(&status),
         foreign_mntns,
         cwd,
+        in_service_unit: std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+            .is_ok_and(|c| cgroup_has_service_unit(&c)),
     }
+}
+
+/// Whether the cgroup file of a process names a systemd service unit (`.../ssh.service`).
+fn cgroup_has_service_unit(cgroup: &str) -> bool {
+    cgroup
+        .lines()
+        .filter_map(|l| l.splitn(3, ':').nth(2))
+        .any(|path| path.split('/').any(|c| c.ends_with(".service")))
 }
 
 /// The effective uid from /proc/pid/status (`Uid: real effective saved fs`): what the
@@ -276,7 +295,30 @@ mod tests {
             uid: Some(uid.into()),
             foreign_mntns: false,
             cwd: None,
+            in_service_unit: false,
         }
+    }
+
+    #[test]
+    fn service_units_are_read_from_the_cgroup() {
+        assert!(cgroup_has_service_unit(
+            "0::/system.slice/ssh.service
+"
+        ));
+        assert!(cgroup_has_service_unit(
+            "12:cpu:/system.slice/docker.service
+0::/system.slice/docker.service
+"
+        ));
+        assert!(!cgroup_has_service_unit(
+            "0::/user.slice/user-1000.slice/session-3.scope
+"
+        ));
+        assert!(!cgroup_has_service_unit(
+            "0::/
+"
+        ));
+        assert!(!cgroup_has_service_unit(""));
     }
 
     #[test]

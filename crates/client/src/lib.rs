@@ -19,14 +19,15 @@ use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use serde::{de::DeserializeOwned, Serialize};
 use socketguard_core::api_types::{
-    ApiError, ApplyRequest, ApplyResponse, DisableRequest, Enforcement, EnforcementNotice,
-    ExportDocument, MergeRequest, NewGroup, NewNetwork, NewPeer, ParseCredentialsRequest,
-    ProtectHostRequest, ProtectHostResponse, ReviewRequest, SetMembers, SplitRequest,
-    StatusResponse, UpdateLabel, UpdateSettings,
+    ApiError, ApplyRequest, ApplyResponse, ChangesRequest, ChangesResponse, DisableRequest,
+    Enforcement, EnforcementNotice, ExportDocument, MemberQuery, MergeRequest, NewGroup,
+    NewNetwork, NewPeer, NewTag, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse,
+    ReviewRequest, SetMembers, ShareResponse, SplitRequest, StatusResponse, TorKeyResponse,
+    UpdateLabel, UpdateSettings, UpdateTag,
 };
 use socketguard_core::{
     ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
-    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, Settings,
+    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, PortRef, Settings, Tag, TagMember,
 };
 
 /// Environment variable that overrides the endpoint (socket path or pipe name).
@@ -99,6 +100,8 @@ pub struct Client {
 pub struct GrantQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -226,12 +229,21 @@ impl Client {
         body: Option<Vec<u8>>,
     ) -> Result<Saved<T>> {
         let (status, bytes) = self.call_status(route, params, None, body).await?;
+        self.saved_from(status, &bytes)
+    }
+
+    /// Read the answer of a change as [`Client::call_saved`] does.
+    fn saved_from<T: DeserializeOwned>(
+        &self,
+        status: StatusCode,
+        bytes: &Bytes,
+    ) -> Result<Saved<T>> {
         let bad = |e: serde_json::Error| Error::Protocol(format!("bad response: {e}"));
         // An empty body (204) is the unit value.
         let mut doc = if bytes.is_empty() {
             serde_json::Value::Null
         } else {
-            serde_json::from_slice(&bytes).map_err(bad)?
+            serde_json::from_slice(bytes).map_err(bad)?
         };
         let enforcement = if status == StatusCode::ACCEPTED {
             let notice: EnforcementNotice = serde_json::from_value(doc.clone()).map_err(bad)?;
@@ -297,6 +309,11 @@ impl Client {
         self.call_saved(&routes::MERGE_APP, &[id], json(req)).await
     }
 
+    /// What the app's granted Tor peers need to connect: their client authorization lines.
+    pub async fn share_app(&self, id: &str) -> Result<ShareResponse> {
+        self.call(&routes::SHARE_APP, &[id], None, None).await
+    }
+
     // ─── Peers ───────────────────────────────────────────────────────────────
 
     pub async fn list_peers(&self) -> Result<Vec<Peer>> {
@@ -336,6 +353,13 @@ impl Client {
         req: &NewCredential,
     ) -> Result<Saved<Credential>> {
         self.call_saved(&routes::ADD_CREDENTIAL, &[peer_id], json(req))
+            .await
+    }
+
+    /// Generate a Tor client key for the peer (replacing the one generated before). The
+    /// answer holds the private key; `share_app` hands it out later too.
+    pub async fn generate_tor_key(&self, peer_id: &str) -> Result<Saved<TorKeyResponse>> {
+        self.call_saved(&routes::GENERATE_TOR_KEY, &[peer_id], None)
             .await
     }
 
@@ -397,6 +421,60 @@ impl Client {
 
     pub async fn delete_grant(&self, id: &str) -> Result<Saved<()>> {
         self.call_saved(&routes::DELETE_GRANT, &[id], None).await
+    }
+
+    /// Apply many changes at once: all or nothing, one firewall update (ADR 0045). With
+    /// `dry_run` nothing is saved and the answer says what would change. An `AddGrant` to
+    /// Anyone needs `confirm_open`, else the whole batch is refused with the code
+    /// `confirmation_required`.
+    pub async fn changes(&self, req: &ChangesRequest) -> Result<Saved<ChangesResponse>> {
+        self.call_saved(&routes::CHANGES, &[], json(req)).await
+    }
+
+    // ─── Tags ────────────────────────────────────────────────────────────────
+
+    pub async fn list_tags(&self) -> Result<Vec<Tag>> {
+        self.call(&routes::LIST_TAGS, &[], None, None).await
+    }
+
+    pub async fn create_tag(&self, req: &NewTag) -> Result<Saved<Tag>> {
+        self.call_saved(&routes::CREATE_TAG, &[], json(req)).await
+    }
+
+    pub async fn get_tag(&self, id: &str) -> Result<Tag> {
+        self.call(&routes::GET_TAG, &[id], None, None).await
+    }
+
+    /// Rename a tag and/or replace its patterns.
+    pub async fn update_tag(&self, id: &str, req: &UpdateTag) -> Result<Saved<Tag>> {
+        self.call_saved(&routes::UPDATE_TAG, &[id], json(req)).await
+    }
+
+    pub async fn delete_tag(&self, id: &str) -> Result<Saved<()>> {
+        self.call_saved(&routes::DELETE_TAG, &[id], None).await
+    }
+
+    pub async fn add_tag_member(&self, tag_id: &str, member: &TagMember) -> Result<Saved<Tag>> {
+        self.call_saved(&routes::ADD_TAG_MEMBER, &[tag_id], json(member))
+            .await
+    }
+
+    /// Remove an app (`port` None) or one port of it from a tag.
+    pub async fn remove_tag_member(
+        &self,
+        tag_id: &str,
+        app_id: &str,
+        port: Option<PortRef>,
+    ) -> Result<Saved<Tag>> {
+        let query = MemberQuery {
+            port: port.map(|p| p.port),
+            proto: port.map(|p| p.proto),
+        };
+        let q = serde_urlencoded::to_string(&query).ok();
+        let (status, bytes) = self
+            .call_status(&routes::REMOVE_TAG_MEMBER, &[tag_id, app_id], q, None)
+            .await?;
+        self.saved_from(status, &bytes)
     }
 
     // ─── Networks ────────────────────────────────────────────────────────────

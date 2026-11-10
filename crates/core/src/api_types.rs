@@ -3,7 +3,12 @@
 //! TypeScript binding (ADR 0033).
 
 use crate::config::BackendConfig;
-use crate::model::{AddressId, AddressMode, CredentialKind, Network, PeerId, PortRef, Settings};
+use crate::model::{
+    AddressId, AddressMode, AppId, Credential, CredentialKind, GrantId, Network, NetworkId,
+    NewCredential, PeerId, PortRef, Settings, Subject, TagId, Target,
+};
+use crate::reach::GrantReach;
+use crate::tags::TagMember;
 use crate::types::Protocol;
 use serde::{Deserialize, Serialize};
 
@@ -303,6 +308,9 @@ pub enum ChangeItem {
     Peer,
     Group,
     Grant,
+    Tag,
+    TagMember,
+    App,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -334,6 +342,174 @@ impl ApplyResponse {
     }
 }
 
+// ─── Tags ────────────────────────────────────────────────────────────────────
+
+/// Body of `POST /api/tags`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewTag {
+    pub label: String,
+    /// Globs on the process name or the executable path (ADR 0043).
+    #[serde(default)]
+    pub patterns: Vec<String>,
+    #[serde(default)]
+    pub members: Vec<TagMember>,
+}
+
+/// Body of `PATCH /api/tags/{id}`. Absent fields stay as they are.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateTag {
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub label: Option<String>,
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub patterns: Option<Vec<String>>,
+}
+
+/// Query of `DELETE /api/tags/{id}/members/{app_id}`: without `port` the whole-app
+/// membership goes, with it the membership of that port.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub proto: Option<Protocol>,
+}
+
+// ─── Batch changes ───────────────────────────────────────────────────────────
+
+/// One operation of `POST /api/changes` (ADR 0045). Wherever an id goes, a `ref` of an
+/// earlier create operation may stand in for it.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ChangeOp {
+    CreatePeer {
+        /// A client-chosen name starting with `$`, e.g. `$new0`.
+        #[serde(rename = "ref", default)]
+        #[cfg_attr(feature = "ts", ts(optional, rename = "ref"))]
+        ref_: Option<String>,
+        label: String,
+        #[serde(default)]
+        credentials: Vec<NewCredential>,
+    },
+    CreateTag {
+        #[serde(rename = "ref", default)]
+        #[cfg_attr(feature = "ts", ts(optional, rename = "ref"))]
+        ref_: Option<String>,
+        label: String,
+        #[serde(default)]
+        patterns: Vec<String>,
+    },
+    AddGrant {
+        target: Target,
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        port: Option<PortRef>,
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        network_id: Option<NetworkId>,
+        subject: Subject,
+        /// Needed when the subject is Anyone; without it the whole batch is refused.
+        #[serde(default)]
+        confirm_open: bool,
+    },
+    RemoveGrant {
+        grant_id: GrantId,
+    },
+    AddTagMember {
+        tag_id: TagId,
+        app_id: AppId,
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        port: Option<PortRef>,
+    },
+    RemoveTagMember {
+        tag_id: TagId,
+        app_id: AppId,
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        port: Option<PortRef>,
+    },
+    Review {
+        app_id: AppId,
+        reviewed: bool,
+    },
+}
+
+/// Body of `POST /api/changes`: the operations are applied in order, all or nothing, with
+/// one firewall update. With `dry_run` nothing is saved.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangesRequest {
+    pub ops: Vec<ChangeOp>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// One entry of the diff of a batch.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchChange {
+    #[serde(flatten)]
+    pub change: Change,
+    /// The id of what was created or removed (a dry run shows the id it would get).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub id: Option<String>,
+    /// For a grant: how well its subject is identified on each network it applies to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reach: Vec<GrantReach>,
+}
+
+/// Result of `POST /api/changes`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChangesResponse {
+    pub dry_run: bool,
+    /// Each `ref` of the request and the id it stands for.
+    pub refs: std::collections::BTreeMap<String, String>,
+    pub changes: Vec<BatchChange>,
+}
+
+// ─── Tor client keys and sharing ─────────────────────────────────────────────
+
+/// Result of `POST /api/peers/{id}/tor-key`: the new credential and, once, its private
+/// key in base32 (the daemon keeps it too, for `share`).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TorKeyResponse {
+    pub credential: Credential,
+    pub private_key: String,
+}
+
+/// What a granted Tor peer needs to reach an app's onion service.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TorShare {
+    pub network_id: NetworkId,
+    /// The service's `.onion` name.
+    pub hostname: String,
+    pub peer_id: PeerId,
+    pub peer_label: String,
+    /// The line for a file `<name>.auth_private` in the client's `ClientOnionAuthDir`:
+    /// `<onion name without .onion>:descriptor:x25519:<base32 private key>`.
+    pub auth_private: String,
+}
+
+/// Response of `GET /api/apps/{id}/share`: what the app's own addresses cannot tell.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareResponse {
+    /// One entry per granted peer with a key the daemon generated, per onion service.
+    pub tor: Vec<TorShare>,
+}
+
 // ─── Events ──────────────────────────────────────────────────────────────────
 
 /// Names of the `GET /api/events` server-sent events.
@@ -342,6 +518,7 @@ pub mod event_name {
     pub const APP_DISCOVERED: &str = "app_discovered";
     pub const PEERS_CHANGED: &str = "peers_changed";
     pub const GRANTS_CHANGED: &str = "grants_changed";
+    pub const TAGS_CHANGED: &str = "tags_changed";
     pub const NETWORKS_CHANGED: &str = "networks_changed";
     pub const SETTINGS_CHANGED: &str = "settings_changed";
     pub const ACTIVITY: &str = "activity";
@@ -357,6 +534,7 @@ pub enum ApiEvent {
     AppDiscovered(String),
     PeersChanged,
     GrantsChanged,
+    TagsChanged,
     NetworksChanged,
     SettingsChanged,
     Activity,
@@ -375,6 +553,7 @@ impl ApiEvent {
             ApiEvent::AppDiscovered(_) => event_name::APP_DISCOVERED,
             ApiEvent::PeersChanged => event_name::PEERS_CHANGED,
             ApiEvent::GrantsChanged => event_name::GRANTS_CHANGED,
+            ApiEvent::TagsChanged => event_name::TAGS_CHANGED,
             ApiEvent::NetworksChanged => event_name::NETWORKS_CHANGED,
             ApiEvent::SettingsChanged => event_name::SETTINGS_CHANGED,
             ApiEvent::Activity => event_name::ACTIVITY,
@@ -390,6 +569,7 @@ impl ApiEvent {
             APP_DISCOVERED => ApiEvent::AppDiscovered(data.to_string()),
             PEERS_CHANGED => ApiEvent::PeersChanged,
             GRANTS_CHANGED => ApiEvent::GrantsChanged,
+            TAGS_CHANGED => ApiEvent::TagsChanged,
             NETWORKS_CHANGED => ApiEvent::NetworksChanged,
             SETTINGS_CHANGED => ApiEvent::SettingsChanged,
             ACTIVITY => ApiEvent::Activity,

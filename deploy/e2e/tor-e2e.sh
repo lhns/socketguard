@@ -112,31 +112,24 @@ sleep 5
 step "no grant: still nothing after a reconcile pass" nothing_published
 
 # ── Keys for B ───────────────────────────────────────────────────────────────
-KEYS="$(Bi python3 - <<'PY'
-import base64
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, PublicFormat, NoEncryption
-k = X25519PrivateKey.generate()
-b32 = lambda b: base64.b32encode(b).decode().rstrip("=")
-print(b32(k.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)))
-print(b32(k.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())))
-PY
-)"
-PUB="$(echo "$KEYS" | sed -n 1p)"; PRIV="$(echo "$KEYS" | sed -n 2p)"
-[ ${#PUB} -eq 52 ] && [ ${#PRIV} -eq 52 ] || { fail "generate an x25519 key pair"; exit 1; }
-pass "generated an x25519 key pair for B"
+# The daemon generates B's key pair (ADR 0045) and `share` hands out the client's
+# ClientOnionAuthDir line, so B uses exactly what a user would copy.
+step "add a peer for B without credentials" A $SG peers add bnode
+step "the daemon generates a Tor client key for the peer" A $SG peers tor-key bnode
+step "the generated key is stored as a Tor client key" sh -c "docker exec $NODE_A $SG peers show bnode --json | jq -e '.credentials | length == 1 and .[0].kind == \"tor_client_key\" and (.[0].value | length == 52)' >/dev/null"
+step "grant the listener's port to that peer" A $SG grant "$APP_ID:$PORT" bnode --network tor
+step "the grant is verified on Tor" sh -c "docker exec $NODE_A $SG grants --app $APP_ID --json | jq -e '.[0].reach[0].reach == \"verified\"' >/dev/null"
+AUTH_LINE="$(docker exec $NODE_A $SG share $APP_ID --network tor --json | jq -r '.[] | select(contains(":descriptor:x25519:"))')"
+[ "${AUTH_LINE%%:descriptor:x25519:*}" = "${ONION%.onion}" ] && [ ${#AUTH_LINE} -gt 100 ] || { fail "share prints the client authorization line (got: $AUTH_LINE)"; exit 1; }
+pass "share prints the client authorization line for B"
 
 # B's client tor learns the key, the third client gets none; both bootstrap meanwhile.
 # ClientOnionAuthDir is read when tor starts, so the key goes in first.
 B sh -c "install -d -o debian-tor -g debian-tor -m 700 /var/lib/tor-b /var/lib/tor-b/onion_auth"
-B sh -c "echo '${ONION%.onion}:descriptor:x25519:$PRIV' > /var/lib/tor-b/onion_auth/a.auth_private && chown debian-tor /var/lib/tor-b/onion_auth/a.auth_private && chmod 600 /var/lib/tor-b/onion_auth/a.auth_private"
+B sh -c "echo '$AUTH_LINE' > /var/lib/tor-b/onion_auth/a.auth_private && chown debian-tor /var/lib/tor-b/onion_auth/a.auth_private && chmod 600 /var/lib/tor-b/onion_auth/a.auth_private"
 tor_start "$NODE_B" /var/lib/tor-b /etc/torrc-b /var/log/tor-b.log
 tor_start "$NODE_B" /var/lib/tor-c /etc/torrc-c /var/log/tor-c.log
 
-step "add a peer holding B's Tor key" A $SG peers add bnode --tor-key "$PUB"
-step "the peer's key is stored normalized" sh -c "docker exec $NODE_A $SG peers show bnode --json | jq -e --arg k '$PUB' '.credentials[0].kind == \"tor_client_key\" and .credentials[0].value == \$k' >/dev/null"
-step "grant the listener's port to that peer" A $SG grant "$APP_ID:$PORT" bnode --network tor
-step "the grant is verified on Tor" sh -c "docker exec $NODE_A $SG grants --app $APP_ID --json | jq -e '.[0].reach[0].reach == \"verified\"' >/dev/null"
 step "granted: the service is published" retry 30 one_published
 # The daemon generated the key and name itself; the ServiceID Tor derived from that key on
 # the first ADD_ONION must be the same name (`apps show` reports the local one).

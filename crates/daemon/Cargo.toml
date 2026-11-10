@@ -42,6 +42,7 @@ tracing-opentelemetry = "0.34"
 curve25519-dalek = "4"
 sha3 = "0.10"
 base64 = "0.22"
+data-encoding = { workspace = true }
 
 [dev-dependencies]
 socketguard-daemon = { path = ".", features = ["test-support"] }

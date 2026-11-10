@@ -29,6 +29,7 @@ impl Engine {
             exe_path: Option<String>,
             interpreter_arg: Option<String>,
             identity_note: Option<String>,
+            system: bool,
             ports: BTreeMap<PortRef, AddrFamily>,
         }
         let mut live: BTreeMap<AppId, Live> = BTreeMap::new();
@@ -42,6 +43,7 @@ impl Engine {
                 name,
                 interpreter_arg,
                 note,
+                system,
             } = app_identity(ls);
             let port_ref = PortRef {
                 port: ls.port,
@@ -60,6 +62,7 @@ impl Engine {
                     exe_path: ls.exe_path.clone(),
                     interpreter_arg,
                     identity_note: note,
+                    system,
                     ports: BTreeMap::new(),
                 })
                 .ports
@@ -84,7 +87,7 @@ impl Engine {
             let ports: Vec<(PortRef, AddrFamily)> = l.ports.iter().map(|(p, f)| (*p, *f)).collect();
             if !known.contains_key(id) {
                 info!("New app detected: {} ({id})", l.name);
-                db.insert_app(&App {
+                let app = App {
                     id: id.clone(),
                     name: l.name.clone(),
                     process_name: l.process_name.clone(),
@@ -92,12 +95,14 @@ impl Engine {
                     interpreter_arg: l.interpreter_arg.clone(),
                     identity_note: l.identity_note.clone(),
                     reviewed: false,
+                    system: l.system,
                     first_seen: now,
                     last_seen: now,
                     ports: vec![],
                     addresses: vec![],
-                })
-                .await?;
+                };
+                db.insert_app(&app).await?;
+                self.tag_new_app(state, &app).await;
                 self.record(
                     state,
                     NewActivity::new(
@@ -110,7 +115,7 @@ impl Engine {
                 self.emit(state, DaemonEvent::AppDiscovered(id.clone()));
                 changed = true;
             } else {
-                db.touch_app(id, &l.process_name, l.exe_path.as_deref(), now)
+                db.touch_app(id, &l.process_name, l.exe_path.as_deref(), l.system, now)
                     .await?;
             }
             let was_listening: BTreeSet<PortRef> = known

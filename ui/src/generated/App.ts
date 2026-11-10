@@ -19,4 +19,9 @@ identity_note: string | null,
 /**
  * False = pending: no decision has been made about this app yet.
  */
-reviewed: boolean, first_seen: string, last_seen: string, ports: Array<AppPort>, addresses: Array<Address>, };
+reviewed: boolean, 
+/**
+ * An OS component (service or system process), so frontends can group it away from
+ * the user's own apps.
+ */
+system: boolean, first_seen: string, last_seen: string, ports: Array<AppPort>, addresses: Array<Address>, };

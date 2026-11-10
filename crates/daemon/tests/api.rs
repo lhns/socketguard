@@ -380,7 +380,7 @@ async fn grants_with_reach_filters_and_errors() {
     let (s, grant) = d
         .post(
             "/api/grants",
-            json!({"app_id": app_id, "subject": {"kind": "peer", "id": alice}}),
+            json!({"target": {"kind": "app", "id": app_id}, "subject": {"kind": "peer", "id": alice}}),
         )
         .await;
     assert_eq!(s, StatusCode::CREATED, "{grant}");
@@ -405,7 +405,7 @@ async fn grants_with_reach_filters_and_errors() {
     let (s, _) = d
         .post(
             "/api/grants",
-            json!({"app_id": app_id, "subject": {"kind": "group", "id": gid}}),
+            json!({"target": {"kind": "app", "id": app_id}, "subject": {"kind": "group", "id": gid}}),
         )
         .await;
     assert_eq!(s, StatusCode::CREATED);
@@ -445,23 +445,23 @@ async fn grants_with_reach_filters_and_errors() {
     let (s, body) = d
         .post(
             "/api/grants",
-            json!({"app_id": app_id, "subject": {"kind": "peer", "id": alice}}),
+            json!({"target": {"kind": "app", "id": app_id}, "subject": {"kind": "peer", "id": alice}}),
         )
         .await;
     assert_eq!((s, code(&body)), (StatusCode::CONFLICT, "conflict"));
     let (s, body) = d
         .post(
             "/api/grants",
-            json!({"app_id": "nope", "subject": {"kind": "anyone"}, "confirm_open": true}),
+            json!({"target": {"kind": "app", "id": "nope"}, "subject": {"kind": "anyone"}, "confirm_open": true}),
         )
         .await;
     assert_eq!((s, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
     let (s, body) = d
-        .post("/api/grants", json!({"app_id": app_id, "port": {"port": 9, "proto": "tcp"}, "subject": {"kind": "peer", "id": alice}}))
+        .post("/api/grants", json!({"target": {"kind": "app", "id": app_id}, "port": {"port": 9, "proto": "tcp"}, "subject": {"kind": "peer", "id": alice}}))
         .await;
     assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
     let (s, body) = d
-        .post("/api/grants", json!({"app_id": app_id, "network_id": "local", "subject": {"kind": "peer", "id": alice}}))
+        .post("/api/grants", json!({"target": {"kind": "app", "id": app_id}, "network_id": "local", "subject": {"kind": "peer", "id": alice}}))
         .await;
     assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "local_network"));
     assert_eq!(body["message"], "Local is this machine only");
@@ -483,7 +483,7 @@ async fn a_grant_to_anyone_needs_confirmation() {
     let (s, body) = d
         .post(
             "/api/grants",
-            json!({"app_id": app_id, "subject": {"kind": "anyone"}}),
+            json!({"target": {"kind": "app", "id": app_id}, "subject": {"kind": "anyone"}}),
         )
         .await;
     assert_eq!(
@@ -495,7 +495,7 @@ async fn a_grant_to_anyone_needs_confirmation() {
     let (s, grant) = d
         .post(
             "/api/grants",
-            json!({"app_id": app_id, "subject": {"kind": "anyone"}, "confirm_open": true}),
+            json!({"target": {"kind": "app", "id": app_id}, "subject": {"kind": "anyone"}, "confirm_open": true}),
         )
         .await;
     assert_eq!(s, StatusCode::CREATED, "{grant}");
@@ -961,12 +961,15 @@ async fn populated() -> Daemon {
         json!({"kind": "group", "id": id(&team)}),
     ] {
         let (s, b) = d
-            .post("/api/grants", json!({"app_id": app_id, "subject": subject}))
+            .post(
+                "/api/grants",
+                json!({"target": {"kind": "app", "id": app_id}, "subject": subject}),
+            )
             .await;
         assert_eq!(s, StatusCode::CREATED, "{b}");
     }
     let (s, b) = d
-        .post("/api/grants", json!({"app_id": app_id, "network_id": "ygg", "port": {"port": 80, "proto": "tcp"}, "subject": {"kind": "anyone"}, "confirm_open": true}))
+        .post("/api/grants", json!({"target": {"kind": "app", "id": app_id}, "network_id": "ygg", "port": {"port": 80, "proto": "tcp"}, "subject": {"kind": "anyone"}, "confirm_open": true}))
         .await;
     assert_eq!(s, StatusCode::CREATED, "{b}");
     d

@@ -115,6 +115,7 @@ export const EVENT_INVALIDATIONS: Record<string, string[][]> = {
   app_discovered: [["apps"], ["app"], ["status"]],
   peers_changed: [["peers"], ["groups"], ["grants"], ["app"]],
   grants_changed: [["grants"], ["apps"], ["app"]],
+  tags_changed: [["tags"], ["grants"], ["app"]],
   networks_changed: [["networks"], ["status"], ["app"]],
   settings_changed: [["settings"], ["status"]],
   activity: [["activity"]],

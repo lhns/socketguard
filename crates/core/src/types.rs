@@ -110,6 +110,13 @@ pub struct ListeningSocket {
     /// against it for the app identity.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// The process owning the socket could not be identified (ADR 0046): the socket becomes
+    /// an app of its own, `unknown:<proto>/<port>`.
+    #[serde(default)]
+    pub unidentified: bool,
+    /// Linux: the process runs in a systemd service unit.
+    #[serde(default)]
+    pub in_service_unit: bool,
 }
 
 impl ListeningSocket {
@@ -126,6 +133,8 @@ impl ListeningSocket {
             uid: None,
             foreign_mntns: false,
             cwd: None,
+            unidentified: false,
+            in_service_unit: false,
         }
     }
 
@@ -167,6 +176,11 @@ impl ListeningSocket {
 
     pub fn with_cwd(mut self, cwd: Option<String>) -> Self {
         self.cwd = cwd;
+        self
+    }
+
+    pub fn with_in_service_unit(mut self, in_unit: bool) -> Self {
+        self.in_service_unit = in_unit;
         self
     }
 

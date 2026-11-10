@@ -41,6 +41,7 @@ fn nginx() -> App {
         interpreter_arg: None,
         identity_note: None,
         reviewed: true,
+        system: false,
         first_seen: t("2026-11-01T08:00:00Z"),
         last_seen: t("2026-11-09T12:30:00Z"),
         ports: vec![
@@ -88,6 +89,7 @@ fn redis() -> App {
         interpreter_arg: None,
         identity_note: None,
         reviewed: false,
+        system: false,
         first_seen: t("2026-11-09T09:00:00Z"),
         last_seen: t("2026-11-09T12:30:00Z"),
         ports: vec![AppPort {
@@ -143,7 +145,7 @@ fn grant(
     GrantView {
         grant: Grant {
             id: id.into(),
-            app_id: "5c0d1f2a99887766".into(),
+            target: Target::App("5c0d1f2a99887766".into()),
             port: port.map(tcp),
             network_id: net.map(Into::into),
             subject,
@@ -266,6 +268,8 @@ fn app_detail() {
             packets: 1234,
             bytes: 567890,
         }],
+        access: vec![],
+        tags: vec![],
     };
     insta::assert_snapshot!(render::app_detail(&d, &names()));
 }
@@ -276,6 +280,8 @@ fn closed_app_detail() {
         app: redis(),
         grants: vec![],
         counters: vec![],
+        access: vec![],
+        tags: vec![],
     };
     insta::assert_snapshot!(render::app_detail(&d, &names()));
 }

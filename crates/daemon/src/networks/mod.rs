@@ -11,6 +11,7 @@ pub mod ip;
 pub mod ledger;
 pub mod onion_key;
 pub mod tor;
+pub mod tor_client_key;
 pub mod tor_control;
 
 use crate::iface::InterfaceManager;
@@ -216,12 +217,9 @@ pub fn enforcement_for(
                 .into_iter()
                 .filter(|p| listening.contains(p))
                 .collect();
-            let grants = snap
-                .grants
+            let grants = socketguard_core::grants_for_app(&snap.grants, &snap.tags, &app.id)
                 .iter()
-                .filter(|g| {
-                    g.app_id == app.id && g.network_id.as_deref().is_none_or(|n| n == network.id)
-                })
+                .filter(|g| g.network_id.as_deref().is_none_or(|n| n == network.id))
                 .map(|g| EnforcedGrant {
                     port: g.port,
                     subject: match &g.subject {

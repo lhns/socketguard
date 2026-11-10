@@ -14,11 +14,14 @@
 //! reconcile pass.
 
 mod addresses;
+mod batch;
 mod discovery;
 mod enforce;
 mod firewall;
 mod mutations;
 mod queries;
+mod tags;
+mod torkeys;
 
 use addresses::disable_all;
 pub use addresses::plan_addresses;
@@ -117,7 +120,10 @@ impl From<CredentialError> for EngineError {
 /// Filter for [`Engine::list_grants`].
 #[derive(Debug, Clone, Default)]
 pub struct GrantFilter {
+    /// Grants on this app itself (not through a tag).
     pub app_id: Option<String>,
+    /// Grants on this tag.
+    pub tag_id: Option<String>,
     /// Grants to this peer, directly or through one of its groups.
     pub peer_id: Option<String>,
     pub group_id: Option<String>,

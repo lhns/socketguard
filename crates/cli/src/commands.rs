@@ -5,7 +5,7 @@
 use crate::cli::*;
 use crate::document;
 use crate::flows;
-use crate::parse::{self, SubjectSpec};
+use crate::parse::{self, SubjectSpec, TargetSpec};
 use crate::prompt::{self, Prompter};
 use crate::render::{self, Names};
 use crate::resolve::{resolve, short};
@@ -16,13 +16,14 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use socketguard_client::{ApiEvent, Client, Error as ApiError, GrantQuery, Saved};
 use socketguard_core::api_types::{
-    error_code, ApplyRequest, Enforcement, LockoutRiskInfo, MergeRequest, NewGroup, NewNetwork,
-    NewPeer, ProtectHostRequest, ProtectHostResponse, SplitRequest, UpdateSettings,
+    error_code, ApplyRequest, ChangeOp, ChangesRequest, Enforcement, LockoutRiskInfo, MergeRequest,
+    NewGroup, NewNetwork, NewPeer, NewTag, ProtectHostRequest, ProtectHostResponse, SplitRequest,
+    UpdateSettings, UpdateTag,
 };
 use socketguard_core::config::TorAuth;
 use socketguard_core::{
     ActivityKind, ActivityQuery, ActivityRecord, App, BackendConfig, CredentialKind, GrantView,
-    NewCredential, NewGrant, Peer, PeerGroup, PortRef, Subject,
+    NewCredential, NewGrant, Peer, PeerGroup, PortRef, Subject, Tag, TagMember, Target,
 };
 
 /// What every command needs: the client and the output mode.
@@ -48,6 +49,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Apps(cmd) => apps(&c, cmd).await,
         Command::Peers(cmd) => peers(&c, cmd).await,
         Command::Groups(cmd) => groups(&c, cmd).await,
+        Command::Tags(cmd) => tags(&c, cmd).await,
         Command::Grant(a) => grant(&c, a).await,
         Command::Revoke(a) => revoke(&c, a).await,
         Command::Grants(a) => grants(&c, a).await,
@@ -157,7 +159,8 @@ impl Ctx {
             &self.apps().await?,
             &self.client.list_peers().await?,
             &self.client.list_groups().await?,
-        ))
+        )
+        .with_tags(&self.client.list_tags().await?))
     }
 
     async fn subject(&self, spec: &SubjectSpec) -> Result<Subject> {
@@ -500,7 +503,11 @@ async fn apps(c: &Ctx, cmd: AppsCmd) -> Result<()> {
 async fn share(c: &Ctx, a: ShareArgs) -> Result<()> {
     let app = c.app(&a.app).await?;
     let detail = c.client.get_app(&app.id).await?;
-    let lines = render::share_lines(&detail.app, a.network.as_deref());
+    let mut lines = render::share_lines(&detail.app, a.network.as_deref());
+    let mut tor = c.client.share_app(&app.id).await?;
+    tor.tor
+        .retain(|t| a.network.as_deref().is_none_or(|n| n == t.network_id));
+    lines.extend(render::tor_share(&tor));
     if lines.is_empty() && !c.json {
         bail!("{} has no address to share yet", app.name);
     }
@@ -549,6 +556,13 @@ async fn peers(c: &Ctx, cmd: PeersCmd) -> Result<()> {
         PeersCmd::Parse { values } => {
             let parsed = c.client.parse_credentials(&values.join(" ")).await?;
             c.print(&parsed, || render::parsed_credentials(&parsed))
+        }
+        PeersCmd::TorKey { peer } => {
+            let peer = c.peer(&peer).await?;
+            let saved = c.client.generate_tor_key(&peer.id).await?;
+            c.warn_pending(&saved.enforcement);
+            let key = saved.value;
+            c.print(&key, || render::tor_key(&peer.label, &key))
         }
         PeersCmd::Rename { peer, new_label } => {
             let peer = c.peer(&peer).await?;
@@ -680,27 +694,326 @@ fn member_ids(all: &[Peer], queries: &[String]) -> Result<Vec<String>> {
         .collect()
 }
 
+// ─── Tags ────────────────────────────────────────────────────────────────────
+
+/// `<app>[:port[/proto]]` texts as tag members.
+async fn tag_members(c: &Ctx, texts: &[String]) -> Result<Vec<TagMember>> {
+    let mut out = Vec::new();
+    for t in texts {
+        let (app, port) = parse::parse_target(t);
+        out.push(TagMember {
+            app_id: c.app(&app).await?.id,
+            port,
+        });
+    }
+    Ok(out)
+}
+
+async fn tags(c: &Ctx, cmd: TagsCmd) -> Result<()> {
+    match cmd {
+        TagsCmd::List => {
+            let t = c.client.list_tags().await?;
+            let names = c.names().await?;
+            c.print(&t, || render::tags(&t, &names))
+        }
+        TagsCmd::Show { tag } => {
+            let tag = c.tag(&tag).await?;
+            let grants = c
+                .client
+                .list_grants(&GrantQuery {
+                    tag: Some(tag.id.clone()),
+                    ..Default::default()
+                })
+                .await?;
+            let names = c.names().await?;
+            c.print(&tag, || render::tag_detail(&tag, &names, &grants))
+        }
+        TagsCmd::Add {
+            label,
+            members,
+            patterns,
+        } => {
+            let members = tag_members(c, &members).await?;
+            let saved = c
+                .client
+                .create_tag(&NewTag {
+                    label,
+                    patterns,
+                    members,
+                })
+                .await?;
+            c.warn_pending(&saved.enforcement);
+            let tag = saved.value;
+            let names = c.names().await?;
+            c.print(&tag, || {
+                format!(
+                    "added tag {}\n\n{}",
+                    tag.label,
+                    render::tags(std::slice::from_ref(&tag), &names)
+                )
+            })
+        }
+        TagsCmd::Rename { tag, new_label } => {
+            let tag = c.tag(&tag).await?;
+            let saved = c
+                .client
+                .update_tag(
+                    &tag.id,
+                    &UpdateTag {
+                        label: Some(new_label),
+                        patterns: None,
+                    },
+                )
+                .await?;
+            c.warn_pending(&saved.enforcement);
+            let r = saved.value;
+            c.print(&r, || format!("renamed {} to {}", tag.label, r.label))
+        }
+        TagsCmd::Patterns { tag, patterns } => {
+            let tag = c.tag(&tag).await?;
+            let saved = c
+                .client
+                .update_tag(
+                    &tag.id,
+                    &UpdateTag {
+                        label: None,
+                        patterns: Some(patterns),
+                    },
+                )
+                .await?;
+            c.warn_pending(&saved.enforcement);
+            let r = saved.value;
+            let names = c.names().await?;
+            c.print(&r, || render::tag_detail(&r, &names, &[]))
+        }
+        TagsCmd::Rm { tag } => {
+            let tag = c.tag(&tag).await?;
+            let saved = c.client.delete_tag(&tag.id).await?;
+            c.done_saved(saved, format!("removed tag {} and its grants", tag.label))
+        }
+        TagsCmd::Members(TagMembersCmd::Add { tag, members }) => {
+            let tag = c.tag(&tag).await?;
+            let mut last = tag.clone();
+            for m in tag_members(c, &members).await? {
+                let saved = c.client.add_tag_member(&tag.id, &m).await?;
+                c.warn_pending(&saved.enforcement);
+                last = saved.value;
+            }
+            let names = c.names().await?;
+            c.print(&last, || render::tag_detail(&last, &names, &[]))
+        }
+        TagsCmd::Members(TagMembersCmd::Rm { tag, members }) => {
+            let tag = c.tag(&tag).await?;
+            let mut last = tag.clone();
+            for m in tag_members(c, &members).await? {
+                let saved = c
+                    .client
+                    .remove_tag_member(&tag.id, &m.app_id, m.port)
+                    .await?;
+                c.warn_pending(&saved.enforcement);
+                last = saved.value;
+            }
+            let names = c.names().await?;
+            c.print(&last, || render::tag_detail(&last, &names, &[]))
+        }
+    }
+}
+
 // ─── Grants ──────────────────────────────────────────────────────────────────
 
+/// What a `grant` or `revoke` names, resolved: targets with their own port, subjects and
+/// networks. Every combination is one grant.
+struct GrantSpec {
+    /// Target, its port, and how the user spelled it (for questions).
+    targets: Vec<(Target, Option<PortRef>, String)>,
+    subjects: Vec<Subject>,
+    networks: Vec<Option<String>>,
+}
+
+impl GrantSpec {
+    fn ops(&self, confirm_open: bool) -> Vec<ChangeOp> {
+        let mut ops = Vec::new();
+        for (target, port, _) in &self.targets {
+            for network_id in &self.networks {
+                for subject in &self.subjects {
+                    ops.push(ChangeOp::AddGrant {
+                        target: target.clone(),
+                        port: *port,
+                        network_id: network_id.clone(),
+                        subject: subject.clone(),
+                        confirm_open,
+                    });
+                }
+            }
+        }
+        ops
+    }
+
+    fn names(&self) -> String {
+        self.targets
+            .iter()
+            .map(|t| t.2.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl Ctx {
+    async fn tag(&self, query: &str) -> Result<Tag> {
+        Ok(resolve("tag", &self.client.list_tags().await?, query)?.clone())
+    }
+
+    async fn target(&self, spec: &TargetSpec) -> Result<Target> {
+        Ok(match spec {
+            TargetSpec::App(q) => Target::App(self.app(q).await?.id),
+            TargetSpec::Tag(q) => Target::Tag(self.tag(q).await?.id),
+        })
+    }
+
+    /// The targets named by positional/`--app`/`--tag` texts, crossed with `--port` for
+    /// those that carry no port of their own.
+    async fn targets(
+        &self,
+        targets: &[String],
+        tags: &[String],
+        ports: &[String],
+    ) -> Result<Vec<(Target, Option<PortRef>, String)>> {
+        let extra: Vec<Option<PortRef>> = if ports.is_empty() {
+            vec![None]
+        } else {
+            ports
+                .iter()
+                .map(|p| parse::parse_port(p).map(Some))
+                .collect::<Result<_>>()?
+        };
+        let mut specs: Vec<(TargetSpec, Option<PortRef>, String)> = Vec::new();
+        for t in targets {
+            let (spec, port) = parse::parse_target_spec(t);
+            specs.push((spec, port, t.clone()));
+        }
+        for t in tags {
+            let (label, port) = parse::parse_target(t);
+            specs.push((TargetSpec::Tag(label), port, format!("tag:{t}")));
+        }
+        let mut out = Vec::new();
+        for (spec, own, text) in specs {
+            let target = self.target(&spec).await?;
+            let ports = if own.is_some() {
+                vec![own]
+            } else {
+                extra.clone()
+            };
+            for port in ports {
+                out.push((target.clone(), port, text.clone()));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn grant_spec(
+        &self,
+        targets: &[String],
+        tags: &[String],
+        ports: &[String],
+        to: &[String],
+        networks: &[String],
+    ) -> Result<GrantSpec> {
+        let mut subjects = Vec::new();
+        for s in to {
+            subjects.push(self.subject(&parse::parse_subject(s)).await?);
+        }
+        Ok(GrantSpec {
+            targets: self.targets(targets, tags, ports).await?,
+            subjects,
+            networks: if networks.is_empty() {
+                vec![None]
+            } else {
+                networks.iter().cloned().map(Some).collect()
+            },
+        })
+    }
+}
+
+/// Whether `grant`/`revoke` got the flag form (several targets, subjects or ports).
+fn uses_flags(apps: &[String], tags: &[String], ports: &[String], to: &[String]) -> bool {
+    !(apps.is_empty() && tags.is_empty() && ports.is_empty() && to.is_empty())
+}
+
 async fn grant(c: &Ctx, a: GrantArgs) -> Result<()> {
-    let (app_q, port) = parse::parse_target(&a.target);
-    let app = c.app(&app_q).await?;
-    let subject = c.subject(&parse::parse_subject(&a.subject)).await?;
+    let flags = uses_flags(&a.apps, &a.tags, &a.ports, &a.to);
+    let (targets, to) = match (&a.target, &a.subject) {
+        (Some(t), Some(s)) if !flags => (vec![t.clone()], vec![s.clone()]),
+        (None, None) if flags => (a.apps.clone(), a.to.clone()),
+        (Some(_), _) | (_, Some(_)) if flags => {
+            bail!("give either <target> <subject> or the --app/--tag/--to flags, not both")
+        }
+        _ => bail!(
+            "give <app> <subject>, or --to with --app and/or --tag \
+             (e.g. grant --app web --app api --port 80 --to alice)"
+        ),
+    };
+    if flags && (a.to.is_empty() || a.apps.is_empty() && a.tags.is_empty()) {
+        bail!("--to and at least one of --app or --tag are needed");
+    }
+    let spec = c
+        .grant_spec(&targets, &a.tags, &a.ports, &to, &a.networks)
+        .await?;
+    // One grant by the positional form keeps the single-grant route and its answer.
+    if !flags && spec.networks.len() == 1 && !a.dry_run {
+        return grant_one(c, &a, spec).await;
+    }
+    let mut req = ChangesRequest {
+        ops: spec.ops(a.yes),
+        dry_run: a.dry_run,
+    };
+    let saved = match c.client.changes(&req).await {
+        Err(e) if e.is_confirmation_required() => {
+            let net = match spec.networks.as_slice() {
+                [Some(n)] => Some(n.as_str()),
+                _ => None,
+            };
+            prompt::Stdin.confirm_or_yes(
+                false,
+                &render::open_question(&spec.names(), net),
+                &format!(
+                    "this opens {} to every host that can reach it; repeat with --yes to confirm",
+                    spec.names()
+                ),
+            )?;
+            req.ops = spec.ops(true);
+            c.client.changes(&req).await?
+        }
+        other => other?,
+    };
+    c.warn_pending(&saved.enforcement);
+    let done = saved.value;
+    c.print(&done, || {
+        let head = if done.dry_run {
+            "dry run, nothing was changed:"
+        } else {
+            "granted:"
+        };
+        format!("{head}\n{}", render::batch(&done))
+    })
+}
+
+/// The positional `grant <target> <subject>`: one grant.
+async fn grant_one(c: &Ctx, a: &GrantArgs, spec: GrantSpec) -> Result<()> {
+    let (target, port, text) = spec.targets[0].clone();
     let mut req = NewGrant {
-        app_id: app.id.clone(),
+        target,
         port,
-        network_id: a.network,
-        subject,
+        network_id: spec.networks[0].clone(),
+        subject: spec.subjects[0].clone(),
         confirm_open: a.yes,
     };
     let created = match c.client.create_grant(&req).await {
         Err(e) if e.is_confirmation_required() => {
             prompt::Stdin.confirm_or_yes(
                 false,
-                &render::open_question(&a.target, req.network_id.as_deref()),
+                &render::open_question(&text, req.network_id.as_deref()),
                 &format!(
-                    "this opens {} to every host that can reach it; repeat with --yes to confirm",
-                    a.target
+                    "this opens {text} to every host that can reach it; repeat with --yes to confirm"
                 ),
             )?;
             req.confirm_open = true;
@@ -727,10 +1040,27 @@ pub fn find_grants<'a>(
     subject: &Subject,
     network: Option<&str>,
 ) -> Vec<&'a GrantView> {
+    find_target_grants(
+        grants,
+        &Target::App(app_id.to_string()),
+        port,
+        subject,
+        network,
+    )
+}
+
+/// [`find_grants`] for an app or a tag.
+pub fn find_target_grants<'a>(
+    grants: &'a [GrantView],
+    target: &Target,
+    port: Option<PortRef>,
+    subject: &Subject,
+    network: Option<&str>,
+) -> Vec<&'a GrantView> {
     grants
         .iter()
         .filter(|g| {
-            g.grant.app_id == app_id
+            g.grant.target == *target
                 && g.grant.port == port
                 && g.grant.subject == *subject
                 && network.is_none_or(|n| g.grant.network_id.as_deref() == Some(n))
@@ -740,19 +1070,34 @@ pub fn find_grants<'a>(
 
 async fn revoke(c: &Ctx, a: RevokeArgs) -> Result<()> {
     let all = c.client.list_grants(&GrantQuery::default()).await?;
+    let flags = uses_flags(&a.apps, &a.tags, &a.ports, &a.to);
+    if flags {
+        if a.target.is_some() || a.subject.is_some() {
+            bail!("give either <target> <subject> or the --app/--tag/--to flags, not both");
+        }
+        if a.to.is_empty() || a.apps.is_empty() && a.tags.is_empty() {
+            bail!("--to and at least one of --app or --tag are needed");
+        }
+        return revoke_many(c, &a, &all).await;
+    }
+    let target = a
+        .target
+        .as_deref()
+        .ok_or_else(|| anyhow!("give a grant id, or <target> <subject>"))?;
     let id = match &a.subject {
         None => {
             let ids: Vec<String> = all.iter().map(|g| g.grant.id.clone()).collect();
-            resolve("grant", &ids, &a.target)?.clone()
+            resolve("grant", &ids, target)?.clone()
         }
         Some(subject) => {
-            let (app_q, port) = parse::parse_target(&a.target);
-            let app = c.app(&app_q).await?;
+            let (spec, port) = parse::parse_target_spec(target);
+            let wanted = c.target(&spec).await?;
             let subject = c.subject(&parse::parse_subject(subject)).await?;
-            let found = find_grants(&all, &app.id, port, &subject, a.network.as_deref());
+            let network = a.networks.first().map(String::as_str);
+            let found = find_target_grants(&all, &wanted, port, &subject, network);
             match found.as_slice() {
                 [one] => one.grant.id.clone(),
-                [] => bail!("no such grant; see `socketguard grants --app {}`", app.name),
+                [] => bail!("no such grant; see `socketguard grants`"),
                 many => {
                     let names = c.names().await?;
                     bail!(
@@ -772,9 +1117,63 @@ async fn revoke(c: &Ctx, a: RevokeArgs) -> Result<()> {
     c.done_saved(saved, format!("revoked grant {}", short(&id)))
 }
 
+/// `revoke --app ... --to ...`: every grant the combinations name, in one batch.
+async fn revoke_many(c: &Ctx, a: &RevokeArgs, all: &[GrantView]) -> Result<()> {
+    let spec = c.grant_spec(&[], &a.tags, &a.ports, &a.to, &[]).await?;
+    // `--app` goes through the same spelling as the positional target.
+    let mut targets = c.targets(&a.apps, &[], &a.ports).await?;
+    targets.extend(spec.targets);
+    let mut ids: Vec<String> = Vec::new();
+    for (target, port, text) in &targets {
+        for subject in &spec.subjects {
+            let found: Vec<&GrantView> = if a.networks.is_empty() {
+                find_target_grants(all, target, *port, subject, None)
+            } else {
+                a.networks
+                    .iter()
+                    .flat_map(|n| find_target_grants(all, target, *port, subject, Some(n)))
+                    .collect()
+            };
+            if found.is_empty() {
+                bail!(
+                    "no grant of {text} for {}; nothing was changed",
+                    c.names().await?.subject(subject)
+                );
+            }
+            for g in found {
+                if !ids.contains(&g.grant.id) {
+                    ids.push(g.grant.id.clone());
+                }
+            }
+        }
+    }
+    let req = ChangesRequest {
+        ops: ids
+            .into_iter()
+            .map(|grant_id| ChangeOp::RemoveGrant { grant_id })
+            .collect(),
+        dry_run: a.dry_run,
+    };
+    let saved = c.client.changes(&req).await?;
+    c.warn_pending(&saved.enforcement);
+    let done = saved.value;
+    c.print(&done, || {
+        let head = if done.dry_run {
+            "dry run, nothing was changed:"
+        } else {
+            "revoked:"
+        };
+        format!("{head}\n{}", render::batch(&done))
+    })
+}
+
 async fn grants(c: &Ctx, a: GrantsArgs) -> Result<()> {
     let query = GrantQuery {
         app: c.opt_app(a.app.as_deref()).await?,
+        tag: match a.tag.as_deref() {
+            Some(q) => Some(c.tag(q).await?.id),
+            None => None,
+        },
         peer: c.opt_peer(a.peer.as_deref()).await?,
         group: c.opt_group(a.group.as_deref()).await?,
     };

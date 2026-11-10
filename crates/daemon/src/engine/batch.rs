@@ -1,0 +1,468 @@
+//! Batch changes (ADR 0045): many operations, one transaction, one firewall update.
+//!
+//! The operations are planned in order against an in-memory copy of the state
+//! ([`Catalog`]), so later ones see earlier ones, including what a `ref` stands for. The
+//! plan is a list of database writes, applied in one transaction; a dry run applies them
+//! against the real constraints and rolls back.
+
+use super::mutations::Catalog;
+use super::*;
+use crate::api::DaemonEvent;
+use crate::state::{NewActivity, Write};
+use crate::AppState;
+use chrono::Utc;
+use socketguard_core::api_types::{
+    BatchChange, Change, ChangeItem, ChangeKind, ChangeOp, ChangesRequest, ChangesResponse,
+};
+use socketguard_core::{
+    new_id, ActivityKind, Credential, Grant, GrantReach, NewGrant, Peer, Subject, TagMember, Target,
+};
+use std::collections::BTreeMap;
+
+/// The state of planning a batch.
+struct Plan {
+    cat: Catalog,
+    refs: BTreeMap<String, String>,
+    writes: Vec<Write>,
+    changes: Vec<BatchChange>,
+    activities: Vec<NewActivity>,
+    events: Vec<DaemonEvent>,
+    networks: Vec<socketguard_core::Network>,
+    protected: Vec<String>,
+}
+
+impl Plan {
+    fn event(&mut self, ev: DaemonEvent) {
+        if !self.events.contains(&ev) {
+            self.events.push(ev);
+        }
+    }
+
+    fn change(&mut self, kind: ChangeKind, item: ChangeItem, name: String, id: Option<String>) {
+        self.changes.push(BatchChange {
+            change: Change {
+                kind,
+                item,
+                name,
+                detail: None,
+                opens_to_anyone: false,
+            },
+            id,
+            reach: vec![],
+        });
+    }
+
+    /// An id or a `ref` of an earlier create operation.
+    fn resolve(&self, id: &str) -> Result<String, EngineError> {
+        if id.starts_with('$') {
+            self.refs
+                .get(id)
+                .cloned()
+                .ok_or_else(|| EngineError::Invalid(format!("unknown reference {id}")))
+        } else {
+            Ok(id.to_string())
+        }
+    }
+
+    fn define_ref(&mut self, name: &Option<String>, id: &str) -> Result<(), EngineError> {
+        let Some(name) = name else {
+            return Ok(());
+        };
+        if !name.starts_with('$') || name.len() < 2 {
+            return Err(EngineError::Invalid(format!(
+                "a ref starts with $ and has a name, like $new0 (got {name:?})"
+            )));
+        }
+        if self.refs.insert(name.clone(), id.to_string()).is_some() {
+            return Err(EngineError::Invalid(format!("ref {name} is used twice")));
+        }
+        Ok(())
+    }
+
+    fn grant_reach(&self, grant: &Grant) -> Vec<GrantReach> {
+        Engine::reach_of(grant, &self.cat, &self.networks, &self.protected)
+    }
+}
+
+impl Engine {
+    /// Apply (or, with `dry_run`, only check) a batch of changes. All or nothing: the first
+    /// operation that fails refuses the whole batch and nothing is saved.
+    pub async fn apply_changes(
+        &self,
+        state: &AppState,
+        req: &ChangesRequest,
+    ) -> Result<ChangesResponse, EngineError> {
+        // The confirmation is the first thing every frontend must handle, so it comes
+        // before any other complaint.
+        for op in &req.ops {
+            if let ChangeOp::AddGrant {
+                subject: Subject::Anyone,
+                confirm_open: false,
+                ..
+            } = op
+            {
+                return Err(EngineError::ConfirmationRequired);
+            }
+        }
+        let mut plan = Plan {
+            cat: Catalog::load(state).await?,
+            refs: BTreeMap::new(),
+            writes: Vec::new(),
+            changes: Vec::new(),
+            activities: Vec::new(),
+            events: Vec::new(),
+            networks: self.networks(),
+            protected: self.protected_interfaces(state).await?,
+        };
+        for (i, op) in req.ops.iter().enumerate() {
+            self.plan_op(state, &mut plan, op)
+                .await
+                .map_err(|e| in_operation(i, e))?;
+        }
+
+        let response = |plan: &Plan| ChangesResponse {
+            dry_run: req.dry_run,
+            refs: plan.refs.clone(),
+            changes: plan.changes.clone(),
+        };
+        if req.dry_run {
+            // The real constraints decide, but nothing stays.
+            state
+                .db
+                .try_writes(&plan.writes)
+                .await
+                .map_err(|e| Self::conflict_or_internal(e, "a change of this batch"))?;
+            return Ok(response(&plan));
+        }
+        if plan.writes.is_empty() {
+            return Ok(response(&plan));
+        }
+        state
+            .db
+            .apply_writes(&plan.writes)
+            .await
+            .map_err(|e| Self::conflict_or_internal(e, "a change of this batch"))?;
+        let applied = self.apply_firewall(state).await;
+        if let Err(e) = state.db.insert_activity(&plan.activities).await {
+            warn!("Could not record activity: {e}");
+        }
+        plan.event(DaemonEvent::Activity);
+        let events = std::mem::take(&mut plan.events);
+        self.commit(state, applied, None, &events).await?;
+        Ok(response(&plan))
+    }
+
+    async fn plan_op(
+        &self,
+        state: &AppState,
+        plan: &mut Plan,
+        op: &ChangeOp,
+    ) -> Result<(), EngineError> {
+        match op {
+            ChangeOp::CreatePeer {
+                ref_,
+                label,
+                credentials,
+            } => {
+                let label = Self::clean_label(label, "peer")?;
+                if plan.cat.peers.iter().any(|p| p.label == label) {
+                    return Err(EngineError::Conflict(format!(
+                        "peer {label} already exists"
+                    )));
+                }
+                let mut creds: Vec<Credential> = Vec::new();
+                for input in credentials {
+                    let c = self.new_credential(state, input).await?;
+                    let taken = plan
+                        .cat
+                        .peers
+                        .iter()
+                        .flat_map(|p| p.credentials.iter().map(move |x| (&p.label, x)))
+                        .find(|(_, x)| x.kind == c.kind && x.value == c.value);
+                    if let Some((owner, _)) = taken {
+                        return Err(EngineError::Conflict(format!(
+                            "{} {} already belongs to peer {owner}",
+                            c.kind, c.value
+                        )));
+                    }
+                    if creds.iter().any(|x| x.kind == c.kind && x.value == c.value) {
+                        return Err(EngineError::Invalid(format!(
+                            "{} {} is listed twice",
+                            c.kind, c.value
+                        )));
+                    }
+                    creds.push(c);
+                }
+                let peer = Peer {
+                    id: new_id(),
+                    label: label.clone(),
+                    credentials: creds,
+                    groups: vec![],
+                    created_at: Utc::now(),
+                };
+                plan.define_ref(ref_, &peer.id)?;
+                plan.activities.push(
+                    NewActivity::new(ActivityKind::PeerAdded, format!("Added peer {label}"))
+                        .peer(&peer.id),
+                );
+                plan.change(
+                    ChangeKind::Create,
+                    ChangeItem::Peer,
+                    label,
+                    Some(peer.id.clone()),
+                );
+                plan.cat.peers.push(peer.clone());
+                plan.writes.push(Write::InsertPeer(peer));
+                plan.event(DaemonEvent::PeersChanged);
+            }
+            ChangeOp::CreateTag {
+                ref_,
+                label,
+                patterns,
+            } => {
+                let tag = Self::plan_tag(new_id(), label, patterns, &[], &plan.cat.apps)?;
+                if plan.cat.tags.iter().any(|t| t.label == tag.label) {
+                    return Err(EngineError::Conflict(format!(
+                        "tag {} already exists",
+                        tag.label
+                    )));
+                }
+                plan.define_ref(ref_, &tag.id)?;
+                plan.activities.push(NewActivity::new(
+                    ActivityKind::TagAdded,
+                    format!("Added tag {}", tag.label),
+                ));
+                plan.change(
+                    ChangeKind::Create,
+                    ChangeItem::Tag,
+                    tag.label.clone(),
+                    Some(tag.id.clone()),
+                );
+                plan.cat.tags.push(tag.clone());
+                plan.writes.push(Write::InsertTag(tag));
+                plan.event(DaemonEvent::TagsChanged);
+            }
+            ChangeOp::AddGrant {
+                target,
+                port,
+                network_id,
+                subject,
+                confirm_open,
+            } => {
+                let target = match target {
+                    Target::App(id) => Target::App(id.clone()),
+                    Target::Tag(id) => Target::Tag(plan.resolve(id)?),
+                };
+                let subject = match subject {
+                    Subject::Peer(id) => Subject::Peer(plan.resolve(id)?),
+                    Subject::Group(id) => Subject::Group(plan.resolve(id)?),
+                    Subject::Anyone => Subject::Anyone,
+                };
+                let req = NewGrant {
+                    target,
+                    port: *port,
+                    network_id: network_id.clone(),
+                    subject,
+                    confirm_open: *confirm_open,
+                };
+                let info = self.check_new_grant(&plan.cat, &req)?;
+                let grant = Grant {
+                    id: new_id(),
+                    target: req.target,
+                    port: req.port,
+                    network_id: req.network_id,
+                    subject: req.subject,
+                    created_at: Utc::now(),
+                };
+                plan.activities
+                    .push(Self::grant_added_activity(&grant, &info));
+                plan.changes.push(BatchChange {
+                    change: Change {
+                        kind: ChangeKind::Create,
+                        item: ChangeItem::Grant,
+                        name: format!(
+                            "{} to {}{}",
+                            info.subject_label,
+                            info.target_name,
+                            port.map(|p| format!(" {p}")).unwrap_or_default()
+                        ),
+                        detail: grant.network_id.as_ref().map(|n| format!("on {n}")),
+                        opens_to_anyone: grant.subject == Subject::Anyone,
+                    },
+                    id: Some(grant.id.clone()),
+                    reach: plan.grant_reach(&grant),
+                });
+                plan.cat.grants.push(grant.clone());
+                plan.writes.push(Write::InsertGrant(grant));
+                plan.event(DaemonEvent::GrantsChanged);
+            }
+            ChangeOp::RemoveGrant { grant_id } => {
+                let id = plan.resolve(grant_id)?;
+                let at = plan
+                    .cat
+                    .grants
+                    .iter()
+                    .position(|g| g.id == id)
+                    .ok_or_else(|| EngineError::NotFound(format!("grant {id}")))?;
+                let grant = plan.cat.grants.remove(at);
+                let reach = plan.grant_reach(&grant);
+                plan.activities
+                    .push(self.grant_removed_activity(state, &grant).await);
+                plan.changes.push(BatchChange {
+                    change: Change {
+                        kind: ChangeKind::Delete,
+                        item: ChangeItem::Grant,
+                        name: format!("grant {}", &id[..id.len().min(8)]),
+                        detail: None,
+                        opens_to_anyone: false,
+                    },
+                    id: Some(id.clone()),
+                    reach,
+                });
+                plan.writes.push(Write::DeleteGrant(id));
+                plan.event(DaemonEvent::GrantsChanged);
+            }
+            ChangeOp::AddTagMember {
+                tag_id,
+                app_id,
+                port,
+            } => {
+                let tag_id = plan.resolve(tag_id)?;
+                let app = plan
+                    .cat
+                    .app(app_id)
+                    .ok_or_else(|| EngineError::NotFound(format!("app {app_id}")))?
+                    .clone();
+                if let Some(p) = port {
+                    if !app.has_port(*p) {
+                        return Err(EngineError::Invalid(format!(
+                            "{} has no port {p}",
+                            app.name
+                        )));
+                    }
+                }
+                let tag = plan
+                    .cat
+                    .tags
+                    .iter_mut()
+                    .find(|t| t.id == tag_id)
+                    .ok_or_else(|| EngineError::NotFound(format!("tag {tag_id}")))?;
+                let member = TagMember {
+                    app_id: app.id.clone(),
+                    port: *port,
+                };
+                tag.excluded.retain(|a| *a != app.id);
+                let tag_label = tag.label.clone();
+                if !tag.members.contains(&member) {
+                    tag.members.push(member);
+                    plan.activities.push(
+                        NewActivity::new(
+                            ActivityKind::TagChanged,
+                            format!("Added {} to tag {tag_label}", app.name),
+                        )
+                        .app(&app.id),
+                    );
+                    plan.change(
+                        ChangeKind::Create,
+                        ChangeItem::TagMember,
+                        format!("{} in tag {tag_label}", app.name),
+                        None,
+                    );
+                }
+                plan.writes.push(Write::AddTagMember {
+                    tag_id,
+                    app_id: app.id,
+                    port: *port,
+                });
+                plan.event(DaemonEvent::TagsChanged);
+                plan.event(DaemonEvent::GrantsChanged);
+            }
+            ChangeOp::RemoveTagMember {
+                tag_id,
+                app_id,
+                port,
+            } => {
+                let tag_id = plan.resolve(tag_id)?;
+                let tag = plan
+                    .cat
+                    .tags
+                    .iter()
+                    .find(|t| t.id == tag_id)
+                    .ok_or_else(|| EngineError::NotFound(format!("tag {tag_id}")))?
+                    .clone();
+                if !tag
+                    .members
+                    .iter()
+                    .any(|m| m.app_id == *app_id && m.port == *port)
+                {
+                    return Err(EngineError::NotFound(format!(
+                        "membership of app {app_id} in tag {}",
+                        tag.label
+                    )));
+                }
+                let exclude = Self::removal_excludes(state, &tag, app_id, *port).await?;
+                let live = plan.cat.tags.iter_mut().find(|t| t.id == tag_id);
+                if let Some(live) = live {
+                    live.members
+                        .retain(|m| !(m.app_id == *app_id && m.port == *port));
+                    if exclude {
+                        live.excluded.push(app_id.clone());
+                    }
+                }
+                plan.activities.push(
+                    NewActivity::new(
+                        ActivityKind::TagChanged,
+                        format!("Removed an app from tag {}", tag.label),
+                    )
+                    .app(app_id),
+                );
+                plan.change(
+                    ChangeKind::Delete,
+                    ChangeItem::TagMember,
+                    format!("{app_id} from tag {}", tag.label),
+                    None,
+                );
+                plan.writes.push(Write::RemoveTagMember {
+                    tag_id,
+                    app_id: app_id.clone(),
+                    port: *port,
+                    exclude,
+                });
+                plan.event(DaemonEvent::TagsChanged);
+                plan.event(DaemonEvent::GrantsChanged);
+            }
+            ChangeOp::Review { app_id, reviewed } => {
+                let app = plan
+                    .cat
+                    .apps
+                    .iter_mut()
+                    .find(|a| a.id == *app_id)
+                    .ok_or_else(|| EngineError::NotFound(format!("app {app_id}")))?;
+                app.reviewed = *reviewed;
+                let name = app.name.clone();
+                plan.change(
+                    ChangeKind::Update,
+                    ChangeItem::App,
+                    name,
+                    Some(app_id.clone()),
+                );
+                plan.writes.push(Write::SetReviewed {
+                    app_id: app_id.clone(),
+                    reviewed: *reviewed,
+                });
+                plan.event(DaemonEvent::AppsChanged);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Name the operation a refusal came from.
+fn in_operation(i: usize, e: EngineError) -> EngineError {
+    match e {
+        EngineError::NotFound(m) => EngineError::NotFound(format!("{m} (operation {i})")),
+        EngineError::Invalid(m) => EngineError::Invalid(format!("operation {i}: {m}")),
+        EngineError::Conflict(m) => EngineError::Conflict(format!("operation {i}: {m}")),
+        other => other,
+    }
+}

@@ -19,13 +19,13 @@ use futures_util::stream::Stream;
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use socketguard_core::api_types::{
-    error_code, event_name, ApiError, ApplyRequest, Counts, DisableRequest, EnforcementNotice,
-    LockoutRiskInfo, MergeRequest, NewGroup, NewNetwork, NewPeer, ParseCredentialsRequest,
-    ProtectHostRequest, ProtectHostResponse, ReviewRequest, SetMembers, SplitRequest,
-    StatusResponse, UpdateLabel, UpdateSettings,
+    error_code, event_name, ApiError, ApplyRequest, ChangesRequest, Counts, DisableRequest,
+    EnforcementNotice, LockoutRiskInfo, MemberQuery, MergeRequest, NewGroup, NewNetwork, NewPeer,
+    NewTag, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse, ReviewRequest,
+    SetMembers, SplitRequest, StatusResponse, UpdateLabel, UpdateSettings, UpdateTag,
 };
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
-use socketguard_core::{ActivityQuery, NewCredential, NewGrant, PortRef};
+use socketguard_core::{ActivityQuery, NewCredential, NewGrant, PortRef, TagMember};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
@@ -40,6 +40,7 @@ pub enum DaemonEvent {
     AppDiscovered(String),
     PeersChanged,
     GrantsChanged,
+    TagsChanged,
     NetworksChanged,
     SettingsChanged,
     Activity,
@@ -52,6 +53,7 @@ impl DaemonEvent {
             DaemonEvent::AppDiscovered(_) => event_name::APP_DISCOVERED,
             DaemonEvent::PeersChanged => event_name::PEERS_CHANGED,
             DaemonEvent::GrantsChanged => event_name::GRANTS_CHANGED,
+            DaemonEvent::TagsChanged => event_name::TAGS_CHANGED,
             DaemonEvent::NetworksChanged => event_name::NETWORKS_CHANGED,
             DaemonEvent::SettingsChanged => event_name::SETTINGS_CHANGED,
             DaemonEvent::Activity => event_name::ACTIVITY,
@@ -80,6 +82,7 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::POST, "/api/apps/{id}/review"),
     (Method::POST, "/api/apps/{id}/split"),
     (Method::POST, "/api/apps/{id}/merge"),
+    (Method::GET, "/api/apps/{id}/share"),
     (Method::GET, "/api/peers"),
     (Method::POST, "/api/peers"),
     (Method::GET, "/api/peers/{id}"),
@@ -88,6 +91,7 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::POST, "/api/credentials/parse"),
     (Method::POST, "/api/peers/{id}/credentials"),
     (Method::DELETE, "/api/peers/{id}/credentials/{cred_id}"),
+    (Method::POST, "/api/peers/{id}/tor-key"),
     (Method::GET, "/api/peer-groups"),
     (Method::POST, "/api/peer-groups"),
     (Method::GET, "/api/peer-groups/{id}"),
@@ -97,6 +101,14 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::GET, "/api/grants"),
     (Method::POST, "/api/grants"),
     (Method::DELETE, "/api/grants/{id}"),
+    (Method::POST, "/api/changes"),
+    (Method::GET, "/api/tags"),
+    (Method::POST, "/api/tags"),
+    (Method::GET, "/api/tags/{id}"),
+    (Method::PATCH, "/api/tags/{id}"),
+    (Method::DELETE, "/api/tags/{id}"),
+    (Method::POST, "/api/tags/{id}/members"),
+    (Method::DELETE, "/api/tags/{id}/members/{app_id}"),
     (Method::GET, "/api/networks"),
     (Method::POST, "/api/networks"),
     (Method::DELETE, "/api/networks/{id}"),
@@ -124,6 +136,7 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("POST", "/api/apps/{id}/review") => post(app_review),
         ("POST", "/api/apps/{id}/split") => post(app_split),
         ("POST", "/api/apps/{id}/merge") => post(app_merge),
+        ("GET", "/api/apps/{id}/share") => get(app_share),
         ("GET", "/api/peers") => get(peers_list),
         ("POST", "/api/peers") => post(peer_create),
         ("GET", "/api/peers/{id}") => get(peer_get),
@@ -132,6 +145,7 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("POST", "/api/credentials/parse") => post(credentials_parse),
         ("POST", "/api/peers/{id}/credentials") => post(credential_add),
         ("DELETE", "/api/peers/{id}/credentials/{cred_id}") => delete(credential_remove),
+        ("POST", "/api/peers/{id}/tor-key") => post(tor_key_generate),
         ("GET", "/api/peer-groups") => get(groups_list),
         ("POST", "/api/peer-groups") => post(group_create),
         ("GET", "/api/peer-groups/{id}") => get(group_get),
@@ -141,6 +155,14 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("GET", "/api/grants") => get(grants_list),
         ("POST", "/api/grants") => post(grant_create),
         ("DELETE", "/api/grants/{id}") => delete(grant_delete),
+        ("POST", "/api/changes") => post(changes_post),
+        ("GET", "/api/tags") => get(tags_list),
+        ("POST", "/api/tags") => post(tag_create),
+        ("GET", "/api/tags/{id}") => get(tag_get),
+        ("PATCH", "/api/tags/{id}") => patch(tag_update),
+        ("DELETE", "/api/tags/{id}") => delete(tag_delete),
+        ("POST", "/api/tags/{id}/members") => post(tag_member_add),
+        ("DELETE", "/api/tags/{id}/members/{app_id}") => delete(tag_member_remove),
         ("GET", "/api/networks") => get(networks_list),
         ("POST", "/api/networks") => post(network_create),
         ("DELETE", "/api/networks/{id}") => delete(network_delete),
@@ -414,6 +436,12 @@ async fn app_delete(State(state): State<Shared>, Path(id): Path<String>) -> ApiR
     Ok(saved(&engine, StatusCode::NO_CONTENT, None::<()>))
 }
 
+/// What an app's granted Tor peers need to connect (their client authorization lines).
+async fn app_share(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(engine.share(&state, &id).await?).into_response())
+}
+
 async fn app_review(
     State(state): State<Shared>,
     Path(id): Path<String>,
@@ -508,6 +536,17 @@ async fn credential_add(
     Ok(saved(&engine, StatusCode::CREATED, Some(c)))
 }
 
+/// Generate a Tor client key for the peer. The private key is in the answer and stays
+/// readable through `share`.
+async fn tor_key_generate(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let key = engine.generate_tor_key(&state, &id).await?;
+    Ok(saved(&engine, StatusCode::CREATED, Some(key)))
+}
+
 async fn credential_remove(
     State(state): State<Shared>,
     Path((id, cred_id)): Path<(String, String)>,
@@ -570,6 +609,7 @@ async fn group_members(
 #[derive(serde::Deserialize, Default)]
 struct GrantParams {
     app: Option<String>,
+    tag: Option<String>,
     peer: Option<String>,
     group: Option<String>,
 }
@@ -584,6 +624,7 @@ async fn grants_list(
             &state,
             GrantFilter {
                 app_id: q.app,
+                tag_id: q.tag,
                 peer_id: q.peer,
                 group_id: q.group,
             },
@@ -605,6 +646,90 @@ async fn grant_delete(State(state): State<Shared>, Path(id): Path<String>) -> Ap
     let engine = state.engine.read().await;
     engine.delete_grant(&state, &id).await?;
     Ok(saved(&engine, StatusCode::NO_CONTENT, None::<()>))
+}
+
+/// Many changes at once, atomically, with one firewall update (ADR 0045).
+async fn changes_post(
+    State(state): State<Shared>,
+    ApiJson(req): ApiJson<ChangesRequest>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let result = engine.apply_changes(&state, &req).await?;
+    if req.dry_run {
+        return Ok(Json(result).into_response());
+    }
+    Ok(saved(&engine, StatusCode::OK, Some(result)))
+}
+
+// ─── Tags ────────────────────────────────────────────────────────────────────
+
+async fn tags_list(State(state): State<Shared>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(engine.list_tags(&state).await?).into_response())
+}
+
+async fn tag_create(
+    State(state): State<Shared>,
+    ApiJson(req): ApiJson<NewTag>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let tag = engine
+        .create_tag(&state, &req.label, &req.patterns, &req.members)
+        .await?;
+    Ok(saved(&engine, StatusCode::CREATED, Some(tag)))
+}
+
+async fn tag_get(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(engine.get_tag(&state, &id).await?).into_response())
+}
+
+async fn tag_update(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<UpdateTag>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let tag = engine
+        .update_tag(&state, &id, req.label.as_deref(), req.patterns.as_deref())
+        .await?;
+    Ok(saved(&engine, StatusCode::OK, Some(tag)))
+}
+
+async fn tag_delete(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    engine.delete_tag(&state, &id).await?;
+    Ok(saved(&engine, StatusCode::NO_CONTENT, None::<()>))
+}
+
+async fn tag_member_add(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<TagMember>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let tag = engine
+        .add_tag_member(&state, &id, &req.app_id, req.port)
+        .await?;
+    Ok(saved(&engine, StatusCode::OK, Some(tag)))
+}
+
+async fn tag_member_remove(
+    State(state): State<Shared>,
+    Path((id, app_id)): Path<(String, String)>,
+    ApiQuery(q): ApiQuery<MemberQuery>,
+) -> ApiResult<Response> {
+    let port = match (q.port, q.proto) {
+        (Some(port), proto) => Some(PortRef {
+            port,
+            proto: proto.unwrap_or(socketguard_core::Protocol::Tcp),
+        }),
+        (None, None) => None,
+        (None, Some(_)) => return Err(ApiErr::invalid("proto needs a port")),
+    };
+    let engine = state.engine.read().await;
+    let tag = engine.remove_tag_member(&state, &id, &app_id, port).await?;
+    Ok(saved(&engine, StatusCode::OK, Some(tag)))
 }
 
 // ─── Networks ────────────────────────────────────────────────────────────────

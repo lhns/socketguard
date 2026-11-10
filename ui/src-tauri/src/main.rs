@@ -12,11 +12,12 @@ use tauri::Emitter;
 use serde::Serialize;
 use socketguard_client::{Client, Error as ClientError, GrantQuery};
 use socketguard_core::api_types::{
-    NewPeer, ProtectHostRequest, ProtectHostResponse, StatusResponse,
+    ChangesRequest, ChangesResponse, NewPeer, NewTag, ProtectHostRequest, ProtectHostResponse,
+    ShareResponse, StatusResponse, TorKeyResponse, UpdateTag,
 };
 use socketguard_core::{
     ActivityQuery, ActivityRecord, App, AppDetail, Credential, GrantView, Network, NewCredential,
-    NewGrant, ParsedCredential, Peer, PeerGroup, Settings,
+    NewGrant, ParsedCredential, Peer, PeerGroup, PortRef, Settings, Tag, TagMember,
 };
 
 /// Error shape the frontend branches on. API errors keep the daemon's code
@@ -140,6 +141,66 @@ async fn create_grant(req: NewGrant) -> CmdResult<GrantView> {
 async fn delete_grant(id: String) -> CmdResult<()> {
     client().delete_grant(&id).await?;
     Ok(())
+}
+
+/// Many changes at once: all or nothing, one firewall update (ADR 0045).
+#[tauri::command]
+async fn changes(req: ChangesRequest) -> CmdResult<ChangesResponse> {
+    Ok(client().changes(&req).await?.value)
+}
+
+#[tauri::command]
+async fn list_tags() -> CmdResult<Vec<Tag>> {
+    Ok(client().list_tags().await?)
+}
+
+#[tauri::command]
+async fn create_tag(req: NewTag) -> CmdResult<Tag> {
+    Ok(client().create_tag(&req).await?.value)
+}
+
+#[tauri::command]
+async fn get_tag(id: String) -> CmdResult<Tag> {
+    Ok(client().get_tag(&id).await?)
+}
+
+#[tauri::command]
+async fn update_tag(id: String, req: UpdateTag) -> CmdResult<Tag> {
+    Ok(client().update_tag(&id, &req).await?.value)
+}
+
+#[tauri::command]
+async fn delete_tag(id: String) -> CmdResult<()> {
+    client().delete_tag(&id).await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn add_tag_member(tag_id: String, member: TagMember) -> CmdResult<Tag> {
+    Ok(client().add_tag_member(&tag_id, &member).await?.value)
+}
+
+#[tauri::command]
+async fn remove_tag_member(
+    tag_id: String,
+    app_id: String,
+    port: Option<PortRef>,
+) -> CmdResult<Tag> {
+    Ok(client()
+        .remove_tag_member(&tag_id, &app_id, port)
+        .await?
+        .value)
+}
+
+/// Generate a Tor client key for a peer; the answer carries the private key.
+#[tauri::command]
+async fn generate_tor_key(peer_id: String) -> CmdResult<TorKeyResponse> {
+    Ok(client().generate_tor_key(&peer_id).await?.value)
+}
+
+#[tauri::command]
+async fn share_app(id: String) -> CmdResult<ShareResponse> {
+    Ok(client().share_app(&id).await?)
 }
 
 #[tauri::command]
@@ -273,6 +334,16 @@ fn main() {
             list_grants,
             create_grant,
             delete_grant,
+            changes,
+            list_tags,
+            create_tag,
+            get_tag,
+            update_tag,
+            delete_tag,
+            add_tag_member,
+            remove_tag_member,
+            generate_tor_key,
+            share_app,
             list_networks,
             get_settings,
             set_protect_host,
