@@ -40,7 +40,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0030](0030-windows-enforcement-via-wfp.md) | Windows Enforcement via the WFP API | Accepted |
 | [0031](0031-yggdrasil-subnet-backend.md) | Yggdrasil Backend from the Node Subnet | Accepted |
 | [0032](0032-local-api-transport-and-auth.md) | Local API Transport and Authorization | Accepted |
-| [0033](0033-frontends-shared-client-cli-first.md) | Frontends: Shared Client, CLI First, UI as API Client | Accepted |
+| [0033](0033-frontends-shared-client-cli-first.md) | Frontends: Shared Client, CLI First, UI as API Client | Accepted (UI scope superseded by 0042) |
 | [0034](0034-observability-and-activity.md) | Observability with OpenTelemetry and a Local Activity Store | Accepted |
 | [0035](0035-test-strategy-and-ci.md) | Test Strategy and CI | Accepted |
 | [0036](0036-future-directions.md) | Future Directions: WireGuard, mTLS Gateway, IPv4 | Accepted |
@@ -49,6 +49,10 @@ ADRs document significant architectural decisions made during the project's deve
 | [0039](0039-onion-service-lifecycle.md) | Onion Service Lifecycle | Superseded by 0040 |
 | [0040](0040-onion-service-lifecycle-consolidated.md) | Onion Service Lifecycle (Consolidated) | Accepted |
 | [0041](0041-unique-grants.md) | Grants Are Unique in the Database | Accepted |
+| [0042](0042-ui-covers-the-whole-api.md) | The UI Covers the Whole API | Accepted (supersedes 0033's UI scope) |
+| [0043](0043-app-tags.md) | App Tags as Grant Targets | Accepted |
+| [0044](0044-ipv4-and-network-segments.md) | IPv4 and Network Segments on Protect-Host | Accepted (amends 0026, 0028) |
+| [0045](0045-batch-changes-credential-parsing-tor-keys.md) | Batch Changes, One Credential Parser, Stored Tor Client Keys | Accepted |
 
 ## Format
 

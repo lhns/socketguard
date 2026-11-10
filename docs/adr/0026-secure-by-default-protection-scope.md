@@ -46,3 +46,7 @@ An address could sit on an interface without deny rules: a failed removal was on
 - The producer's managed scope is every address of an app plus every owned address, retiring ones included, so a retiring address stays denied until it is really gone.
 - Every reconcile (and startup, after the first apply) sweeps: owned addresses that no app has are retiring and are removed, and failed removals are retried. `disable` retires all owned addresses and keeps the rows of those it could not remove; the disabled daemon keeps retrying.
 - An address is added to an interface only if it is in the managed scope of the last ruleset that was applied successfully. This covers new, re-homed and split addresses, and a state or DB read error before the apply.
+
+## Amendment (ADR 0044)
+
+IPv4 grants exist now (ADR 0044), so whole-host scopes cover IPv4 again.

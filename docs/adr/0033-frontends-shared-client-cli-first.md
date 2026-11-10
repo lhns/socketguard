@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Amends ADR 0010.
+Accepted. Amends ADR 0010. The UI-scope clause is superseded by ADR 0042.
 
 ## Date
 

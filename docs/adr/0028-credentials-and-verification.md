@@ -34,3 +34,7 @@ Access was granted to IP strings and rules matched only the source address, so a
 - Key-verified access works on Yggdrasil without WireGuard, and on Tor once the onion network lands. LAN stays IP-only and is flagged as such.
 - A key peer with no Yggdrasil network shows "not reachable here" instead of silently granting nothing.
 - Trusting everything a node routes is always a deliberate, visibly labelled choice.
+
+## Amendment (ADRs 0044, 0045)
+
+`ip` credentials accept IPv4, for whole-host scopes (ADR 0044). All credential input goes through one core parser (ADR 0045).
