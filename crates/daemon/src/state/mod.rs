@@ -1,6 +1,6 @@
 //! SQLite persistence, schema v4 (ADR 0027, 0037, 0040): apps, ports, addresses, peers, credentials,
 //! groups, grants, settings, activity and onion service keys. Versioned with
-//! `PRAGMA user_version`; a database from before the redesign is renamed out of the way,
+//! `PRAGMA user_version`; a database from before schema v1 is renamed out of the way,
 //! never migrated.
 //!
 //! The database holds private keys (`onion_keys`), so it is protected at rest: on Unix the

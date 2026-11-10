@@ -4198,6 +4198,7 @@ dependencies = [
  "socket2",
  "socketguard-client",
  "socketguard-core",
+ "socketguard-daemon",
  "sqlx",
  "sysinfo",
  "thiserror 2.0.18",

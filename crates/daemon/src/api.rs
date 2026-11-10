@@ -69,7 +69,7 @@ impl DaemonEvent {
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
 /// Every route of the API. The router is built from this table, so it is also the list
-/// the coverage tests compare against the client crate (and, in Phase 7, the CLI).
+/// the coverage tests compare against the client crate and the CLI.
 pub const ROUTES: &[(Method, &str)] = &[
     (Method::GET, "/api/status"),
     (Method::GET, "/api/events"),
