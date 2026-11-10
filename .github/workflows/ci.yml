@@ -1,0 +1,95 @@
+# CI on GitHub Actions. Forgejo has its own copy in .forgejo/workflows/ci.yml (Forgejo
+# ignores .github/ when .forgejo/ exists). The Tauri crate (socketguard-ui) is excluded
+# from the Rust jobs: it needs webkit2gtk and builds the frontend; the `ui` job covers the
+# frontend. Docker end-to-end tests (deploy/e2e) stay local.
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --exclude socketguard-ui --all-targets -- -D warnings
+      - run: cargo test --workspace --exclude socketguard-ui
+
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  # Real nftables in network namespaces. The runner is a VM with passwordless sudo.
+  # cargo runs as the runner user (rustup is per-user); only the test binary runs as root.
+  netns:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nftables iproute2 conntrack iputils-ping netcat-openbsd python3 jq
+      - name: Build the test binary
+        run: |
+          cargo test -p socketguard-daemon --test netns --no-run --message-format=json > build.json
+          jq -r 'select(.reason == "compiler-artifact" and .target.name == "netns" and .executable != null) | .executable' build.json | tail -n1 > netns-bin
+          test -s netns-bin
+      - name: Run as root
+        working-directory: crates/daemon
+        run: sudo env SOCKETGUARD_NETNS_TESTS=1 "$(cat "$GITHUB_WORKSPACE/netns-bin")" --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/netns.log"
+      - name: Check the tests did not skip
+        run: "! grep -q 'skipping netns test' \"$RUNNER_TEMP/netns.log\""
+
+  # The macOS code has no other CI; sudo gives root for the pf check and the smoke test.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --exclude socketguard-ui --all-targets -- -D warnings
+      - run: cargo test --workspace --exclude socketguard-ui --no-fail-fast
+      - name: pfctl accepts the rendered ruleset
+        run: |
+          cargo test -p socketguard-daemon --lib pf_accepts --no-run --message-format=json > build.json
+          bin=$(jq -r 'select(.reason == "compiler-artifact" and .target.kind[0] == "lib" and .profile.test == true and .executable != null) | .executable' build.json | tail -n1)
+          sudo env SOCKETGUARD_PF_CHECK=1 "$bin" pf_accepts --nocapture
+
+  macos-smoke:
+    runs-on: macos-latest
+    needs: macos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: deploy/ci/macos-smoke.sh

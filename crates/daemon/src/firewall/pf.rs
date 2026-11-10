@@ -284,6 +284,23 @@ mod tests {
         assert!(out.contains("from fe80::/10 port 547 to fe80::/10 port 546"));
     }
 
+    /// Needs macOS and root (`pfctl -n` parses without loading); CI opts in.
+    #[test]
+    fn pf_accepts_the_rendered_rulesets() {
+        if std::env::var("SOCKETGUARD_PF_CHECK").is_err() {
+            eprintln!("skipping: set SOCKETGUARD_PF_CHECK=1 on macOS as root");
+            return;
+        }
+        for rs in [golden_ruleset(), DesiredRuleset::default()] {
+            let out = pfctl(&["-n", "-f", "-"], Some(&render(&rs))).expect("run pfctl");
+            assert!(
+                out.status.success(),
+                "pfctl rejected the ruleset: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
     #[test]
     fn empty_ruleset_keeps_essentials() {
         let out = render(&DesiredRuleset::default());

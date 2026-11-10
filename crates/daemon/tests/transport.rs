@@ -130,14 +130,52 @@ mod unix {
             return;
         }
         let path = temp_socket();
-        // Group `root` exists everywhere and stands in for `socketguard`.
-        let server = transport::bind_unix(&path, "root").unwrap();
+        // The group of gid 0 exists everywhere and stands in for `socketguard`.
+        let gid0 = if cfg!(target_os = "macos") {
+            "wheel"
+        } else {
+            "root"
+        };
+        let server = transport::bind_unix(&path, gid0).unwrap();
         let meta = std::fs::metadata(&path).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o660);
         assert_eq!(meta.gid(), 0);
         let r = Running::start(server, path.to_str().unwrap().to_string()).await;
         let _open_events = exercise(&r).await;
         r.stop().await;
+    }
+
+    /// Binding must not touch the process umask: it once did, and concurrent binds left
+    /// it at 0o177, so other threads' directories lost their search bit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_binds_leave_no_stray_files_and_the_umask_alone() {
+        let dir = std::env::temp_dir().join(format!("sg-binds-{}", uuid::Uuid::new_v4().simple()));
+        let tasks: Vec<_> = (0..16)
+            .map(|i| {
+                let path = dir.join(format!("s{i}.sock"));
+                tokio::task::spawn_blocking(move || {
+                    transport::bind_unix(&path, "no-such-group-sg-test").unwrap()
+                })
+            })
+            .collect();
+        let mut servers = Vec::new();
+        for t in tasks {
+            servers.push(t.await.unwrap());
+        }
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        let mut expected: Vec<_> = (0..16).map(|i| format!("s{i}.sock")).collect();
+        expected.sort();
+        assert_eq!(names, expected, "only the sockets remain");
+        let probe = dir.join("probe");
+        std::fs::create_dir(&probe).unwrap();
+        let mode = std::fs::metadata(&probe).unwrap().permissions().mode();
+        assert!(mode & 0o100 != 0, "umask was left restrictive: {mode:o}");
+        drop(servers);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
