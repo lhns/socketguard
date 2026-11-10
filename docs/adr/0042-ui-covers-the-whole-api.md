@@ -24,3 +24,13 @@ ADR 0033 kept the UI to everyday flows and left the rest to the CLI. The first l
 
 - The UI grows: more pages, a matrix component, more Tauri commands. The coverage test keeps it from drifting behind the API.
 - Bulk work no longer needs the CLI.
+
+## Amendment (2026-11-10): two lists, one inspector, a read-only overview
+
+The first build followed the decision above and came out incoherent: three tabs (Apps, Access, Peers & groups) that were partly views of each other, the same relation edited in five places with three ways of committing, and bulk work in different dialogs than single edits. The Simple/Advanced switch only chose a tab. This replaces the second and third points of the decision; coverage, Activity and error display stand.
+
+- **Navigation:** Apps · Peers · Activity · Settings. No Access tab and no Simple/Advanced views.
+- **List and inspector, used twice.** Apps ("what": tags, apps, system services) and Peers ("who": Anyone and "everyone on <network>", groups, peers) are the same screen: a selectable table, with an inspector beside it that shows the selection. One row gives its detail; several rows give the same sections for all of them, so bulk editing is not a separate UI. Tags and groups are rows of their list.
+- **One place per operation.** Access is shown by one list in both directions (who can reach this, what this can reach) and added by one form in the inspector. Tags, groups and members are chosen in a search popover.
+- **The access matrix is read-only.** Subjects can be added as columns to the Apps table to see who reaches what; a cell opens the inspector, where the change is made. Editing in the grid duplicated the inspector and needed its own staging.
+- **One commit rule.** A change that alters who can reach something is shown first and needs one Apply; a change that alters nobody's reach, or only closes, applies at once. Modal dialogs are left for confirmations (open to anyone, deletions, turning SocketGuard off) and for secrets shown once.
