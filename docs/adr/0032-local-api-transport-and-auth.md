@@ -4,6 +4,8 @@
 
 Accepted. Supersedes ADR 0015; replaces the transport and endpoint list of ADR 0006.
 
+Amended below; read the amendments in order.
+
 ## Date
 
 2026-11-09

@@ -4,6 +4,8 @@
 
 Accepted. Supersedes ADRs 0009 and 0016-0024, the schema and migration parts of ADR 0005, and the stale-socket deletion of ADR 0007.
 
+Amended below; read the amendments in order.
+
 ## Date
 
 2026-11-09

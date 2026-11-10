@@ -4,6 +4,8 @@
 
 Accepted
 
+Amended below; read the amendments in order.
+
 ## Date
 
 2026-11-09

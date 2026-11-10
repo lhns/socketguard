@@ -4,6 +4,8 @@
 
 Accepted. Supersedes ADR 0004, and the startup and shutdown cleanup of ADR 0012.
 
+Amended below; read the amendments in order.
+
 ## Date
 
 2026-11-09

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Refines ADR 0037.
+Superseded by ADR 0040. Refines ADR 0037.
 
 ## Date
 

@@ -23,7 +23,7 @@ Each layer is tested where it is cheapest to test:
 - **Telemetry:** engine and API tests assert spans and metrics through the OTel SDK's in-memory exporters.
 - **CLI:** `insta` snapshots of output, and `assert_cmd` end-to-end against an in-process daemon with mocks.
 - **UI:** ESLint, `tsc --noEmit`, Vitest with React Testing Library and Tauri `mockIPC`.
-- **CI:** Forgejo Actions (`.forgejo/workflows/`) runs fmt, `clippy -D warnings`, `cargo test`, and UI lint, typecheck and Vitest. Netns tests need a Linux runner with `CAP_NET_ADMIN`, in the main job or a separate one. CI must be green for every merge.
+- **CI:** Forgejo Actions (`.forgejo/workflows/`) runs fmt, `clippy -D warnings`, `cargo test`, and, in the `ui` job, lint, typecheck and Vitest. Netns tests run in a separate `netns` job: a probe step tries `ip netns add` and `nft list tables`, and the tests run only if the runner is privileged enough; otherwise the job skips them with a warning (`::warning::`) and stays green. CI must be green for every merge.
 - WFP and pf enforcement are verified by live tests on real hosts, not in CI.
 
 ## Consequences

@@ -44,14 +44,16 @@ ADRs document significant architectural decisions made during the project's deve
 | [0034](0034-observability-and-activity.md) | Observability with OpenTelemetry and a Local Activity Store | Accepted |
 | [0035](0035-test-strategy-and-ci.md) | Test Strategy and CI | Accepted |
 | [0036](0036-future-directions.md) | Future Directions: WireGuard, mTLS Gateway, IPv4 | Accepted |
-| [0037](0037-pluggable-networks-and-onion-backend.md) | Pluggable Networks and the Onion Backend | Accepted |
-| [0038](0038-disabled-latch-and-persisted-networks.md) | Disabled Latch and Persisted Networks | Accepted |
+| [0037](0037-pluggable-networks-and-onion-backend.md) | Pluggable Networks and the Onion Backend | Accepted (refined by 0040) |
+| [0038](0038-disabled-latch-and-persisted-networks.md) | Disabled Latch and Persisted Networks | Accepted (refines 0026 and 0032) |
+| [0039](0039-onion-service-lifecycle.md) | Onion Service Lifecycle | Superseded by 0040 |
+| [0040](0040-onion-service-lifecycle-consolidated.md) | Onion Service Lifecycle (Consolidated) | Accepted |
 
 ## Format
 
 Each ADR follows this structure:
 
-- **Status**: Accepted, Deprecated, or Superseded
+- **Status**: `Accepted`, optionally followed by a note (`Supersedes ADR n`, `Refines ADR n`, `Amended below`), or `Superseded by ADR n`. An accepted ADR's decision is not rewritten: later changes are appended as `Amendment` sections (read in order), or a new ADR supersedes it
 - **Date**: When the decision was made
 - **Context**: The problem or situation that prompted the decision
 - **Decision**: What was decided and why

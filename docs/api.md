@@ -46,6 +46,8 @@ opening the pipe it reads the pipe's owner and refuses unless that is `SYSTEM` o
 name while the daemon was down gets no requests. For tests and a daemon started by hand
 from a normal account, set `SOCKETGUARD_TRUST_PIPE_SERVER=1` for the client.
 
+The daemon also gives its database file (and -wal/-shm) a protected ACL, SYSTEM and Administrators only, because it holds the onion service keys, and refuses to start if it cannot. Set `SOCKETGUARD_ALLOW_UNPROTECTED_DB=1` for the daemon to continue with a warning; for tests and development only (ADR 0040).
+
 Let a user in:
 
     net localgroup "SocketGuard Users" /add
@@ -194,6 +196,8 @@ carries the meaning; `data` is empty unless stated. Clients re-fetch what change
 | `activity` | new activity records |
 
 The client crate parses them into `ApiEvent`.
+
+The desktop UI's Tauri backend re-emits these events to the frontend under the same names and adds two UI-local ones, `daemon_connected` and `daemon_disconnected`, for its own connection to the stream; the daemon never sends them.
 
 ## Export and apply
 

@@ -40,7 +40,7 @@ WireGuard (existing interfaces) and an mTLS gateway are planned; see ADR 0036/00
 socketguard (CLI) ─┐                    ┌─▶ firewall: nftables / pf / WFP (atomic desired state)
                    ├─▶ local API ─▶ daemon ─▶ interfaces: add/remove addresses
 desktop UI (Tauri) ┘  (Unix socket /    ├─▶ networks: Local, LAN, Yggdrasil, Tor
-                       named pipe)      └─▶ SQLite (schema v2) + activity log + OpenTelemetry
+                       named pipe)      └─▶ SQLite + activity log + OpenTelemetry
 ```
 
 | Crate | Description |
@@ -170,30 +170,22 @@ socketguard apps show myapp                     # prints the .onion name
 socketguard share myapp                         # http://<id>.onion:8080
 ```
 
-The daemon sends your onion keys to whatever answers on the control address, and any local
-user can bind the default `127.0.0.1:9051` while Tor is down. Therefore:
+The daemon sends your onion keys to whatever answers on the control address, so:
 
-- **Prefer a Unix control socket** (`ControlSocket /run/tor/control` in torrc, then
-  `--control unix:/run/tor/control`). Only Tor's account can own that path, and `auth: none` is
-  accepted only there. `expect_tor_uid` additionally checks the uid serving the socket (Linux).
-- With the default `auth: cookie` the daemon uses SAFECOOKIE: it verifies that the control port
-  knows the cookie before it sends anything, and never sends the cookie. Plain COOKIE is
-  refused; `auth: cookie_insecure` accepts it for a Tor without SAFECOOKIE.
-- The cookie file must be a regular, 32-byte file (no symlink, not writable by others) owned by
-  root, by `expect_tor_uid` or by the owner of `cookie_dir` (default: the directory of
-  `cookie_path`). Set `cookie_path` (for example `/var/lib/tor/control_auth_cookie`) to pin the
-  file PROTOCOLINFO may name. These are keys of the tor entry in `backends` in the config file.
-- Revoking access never fails open: if Tor is down the removal is remembered and retried, the
-  change returns HTTP 202 with `enforcement: pending` (the CLI warns), and onion services we
-  created whose address is gone are removed on the next pass. Services we did not create are
-  left alone.
+- Prefer a Unix control socket (`ControlSocket /run/tor/control` in torrc, then
+  `--control unix:/run/tor/control`); a TCP control address must be loopback.
+- Authentication is SAFECOOKIE by default: the daemon checks that the control port knows the
+  cookie before it sends anything. The cookie file is vetted (owner, permissions, no symlink);
+  on Windows set `cookie_path` (and `cookie_owner`) in the config file.
+- Revoking access never fails open: if Tor is down, the removal is remembered and retried, the
+  change returns HTTP 202 `enforcement: pending` (the CLI warns), and removing the network is
+  refused (409) until it is confirmed, unless forced.
+- Tor networks created through the API may only use the default or config-file settings;
+  anything else belongs in the config file, which only an administrator can edit.
 
-The service keys live in the daemon's database (mode 0600 on Unix; on Windows the daemon gives the
-file a protected ACL: SYSTEM and Administrators only, and refuses to start if it cannot; set
-`SOCKETGUARD_ALLOW_UNPROTECTED_DB=1` to run anyway in tests or development). On Windows Tor needs
-`cookie_path` (and `cookie_owner`, the SID of Tor's account, unless Tor runs as SYSTEM or an
-Administrator) in the config file. See ADR 0037 and 0039. A Docker end-to-end
-test is in `deploy/e2e/tor-e2e.sh`.
+The service keys live in the daemon's database (mode 0600 on Unix, a protected ACL on Windows).
+See [ADR 0040](docs/adr/0040-onion-service-lifecycle-consolidated.md) for the full decision
+and `deploy/e2e/tor-e2e.sh` for the Docker end-to-end test.
 
 ## Testing
 
@@ -215,7 +207,7 @@ test is in `deploy/e2e/tor-e2e.sh`.
 ## Architecture decisions
 
 Architecture decisions are recorded as ADRs in [`docs/adr/`](docs/adr/); the current design is
-ADR 0026–0039.
+ADR 0026–0040.
 
 ## License
 

@@ -4,6 +4,8 @@
 
 Accepted. Supersedes ADR 0008 (Windows part: ADR 0030).
 
+Amended below; read the amendments in order.
+
 ## Date
 
 2026-11-09
