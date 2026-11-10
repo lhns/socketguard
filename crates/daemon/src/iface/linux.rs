@@ -1,11 +1,11 @@
-use super::NetworkInterface;
+use super::InterfaceManager;
 use anyhow::{Context, Result};
 use std::net::Ipv6Addr;
 use std::process::Command;
 
-pub struct LinuxNetworkInterface;
+pub struct LinuxInterfaces;
 
-impl NetworkInterface for LinuxNetworkInterface {
+impl InterfaceManager for LinuxInterfaces {
     fn add_address(&self, iface: &str, addr: Ipv6Addr, prefix: u8) -> Result<()> {
         let mut cmd = Command::new("ip");
         cmd.args(["addr", "add", &format!("{addr}/{prefix}"), "dev", iface]);
@@ -27,9 +27,9 @@ impl NetworkInterface for LinuxNetworkInterface {
         Ok(())
     }
 
-    fn remove_address(&self, iface: &str, addr: Ipv6Addr) -> Result<()> {
+    fn remove_address(&self, iface: &str, addr: Ipv6Addr, prefix: u8) -> Result<()> {
         let output = Command::new("ip")
-            .args(["addr", "del", &format!("{addr}/128"), "dev", iface])
+            .args(["addr", "del", &format!("{addr}/{prefix}"), "dev", iface])
             .output()
             .context("failed to run ip addr del")?;
 

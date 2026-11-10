@@ -1,8 +1,8 @@
 use crate::backend::yggdrasil::{NodeInfo, YggdrasilNode};
 use crate::backend::{with_prefix64, Ipv6Backend, Prefix};
 use crate::firewall::{Counter, DesiredRuleset, DropEvent, DropSink, Firewall, Revocation};
+use crate::iface::InterfaceManager;
 use crate::monitor::SocketMonitor;
-use crate::network::NetworkInterface;
 use crate::AppState;
 use anyhow::Result;
 use socketguard_core::config::DaemonConfig;
@@ -146,7 +146,7 @@ impl Firewall for MockFirewall {
     }
 }
 
-// ─── MockNetworkInterface ────────────────────────────────────────────────────
+// ─── MockInterfaceManager ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NetworkCall {
@@ -164,14 +164,14 @@ pub enum NetworkCall {
 /// Records calls and tracks which addresses are configured on which interface.
 /// Cloning shares the state, so a test can keep a handle after boxing the mock.
 #[derive(Clone)]
-pub struct MockNetworkInterface {
+pub struct MockInterfaceManager {
     pub calls: Arc<Mutex<Vec<NetworkCall>>>,
     addrs: Arc<Mutex<HashMap<String, HashSet<Ipv6Addr>>>>,
     missing_ifaces: Arc<Mutex<HashSet<String>>>,
     remove_failing: Arc<Mutex<bool>>,
 }
 
-impl MockNetworkInterface {
+impl MockInterfaceManager {
     pub fn new(calls: Arc<Mutex<Vec<NetworkCall>>>) -> Self {
         Self {
             calls,
@@ -225,7 +225,7 @@ impl MockNetworkInterface {
     }
 }
 
-impl NetworkInterface for MockNetworkInterface {
+impl InterfaceManager for MockInterfaceManager {
     fn add_address(&self, iface: &str, addr: Ipv6Addr, prefix: u8) -> Result<()> {
         self.calls.lock().unwrap().push(NetworkCall::AddAddress {
             iface: iface.to_string(),
@@ -244,7 +244,7 @@ impl NetworkInterface for MockNetworkInterface {
         Ok(())
     }
 
-    fn remove_address(&self, iface: &str, addr: Ipv6Addr) -> Result<()> {
+    fn remove_address(&self, iface: &str, addr: Ipv6Addr, _prefix: u8) -> Result<()> {
         self.calls.lock().unwrap().push(NetworkCall::RemoveAddress {
             iface: iface.to_string(),
             addr,
@@ -553,7 +553,7 @@ pub fn empty_engine() -> crate::engine::Engine {
     crate::engine::Engine::new_injectable(
         Box::new(MockSocketMonitor::new(vec![])),
         Arc::new(MockFirewall::new(Arc::new(Mutex::new(vec![])))),
-        Arc::new(MockNetworkInterface::new(Arc::new(Mutex::new(vec![])))),
+        Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),
         HashMap::new(),
     )
 }
@@ -565,7 +565,7 @@ pub struct StandardDaemon {
     pub fw: Arc<MockFirewall>,
     /// What the engine asked the firewall to do.
     pub fw_calls: Arc<Mutex<Vec<FirewallCall>>>,
-    pub net: MockNetworkInterface,
+    pub net: MockInterfaceManager,
     /// What the engine asked the interfaces to do.
     pub net_calls: Arc<Mutex<Vec<NetworkCall>>>,
     /// The allocator behind each network.
@@ -587,7 +587,7 @@ pub async fn daemon_with(
     let fw_calls = Arc::new(Mutex::new(Vec::new()));
     let net_calls = Arc::new(Mutex::new(Vec::new()));
     let fw = Arc::new(MockFirewall::new(fw_calls.clone()));
-    let net = MockNetworkInterface::new(net_calls.clone());
+    let net = MockInterfaceManager::new(net_calls.clone());
     let monitor = MockSocketMonitor::new(initial);
     let sockets = monitor.sockets.clone();
 

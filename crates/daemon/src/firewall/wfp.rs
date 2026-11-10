@@ -43,8 +43,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::core::{GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::HANDLE;
-use windows::Win32::NetworkManagement::IpHelper::ConvertInterfaceAliasToLuid;
-use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::*;
 
 const AUTHN_DEFAULT: u32 = 0xFFFF_FFFF; // RPC_C_AUTHN_DEFAULT
@@ -483,14 +481,7 @@ fn raw_cond(
 }
 
 fn resolve_luid(alias: &str) -> Option<u64> {
-    let w = wide(alias);
-    let mut luid = NET_LUID_LH::default();
-    let rc = unsafe { ConvertInterfaceAliasToLuid(PCWSTR(w.as_ptr()), &mut luid) };
-    if rc.0 == 0 {
-        Some(unsafe { luid.Value })
-    } else {
-        None
-    }
+    crate::iface::alias_to_luid(alias).map(|luid| unsafe { luid.Value })
 }
 
 // ---------------------------------------------------------------------------

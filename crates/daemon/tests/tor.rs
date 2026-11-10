@@ -78,7 +78,7 @@ impl Harness {
         let engine = Engine::new_injectable(
             Box::new(MockSocketMonitor::new(sockets)),
             fw.clone(),
-            Arc::new(MockNetworkInterface::new(Arc::new(Mutex::new(vec![])))),
+            Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),
             backends,
         );
         let state = test_app_state_at(
@@ -609,8 +609,8 @@ async fn a_remote_control_address_is_refused_when_the_network_is_made() {
         cookie_owner: None,
         allow_remote_control: allow,
     };
-    let net: Arc<dyn socketguard_daemon::network::NetworkInterface> =
-        Arc::new(MockNetworkInterface::new(Arc::new(Mutex::new(vec![]))));
+    let net: Arc<dyn socketguard_daemon::iface::InterfaceManager> =
+        Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![]))));
     let err = networks::create(&tor("10.0.0.1:9051", false), [0; 5], net.clone())
         .err()
         .unwrap();

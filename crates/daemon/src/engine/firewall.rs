@@ -204,7 +204,7 @@ impl Engine {
                 .map(|name| HostInterface {
                     name: name.clone(),
                     addrs: self
-                        .network
+                        .ifaces
                         .list_addresses(name)
                         .unwrap_or_default()
                         .into_iter()
@@ -319,7 +319,7 @@ impl Engine {
         for (key, iface, net_id) in scopes {
             let host = HostInterface {
                 addrs: self
-                    .network
+                    .ifaces
                     .list_addresses(&iface)
                     .unwrap_or_default()
                     .into_iter()

@@ -36,7 +36,7 @@ Four traits are defined:
 - `SocketMonitor` — `list_listening_sockets() -> Vec<ListeningSocket>`
 - `Ipv6Backend` — `allocate_address() -> AllocatedAddress`, `release_address()`
 - `Firewall` — `apply_acl()`, `remove_acl()`, `block_all()`, `allow_all()`
-- `NetworkInterface` — `add_address()`, `remove_address()`
+- `InterfaceManager` — `add_address()`, `remove_address()`
 
 Each module provides a `create_*()` factory function that returns `Box<dyn Trait>`, selected at compile time via `#[cfg(target_os)]`.
 

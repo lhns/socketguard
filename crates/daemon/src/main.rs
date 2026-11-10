@@ -130,11 +130,7 @@ async fn disable(config: &DaemonConfig) -> Result<()> {
         if b.backend.interface().is_none() {
             nets.push((
                 b.id.clone(),
-                networks::create(
-                    &b.backend,
-                    [0; 5],
-                    Arc::from(network::create_network_interface()),
-                )?,
+                networks::create(&b.backend, [0; 5], Arc::from(iface::create()))?,
             ));
         }
     }
@@ -143,7 +139,7 @@ async fn disable(config: &DaemonConfig) -> Result<()> {
         &interfaces,
         nets,
         Arc::from(firewall::create_firewall()),
-        Arc::from(network::create_network_interface()),
+        Arc::from(iface::create()),
     )
     .await?;
     eprintln!("[socketguard] Firewall rules, addresses and onion services removed");

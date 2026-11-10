@@ -13,7 +13,7 @@ pub mod tor;
 pub mod tor_control;
 
 use crate::backend::{self, Ipv6Backend, Prefix};
-use crate::network::NetworkInterface;
+use crate::iface::InterfaceManager;
 use crate::ruleset::{served_ports, subject_credentials, Snapshot};
 use anyhow::Result;
 use socketguard_core::config::BackendConfig;
@@ -256,7 +256,7 @@ impl Network for IpNetwork {
 pub fn create(
     config: &BackendConfig,
     ula_global_id: [u8; 5],
-    net: Arc<dyn NetworkInterface>,
+    net: Arc<dyn InterfaceManager>,
 ) -> Result<Arc<dyn Network>> {
     match config {
         BackendConfig::Tor {

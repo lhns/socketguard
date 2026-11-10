@@ -1,52 +1,32 @@
-use super::NetworkInterface;
+use super::InterfaceManager;
 use anyhow::Result;
 use std::net::Ipv6Addr;
-use windows::Win32::Foundation::{ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS, WIN32_ERROR};
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{
+    ERROR_BUFFER_OVERFLOW, ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS, WIN32_ERROR,
+};
 use windows::Win32::NetworkManagement::IpHelper::{
-    CreateUnicastIpAddressEntry, DeleteUnicastIpAddressEntry, FreeMibTable,
-    GetUnicastIpAddressTable, InitializeUnicastIpAddressEntry, MIB_UNICASTIPADDRESS_ROW,
+    ConvertInterfaceAliasToLuid, CreateUnicastIpAddressEntry, DeleteUnicastIpAddressEntry,
+    FreeMibTable, GetAdaptersAddresses, GetUnicastIpAddressTable, InitializeUnicastIpAddressEntry,
+    GAA_FLAG_SKIP_ANYCAST, IP_ADAPTER_ADDRESSES_LH, MIB_UNICASTIPADDRESS_ROW,
 };
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows::Win32::Networking::WinSock::{
     IpDadStatePreferred, AF_INET6, SOCKADDR_IN6, SOCKADDR_INET,
 };
 
-pub struct WindowsNetworkInterface;
+pub struct WindowsInterfaces;
 
-/// Look up the NET_LUID for a network interface by its display name.
+/// The LUID of the interface with this display name (alias), if there is one.
+pub(crate) fn alias_to_luid(alias: &str) -> Option<NET_LUID_LH> {
+    let wide: Vec<u16> = alias.encode_utf16().chain(Some(0)).collect();
+    let mut luid = NET_LUID_LH::default();
+    let rc = unsafe { ConvertInterfaceAliasToLuid(PCWSTR(wide.as_ptr()), &mut luid) };
+    (rc.0 == 0).then_some(luid)
+}
+
 fn get_interface_luid(iface: &str) -> Result<NET_LUID_LH> {
-    use windows::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, IP_ADAPTER_ADDRESSES_LH,
-    };
-
-    let family = AF_INET6.0 as u32;
-    let flags = GAA_FLAG_SKIP_ANYCAST;
-
-    // First call to get required buffer size
-    let mut size = 0u32;
-    unsafe {
-        let _ = GetAdaptersAddresses(family, flags, None, None, &mut size);
-    }
-
-    let mut buf = vec![0u8; size as usize];
-    let adapter_ptr = buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
-
-    let ret = unsafe { GetAdaptersAddresses(family, flags, None, Some(adapter_ptr), &mut size) };
-    if ret != 0 {
-        anyhow::bail!("GetAdaptersAddresses failed with error {ret}");
-    }
-
-    let mut current = adapter_ptr;
-    while !current.is_null() {
-        let adapter = unsafe { &*current };
-        let friendly_name = unsafe { adapter.FriendlyName.to_string() }.unwrap_or_default();
-        if friendly_name == iface {
-            return Ok(adapter.Luid);
-        }
-        current = adapter.Next;
-    }
-
-    anyhow::bail!("network interface {iface:?} not found")
+    alias_to_luid(iface).ok_or_else(|| anyhow::anyhow!("network interface {iface:?} not found"))
 }
 
 /// Build a SOCKADDR_INET from an Ipv6Addr.
@@ -66,43 +46,49 @@ fn check_win32(err: WIN32_ERROR, ignore: &[WIN32_ERROR]) -> Result<()> {
     }
 }
 
-/// List all network interface friendly names.
-fn enumerate_interface_names() -> Result<Vec<String>> {
-    use windows::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, IP_ADAPTER_ADDRESSES_LH,
-    };
+/// Call `visit` on every IPv6-capable adapter. The adapter list can grow between the size
+/// query and the fetch (ERROR_BUFFER_OVERFLOW), so retry a few times.
+fn for_each_adapter(mut visit: impl FnMut(&IP_ADAPTER_ADDRESSES_LH)) -> Result<()> {
     let family = AF_INET6.0 as u32;
-    let flags = GAA_FLAG_SKIP_ANYCAST;
-
     let mut size = 0u32;
-    unsafe {
-        let _ = GetAdaptersAddresses(family, flags, None, None, &mut size);
-    }
-
-    let mut buf = vec![0u8; size as usize];
-    let adapter_ptr = buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
-
-    let ret = unsafe { GetAdaptersAddresses(family, flags, None, Some(adapter_ptr), &mut size) };
-    if ret != 0 {
-        anyhow::bail!("GetAdaptersAddresses failed with error {ret}");
-    }
-
-    let mut names = Vec::new();
-    let mut current = adapter_ptr;
-    while !current.is_null() {
-        let adapter = unsafe { &*current };
-        let friendly_name = unsafe { adapter.FriendlyName.to_string() }.unwrap_or_default();
-        if !friendly_name.is_empty() {
-            names.push(friendly_name);
+    for _ in 0..4 {
+        // u64 elements keep the buffer aligned for the adapter structs.
+        let mut buf = vec![0u64; (size as usize).div_ceil(8)];
+        let first = buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+        let ptr = (size > 0).then_some(first);
+        let ret =
+            unsafe { GetAdaptersAddresses(family, GAA_FLAG_SKIP_ANYCAST, None, ptr, &mut size) };
+        if ret == ERROR_BUFFER_OVERFLOW.0 {
+            continue; // `size` now holds the required length
         }
-        current = adapter.Next;
+        if ret != 0 {
+            anyhow::bail!("GetAdaptersAddresses failed with error {ret}");
+        }
+        let mut current = first;
+        while !current.is_null() {
+            let adapter = unsafe { &*current };
+            visit(adapter);
+            current = adapter.Next;
+        }
+        return Ok(());
     }
+    anyhow::bail!("GetAdaptersAddresses: the adapter list kept growing")
+}
 
+/// All network interface friendly names, sorted.
+fn enumerate_interface_names() -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for_each_adapter(|adapter| {
+        let name = unsafe { adapter.FriendlyName.to_string() }.unwrap_or_default();
+        if !name.is_empty() {
+            names.push(name);
+        }
+    })?;
     names.sort();
     Ok(names)
 }
 
-impl NetworkInterface for WindowsNetworkInterface {
+impl InterfaceManager for WindowsInterfaces {
     fn add_address(&self, iface: &str, addr: Ipv6Addr, prefix: u8) -> Result<()> {
         let luid = get_interface_luid(iface)?;
 
@@ -118,7 +104,7 @@ impl NetworkInterface for WindowsNetworkInterface {
         check_win32(err, &[ERROR_OBJECT_ALREADY_EXISTS])
     }
 
-    fn remove_address(&self, iface: &str, addr: Ipv6Addr) -> Result<()> {
+    fn remove_address(&self, iface: &str, addr: Ipv6Addr, _prefix: u8) -> Result<()> {
         let target_octets = addr.octets();
 
         // Enumerate all unicast addresses and find matching entry
@@ -175,5 +161,20 @@ impl NetworkInterface for WindowsNetworkInterface {
 
     fn list_interfaces(&self) -> Result<Vec<String>> {
         enumerate_interface_names()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listed_interfaces_resolve_to_a_luid() {
+        let names = enumerate_interface_names().unwrap();
+        assert!(!names.is_empty());
+        for n in names {
+            assert!(alias_to_luid(&n).is_some(), "{n}");
+        }
+        assert!(alias_to_luid("no such interface").is_none());
     }
 }

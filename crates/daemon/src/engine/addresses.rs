@@ -5,7 +5,7 @@ use super::*;
 use crate::api::DaemonEvent;
 use crate::backend::{iid_of, same_prefix64, with_prefix64};
 use crate::firewall::{Firewall, ScopeMatch};
-use crate::network::NetworkInterface;
+use crate::iface::InterfaceManager;
 use crate::networks::{LocatorRequest, NewLocator};
 use crate::state::{Database, OwnedAddress};
 use crate::AppState;
@@ -64,7 +64,7 @@ impl Engine {
             return;
         }
         let due_count = due.len();
-        let failures = release_owned(db, &self.network, due).await;
+        let failures = release_owned(db, &self.ifaces, due).await;
         {
             let mut failing = self.removal_failing.lock().unwrap();
             let still: HashSet<Ipv6Addr> = failures.iter().map(|(o, _)| o.addr).collect();
@@ -134,7 +134,7 @@ impl Engine {
             warn!("Not adding {addr} to {iface}: cannot record it first: {e}");
             return false;
         }
-        match self.network.add_address(iface, addr, ADDRESS_PREFIX_LEN) {
+        match self.ifaces.add_address(iface, addr, ADDRESS_PREFIX_LEN) {
             Ok(()) => true,
             Err(e) => {
                 warn!("Failed to add {addr} to {iface}: {e}");
@@ -318,7 +318,7 @@ impl Engine {
             .collect();
 
         for (iface, wanted) in expected {
-            let present = match self.network.list_addresses(&iface) {
+            let present = match self.ifaces.list_addresses(&iface) {
                 Ok(p) => {
                     self.unavailable_ifaces.lock().unwrap().remove(&iface);
                     p
@@ -557,7 +557,7 @@ pub(super) async fn disable_all(
     db: &Database,
     interfaces: &HashMap<String, String>,
     firewall: Arc<dyn Firewall>,
-    network: Arc<dyn NetworkInterface>,
+    ifaces: Arc<dyn InterfaceManager>,
 ) -> anyhow::Result<()> {
     db.set_disabled(true).await?;
     // Removing the rules answers the unadopted question too.
@@ -584,7 +584,7 @@ pub(super) async fn disable_all(
     // remains denied, and the disabled daemon's sweep removes the rules once the last one
     // is gone.
     let owned = db.list_owned_addresses().await?;
-    let failures = release_owned(db, &network, owned).await;
+    let failures = release_owned(db, &ifaces, owned).await;
     if !failures.is_empty() {
         let list: Vec<String> = failures
             .iter()
@@ -604,7 +604,7 @@ pub(super) async fn disable_all(
 /// the address). Returns the ones that are still there.
 async fn release_owned(
     db: &Database,
-    network: &Arc<dyn NetworkInterface>,
+    ifaces: &Arc<dyn InterfaceManager>,
     rows: Vec<OwnedAddress>,
 ) -> Vec<(OwnedAddress, anyhow::Error)> {
     let mut failures = Vec::new();
@@ -617,14 +617,16 @@ async fn release_owned(
                 warn!("Cannot record {} as retiring: {e}", o.addr);
             }
         }
-        let net = network.clone();
+        let net = ifaces.clone();
         let (iface, addr) = (o.interface.clone(), o.addr);
-        let removed = tokio::task::spawn_blocking(move || match net.remove_address(&iface, addr) {
-            Ok(()) => Ok(()),
-            Err(e) => match net.list_addresses(&iface) {
-                Ok(list) if !list.contains(&addr) => Ok(()),
-                _ => Err(e),
-            },
+        let removed = tokio::task::spawn_blocking(move || {
+            match net.remove_address(&iface, addr, ADDRESS_PREFIX_LEN) {
+                Ok(()) => Ok(()),
+                Err(e) => match net.list_addresses(&iface) {
+                    Ok(list) if !list.contains(&addr) => Ok(()),
+                    _ => Err(e),
+                },
+            }
         })
         .await;
         match removed {
@@ -757,7 +759,7 @@ mod tests {
             &db,
             &ifaces,
             Arc::new(MockFirewall::new(Arc::new(Mutex::new(vec![])))),
-            Arc::new(MockNetworkInterface::new(calls.clone())),
+            Arc::new(MockInterfaceManager::new(calls.clone())),
         )
         .await
         .unwrap();

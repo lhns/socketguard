@@ -26,9 +26,9 @@ use enforce::disable_networks;
 
 use crate::api::DaemonEvent;
 use crate::firewall::{DesiredRuleset, DropEvent, Firewall};
+use crate::iface::{self, InterfaceManager};
 use crate::metrics::{CounterKey, Metrics};
 use crate::monitor::{self, SocketMonitor};
-use crate::network::{self, NetworkInterface};
 use crate::networks;
 use crate::ruleset::LockoutRisk;
 use crate::state::{Database, NewActivity};
@@ -130,7 +130,7 @@ pub struct Engine {
     monitor: Box<dyn SocketMonitor>,
     pub(crate) backends: HashMap<String, ActiveBackend>,
     firewall: Arc<dyn Firewall>,
-    network: Arc<dyn NetworkInterface>,
+    ifaces: Arc<dyn InterfaceManager>,
     /// Persisted ULA global ID handed to ULA backends.
     ula_global_id: [u8; 5],
     /// Interfaces already reported as unavailable (avoids a warning every poll).
@@ -174,7 +174,7 @@ impl Engine {
             ula_global_id,
             monitor::create_monitor(),
             Arc::from(crate::firewall::create_firewall()),
-            Arc::from(network::create_network_interface()),
+            Arc::from(iface::create()),
         )
     }
 
@@ -183,11 +183,11 @@ impl Engine {
         ula_global_id: [u8; 5],
         monitor: Box<dyn SocketMonitor>,
         firewall: Arc<dyn Firewall>,
-        network: Arc<dyn NetworkInterface>,
+        ifaces: Arc<dyn InterfaceManager>,
     ) -> anyhow::Result<Self> {
         let mut backends = HashMap::new();
         for inst in &config.backends {
-            let network = networks::create(&inst.backend, ula_global_id, network.clone())?;
+            let network = networks::create(&inst.backend, ula_global_id, ifaces.clone())?;
             backends.insert(
                 inst.id.clone(),
                 ActiveBackend {
@@ -199,7 +199,7 @@ impl Engine {
         Ok(Self::assemble(
             monitor,
             firewall,
-            network,
+            ifaces,
             backends,
             ula_global_id,
         ))
@@ -209,13 +209,13 @@ impl Engine {
     pub fn new_injectable(
         monitor: Box<dyn SocketMonitor>,
         firewall: Arc<dyn Firewall>,
-        network: Arc<dyn NetworkInterface>,
+        ifaces: Arc<dyn InterfaceManager>,
         backends: HashMap<String, ActiveBackend>,
     ) -> Self {
         let mut engine = Self::assemble(
             monitor,
             firewall,
-            network,
+            ifaces,
             backends,
             crate::backend::ula::UlaBackend::random_global_id(),
         );
@@ -237,7 +237,7 @@ impl Engine {
     fn assemble(
         monitor: Box<dyn SocketMonitor>,
         firewall: Arc<dyn Firewall>,
-        network: Arc<dyn NetworkInterface>,
+        ifaces: Arc<dyn InterfaceManager>,
         backends: HashMap<String, ActiveBackend>,
         ula_global_id: [u8; 5],
     ) -> Self {
@@ -245,7 +245,7 @@ impl Engine {
             monitor,
             backends,
             firewall,
-            network,
+            ifaces,
             ula_global_id,
             unavailable_ifaces: Mutex::default(),
             alloc_failing: Mutex::default(),
@@ -425,7 +425,7 @@ impl Engine {
             &ifaces,
             nets,
             self.firewall.clone(),
-            self.network.clone(),
+            self.ifaces.clone(),
         )
         .await;
         self.commit(state, removed, None, &[DaemonEvent::SettingsChanged])
@@ -500,9 +500,9 @@ pub async fn disable_everything(
     interfaces: &HashMap<String, String>,
     networks: Vec<(String, Arc<dyn networks::Network>)>,
     firewall: Arc<dyn Firewall>,
-    network: Arc<dyn NetworkInterface>,
+    ifaces: Arc<dyn InterfaceManager>,
 ) -> anyhow::Result<()> {
-    let removed = disable_all(db, interfaces, firewall, network).await;
+    let removed = disable_all(db, interfaces, firewall, ifaces).await;
     disable_networks(db, networks).await;
     removed
 }
@@ -580,7 +580,7 @@ mod tests {
         db.migrate().await.unwrap();
         let addr: Ipv6Addr = "fd00::1".parse().unwrap();
         db.claim_address(addr, "lo", Some("local")).await.unwrap();
-        let net = MockNetworkInterface::new(Arc::new(Mutex::new(vec![])));
+        let net = MockInterfaceManager::new(Arc::new(Mutex::new(vec![])));
         net.plant_address("lo", addr);
         net.set_remove_failing(true);
         let tor = Arc::new(CountingNetwork::default());

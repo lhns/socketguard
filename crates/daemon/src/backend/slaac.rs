@@ -1,5 +1,5 @@
 use super::{Ipv6Backend, Prefix};
-use crate::network::NetworkInterface;
+use crate::iface::InterfaceManager;
 use anyhow::{bail, Context, Result};
 use rand::Rng;
 use socketguard_core::{AllocatedAddress, BackendType};
@@ -19,7 +19,7 @@ pub const DISCOVERY_CACHE: Duration = Duration::from_secs(10);
 /// re-read regularly, so a changed ISP prefix is followed.
 pub struct SlaacBackend {
     interface: String,
-    net: Arc<dyn NetworkInterface>,
+    net: Arc<dyn InterfaceManager>,
     /// A configured prefix; never rediscovered.
     fixed: Option<[u8; 8]>,
     cache_for: Duration,
@@ -33,7 +33,7 @@ impl SlaacBackend {
     pub fn new(
         interface: &str,
         prefix: Option<&str>,
-        net: Arc<dyn NetworkInterface>,
+        net: Arc<dyn InterfaceManager>,
     ) -> Result<Self> {
         Self::with_cache(interface, prefix, net, DISCOVERY_CACHE)
     }
@@ -41,7 +41,7 @@ impl SlaacBackend {
     pub fn with_cache(
         interface: &str,
         prefix: Option<&str>,
-        net: Arc<dyn NetworkInterface>,
+        net: Arc<dyn InterfaceManager>,
         cache_for: Duration,
     ) -> Result<Self> {
         let fixed = match prefix {
@@ -209,7 +209,7 @@ fn parse_prefix(prefix_str: &str) -> Result<[u8; 8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::MockNetworkInterface;
+    use crate::test_support::MockInterfaceManager;
 
     #[test]
     fn parse_prefix_with_slash() {
@@ -272,11 +272,11 @@ mod tests {
         );
     }
 
-    fn mock() -> MockNetworkInterface {
-        MockNetworkInterface::new(Arc::default())
+    fn mock() -> MockInterfaceManager {
+        MockInterfaceManager::new(Arc::default())
     }
 
-    fn add(m: &MockNetworkInterface, addr: &str) {
+    fn add(m: &MockInterfaceManager, addr: &str) {
         m.add_address("eth0", addr.parse().unwrap(), 64).unwrap();
     }
 
@@ -313,7 +313,7 @@ mod tests {
             SlaacBackend::with_cache("eth0", None, Arc::new(m.clone()), Duration::from_secs(3600))
                 .unwrap();
         let first = b.current_prefix().unwrap().unwrap();
-        m.remove_address("eth0", "2001:db8:1::1".parse().unwrap())
+        m.remove_address("eth0", "2001:db8:1::1".parse().unwrap(), 128)
             .unwrap();
         add(&m, "2001:db8:2::1");
         assert_eq!(b.current_prefix().unwrap().unwrap(), first);

@@ -172,7 +172,7 @@ impl Engine {
                 EngineError::Invalid(e)
             }
         })?;
-        let n = networks::create(&inst.backend, self.ula_global_id, self.network.clone())
+        let n = networks::create(&inst.backend, self.ula_global_id, self.ifaces.clone())
             .map_err(|e| EngineError::Invalid(format!("cannot create network: {e}")))?;
         self.add_network_instance(state, &inst, n).await;
         self.networks()

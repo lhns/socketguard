@@ -1,11 +1,11 @@
-use super::NetworkInterface;
+use super::InterfaceManager;
 use anyhow::{Context, Result};
 use std::net::Ipv6Addr;
 use std::process::Command;
 
-pub struct MacosNetworkInterface;
+pub struct MacosInterfaces;
 
-impl NetworkInterface for MacosNetworkInterface {
+impl InterfaceManager for MacosInterfaces {
     fn add_address(&self, iface: &str, addr: Ipv6Addr, prefix: u8) -> Result<()> {
         let output = Command::new("ifconfig")
             .args([
@@ -29,7 +29,7 @@ impl NetworkInterface for MacosNetworkInterface {
         Ok(())
     }
 
-    fn remove_address(&self, iface: &str, addr: Ipv6Addr) -> Result<()> {
+    fn remove_address(&self, iface: &str, addr: Ipv6Addr, _prefix: u8) -> Result<()> {
         let output = Command::new("ifconfig")
             .args([iface, "inet6", &format!("{addr}"), "-alias"])
             .output()

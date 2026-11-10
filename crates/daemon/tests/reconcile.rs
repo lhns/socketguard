@@ -12,7 +12,7 @@ use socketguard_core::{
 use socketguard_daemon::api::DaemonEvent;
 use socketguard_daemon::engine::{Engine, EngineError, GrantFilter, ProtectHostError};
 use socketguard_daemon::firewall::{DropEvent, ScopeMatch, Sources};
-use socketguard_daemon::network::NetworkInterface as _;
+use socketguard_daemon::iface::InterfaceManager as _;
 use socketguard_daemon::test_support::*;
 use socketguard_daemon::AppState;
 use std::collections::HashMap;
@@ -31,7 +31,7 @@ struct Harness {
     state: Arc<AppState>,
     fw: Arc<MockFirewall>,
     fw_calls: Arc<Mutex<Vec<FirewallCall>>>,
-    net: MockNetworkInterface,
+    net: MockInterfaceManager,
     net_calls: Arc<Mutex<Vec<NetworkCall>>>,
     sockets: Arc<Mutex<Vec<ListeningSocket>>>,
     nets: HashMap<&'static str, MockIpv6Backend>,
@@ -1388,7 +1388,7 @@ async fn ula_global_id_survives_restart() {
         let b = socketguard_daemon::backend::create_backend(
             &ula,
             id,
-            std::sync::Arc::new(MockNetworkInterface::new(Default::default())),
+            std::sync::Arc::new(MockInterfaceManager::new(Default::default())),
         )
         .unwrap();
         (id, b.allocate(None).unwrap().address.octets())
@@ -1404,7 +1404,7 @@ async fn ula_global_id_survives_restart() {
     let b = socketguard_daemon::backend::create_backend(
         &ula,
         id,
-        std::sync::Arc::new(MockNetworkInterface::new(Default::default())),
+        std::sync::Arc::new(MockInterfaceManager::new(Default::default())),
     )
     .unwrap();
     assert_eq!(
@@ -1780,7 +1780,7 @@ async fn a_network_that_cannot_initialise_is_down_not_fatal() {
         }],
         ..DaemonConfig::default()
     };
-    let net = MockNetworkInterface::new(Default::default());
+    let net = MockInterfaceManager::new(Default::default());
     let fw = Arc::new(MockFirewall::new(Default::default()));
     let monitor = MockSocketMonitor::new(vec![listener("nginx", 80, Protocol::Tcp)]);
     let engine = Engine::new_with_deps(

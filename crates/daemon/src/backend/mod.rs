@@ -3,7 +3,7 @@ pub mod slaac;
 pub mod ula;
 pub mod yggdrasil;
 
-use crate::network::NetworkInterface;
+use crate::iface::InterfaceManager;
 use anyhow::Result;
 use socketguard_core::config::BackendConfig;
 use socketguard_core::AllocatedAddress;
@@ -56,7 +56,7 @@ pub trait Ipv6Backend: Send + Sync {
 pub fn create_backend(
     config: &BackendConfig,
     ula_global_id: [u8; 5],
-    net: Arc<dyn NetworkInterface>,
+    net: Arc<dyn InterfaceManager>,
 ) -> Result<Box<dyn Ipv6Backend>> {
     match config {
         BackendConfig::Ula { .. } => Ok(Box::new(ula::UlaBackend::new(ula_global_id))),
