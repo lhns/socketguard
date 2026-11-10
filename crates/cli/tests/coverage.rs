@@ -1,11 +1,20 @@
 //! Every API route is reachable from a CLI command (ADR 0033), and the table names only
-//! commands that exist. The client crate's own table is compared with the daemon's
-//! routes in the daemon's tests.
+//! commands that exist. The CLI table names client methods; their routes come from the
+//! client's `CLIENT_ROUTES`, which the daemon's tests compare with the daemon's routes.
 
 use clap::CommandFactory;
 use socketguard_cli::{cli::Cli, CLI_ROUTES};
+use socketguard_client::CLIENT_ROUTES;
 use socketguard_daemon::api::ROUTES;
 use std::collections::BTreeSet;
+
+/// The (method, path) of the client method a CLI command calls.
+fn route_of(client_method: &str) -> Option<(String, String)> {
+    CLIENT_ROUTES
+        .iter()
+        .find(|r| r.name == client_method)
+        .map(|r| (r.method.to_string(), r.path.to_string()))
+}
 
 #[test]
 fn every_route_is_reachable_from_a_cli_command() {
@@ -15,7 +24,7 @@ fn every_route_is_reachable_from_a_cli_command() {
         .collect();
     let cli: BTreeSet<(String, String)> = CLI_ROUTES
         .iter()
-        .map(|r| (r.http_method.to_string(), r.path.to_string()))
+        .filter_map(|r| route_of(r.client_method))
         .collect();
     let missing: Vec<_> = api.difference(&cli).collect();
     let extra: Vec<_> = cli.difference(&api).collect();
@@ -30,14 +39,10 @@ fn every_route_is_reachable_from_a_cli_command() {
 }
 
 #[test]
-fn the_client_has_a_method_for_every_route_of_the_table() {
-    let client: BTreeSet<(String, String)> = socketguard_client::CLIENT_ROUTES
-        .iter()
-        .map(|(m, p)| (m.to_string(), p.to_string()))
-        .collect();
+fn the_client_has_every_method_the_table_names() {
     for r in CLI_ROUTES {
         assert!(
-            client.contains(&(r.http_method.to_string(), r.path.to_string())),
+            route_of(r.client_method).is_some(),
             "{} uses {} which the client does not have",
             r.command,
             r.client_method

@@ -1,7 +1,8 @@
 //! Snapshots of the human output (review with `cargo insta review`).
 
 use chrono::{DateTime, Utc};
-use socketguard_cli::commands::{document_text, find_grants, parse_document};
+use socketguard_cli::commands::find_grants;
+use socketguard_cli::document::{parse as parse_document, text as document_text};
 use socketguard_cli::render::{self, Names};
 use socketguard_core::api_types::*;
 use socketguard_core::*;
@@ -384,7 +385,7 @@ fn share_onion_addresses() {
 fn tor_network_config_from_flags() {
     use socketguard_core::config::{BackendConfig, TorAuth};
     assert_eq!(
-        socketguard_cli::commands::tor_config(None, None).unwrap(),
+        socketguard_cli::commands::tor_config(None, None),
         BackendConfig::Tor {
             control: "127.0.0.1:9051".into(),
             auth: TorAuth::Cookie,
@@ -396,8 +397,7 @@ fn tor_network_config_from_flags() {
         }
     );
     assert_eq!(
-        socketguard_cli::commands::tor_config(Some("unix:/run/tor/c".into()), Some("pw".into()))
-            .unwrap(),
+        socketguard_cli::commands::tor_config(Some("unix:/run/tor/c".into()), Some("pw".into())),
         BackendConfig::Tor {
             control: "unix:/run/tor/c".into(),
             auth: TorAuth::Password("pw".into()),

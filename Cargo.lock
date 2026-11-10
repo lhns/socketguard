@@ -4143,8 +4143,6 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "opentelemetry",
- "opentelemetry_sdk",
  "percent-encoding",
  "serde",
  "serde_json",

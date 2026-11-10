@@ -4,6 +4,8 @@
 
 pub mod cli;
 pub mod commands;
+pub mod document;
+pub mod flows;
 pub mod parse;
 pub mod prompt;
 pub mod render;
@@ -12,9 +14,21 @@ pub mod routes;
 
 pub use routes::CLI_ROUTES;
 
-/// Print an error the way the CLI shows it, and say whether anything was printed.
+/// An error whose explanation was already printed; `main` only sets the exit code.
+#[derive(Debug)]
+pub struct Reported;
+
+impl std::fmt::Display for Reported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("failed")
+    }
+}
+
+impl std::error::Error for Reported {}
+
+/// Print an error the way the CLI shows it (nothing for a [`Reported`] one).
 pub fn report(err: &anyhow::Error, json: bool) {
-    if err.downcast_ref::<commands::Reported>().is_some() {
+    if err.downcast_ref::<Reported>().is_some() {
         return;
     }
     if let Some(socketguard_client::Error::Api {

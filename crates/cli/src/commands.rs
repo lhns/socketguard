@@ -1,47 +1,34 @@
-//! What each command does: resolve names, call the client, print. Output formatting lives
-//! in [`crate::render`], parsing in [`crate::parse`].
+//! What each command does: resolve names, call the client, print. The interactive flows
+//! are in [`crate::flows`], export documents in [`crate::document`], output formatting in
+//! [`crate::render`], parsing in [`crate::parse`].
 
 use crate::cli::*;
+use crate::document;
+use crate::flows;
 use crate::parse::{self, SubjectSpec};
 use crate::prompt::{self, Prompter};
 use crate::render::{self, Names};
-use crate::resolve::{resolve, resolve_id, short};
+use crate::resolve::{resolve, short};
+use crate::Reported;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::CommandFactory;
 use futures_util::StreamExt;
 use serde::Serialize;
 use socketguard_client::{ApiEvent, Client, Error as ApiError, GrantQuery, Saved};
 use socketguard_core::api_types::{
-    error_code, ApplyRequest, ExportDocument, LockoutRiskInfo, MergeRequest, NewGroup, NewNetwork,
-    NewPeer, ProtectHostRequest, SplitRequest, UpdateSettings,
+    error_code, ApplyRequest, Enforcement, LockoutRiskInfo, MergeRequest, NewGroup, NewNetwork,
+    NewPeer, ProtectHostRequest, ProtectHostResponse, SplitRequest, UpdateSettings,
 };
+use socketguard_core::config::TorAuth;
 use socketguard_core::{
-    ActivityKind, ActivityQuery, AddressMode, App, BackendConfig, CredentialKind, GrantView,
-    NetworkKind, NewGrant, Peer, PortRef, Subject,
+    ActivityKind, ActivityQuery, ActivityRecord, App, BackendConfig, CredentialKind, GrantView,
+    NewCredential, NewGrant, Peer, PeerGroup, PortRef, Subject,
 };
 
-/// An error whose explanation was already printed; `main` only sets the exit code.
-#[derive(Debug)]
-pub struct Reported;
-
-impl std::fmt::Display for Reported {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("failed")
-    }
-}
-
-impl std::error::Error for Reported {}
-
-struct Ctx {
-    client: Client,
-    json: bool,
-}
-
-pub fn client_for(socket: Option<&str>) -> Client {
-    match socket {
-        Some(s) => Client::new(s),
-        None => Client::from_env(),
-    }
+/// What every command needs: the client and the output mode.
+pub struct Ctx {
+    pub client: Client,
+    pub json: bool,
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -50,10 +37,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         clap_complete::generate(*shell, &mut cmd, "socketguard", &mut std::io::stdout());
         return Ok(());
     }
-    let c = Ctx {
-        client: client_for(cli.socket.as_deref()),
-        json: cli.json,
-    };
+    // The environment is read by clap (`--socket`); without either, the platform default.
+    let endpoint = cli
+        .socket
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(socketguard_client::default_endpoint);
+    let c = Ctx::new(Client::new(endpoint), cli.json);
     match cli.command {
         Command::Status => status(&c).await,
         Command::Apps(cmd) => apps(&c, cmd).await,
@@ -67,9 +56,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::ProtectHost(cmd) => protect_host(&c, cmd).await,
         Command::Activity(a) => activity(&c, a).await,
         Command::Watch => watch(&c).await,
-        Command::Pending => pending(&c, &mut prompt::Stdin).await,
+        Command::Pending => flows::pending(&c, &mut prompt::Stdin).await,
         Command::Share(a) => share(&c, a).await,
-        Command::Init => init(&c, &mut prompt::Stdin).await,
+        Command::Init => flows::init(&c, &mut prompt::Stdin).await,
         Command::Export(a) => export(&c, a).await,
         Command::Apply(a) => apply(&c, a).await,
         Command::Disable(a) => disable(&c, a).await,
@@ -81,8 +70,12 @@ pub async fn run(cli: Cli) -> Result<()> {
 // ─── Output and lookups ──────────────────────────────────────────────────────
 
 impl Ctx {
+    pub fn new(client: Client, json: bool) -> Self {
+        Self { client, json }
+    }
+
     /// Print `value` as JSON, or the human form.
-    fn print<T: Serialize>(&self, value: &T, human: impl FnOnce() -> String) -> Result<()> {
+    pub(crate) fn print<T: Serialize>(&self, value: &T, human: impl FnOnce() -> String) -> Result<()> {
         if self.json {
             println!("{}", serde_json::to_string_pretty(value)?);
         } else {
@@ -111,7 +104,7 @@ impl Ctx {
     }
 
     /// Say that a saved change is not in effect everywhere yet.
-    fn warn_pending(&self, enforcement: &Option<socketguard_core::api_types::Enforcement>) {
+    pub(crate) fn warn_pending(&self, enforcement: &Option<Enforcement>) {
         if let Some(e) = enforcement {
             eprintln!("warning: {}", e.message);
         }
@@ -129,8 +122,30 @@ impl Ctx {
         Ok(resolve("peer", &self.client.list_peers().await?, query)?.clone())
     }
 
-    async fn group(&self, query: &str) -> Result<socketguard_core::PeerGroup> {
+    async fn group(&self, query: &str) -> Result<PeerGroup> {
         Ok(resolve("group", &self.client.list_groups().await?, query)?.clone())
+    }
+
+    /// The id of the app the user named, if they named one.
+    async fn opt_app(&self, query: Option<&str>) -> Result<Option<String>> {
+        match query {
+            Some(q) => Ok(Some(self.app(q).await?.id)),
+            None => Ok(None),
+        }
+    }
+
+    async fn opt_peer(&self, query: Option<&str>) -> Result<Option<String>> {
+        match query {
+            Some(q) => Ok(Some(self.peer(q).await?.id)),
+            None => Ok(None),
+        }
+    }
+
+    async fn opt_group(&self, query: Option<&str>) -> Result<Option<String>> {
+        match query {
+            Some(q) => Ok(Some(self.group(q).await?.id)),
+            None => Ok(None),
+        }
     }
 
     async fn names(&self) -> Result<Names> {
@@ -170,17 +185,24 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
             admin_endpoint,
             control,
             password,
+            password_env,
+            password_stdin,
         } => {
-            let backend = if r#type.eq_ignore_ascii_case("tor") {
+            let backend = if r#type == NetworkType::Tor {
                 if interface.is_some() || admin_endpoint.is_some() {
                     bail!("tor has no --interface or --admin-endpoint");
                 }
-                tor_config(control, password)?
+                let password = tor_password(password, password_env, password_stdin)?;
+                tor_config(control, password)
             } else {
-                if control.is_some() || password.is_some() {
-                    bail!("--control and --password only apply to tor");
+                if control.is_some()
+                    || password.is_some()
+                    || password_env.is_some()
+                    || password_stdin
+                {
+                    bail!("--control and the --password options only apply to tor");
                 }
-                backend_config(&r#type, interface, admin_endpoint)?
+                backend_config(r#type, interface, admin_endpoint)?
             };
             let n = c.client.add_network(&NewNetwork { id, backend }).await?;
             c.print(&n, || {
@@ -198,42 +220,87 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
     }
 }
 
-/// `tor [--control X] [--password P]` as the daemon's backend config.
-pub fn tor_config(control: Option<String>, password: Option<String>) -> Result<BackendConfig> {
-    let mut v = serde_json::json!({"type": "tor"});
-    if let Some(c) = control {
-        v["control"] = c.into();
+/// The Tor control password from the option that gave it: the command line, an
+/// environment variable, or the first line of stdin. Empty is an error.
+fn tor_password(
+    password: Option<String>,
+    env: Option<String>,
+    stdin: bool,
+) -> Result<Option<String>> {
+    let password = match (password, env, stdin) {
+        (Some(p), _, _) => p,
+        (None, Some(var), _) => std::env::var(&var)
+            .map_err(|_| anyhow!("--password-env: {var} is not set to a text value"))?,
+        (None, None, true) => read_password_line(std::io::stdin().lock())?,
+        (None, None, false) => return Ok(None),
+    };
+    if password.is_empty() {
+        bail!("the Tor control password is empty");
     }
-    if let Some(p) = password {
-        v["auth"] = serde_json::json!({ "password": p });
-    }
-    serde_json::from_value(v).context("invalid network")
+    Ok(Some(password))
 }
 
-/// `<type> --interface X [--admin-endpoint Z]` as the daemon's backend config.
+/// The first line of `input`, without its line ending.
+fn read_password_line(mut input: impl std::io::BufRead) -> Result<String> {
+    let mut line = String::new();
+    input
+        .read_line(&mut line)
+        .context("reading the password from stdin")?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+/// `tor [--control X] [--password P]` as the daemon's backend config.
+pub fn tor_config(control: Option<String>, password: Option<String>) -> BackendConfig {
+    let mut config = BackendConfig::default_tor();
+    if let BackendConfig::Tor {
+        control: c, auth, ..
+    } = &mut config
+    {
+        if let Some(control) = control {
+            *c = control;
+        }
+        if let Some(password) = password {
+            *auth = TorAuth::Password(password);
+        }
+    }
+    config
+}
+
+/// `<type> --interface X [--admin-endpoint Z]` as the daemon's backend config; not for tor.
 pub fn backend_config(
-    kind: &str,
+    kind: NetworkType,
     interface: Option<String>,
     admin_endpoint: Option<String>,
 ) -> Result<BackendConfig> {
-    let kind = kind.to_ascii_lowercase();
-    if !["ula", "slaac", "dhcpv6", "yggdrasil"].contains(&kind.as_str()) {
-        bail!("unknown network type {kind:?} (ula, slaac, dhcpv6, yggdrasil)");
-    }
-    if kind != "ula" && interface.is_none() {
-        bail!("--interface is required for {kind}");
-    }
-    if admin_endpoint.is_some() && kind != "yggdrasil" {
+    if admin_endpoint.is_some() && kind != NetworkType::Yggdrasil {
         bail!("--admin-endpoint only applies to yggdrasil");
     }
-    let mut v = serde_json::json!({"type": kind});
-    if let Some(i) = interface {
-        v["interface"] = i.into();
-    }
-    if let Some(a) = admin_endpoint {
-        v["admin_endpoint"] = a.into();
-    }
-    serde_json::from_value(v).context("invalid network")
+    let required = || {
+        interface
+            .clone()
+            .ok_or_else(|| anyhow!("--interface is required for {kind}"))
+    };
+    Ok(match kind {
+        // Without an interface the daemon's default (loopback).
+        NetworkType::Ula => match &interface {
+            Some(interface) => BackendConfig::Ula {
+                interface: interface.clone(),
+            },
+            None => BackendConfig::default(),
+        },
+        NetworkType::Slaac => BackendConfig::Slaac {
+            interface: required()?,
+            prefix: None,
+        },
+        NetworkType::Dhcpv6 => BackendConfig::Dhcpv6 {
+            interface: required()?,
+        },
+        NetworkType::Yggdrasil => BackendConfig::Yggdrasil {
+            interface: required()?,
+            admin_endpoint,
+        },
+        NetworkType::Tor => bail!("tor is configured with tor_config"),
+    })
 }
 
 async fn settings(c: &Ctx, cmd: SettingsCmd) -> Result<()> {
@@ -243,14 +310,10 @@ async fn settings(c: &Ctx, cmd: SettingsCmd) -> Result<()> {
             c.print(&s, || render::settings(&s))
         }
         SettingsCmd::AddressMode { mode } => {
-            let mode: AddressMode = mode
-                .replace('-', "_")
-                .parse()
-                .map_err(|e: String| anyhow!(e))?;
             let s = c
                 .client
                 .update_settings(&UpdateSettings {
-                    address_mode: Some(mode),
+                    address_mode: Some(mode.into()),
                 })
                 .await?;
             c.print(&s, || render::settings(&s))
@@ -303,11 +366,11 @@ async fn protect_host(c: &Ctx, cmd: ProtectHostCmd) -> Result<()> {
 
 /// Turn protect-host on. A refusal because of lockout risks is printed (human mode) and
 /// returns `None`; in JSON mode the API error propagates.
-async fn set_protect_host(
+pub(crate) async fn set_protect_host(
     c: &Ctx,
     interfaces: Vec<String>,
     force: bool,
-) -> Result<Option<socketguard_core::api_types::ProtectHostResponse>> {
+) -> Result<Option<ProtectHostResponse>> {
     let req = ProtectHostRequest { interfaces, force };
     match c.client.set_protect_host(&req).await {
         Ok(r) => Ok(Some(r)),
@@ -405,7 +468,7 @@ async fn apps(c: &Ctx, cmd: AppsCmd) -> Result<()> {
                 .collect();
             let ids = address_ids
                 .iter()
-                .map(|q| Ok(resolve_id("address", &own, q)?.clone()))
+                .map(|q| Ok(resolve("address", &own, q)?.clone()))
                 .collect::<Result<Vec<_>>>()?;
             let saved = c
                 .client
@@ -502,7 +565,7 @@ async fn peers(c: &Ctx, cmd: PeersCmd) -> Result<()> {
         PeersCmd::Cred(CredCmd::Rm { peer, cred_id }) => {
             let peer = c.peer(&peer).await?;
             let ids: Vec<String> = peer.credentials.iter().map(|x| x.id.clone()).collect();
-            let id = resolve_id("credential", &ids, &cred_id)?;
+            let id = resolve("credential", &ids, &cred_id)?;
             let saved = c.client.remove_credential(&peer.id, id).await?;
             c.done_saved(
                 saved,
@@ -513,7 +576,7 @@ async fn peers(c: &Ctx, cmd: PeersCmd) -> Result<()> {
 }
 
 /// All credentials given to `peers add`, flags first, then the bare values.
-pub fn peer_credentials(a: &PeerAddArgs) -> Result<Vec<socketguard_core::NewCredential>> {
+pub fn peer_credentials(a: &PeerAddArgs) -> Result<Vec<NewCredential>> {
     let mut out = Vec::new();
     if let Some(k) = &a.key {
         out.push(parse::cred(CredentialKind::YggKey, k));
@@ -624,16 +687,14 @@ async fn grant(c: &Ctx, a: GrantArgs) -> Result<()> {
     };
     let created = match c.client.create_grant(&req).await {
         Err(e) if e.is_confirmation_required() => {
-            if !prompt::interactive() {
-                bail!(
+            prompt::Stdin.confirm_or_yes(
+                false,
+                &format!("Open {} to anyone who can reach it?", a.target),
+                &format!(
                     "this opens {} to every host that can reach it; repeat with --yes to confirm",
                     a.target
-                );
-            }
-            if !prompt::Stdin.confirm(&format!("Open {} to anyone who can reach it?", a.target)) {
-                eprintln!("not confirmed; nothing changed");
-                return Err(Reported.into());
-            }
+                ),
+            )?;
             req.confirm_open = true;
             c.client.create_grant(&req).await?
         }
@@ -674,7 +735,7 @@ async fn revoke(c: &Ctx, a: RevokeArgs) -> Result<()> {
     let id = match &a.subject {
         None => {
             let ids: Vec<String> = all.iter().map(|g| g.grant.id.clone()).collect();
-            resolve_id("grant", &ids, &a.target)?.clone()
+            resolve("grant", &ids, &a.target)?.clone()
         }
         Some(subject) => {
             let (app_q, port) = parse::parse_target(&a.target);
@@ -705,18 +766,9 @@ async fn revoke(c: &Ctx, a: RevokeArgs) -> Result<()> {
 
 async fn grants(c: &Ctx, a: GrantsArgs) -> Result<()> {
     let query = GrantQuery {
-        app: match &a.app {
-            Some(q) => Some(c.app(q).await?.id),
-            None => None,
-        },
-        peer: match &a.peer {
-            Some(q) => Some(c.peer(q).await?.id),
-            None => None,
-        },
-        group: match &a.group {
-            Some(q) => Some(c.group(q).await?.id),
-            None => None,
-        },
+        app: c.opt_app(a.app.as_deref()).await?,
+        peer: c.opt_peer(a.peer.as_deref()).await?,
+        group: c.opt_group(a.group.as_deref()).await?,
     };
     let g = c.client.list_grants(&query).await?;
     let names = c.names().await?;
@@ -732,14 +784,8 @@ async fn activity(c: &Ctx, a: ActivityArgs) -> Result<()> {
         } else {
             a.kind
         },
-        app_id: match &a.app {
-            Some(q) => Some(c.app(q).await?.id),
-            None => None,
-        },
-        peer_id: match &a.peer {
-            Some(q) => Some(c.peer(q).await?.id),
-            None => None,
-        },
+        app_id: c.opt_app(a.app.as_deref()).await?,
+        peer_id: c.opt_peer(a.peer.as_deref()).await?,
         limit: Some(a.limit),
         ..Default::default()
     };
@@ -787,7 +833,7 @@ async fn activity(c: &Ctx, a: ActivityArgs) -> Result<()> {
 
 fn print_records<'a>(
     c: &Ctx,
-    records: impl Iterator<Item = &'a socketguard_core::ActivityRecord>,
+    records: impl Iterator<Item = &'a ActivityRecord>,
     names: &Names,
 ) -> Result<()> {
     for r in records {
@@ -815,28 +861,6 @@ async fn watch(c: &Ctx) -> Result<()> {
 
 // ─── Export and apply ────────────────────────────────────────────────────────
 
-/// The document as TOML or JSON.
-pub fn document_text(doc: &ExportDocument, json: bool) -> Result<String> {
-    if json {
-        Ok(serde_json::to_string_pretty(doc)? + "\n")
-    } else {
-        Ok(toml::to_string_pretty(doc).context("cannot write TOML")?)
-    }
-}
-
-/// Parse a document; the extension picks the format, else TOML and then JSON are tried.
-pub fn parse_document(text: &str, path: &std::path::Path) -> Result<ExportDocument> {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("json") => Ok(serde_json::from_str(text).context("invalid JSON document")?),
-        Some("toml") => Ok(toml::from_str(text).context("invalid TOML document")?),
-        _ => toml::from_str(text).or_else(|toml_err| {
-            serde_json::from_str(text).map_err(|json_err| {
-                anyhow!("not a TOML document ({toml_err}) nor a JSON one ({json_err})")
-            })
-        }),
-    }
-}
-
 async fn export(c: &Ctx, a: ExportArgs) -> Result<()> {
     let doc = c.client.export().await?;
     let json = c.json
@@ -844,7 +868,7 @@ async fn export(c: &Ctx, a: ExportArgs) -> Result<()> {
             Some(f) => f == "json",
             None => a.output.as_ref().and_then(|p| p.extension()) == Some("json".as_ref()),
         };
-    let text = document_text(&doc, json)?;
+    let text = document::text(&doc, json)?;
     match a.output {
         Some(path) => {
             std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
@@ -860,7 +884,7 @@ async fn export(c: &Ctx, a: ExportArgs) -> Result<()> {
 async fn apply(c: &Ctx, a: ApplyArgs) -> Result<()> {
     let text = std::fs::read_to_string(&a.file)
         .with_context(|| format!("reading {}", a.file.display()))?;
-    let document = parse_document(&text, &a.file)?;
+    let document = document::parse(&text, &a.file)?;
     let diff = c
         .client
         .apply(&ApplyRequest {
@@ -874,18 +898,14 @@ async fn apply(c: &Ctx, a: ApplyArgs) -> Result<()> {
     if !c.json {
         println!("{}", render::changes(&diff));
     }
-    if !a.yes {
-        if !prompt::interactive() {
-            bail!(
-                "{} change(s) pending; repeat with --yes to apply them",
-                diff.changes.len()
-            );
-        }
-        if !prompt::Stdin.confirm("Apply these changes?") {
-            eprintln!("not confirmed; nothing changed");
-            return Err(Reported.into());
-        }
-    }
+    prompt::Stdin.confirm_or_yes(
+        a.yes,
+        "Apply these changes?",
+        &format!(
+            "{} change(s) pending; repeat with --yes to apply them",
+            diff.changes.len()
+        ),
+    )?;
     let done = c
         .client
         .apply(&ApplyRequest {
@@ -901,15 +921,11 @@ async fn apply(c: &Ctx, a: ApplyArgs) -> Result<()> {
 // ─── Disable and enable ──────────────────────────────────────────────────────
 
 async fn disable(c: &Ctx, a: DisableArgs) -> Result<()> {
-    if !a.yes {
-        if !prompt::interactive() {
-            bail!("disable removes every firewall rule and address; repeat with --yes to confirm");
-        }
-        if !prompt::Stdin.confirm("Remove all SocketGuard rules and addresses, opening the host?") {
-            eprintln!("not confirmed; nothing changed");
-            return Err(Reported.into());
-        }
-    }
+    prompt::Stdin.confirm_or_yes(
+        a.yes,
+        "Remove all SocketGuard rules and addresses, opening the host?",
+        "disable removes every firewall rule and address; repeat with --yes to confirm",
+    )?;
     c.client.disable(true).await?;
     c.done("disabled: rules and addresses removed, and kept off until `socketguard enable`")
 }
@@ -919,284 +935,76 @@ async fn enable(c: &Ctx) -> Result<()> {
     c.done("enabled: rules and addresses restored")
 }
 
-// ─── Pending and init ────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Pick a peer or group from a list, or create a peer by pasting a key.
-async fn pick_subject(c: &Ctx, p: &mut dyn Prompter) -> Result<Option<Subject>> {
-    let peers = c.client.list_peers().await?;
-    let groups = c.client.list_groups().await?;
-    let mut options: Vec<String> = peers.iter().map(|p| format!("peer {}", p.label)).collect();
-    options.extend(groups.iter().map(|g| format!("group {}", g.label)));
-    options.push("a new peer (paste a Yggdrasil key or an address)".to_string());
-    options.push("cancel".to_string());
-    let Some(n) = p.choose("Grant to:", &options) else {
-        return Ok(None);
-    };
-    if n < peers.len() {
-        Ok(Some(Subject::Peer(peers[n].id.clone())))
-    } else if n < peers.len() + groups.len() {
-        Ok(Some(Subject::Group(groups[n - peers.len()].id.clone())))
-    } else if n == peers.len() + groups.len() {
-        let label = p.ask("Label for the new peer:");
-        let value = p.ask("Key, address or CIDR:");
-        let peer = c
-            .client
-            .create_peer(&NewPeer {
-                label,
-                credentials: vec![parse::guess_credential(&value)?],
-            })
-            .await?;
-        println!("added peer {}", peer.label);
-        Ok(Some(Subject::Peer(peer.id)))
-    } else {
-        Ok(None)
-    }
-}
-
-async fn grant_all_ports(
-    c: &Ctx,
-    p: &mut dyn Prompter,
-    app: &App,
-    port: Option<PortRef>,
-    subject: Subject,
-) -> Result<()> {
-    let mut req = NewGrant {
-        app_id: app.id.clone(),
-        port,
-        network_id: None,
-        subject,
-        confirm_open: false,
-    };
-    if req.subject == Subject::Anyone {
-        if !p.confirm(&format!("Open {} to anyone who can reach it?", app.name)) {
-            println!("skipped");
-            return Ok(());
-        }
-        req.confirm_open = true;
-    }
-    let saved = c.client.create_grant(&req).await?;
-    c.warn_pending(&saved.enforcement);
-    c.client.review_app(&app.id, true).await?;
-    println!("granted");
-    Ok(())
-}
-
-async fn pending(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
-    let apps = c.client.list_apps(true).await?;
-    if c.json || !p.interactive() {
-        return c.print(&apps, || render::apps(&apps));
-    }
-    if apps.is_empty() {
-        println!("no pending apps");
-        return Ok(());
-    }
-    for app in &apps {
-        println!("\n{}", render::apps(std::slice::from_ref(app)));
-        let options = [
-            "keep closed (mark reviewed)".to_string(),
-            "grant to a peer or group".to_string(),
-            "open to anyone".to_string(),
-            "skip".to_string(),
-        ];
-        let Some(choice) = p.choose(&format!("{} is listening and closed:", app.name), &options)
-        else {
-            break;
-        };
-        match choice {
-            0 => {
-                c.client.review_app(&app.id, true).await?;
-                println!("kept closed");
-            }
-            1 => {
-                if let Some(s) = pick_subject(c, p).await? {
-                    grant_all_ports(c, p, app, None, s).await?;
-                }
-            }
-            2 => grant_all_ports(c, p, app, None, Subject::Anyone).await?,
-            _ => println!("skipped"),
-        }
-    }
-    Ok(())
-}
-
-/// The node's address if `yggdrasilctl` answers.
-fn yggdrasil_node() -> Option<String> {
-    let out = std::process::Command::new("yggdrasilctl")
-        .args(["-json", "getSelf"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    v.get("address")?.as_str().map(str::to_string)
-}
-
-const ADMIN_PORTS: [u16; 2] = [22, 3389];
-
-async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
-    if c.json {
-        bail!("init is interactive and has no --json mode");
-    }
-    let interactive = p.interactive();
-    let status = c.client.status().await?;
-    println!("{}\n", render::networks(&status.networks));
-
-    // 1. A Yggdrasil network, if the node is running and none is configured.
-    if !status
-        .networks
-        .iter()
-        .any(|n| n.kind == NetworkKind::Yggdrasil)
-    {
-        if let Some(addr) = yggdrasil_node() {
-            println!("A Yggdrasil node is running (address {addr}) but has no network here.");
-            if interactive && p.confirm("Add a Yggdrasil network?") {
-                let default = if cfg!(windows) { "Yggdrasil" } else { "ygg0" };
-                let answer = p.ask(&format!("Yggdrasil tun interface [{default}]:"));
-                let interface = if answer.is_empty() {
-                    default.to_string()
-                } else {
-                    answer
-                };
-                let n = c
-                    .client
-                    .add_network(&NewNetwork {
-                        id: None,
-                        backend: backend_config("yggdrasil", Some(interface), None)?,
-                    })
-                    .await?;
-                println!("added network {}", n.id);
-            } else if !interactive {
-                println!("Add it with: socketguard networks add yggdrasil --interface <tun>");
-            }
-        }
-    }
-
-    // 2. Remote-admin listeners.
-    let apps = c.client.list_apps(false).await?;
-    let exposed = c
-        .client
-        .activity(&ActivityQuery {
-            kind: Some(ActivityKind::RemoteAdminExposed),
-            limit: Some(200),
-            ..Default::default()
-        })
-        .await?;
-    let mut found: Vec<(App, PortRef)> = Vec::new();
-    for app in &apps {
-        let flagged = exposed.iter().any(|r| r.app_id.as_deref() == Some(&app.id));
-        let port = app
-            .ports
-            .iter()
-            .find(|p| ADMIN_PORTS.contains(&p.port) && p.proto == socketguard_core::Protocol::Tcp)
-            .map(|p| PortRef {
-                port: p.port,
-                proto: p.proto,
-            });
-        let port = port.or_else(|| {
-            flagged.then(|| {
-                exposed
-                    .iter()
-                    .find(|r| r.app_id.as_deref() == Some(&app.id))
-                    .and_then(|r| r.port)
-                    .map(|port| PortRef {
-                        port,
-                        proto: socketguard_core::Protocol::Tcp,
-                    })
-            })?
-        });
-        let Some(port) = port else { continue };
-        if c.client.get_app(&app.id).await?.grants.is_empty() {
-            found.push((app.clone(), port));
-        }
-    }
-    if found.is_empty() {
-        println!("No remote-administration listener (sshd, RDP) without a grant.");
-    }
-    for (app, port) in found {
-        println!(
-            "{} listens for remote administration on {port} and nobody can reach it.",
-            app.name
+    #[test]
+    fn the_password_comes_from_the_option_given() {
+        assert_eq!(tor_password(None, None, false).unwrap(), None);
+        assert_eq!(
+            tor_password(Some("pw".into()), None, false)
+                .unwrap()
+                .as_deref(),
+            Some("pw")
         );
-        if !interactive {
-            println!(
-                "  grant it with: socketguard grant {}:{} <peer>",
-                app.name, port.port
-            );
-            continue;
-        }
-        let options = [
-            "grant to a peer or group".to_string(),
-            "keep it closed".to_string(),
-        ];
-        if p.choose(&format!("What should happen to {}?", app.name), &options) == Some(0) {
-            if let Some(s) = pick_subject(c, p).await? {
-                grant_all_ports(c, p, &app, Some(port), s).await?;
-            }
-        }
-    }
-
-    // 3. Protect-host, with the lockout check.
-    if status.protect_host_interfaces.is_empty() {
-        println!(
-            "\nWhole-host protection also closes listeners that SocketGuard has no address for."
+        std::env::set_var("SOCKETGUARD_TEST_TOR_PW", "from env");
+        assert_eq!(
+            tor_password(None, Some("SOCKETGUARD_TEST_TOR_PW".into()), false)
+                .unwrap()
+                .as_deref(),
+            Some("from env")
         );
-        if interactive && p.confirm("Turn on protect-host?") {
-            let lan: Vec<String> = status
-                .networks
-                .iter()
-                .filter(|n| n.kind == NetworkKind::Lan)
-                .filter_map(|n| n.interface.clone())
-                .collect();
-            let default = lan.join(",");
-            let answer = p.ask(&format!("Interfaces (comma separated) [{default}]:"));
-            let list = if answer.is_empty() { default } else { answer };
-            let interfaces: Vec<String> = list
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if interfaces.is_empty() {
-                println!("no interfaces given; protect-host stays off");
-            } else if set_protect_host(c, interfaces.clone(), false)
-                .await?
-                .is_none()
-            {
-                if p.confirm("Turn it on anyway (--force)?") {
-                    set_protect_host(c, interfaces, true).await?;
-                    println!("protect-host is on");
-                }
-            } else {
-                println!("protect-host is on");
-            }
-        } else if !interactive {
-            println!("Turn it on with: socketguard protect-host on <interface>...");
-        }
+        std::env::remove_var("SOCKETGUARD_TEST_TOR_PW");
+        let err = tor_password(None, Some("SOCKETGUARD_TEST_TOR_PW".into()), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("SOCKETGUARD_TEST_TOR_PW"), "{err}");
+        assert!(tor_password(Some(String::new()), None, false).is_err());
     }
-    println!("\nDone. `socketguard status` shows the result.");
-    Ok(())
-}
 
-/// The `pending` flow against `client` with the given prompter (not `--json`).
-pub async fn pending_flow(client: Client, p: &mut dyn Prompter) -> Result<()> {
-    pending(
-        &Ctx {
-            client,
-            json: false,
-        },
-        p,
-    )
-    .await
-}
+    #[test]
+    fn the_password_is_the_first_line_of_stdin() {
+        assert_eq!(
+            read_password_line(&b"s3cret\r\nmore\n"[..]).unwrap(),
+            "s3cret"
+        );
+        assert_eq!(
+            read_password_line(&b"no newline"[..]).unwrap(),
+            "no newline"
+        );
+        assert_eq!(read_password_line(&b""[..]).unwrap(), "");
+    }
 
-/// The `init` flow against `client` with the given prompter.
-pub async fn init_flow(client: Client, p: &mut dyn Prompter) -> Result<()> {
-    init(
-        &Ctx {
-            client,
-            json: false,
-        },
-        p,
-    )
-    .await
+    #[test]
+    fn network_configs_are_built_from_the_flags() {
+        assert_eq!(
+            backend_config(NetworkType::Ula, None, None).unwrap(),
+            BackendConfig::default()
+        );
+        assert_eq!(
+            backend_config(
+                NetworkType::Yggdrasil,
+                Some("ygg0".into()),
+                Some("unix:///y".into())
+            )
+            .unwrap(),
+            BackendConfig::Yggdrasil {
+                interface: "ygg0".into(),
+                admin_endpoint: Some("unix:///y".into()),
+            }
+        );
+        assert_eq!(
+            backend_config(NetworkType::Slaac, Some("eth0".into()), None).unwrap(),
+            BackendConfig::Slaac {
+                interface: "eth0".into(),
+                prefix: None,
+            }
+        );
+        let err = backend_config(NetworkType::Dhcpv6, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--interface is required for dhcpv6"), "{err}");
+        assert!(backend_config(NetworkType::Slaac, Some("eth0".into()), Some("x".into())).is_err());
+    }
 }

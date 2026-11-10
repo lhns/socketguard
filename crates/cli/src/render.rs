@@ -8,8 +8,8 @@ use socketguard_core::api_types::{
     ApplyResponse, Change, ChangeItem, ChangeKind, LockoutRiskInfo, StatusResponse,
 };
 use socketguard_core::{
-    ActivityRecord, Address, App, AppDetail, Credential, GrantView, Locator, Network, NetworkKind,
-    NetworkStatus, Peer, PeerGroup, PortSet, Reach, Settings, Subject,
+    ActivityRecord, Address, App, AppDetail, AppPort, Credential, GrantView, Locator, Network,
+    NetworkKind, NetworkStatus, Peer, PeerGroup, PortRef, PortSet, Reach, Settings, Subject,
 };
 use std::collections::HashMap;
 
@@ -40,29 +40,32 @@ impl Names {
     }
 
     pub fn app(&self, id: &str) -> String {
-        self.apps
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| short(id).to_string())
+        label(&self.apps, id)
+    }
+
+    pub fn peer(&self, id: &str) -> String {
+        label(&self.peers, id)
+    }
+
+    pub fn group(&self, id: &str) -> String {
+        label(&self.groups, id)
     }
 
     pub fn subject(&self, s: &Subject) -> String {
         match s {
-            Subject::Peer(id) => self
-                .peers
-                .get(id)
-                .cloned()
-                .unwrap_or_else(|| short(id).to_string()),
-            Subject::Group(id) => format!(
-                "group:{}",
-                self.groups
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_else(|| short(id).to_string())
-            ),
+            Subject::Peer(id) => self.peer(id),
+            Subject::Group(id) => format!("group:{}", self.group(id)),
             Subject::Anyone => "anyone".to_string(),
         }
     }
+}
+
+/// The name of `id`, or its short form when it is not known.
+fn label(names: &HashMap<String, String>, id: &str) -> String {
+    names
+        .get(id)
+        .cloned()
+        .unwrap_or_else(|| short(id).to_string())
 }
 
 // ─── Building blocks ─────────────────────────────────────────────────────────
@@ -106,7 +109,7 @@ pub fn time(t: DateTime<Utc>) -> String {
     t.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-pub fn reach_label(r: Reach) -> &'static str {
+fn reach_label(r: Reach) -> &'static str {
     match r {
         Reach::Verified => "verified",
         Reach::WholeSubnet => "whole subnet",
@@ -116,7 +119,7 @@ pub fn reach_label(r: Reach) -> &'static str {
     }
 }
 
-pub fn kind_label(k: NetworkKind) -> &'static str {
+fn kind_label(k: NetworkKind) -> &'static str {
     match k {
         NetworkKind::Local => "local",
         NetworkKind::Lan => "lan",
@@ -144,12 +147,20 @@ pub fn locator(l: &Locator) -> String {
     }
 }
 
+/// The port and protocol of an app port, for display and for grants.
+pub(crate) fn port_ref(p: &AppPort) -> PortRef {
+    PortRef {
+        port: p.port,
+        proto: p.proto,
+    }
+}
+
 fn app_ports(app: &App) -> String {
     let ports: Vec<String> = app
         .ports
         .iter()
         .map(|p| {
-            let s = format!("{}/{}", p.port, p.proto);
+            let s = port_ref(p).to_string();
             if p.listening {
                 s
             } else {
@@ -189,13 +200,18 @@ fn grant_scope(g: &GrantView) -> (String, String) {
 
 // ─── Status, networks, settings ──────────────────────────────────────────────
 
-pub fn status(s: &StatusResponse) -> String {
-    let c = &s.counts;
-    let protect = if s.protect_host_interfaces.is_empty() {
+/// The interfaces under whole-host protection, or "off".
+fn protect_host(interfaces: &[String]) -> String {
+    if interfaces.is_empty() {
         "off".to_string()
     } else {
-        s.protect_host_interfaces.join(", ")
-    };
+        interfaces.join(", ")
+    }
+}
+
+pub fn status(s: &StatusResponse) -> String {
+    let c = &s.counts;
+    let protect = protect_host(&s.protect_host_interfaces);
     let enforcement = if s.disabled {
         "DISABLED (no rules, no addresses; `socketguard enable` to restore)"
     } else if s.unadopted {
@@ -251,16 +267,11 @@ pub fn networks(nets: &[Network]) -> String {
 }
 
 pub fn settings(s: &Settings) -> String {
-    let mode = match s.address_mode {
-        socketguard_core::AddressMode::PerApp => "per-app",
-        socketguard_core::AddressMode::PerPort => "per-port",
-    };
-    let protect = if s.protect_host_interfaces.is_empty() {
-        "off".to_string()
-    } else {
-        s.protect_host_interfaces.join(", ")
-    };
-    format!("address-mode   {mode}\nprotect-host   {protect}")
+    format!(
+        "address-mode   {}\nprotect-host   {}",
+        s.address_mode,
+        protect_host(&s.protect_host_interfaces)
+    )
 }
 
 // ─── Apps ────────────────────────────────────────────────────────────────────
@@ -366,7 +377,7 @@ pub fn app_detail(d: &AppDetail, names: &Names) -> String {
                 .iter()
                 .map(|p| {
                     vec![
-                        format!("{}/{}", p.port, p.proto),
+                        port_ref(p).to_string(),
                         if p.listening { "yes" } else { "no" }.to_string(),
                     ]
                 })
@@ -516,13 +527,7 @@ pub fn peers(peers: &[Peer], names: &Names) -> String {
                         .join(", "),
                     p.groups
                         .iter()
-                        .map(|g| {
-                            names
-                                .groups
-                                .get(g)
-                                .cloned()
-                                .unwrap_or_else(|| short(g).into())
-                        })
+                        .map(|g| names.group(g))
                         .collect::<Vec<_>>()
                         .join(", "),
                 ]
@@ -537,13 +542,7 @@ pub fn peer_detail(p: &Peer, names: &Names, grants_of: &[GrantView]) -> String {
     } else {
         p.groups
             .iter()
-            .map(|g| {
-                names
-                    .groups
-                    .get(g)
-                    .cloned()
-                    .unwrap_or_else(|| short(g).into())
-            })
+            .map(|g| names.group(g))
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -584,13 +583,7 @@ pub fn groups(groups: &[PeerGroup], names: &Names) -> String {
 pub fn members(g: &PeerGroup, names: &Names) -> String {
     g.members
         .iter()
-        .map(|m| {
-            names
-                .peers
-                .get(m)
-                .cloned()
-                .unwrap_or_else(|| short(m).into())
-        })
+        .map(|m| names.peer(m))
         .collect::<Vec<_>>()
         .join(", ")
 }
