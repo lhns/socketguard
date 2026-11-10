@@ -1,77 +1,23 @@
 #!/usr/bin/env bash
 # End-to-end test of the Yggdrasil subnet backend with two real Yggdrasil nodes in Docker.
 # Runs from Git Bash on Windows or from Linux. See README.md.
-set -u
-export MSYS_NO_PATHCONV=1   # Git Bash: do not rewrite /paths in docker arguments
-
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/../.." && pwd)"
-# Docker Desktop on Windows needs a Windows-style host path for bind mounts.
-HOST_ROOT="$(cd "$ROOT" && pwd -W 2>/dev/null || pwd)"
 
-TARGET_VOL=${TARGET_VOL:-sg-target}   # docker volume holding the Linux build
 IMAGE=sg-e2e-node
 NET=sg-e2e-net
 NODE_A=sg-e2e-a
 NODE_B=sg-e2e-b
+NODE_ARGS="--device /dev/net/tun"
 SOCK=unix:///var/run/yggdrasil.sock
 PORT=8080
-failures=0
 
-pass() { echo "PASS  $*"; }
-fail() { echo "FAIL  $*"; failures=$((failures + 1)); }
-step() { # step "description" command...
-  local desc=$1; shift
-  if "$@"; then pass "$desc"; else fail "$desc"; return 1; fi
-}
-# retry SECONDS command...: run until it succeeds or the time is up
-retry() {
-  local secs=$1; shift
-  local end=$((SECONDS + secs))
-  while ! "$@" >/dev/null 2>&1; do
-    [ "$SECONDS" -ge "$end" ] && return 1
-    sleep 1
-  done
-}
+. "$HERE/lib.sh"
+extra_logs() { echo "--- node A yggdrasil log ---"; docker exec "$NODE_A" tail -n 15 /var/log/ygg.log 2>/dev/null; }
+init_e2e
 
-A() { docker exec "$NODE_A" "$@"; }
-B() { docker exec "$NODE_B" "$@"; }
-daemon_running() { A pgrep -x socketguard-dae; }
-daemon_start() { docker exec -d "$NODE_A" sh -c "SOCKETGUARD_CONFIG=/etc/sg.json exec $DAEMON >>/var/log/sg.log 2>&1"; }
-daemon_stop() { A pkill -x socketguard-dae; retry 15 sh -c "! docker exec $NODE_A pgrep -x socketguard-dae"; }
-
-cleanup() {
-  if [ "$failures" -ne 0 ]; then
-    echo "--- node A daemon log ---"; docker exec "$NODE_A" tail -n 40 /var/log/sg.log 2>/dev/null
-    echo "--- node A yggdrasil log ---"; docker exec "$NODE_A" tail -n 15 /var/log/ygg.log 2>/dev/null
-  fi
-  docker rm -f "$NODE_A" "$NODE_B" >/dev/null 2>&1
-  docker network rm "$NET" >/dev/null 2>&1
-}
-trap cleanup EXIT
-docker rm -f "$NODE_A" "$NODE_B" >/dev/null 2>&1
-docker network rm "$NET" >/dev/null 2>&1
-
-# ── Build ────────────────────────────────────────────────────────────────────
-docker build -q -t "$IMAGE" "$HOST_ROOT/deploy/e2e" >/dev/null || { fail "build node image"; exit 1; }
-pass "build node image"
-
-# Debug build in the container: binaries stay in the sg-target volume, mounted into the nodes.
-docker run --rm -v "$HOST_ROOT":/work -w /work \
-  -v sg-cargo-registry:/usr/local/cargo/registry -v ${TARGET_VOL}:/work/target \
-  -e CARGO_PROFILE_DEV_DEBUG=0 -e CARGO_PROFILE_TEST_DEBUG=0 \
-  rust:1-bookworm cargo build -p socketguard-daemon -p socketguard-cli \
-  || { fail "build daemon and CLI"; exit 1; }
-pass "build daemon and CLI"
-DAEMON=/target/debug/socketguard-daemon
-SG=/target/debug/socketguard
-
-# ── Nodes ────────────────────────────────────────────────────────────────────
-docker network create "$NET" >/dev/null || { fail "create network"; exit 1; }
-for n in "$NODE_A" "$NODE_B"; do
-  docker run -d --name "$n" --network "$NET" --cap-add NET_ADMIN --device /dev/net/tun \
-    -v ${TARGET_VOL}:/target:ro "$IMAGE" sleep infinity >/dev/null || { fail "start $n"; exit 1; }
-done
+# ── Build and nodes ──────────────────────────────────────────────────────────
+build_binaries
+start_nodes
 
 # Generate a Yggdrasil config once per node (the key must survive restarts).
 ygg_conf() { # ygg_conf container peer-uri
@@ -111,8 +57,7 @@ daemon_start
 # ── Allocation ───────────────────────────────────────────────────────────────
 # The listener's address, and whether that address is inside A's subnet.
 # The CLI drives the model: find the listener's app, then its address on the ygg network.
-app_id()    { A $SG apps list --json | jq -er --argjson p "$PORT" '[.[] | select(any(.ports[]; .port == $p))][0].id'; }
-sock_addr() { local id; id="$(app_id)" && A $SG apps show "$id" --json | jq -er '[.addresses[] | select(.network_id == "ygg") | .locator.addr][0]'; }
+sock_addr() { app_address ygg addr; }
 in_subnet() { A python3 -c 'import ipaddress,sys; sys.exit(0 if ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv[2]) else 1)' "$1" "$2"; }
 on_ygg0()   { A ip -6 -j addr show dev ygg0 | jq -e --arg a "$1" '[.[].addr_info[].local] | index($a)' >/dev/null; }
 
@@ -200,5 +145,4 @@ sleep 6
 step "latch: the restarted daemon did not reinstall the table" sh -c "! docker exec $NODE_A nft list table inet socketguard >/dev/null 2>&1"
 step "latch: enable (CLI, running daemon) restores the table" sh -c "docker exec $NODE_A $SG enable && docker exec $NODE_A nft list table inet socketguard >/dev/null"
 
-echo
-if [ "$failures" -eq 0 ]; then echo "ALL STEPS PASSED"; else echo "$failures STEP(S) FAILED"; exit 1; fi
+finish
