@@ -84,7 +84,7 @@ fn fetch_table(what: &str, get: impl Fn(Option<*mut c_void>, &mut u32) -> u32) -
     let mut size = 0u32;
     for _ in 0..4 {
         let mut buf = vec![0u64; (size as usize).div_ceil(8)];
-        let ptr = (size > 0).then(|| buf.as_mut_ptr() as *mut c_void);
+        let ptr = (size > 0).then_some(buf.as_mut_ptr() as *mut c_void);
         match get(ptr, &mut size) {
             0 => return Ok(buf),
             code if code == ERROR_INSUFFICIENT_BUFFER.0 => continue,
