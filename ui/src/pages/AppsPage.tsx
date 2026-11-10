@@ -153,7 +153,10 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
       header: "Ports",
       className: "ports-cell mono",
       cell: (r) => {
-        if (r.m.kind === "tag") return <span className="muted">{tagList.find((t) => t.id === r.m.target.id)?.members.length ?? 0} members</span>;
+        if (r.m.kind === "tag") {
+          const n = tagList.find((t) => t.id === r.m.target.id)?.members.length ?? 0;
+          return <span className="muted">{n} {n === 1 ? "member" : "members"}</span>;
+        }
         if (r.m.kind === "port") return null;
         const listening = r.m.app?.ports.filter((p) => p.listening) ?? [];
         return listening.length ? listening.map(portLabel).join(", ") : <span className="muted">not listening</span>;

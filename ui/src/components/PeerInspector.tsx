@@ -363,7 +363,7 @@ export function AddPeersForm({ onClose }: { onClose: () => void }) {
           <textarea
             id={`${id}-v`}
             className="input mono"
-            rows={3}
+            rows={4}
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder={`${CREDENTIAL_PLACEHOLDER}\nPaste several, separated by lines, commas or spaces.`}
