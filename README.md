@@ -103,7 +103,14 @@ socketguard groups add team alice bob         # also: list, show, rename, rm, me
 socketguard grant nginx:80 alice              # or group:team, or anyone (asks, or --yes)
 socketguard grant sshd:22 alice --network ygg
 socketguard revoke nginx:80 alice             # or: revoke <grant-id>
-socketguard grants [--app A] [--peer P] [--group G]
+socketguard grants [--app A] [--tag T] [--peer P] [--group G]
+# Many at once (one batch: all or nothing, one firewall update; --dry-run shows the diff):
+socketguard grant --app web --app api --port 80 --port 443 --to alice --to group:team [--network lan]
+socketguard revoke --app web --to alice
+
+socketguard tags add dev --match 'python*' --match node   # apps matching join now and when they start
+socketguard tags members add dev web:80                    # an app or one port; also: members rm, show, list, patterns, rename, rm
+socketguard grant tag:dev group:team                       # covers every member, present and future
 
 socketguard networks list                     # also: add <type> --interface X, rm <id>
 socketguard settings address-mode per-port    # or per-app; `settings show`
@@ -167,9 +174,13 @@ x25519 public key from `authorized_clients`) lets only that client in.
 # tor with: ControlPort 9051 and CookieAuthentication 1
 socketguard networks add tor                    # --control 127.0.0.1:9051 [--password-env VAR | --password-stdin]
 socketguard peers add bob --tor-key <base32>    # the key bob's Tor client generated
+# or let the daemon generate the key pair (the private key is stored like the onion keys):
+socketguard peers add bob && socketguard peers tor-key bob
 socketguard grant myapp:8080 bob
 socketguard apps show myapp                     # prints the .onion name
-socketguard share myapp                         # http://<id>.onion:8080
+socketguard share myapp                         # http://<id>.onion:8080, and for a generated key
+                                                # the <id>:descriptor:x25519:<key> line for bob's
+                                                # ClientOnionAuthDir (a file ending in .auth_private)
 ```
 
 The daemon sends your onion keys to whatever answers on the control address, so:
