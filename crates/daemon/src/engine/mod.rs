@@ -5,7 +5,13 @@
 //! Ordering rules that carry over from ADR 0026: a ruleset that covers an address is
 //! applied before the address goes on an interface, and an address leaves its interface
 //! before the ruleset stops covering it. A failed apply keeps new addresses off the
-//! interfaces. Stopping the daemon removes nothing; only [`disable_all`] does.
+//! interfaces. Stopping the daemon removes nothing; only [`disable_everything`] does.
+//!
+//! [`Engine`] is the facade; its methods live in the submodules: `firewall` (ruleset,
+//! counters, drops), `enforce` (networks outside the firewall, adding and removing
+//! networks), `addresses` (planning, allocating, the interfaces), `discovery` (sockets to
+//! apps), `queries` and `mutations`. This file holds the types, the lifecycle and the
+//! reconcile pass.
 
 mod addresses;
 mod discovery;
