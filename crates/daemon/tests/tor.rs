@@ -1,12 +1,15 @@
 //! The Tor network through the engine, against a scripted control port (ADR 0037):
 //! discovery, grants and revocation, the disable latch, Tor going away.
 
-use axum::http::StatusCode;
+mod common;
+
+use axum::http::{Method, StatusCode};
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig, DaemonConfig, TorAuth};
 use socketguard_core::{
     CredentialKind, ListeningSocket, Locator, NetworkKind, NetworkStatus, NewCredential, NewGrant,
     Protocol, Subject,
 };
+use socketguard_daemon::api;
 use socketguard_daemon::engine::{ActiveBackend, Engine};
 use socketguard_daemon::networks::tor::TorNetwork;
 use socketguard_daemon::test_support::*;
@@ -26,16 +29,9 @@ struct Harness {
 
 fn socket(port: u16, protocol: Protocol, bind: &str) -> ListeningSocket {
     ListeningSocket {
-        pid: 1,
-        process_name: "webapp".into(),
-        port,
         protocol,
         bind_address: bind.parse::<IpAddr>().unwrap(),
-        exe_path: Some("/usr/bin/webapp".into()),
-        cmdline: Some(vec!["webapp".into()]),
-        uid: Some("1000".into()),
-        foreign_mntns: false,
-        cwd: None,
+        ..common::listener("webapp", port)
     }
 }
 
@@ -405,38 +401,18 @@ async fn a_service_of_ours_whose_address_vanished_is_swept_but_foreign_ones_stay
 
 // ─── The API says when enforcement is pending ────────────────────────────────
 
+/// A request through the API router of the harness's daemon.
 async fn call(
     h: &Harness,
-    method: &str,
+    method: Method,
     uri: &str,
     body: Option<serde_json::Value>,
-) -> (axum::http::StatusCode, serde_json::Value) {
-    use tower::ServiceExt;
-    let mut req = axum::http::Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("content-type", "application/json");
-    let body = match body {
-        Some(b) => axum::body::Body::from(b.to_string()),
-        None => axum::body::Body::empty(),
-    };
-    req = req.header("accept", "application/json");
-    let resp = socketguard_daemon::api::router(h.state.clone())
-        .oneshot(req.body(body).unwrap())
-        .await
-        .unwrap();
-    let status = resp.status();
-    let bytes = http_body_util::BodyExt::collect(resp.into_body())
-        .await
-        .unwrap()
-        .to_bytes();
-    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-    (status, json)
+) -> (StatusCode, serde_json::Value) {
+    common::call(&api::router(h.state.clone()), method, uri, body).await
 }
 
 #[tokio::test]
 async fn mutations_answer_202_while_enforcement_is_pending() {
-    use axum::http::StatusCode;
     let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
     h.reconcile().await;
     let app = h.app().await;
@@ -445,14 +421,14 @@ async fn mutations_answer_202_while_enforcement_is_pending() {
     });
 
     // Healthy: the usual 201 and 204, no enforcement field.
-    let (s, body) = call(&h, "POST", "/api/grants", Some(new_grant.clone())).await;
+    let (s, body) = call(&h, Method::POST, "/api/grants", Some(new_grant.clone())).await;
     assert_eq!(s, StatusCode::CREATED, "{body}");
     assert!(body.get("enforcement").is_none());
     let id = body["id"].as_str().unwrap().to_string();
 
     // Tor down: the revocation is saved, the answer is 202 with the notice.
     h.tor.set_down(true);
-    let (s, body) = call(&h, "DELETE", &format!("/api/grants/{id}"), None).await;
+    let (s, body) = call(&h, Method::DELETE, &format!("/api/grants/{id}"), None).await;
     assert_eq!(s, StatusCode::ACCEPTED, "{body}");
     assert_eq!(body["enforcement"]["status"], "pending");
     assert!(body["enforcement"]["message"]
@@ -464,7 +440,7 @@ async fn mutations_answer_202_while_enforcement_is_pending() {
     // A create that changes what Tor must publish keeps its body and gains the field.
     let peer = h.peer(TOR_KEY).await;
     let keyed = serde_json::json!({"app_id": app.id, "subject": {"kind": "peer", "id": peer}});
-    let (s, body) = call(&h, "POST", "/api/grants", Some(keyed)).await;
+    let (s, body) = call(&h, Method::POST, "/api/grants", Some(keyed)).await;
     assert_eq!(s, StatusCode::ACCEPTED, "{body}");
     assert!(body["id"].is_string());
     assert_eq!(body["enforcement"]["status"], "pending");
@@ -472,16 +448,15 @@ async fn mutations_answer_202_while_enforcement_is_pending() {
     // Back up: after the retry, plain success again.
     h.tor.set_down(false);
     h.reconcile().await;
-    let (s, _) = call(&h, "DELETE", "/api/peers/none", None).await;
+    let (s, _) = call(&h, Method::DELETE, "/api/peers/none", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     let id = h.state.db.list_grants().await.unwrap().remove(0).id;
-    let (s, body) = call(&h, "DELETE", &format!("/api/grants/{id}"), None).await;
+    let (s, body) = call(&h, Method::DELETE, &format!("/api/grants/{id}"), None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
 }
 
 #[tokio::test]
 async fn tor_down_with_nothing_to_do_does_not_make_mutations_202() {
-    use axum::http::StatusCode;
     let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
     h.reconcile().await;
     let peer = h.peer(TOR_KEY).await;
@@ -494,10 +469,10 @@ async fn tor_down_with_nothing_to_do_does_not_make_mutations_202() {
 
     let cred = serde_json::json!({"kind": "tor_client_key", "value": "FDBSRGWHBKODXLW6IWZZSNGD5AXYI3X4SRXHPQ3GIGJO7OGEDMJQ"});
     let uri = format!("/api/peers/{peer}/credentials");
-    let (s, body) = call(&h, "POST", &uri, Some(cred)).await;
+    let (s, body) = call(&h, Method::POST, &uri, Some(cred)).await;
     assert_eq!(s, StatusCode::CREATED, "{body}");
     assert!(body.get("enforcement").is_none());
-    let (s, body) = call(&h, "DELETE", &format!("/api/peers/{peer}"), None).await;
+    let (s, body) = call(&h, Method::DELETE, &format!("/api/peers/{peer}"), None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
 }
 
@@ -548,7 +523,7 @@ async fn the_api_makes_a_tor_network_only_with_default_or_configured_settings() 
     let file = dir.join("socketguard.json");
     tor_file(&file);
     let h = Harness::new_at(vec![], Some(file.clone())).await;
-    let (s, body) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    let (s, body) = call(&h, Method::DELETE, "/api/networks/tor", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
     // The removal rewrote the file's list; the administrator puts the entry back.
     tor_file(&file);
@@ -568,7 +543,7 @@ async fn the_api_makes_a_tor_network_only_with_default_or_configured_settings() 
         serde_json::json!({"type": "tor", "control": "127.0.0.1:19051",
             "cookie_path": "/var/lib/tor/control_auth_cookie", "cookie_dir": "/tmp"}),
     ] {
-        let (s, body) = call(&h, "POST", "/api/networks", Some(bad.clone())).await;
+        let (s, body) = call(&h, Method::POST, "/api/networks", Some(bad.clone())).await;
         assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}: {body}");
         assert_eq!(body["code"], "invalid");
     }
@@ -579,21 +554,21 @@ async fn the_api_makes_a_tor_network_only_with_default_or_configured_settings() 
         "type": "tor", "control": "127.0.0.1:19051",
         "cookie_path": "/var/lib/tor/control_auth_cookie"
     });
-    let (s, body) = call(&h, "POST", "/api/networks", Some(configured)).await;
+    let (s, body) = call(&h, Method::POST, "/api/networks", Some(configured)).await;
     assert_eq!(s, StatusCode::CREATED, "{body}");
-    let (s, _) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    let (s, _) = call(&h, Method::DELETE, "/api/networks/tor", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     // ... and so are the defaults.
     let default = serde_json::json!({"type": "tor"});
-    let (s, body) = call(&h, "POST", "/api/networks", Some(default)).await;
+    let (s, body) = call(&h, Method::POST, "/api/networks", Some(default)).await;
     assert_eq!(s, StatusCode::CREATED, "{body}");
     std::fs::remove_dir_all(dir).ok();
 
     // Without a config file only the defaults qualify.
     let h = Harness::new(vec![]).await;
-    call(&h, "DELETE", "/api/networks/tor", None).await;
+    call(&h, Method::DELETE, "/api/networks/tor", None).await;
     let custom = serde_json::json!({"type": "tor", "control": "127.0.0.1:19051"});
-    let (s, _) = call(&h, "POST", "/api/networks", Some(custom)).await;
+    let (s, _) = call(&h, Method::POST, "/api/networks", Some(custom)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
 
@@ -629,7 +604,7 @@ async fn removing_the_network_removes_the_services_first() {
     let svc = h.svc().await;
     assert_eq!(h.tor.detached(), [svc.as_str()]);
 
-    let (s, body) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    let (s, body) = call(&h, Method::DELETE, "/api/networks/tor", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
     assert!(h.tor.detached().is_empty());
     assert!(h.tor.commands().contains(&format!("DEL_ONION {svc}")));
@@ -644,7 +619,7 @@ async fn removing_the_network_while_tor_is_down_is_refused_unless_forced() {
     h.grant(Subject::Anyone).await;
     h.tor.set_down(true);
 
-    let (s, body) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    let (s, body) = call(&h, Method::DELETE, "/api/networks/tor", None).await;
     assert_eq!(s, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "conflict");
     assert!(
@@ -659,7 +634,7 @@ async fn removing_the_network_while_tor_is_down_is_refused_unless_forced() {
 
     // Retrying when Tor is back works.
     h.tor.set_down(false);
-    let (s, body) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    let (s, body) = call(&h, Method::DELETE, "/api/networks/tor", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
     assert!(h.tor.detached().is_empty());
 }
@@ -670,7 +645,7 @@ async fn a_forced_removal_goes_ahead_without_tor() {
     h.reconcile().await;
     h.grant(Subject::Anyone).await;
     h.tor.set_down(true);
-    let (s, body) = call(&h, "DELETE", "/api/networks/tor?force=true", None).await;
+    let (s, body) = call(&h, Method::DELETE, "/api/networks/tor?force=true", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
     assert!(h.state.engine.read().await.networks().is_empty());
 }
@@ -682,15 +657,15 @@ async fn pending_tombstones_block_a_removal_with_tor_down() {
     h.grant(Subject::Anyone).await;
     h.tor.set_down(true);
     let id = h.app().await.id;
-    let (s, _) = call(&h, "DELETE", &format!("/api/apps/{id}"), None).await;
+    let (s, _) = call(&h, Method::DELETE, &format!("/api/apps/{id}"), None).await;
     assert!(s.is_success());
     assert!(!ledger(&h).await.tombstones.is_empty());
 
-    let (s, body) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    let (s, body) = call(&h, Method::DELETE, "/api/networks/tor", None).await;
     assert_eq!(s, StatusCode::CONFLICT, "{body}");
     assert!(!ledger(&h).await.tombstones.is_empty(), "still recorded");
     h.tor.set_down(false);
-    let (s, body) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    let (s, body) = call(&h, Method::DELETE, "/api/networks/tor", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
     assert!(h.tor.detached().is_empty());
     assert!(ledger(&h).await.tombstones.is_empty());
@@ -700,6 +675,6 @@ async fn pending_tombstones_block_a_removal_with_tor_down() {
 async fn removing_a_network_with_nothing_published_needs_no_tor() {
     let h = Harness::new(vec![]).await;
     h.tor.set_down(true);
-    let (s, body) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    let (s, body) = call(&h, Method::DELETE, "/api/networks/tor", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
 }
