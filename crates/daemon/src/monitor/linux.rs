@@ -78,6 +78,7 @@ impl SocketMonitor for LinuxSocketMonitor {
                 cmdline: p.cmdline.clone(),
                 uid: p.uid.clone(),
                 foreign_mntns: p.foreign_mntns,
+                cwd: p.cwd.clone(),
             });
         }
         Ok(sockets)
@@ -152,6 +153,7 @@ struct Proc {
     cmdline: Option<Vec<String>>,
     uid: Option<String>,
     foreign_mntns: bool,
+    cwd: Option<String>,
 }
 
 /// One pass over /proc: which processes hold each of the `wanted` socket inodes.
@@ -208,6 +210,7 @@ fn read_proc(pid: u32) -> Proc {
             cmdline: None,
             uid: None,
             foreign_mntns: false,
+            cwd: None,
         };
     };
     // A binary replaced by an upgrade shows as "... (deleted)".
@@ -223,6 +226,9 @@ fn read_proc(pid: u32) -> Proc {
     let own = std::fs::read_link("/proc/self/ns/mnt").ok();
     let theirs = std::fs::read_link(format!("/proc/{pid}/ns/mnt")).ok();
     let foreign_mntns = own.is_none() || theirs.is_none() || own != theirs;
+    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
     Proc {
         pid,
         valid: true,
@@ -231,6 +237,7 @@ fn read_proc(pid: u32) -> Proc {
         cmdline,
         uid: parse_status_uid(&status),
         foreign_mntns,
+        cwd,
     }
 }
 
@@ -271,6 +278,7 @@ mod tests {
             cmdline: None,
             uid: Some(uid.into()),
             foreign_mntns: false,
+            cwd: None,
         }
     }
 

@@ -125,6 +125,7 @@ pub fn listener(name: &str, port: u16) -> ListeningSocket {
         cmdline: Some(vec![name.to_string()]),
         uid: Some("1000".into()),
         foreign_mntns: false,
+        cwd: None,
     }
 }
 

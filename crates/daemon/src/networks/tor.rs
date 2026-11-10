@@ -441,7 +441,7 @@ mod tests {
     use socketguard_core::Credential;
 
     const KEY_A: &str = "ZGBMJ4VIRNVUOQ5SJ2JXPSSWHB2R4YGTKPDGSMZ4HWCD5WLT2YKQ";
-    const KEY_B: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const KEY_B: &str = "FDBSRGWHBKODXLW6IWZZSNGD5AXYI3X4SRXHPQ3GIGJO7OGEDMJQ";
 
     fn port(p: u16) -> PortRef {
         PortRef {

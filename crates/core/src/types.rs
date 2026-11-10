@@ -49,6 +49,10 @@ pub struct ListeningSocket {
     /// `exe_path` may not name the file the host sees there.
     #[serde(default)]
     pub foreign_mntns: bool,
+    /// The process's working directory (if available); relative script paths are resolved
+    /// against it for the app identity.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// Network backend type

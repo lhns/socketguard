@@ -1,6 +1,7 @@
 //! The Tor network through the engine, against a scripted control port (ADR 0037):
 //! discovery, grants and revocation, the disable latch, Tor going away.
 
+use axum::http::StatusCode;
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig, DaemonConfig, TorAuth};
 use socketguard_core::{
     CredentialKind, ListeningSocket, Locator, NetworkKind, NetworkStatus, NewCredential, NewGrant,
@@ -34,11 +35,20 @@ fn socket(port: u16, protocol: Protocol, bind: &str) -> ListeningSocket {
         cmdline: Some(vec!["webapp".into()]),
         uid: Some("1000".into()),
         foreign_mntns: false,
+        cwd: None,
     }
 }
 
 impl Harness {
     async fn new(sockets: Vec<ListeningSocket>) -> Self {
+        Self::new_at(sockets, None).await
+    }
+
+    /// With a config file that API-made network changes are saved to.
+    async fn new_at(
+        sockets: Vec<ListeningSocket>,
+        config_path: Option<std::path::PathBuf>,
+    ) -> Self {
         let tor = MockTorControl::start();
         let fw = Arc::new(MockFirewall::new(Arc::new(Mutex::new(vec![]))));
         let cfg = BackendInstanceConfig {
@@ -49,6 +59,8 @@ impl Harness {
                 cookie_path: None,
                 cookie_dir: None,
                 expect_tor_uid: None,
+                cookie_owner: None,
+                allow_remote_control: false,
             },
         };
         let mut backends = HashMap::new();
@@ -70,12 +82,13 @@ impl Harness {
             backends,
             vec!["tor".into()],
         );
-        let state = test_app_state(
+        let state = test_app_state_at(
             engine,
             DaemonConfig {
                 backends: vec![cfg],
                 ..DaemonConfig::default()
             },
+            config_path,
         )
         .await;
         Self { state, tor, fw }
@@ -480,7 +493,7 @@ async fn tor_down_with_nothing_to_do_does_not_make_mutations_202() {
         NetworkStatus::Down { .. }
     ));
 
-    let cred = serde_json::json!({"kind": "tor_client_key", "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"});
+    let cred = serde_json::json!({"kind": "tor_client_key", "value": "FDBSRGWHBKODXLW6IWZZSNGD5AXYI3X4SRXHPQ3GIGJO7OGEDMJQ"});
     let uri = format!("/api/peers/{peer}/credentials");
     let (s, body) = call(&h, "POST", &uri, Some(cred)).await;
     assert_eq!(s, StatusCode::CREATED, "{body}");
@@ -517,4 +530,177 @@ async fn services_from_before_the_ledger_are_adopted_and_swept() {
     h.state.db.delete_app(&app.id).await.unwrap();
     h.reconcile().await;
     assert!(h.tor.detached().is_empty());
+}
+
+// ─── Networks made through the API ───────────────────────────────────────────
+
+fn tor_file(path: &std::path::Path) {
+    let doc = serde_json::json!({"backends": [{
+        "id": "tor", "type": "tor", "control": "127.0.0.1:19051",
+        "cookie_path": "/var/lib/tor/control_auth_cookie"
+    }]});
+    std::fs::write(path, doc.to_string()).unwrap();
+}
+
+#[tokio::test]
+async fn the_api_makes_a_tor_network_only_with_default_or_configured_settings() {
+    let dir = std::env::temp_dir().join(format!("sg-tor-api-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("socketguard.json");
+    tor_file(&file);
+    let h = Harness::new_at(vec![], Some(file.clone())).await;
+    let (s, body) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    // The removal rewrote the file's list; the administrator puts the entry back.
+    tor_file(&file);
+
+    // A caller steering the control endpoint or its trust is refused ...
+    for bad in [
+        serde_json::json!({"type": "tor", "control": "unix:/tmp/x", "auth": "none"}),
+        serde_json::json!({"type": "tor", "auth": "none"}),
+        serde_json::json!({"type": "tor", "auth": "cookie_insecure"}),
+        serde_json::json!({"type": "tor", "auth": {"password": "pw"}}),
+        serde_json::json!({"type": "tor", "cookie_path": "/tmp/cookie"}),
+        serde_json::json!({"type": "tor", "cookie_dir": "/tmp"}),
+        serde_json::json!({"type": "tor", "control": "127.0.0.1:9999"}),
+        serde_json::json!({"type": "tor", "expect_tor_uid": 0}),
+        serde_json::json!({"type": "tor", "control": "10.0.0.1:9051", "allow_remote_control": true}),
+        // The file's entry with one setting changed.
+        serde_json::json!({"type": "tor", "control": "127.0.0.1:19051",
+            "cookie_path": "/var/lib/tor/control_auth_cookie", "cookie_dir": "/tmp"}),
+    ] {
+        let (s, body) = call(&h, "POST", "/api/networks", Some(bad.clone())).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}: {body}");
+        assert_eq!(body["code"], "invalid");
+    }
+    assert!(h.state.engine.read().await.networks().is_empty());
+
+    // ... what the config file already has is accepted ...
+    let configured = serde_json::json!({
+        "type": "tor", "control": "127.0.0.1:19051",
+        "cookie_path": "/var/lib/tor/control_auth_cookie"
+    });
+    let (s, body) = call(&h, "POST", "/api/networks", Some(configured)).await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    let (s, _) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    // ... and so are the defaults.
+    let default = serde_json::json!({"type": "tor"});
+    let (s, body) = call(&h, "POST", "/api/networks", Some(default)).await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    std::fs::remove_dir_all(dir).ok();
+
+    // Without a config file only the defaults qualify.
+    let h = Harness::new(vec![]).await;
+    call(&h, "DELETE", "/api/networks/tor", None).await;
+    let custom = serde_json::json!({"type": "tor", "control": "127.0.0.1:19051"});
+    let (s, _) = call(&h, "POST", "/api/networks", Some(custom)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_remote_control_address_is_refused_when_the_network_is_made() {
+    use socketguard_daemon::networks;
+    let tor = |addr: &str, allow: bool| BackendConfig::Tor {
+        control: addr.into(),
+        auth: TorAuth::Cookie,
+        cookie_path: None,
+        cookie_dir: None,
+        expect_tor_uid: None,
+        cookie_owner: None,
+        allow_remote_control: allow,
+    };
+    let net: Arc<dyn socketguard_daemon::network::NetworkInterface> =
+        Arc::new(MockNetworkInterface::new(Arc::new(Mutex::new(vec![]))));
+    let err = networks::create(&tor("10.0.0.1:9051", false), [0; 5], net.clone())
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("allow_remote_control"), "{err:#}");
+    assert!(networks::create(&tor("10.0.0.1:9051", true), [0; 5], net.clone()).is_ok());
+    assert!(networks::create(&tor("localhost:9051", false), [0; 5], net).is_ok());
+}
+
+// ─── Removing the network ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn removing_the_network_removes_the_services_first() {
+    let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
+    h.reconcile().await;
+    h.grant(Subject::Anyone).await;
+    let svc = h.svc().await;
+    assert_eq!(h.tor.detached(), [svc.as_str()]);
+
+    let (s, body) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert!(h.tor.detached().is_empty());
+    assert!(h.tor.commands().contains(&format!("DEL_ONION {svc}")));
+    assert!(h.state.engine.read().await.networks().is_empty());
+    assert_eq!(ledger(&h).await, Default::default());
+}
+
+#[tokio::test]
+async fn removing_the_network_while_tor_is_down_is_refused_unless_forced() {
+    let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
+    h.reconcile().await;
+    h.grant(Subject::Anyone).await;
+    h.tor.set_down(true);
+
+    let (s, body) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "conflict");
+    assert!(
+        body["message"].as_str().unwrap().contains("--force"),
+        "{body}"
+    );
+    // Nothing was removed: the network, its address and the service are all still there.
+    assert_eq!(h.state.engine.read().await.networks().len(), 1);
+    assert_eq!(h.app().await.addresses.len(), 1);
+    assert_eq!(h.tor.detached().len(), 1);
+    assert!(!ledger(&h).await.owned.is_empty());
+
+    // Retrying when Tor is back works.
+    h.tor.set_down(false);
+    let (s, body) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert!(h.tor.detached().is_empty());
+}
+
+#[tokio::test]
+async fn a_forced_removal_goes_ahead_without_tor() {
+    let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
+    h.reconcile().await;
+    h.grant(Subject::Anyone).await;
+    h.tor.set_down(true);
+    let (s, body) = call(&h, "DELETE", "/api/networks/tor?force=true", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert!(h.state.engine.read().await.networks().is_empty());
+}
+
+#[tokio::test]
+async fn pending_tombstones_block_a_removal_with_tor_down() {
+    let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
+    h.reconcile().await;
+    h.grant(Subject::Anyone).await;
+    h.tor.set_down(true);
+    let id = h.app().await.id;
+    let (s, _) = call(&h, "DELETE", &format!("/api/apps/{id}"), None).await;
+    assert!(s.is_success());
+    assert!(!ledger(&h).await.tombstones.is_empty());
+
+    let (s, body) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    assert!(!ledger(&h).await.tombstones.is_empty(), "still recorded");
+    h.tor.set_down(false);
+    let (s, body) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert!(h.tor.detached().is_empty());
+    assert!(ledger(&h).await.tombstones.is_empty());
+}
+
+#[tokio::test]
+async fn removing_a_network_with_nothing_published_needs_no_tor() {
+    let h = Harness::new(vec![]).await;
+    h.tor.set_down(true);
+    let (s, body) = call(&h, "DELETE", "/api/networks/tor", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
 }

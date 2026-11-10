@@ -10,6 +10,8 @@ pub struct ProcDetails {
     pub cmdline: Option<Vec<String>>,
     /// The uid on macOS, the owner SID string on Windows.
     pub uid: Option<String>,
+    /// The working directory, when the platform lets us read it.
+    pub cwd: Option<String>,
 }
 
 /// Look up `pids` in one refresh.
@@ -24,6 +26,7 @@ pub fn lookup(pids: &[u32]) -> HashMap<u32, ProcDetails> {
         ProcessRefreshKind::nothing()
             .with_cmd(UpdateKind::Always)
             .with_exe(UpdateKind::Always)
+            .with_cwd(UpdateKind::Always)
             .with_user(UpdateKind::Always),
     );
     pids.iter()
@@ -43,6 +46,7 @@ pub fn lookup(pids: &[u32]) -> HashMap<u32, ProcDetails> {
                         .effective_user_id()
                         .or_else(|| p.user_id())
                         .map(|u| (**u).to_string()),
+                    cwd: p.cwd().map(|c| c.to_string_lossy().into_owned()),
                 },
             ))
         })

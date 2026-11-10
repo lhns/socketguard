@@ -671,6 +671,9 @@ impl MockTorControl {
             MockAuth::SafeCookie { cookie_path, .. } | MockAuth::CookieOnly { cookie_path, .. } => {
                 AuthOptions {
                     cookie_path: Some(cookie_path.clone()),
+                    // The test's cookie file belongs to the account running the test.
+                    #[cfg(windows)]
+                    cookie_owner: crate::networks::tor_control::winacl::current_user_sid().ok(),
                     ..AuthOptions::new(TorAuth::Cookie)
                 }
             }

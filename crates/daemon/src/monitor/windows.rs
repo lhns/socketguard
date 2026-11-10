@@ -48,6 +48,7 @@ impl SocketMonitor for WindowsSocketMonitor {
             }
             if let Some(d) = details.get(&socket.pid) {
                 socket.cmdline = d.cmdline.clone();
+                socket.cwd = d.cwd.clone();
                 socket.uid = d.uid.clone();
                 if socket.exe_path.is_none() {
                     socket.exe_path = d
@@ -137,6 +138,7 @@ fn list_tcp4_listeners() -> Result<Vec<ListeningSocket>> {
                 cmdline: None,
                 uid: None,
                 foreign_mntns: false,
+                cwd: None,
             });
         }
 
@@ -192,6 +194,7 @@ fn list_tcp6_listeners() -> Result<Vec<ListeningSocket>> {
                 cmdline: None,
                 uid: None,
                 foreign_mntns: false,
+                cwd: None,
             });
         }
 
@@ -253,6 +256,7 @@ fn list_udp4_listeners() -> Result<Vec<ListeningSocket>> {
                 cmdline: None,
                 uid: None,
                 foreign_mntns: false,
+                cwd: None,
             });
         }
 
@@ -308,6 +312,7 @@ fn list_udp6_listeners() -> Result<Vec<ListeningSocket>> {
                 cmdline: None,
                 uid: None,
                 foreign_mntns: false,
+                cwd: None,
             });
         }
 

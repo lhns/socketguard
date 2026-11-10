@@ -235,15 +235,22 @@ pub enum NetworksCmd {
         /// Yggdrasil admin endpoint, e.g. unix:///var/run/yggdrasil.sock
         #[arg(long)]
         admin_endpoint: Option<String>,
-        /// Tor control port, `host:port` or `unix:/path` [default: 127.0.0.1:9051]
+        /// Tor control port, `host:port` or `unix:/path` [default: 127.0.0.1:9051]; the daemon refuses
+        /// other values unless its config file has the same network (edit the file instead)
         #[arg(long)]
         control: Option<String>,
-        /// Tor control password; without it the cookie file named by Tor is used
+        /// Tor control password; without it the cookie file named by Tor is used. Like --control,
+        /// refused unless the config file has the same network
         #[arg(long)]
         password: Option<String>,
     },
     /// Remove a network; its addresses leave the interfaces
-    Rm { id: String },
+    Rm {
+        id: String,
+        /// Remove a Tor network even if Tor cannot confirm its onion services are gone
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

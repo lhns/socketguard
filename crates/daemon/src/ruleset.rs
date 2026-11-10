@@ -951,6 +951,7 @@ mod tests {
             cmdline: None,
             uid: Some("0".into()),
             foreign_mntns: false,
+            cwd: None,
         }
     }
 

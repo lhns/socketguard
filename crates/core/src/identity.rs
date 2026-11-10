@@ -674,12 +674,61 @@ fn target_of(host: Host, args: &[String]) -> Target {
 
 // ─── The identity ────────────────────────────────────────────────────────────
 
-fn hex16(parts: &[&str]) -> String {
+/// The first 128 bits of SHA-256 over `parts`, as 32 hex characters.
+fn hex32(parts: &[&str]) -> String {
     let digest = Sha256::digest(parts.join("\0").as_bytes());
-    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+    digest[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// App identity (ADR 0027): the id is the first 16 hex characters of SHA-256 over
+/// Whether `path` names a location by itself (no working directory needed).
+fn is_absolute(path: &str, platform: Platform) -> bool {
+    match platform {
+        Platform::Windows => {
+            let b = path.as_bytes();
+            // A UNC path or `X:\`; `\dir` is relative to the current drive.
+            path.starts_with("\\\\")
+                || path.starts_with("//")
+                || (b.len() >= 3 && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
+        }
+        _ => path.starts_with('/'),
+    }
+}
+
+/// `path` under `cwd`, with `.` and `..` components folded lexically (symlinks are not
+/// resolved: the daemon may not see the same file system).
+fn resolve_against(cwd: &str, path: &str, platform: Platform) -> String {
+    let sep = if platform == Platform::Windows {
+        '\\'
+    } else {
+        '/'
+    };
+    // `\dir\x` on Windows: rooted on the drive of the working directory.
+    let drive = cwd.get(..2).filter(|d| d.as_bytes()[1] == b':');
+    let full = match drive {
+        Some(d) if platform == Platform::Windows && path.starts_with(['\\', '/']) => {
+            format!("{d}{path}")
+        }
+        _ => format!("{cwd}{sep}{path}"),
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for c in full.split(['/', '\\']) {
+        match c {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            c => parts.push(c),
+        }
+    }
+    let root = match platform {
+        Platform::Windows if cwd.starts_with("\\\\") || cwd.starts_with("//") => "\\\\",
+        Platform::Windows => "",
+        _ => "/",
+    };
+    format!("{root}{}", parts.join(&sep.to_string()))
+}
+
+/// App identity (ADR 0027): the id is the first 32 hex characters (128 bits) of SHA-256 over
 ///
 /// - the normalized executable path (or, with the `noexe` marker, the process name),
 /// - what the interpreter runs: kind and name of the script, module, jar, class or
@@ -689,7 +738,8 @@ fn hex16(parts: &[&str]) -> String {
 /// - the marker `foreign-mntns` for a process in another mount namespace.
 ///
 /// The executable path is normalized first so that toolchain upgrades keep the identity.
-/// Relative script paths are used as given: the working directory is not captured.
+/// A relative script, jar or dll path is resolved against the process's working directory;
+/// without it the marker `ambiguous-cwd` keeps the identity apart from the absolute form.
 pub fn app_identity(ls: &ListeningSocket) -> AppIdentity {
     app_identity_on(Platform::current(), ls)
 }
@@ -719,7 +769,19 @@ pub fn app_identity_on(platform: Platform, ls: &ListeningSocket) -> AppIdentity 
     let mut markers: Vec<String> = Vec::new();
     let (interpreter_arg, run_key) = match &target {
         Target::Nothing => (None, String::new()),
-        Target::Arg(kind, v) => (Some(v.clone()), format!("{kind}:{}", case(v))),
+        Target::Arg(kind, v) => {
+            let mut key = v.clone();
+            if matches!(*kind, "script" | "jar" | "dll") && !is_absolute(v, platform) {
+                match ls.cwd.as_deref().filter(|c| is_absolute(c, platform)) {
+                    Some(cwd) => key = resolve_against(cwd, v, platform),
+                    None => {
+                        notes.push("relative path, working directory unknown");
+                        markers.push("ambiguous-cwd".into());
+                    }
+                }
+            }
+            (Some(v.clone()), format!("{kind}:{}", case(&key)))
+        }
         Target::Inline => {
             notes.push("inline code");
             (None, "inline".to_string())
@@ -732,7 +794,7 @@ pub fn app_identity_on(platform: Platform, ls: &ListeningSocket) -> AppIdentity 
             } else {
                 "nocmdline"
             };
-            (None, format!("{tag}:{}", hex16(&[&case(&argv)])))
+            (None, format!("{tag}:{}", hex32(&[&case(&argv)])))
         }
     };
     let key_exe = match &exe {
@@ -752,7 +814,7 @@ pub fn app_identity_on(platform: Platform, ls: &ListeningSocket) -> AppIdentity 
         .as_deref()
         .map(|u| format!("uid:{u}"))
         .unwrap_or_else(|| "uid:?".into());
-    let id = hex16(&["v3", &key_exe, &run_key, &markers.join(","), &uid]);
+    let id = hex32(&["v4", &key_exe, &run_key, &markers.join(","), &uid]);
 
     let name = interpreter_arg
         .as_deref()
@@ -788,6 +850,7 @@ mod tests {
             cmdline: cmd.map(args),
             uid: Some("1000".into()),
             foreign_mntns: false,
+            cwd: None,
         }
     }
 
@@ -809,7 +872,7 @@ mod tests {
         assert_eq!(a.name, "nginx");
         assert_eq!(a.interpreter_arg, None);
         assert_eq!(a.note, None);
-        assert_eq!(a.id.len(), 16);
+        assert_eq!(a.id.len(), 32);
         assert!(a.id.chars().all(|c| c.is_ascii_hexdigit()));
         // Stable: same input, same id, whatever the arguments.
         assert_eq!(a.id, ident("/usr/sbin/nginx", &["nginx"]).id);
@@ -989,6 +1052,130 @@ mod tests {
             ),
         );
         assert_eq!(old.id, up.id);
+    }
+
+    fn at(cwd: Option<&str>, platform: Platform, exe: &str, cmd: &[&str]) -> AppIdentity {
+        let mut s = sock(Some(exe), file_name(exe), Some(cmd));
+        s.cwd = cwd.map(Into::into);
+        app_identity_on(platform, &s)
+    }
+
+    #[test]
+    fn relative_scripts_resolve_against_the_working_directory() {
+        let rel = |cwd| {
+            at(
+                cwd,
+                Platform::Linux,
+                "/usr/bin/node",
+                &["node", "server.js"],
+            )
+        };
+        // The same relative name in two directories is two apps ...
+        assert_ne!(rel(Some("/srv/a")).id, rel(Some("/srv/b")).id);
+        // ... and it is the app that runs the absolute path.
+        let abs = at(
+            None,
+            Platform::Linux,
+            "/usr/bin/node",
+            &["node", "/srv/a/server.js"],
+        );
+        assert_eq!(rel(Some("/srv/a")).id, abs.id);
+        let dots = at(
+            Some("/srv/a/x"),
+            Platform::Linux,
+            "/usr/bin/node",
+            &["node", "../././server.js"],
+        );
+        assert_eq!(dots.id, abs.id);
+        // Display stays as given.
+        assert_eq!(
+            rel(Some("/srv/a")).interpreter_arg.as_deref(),
+            Some("server.js")
+        );
+        assert_eq!(rel(Some("/srv/a")).note, None);
+    }
+
+    #[test]
+    fn a_relative_script_without_a_working_directory_never_merges_with_the_absolute_form() {
+        let unknown = at(
+            None,
+            Platform::Linux,
+            "/usr/bin/node",
+            &["node", "/srv/a/server.js"],
+        );
+        let rel = at(
+            None,
+            Platform::Linux,
+            "/usr/bin/node",
+            &["node", "server.js"],
+        );
+        assert_ne!(rel.id, unknown.id);
+        assert!(rel
+            .note
+            .as_deref()
+            .unwrap()
+            .contains("working directory unknown"));
+        // A relative cwd is as good as none.
+        let odd = at(
+            Some("srv"),
+            Platform::Linux,
+            "/usr/bin/node",
+            &["node", "server.js"],
+        );
+        assert_eq!(odd.id, rel.id);
+        // The cwd does not matter for absolute scripts or modules.
+        let abs_cwd = at(
+            Some("/tmp"),
+            Platform::Linux,
+            "/usr/bin/node",
+            &["node", "/srv/a/server.js"],
+        );
+        assert_eq!(abs_cwd.id, unknown.id);
+        let m1 = at(
+            Some("/a"),
+            Platform::Linux,
+            "/usr/bin/python3",
+            &["python3", "-m", "http.server"],
+        );
+        let m2 = at(
+            Some("/b"),
+            Platform::Linux,
+            "/usr/bin/python3",
+            &["python3", "-m", "http.server"],
+        );
+        assert_eq!(m1.id, m2.id);
+    }
+
+    #[test]
+    fn windows_relative_scripts_use_the_working_directory_case_insensitively() {
+        let w = |cwd, script| {
+            at(
+                Some(cwd),
+                Platform::Windows,
+                r"C:\Python\python.exe",
+                &["python.exe", script],
+            )
+        };
+        assert_eq!(
+            w(r"C:\Srv\App", "run.py").id,
+            w(r"c:\srv\app", r"..\app\RUN.py").id
+        );
+        assert_eq!(w(r"C:\Srv", "run.py").id, w(r"D:\x", r"C:\Srv\run.py").id);
+        assert_ne!(w(r"C:\Srv", "run.py").id, w(r"C:\Other", "run.py").id);
+        // `\dir\run.py` is rooted on the drive of the working directory ...
+        assert_eq!(
+            w(r"C:\x", r"\Srv\run.py").id,
+            w(r"C:\y", r"C:\Srv\run.py").id
+        );
+        assert_ne!(w(r"C:\x", r"\Srv\run.py").id, w(r"D:\x", r"\Srv\run.py").id);
+        // ... and without a working directory it is as unknown as any relative path.
+        let unknown = at(
+            None,
+            Platform::Windows,
+            r"C:\P\python.exe",
+            &["python.exe", r"\Srv\run.py"],
+        );
+        assert!(unknown.note.unwrap().contains("unknown"));
     }
 
     #[test]

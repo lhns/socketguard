@@ -191,8 +191,8 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
                 )
             })
         }
-        NetworksCmd::Rm { id } => {
-            c.client.delete_network(&id).await?;
+        NetworksCmd::Rm { id, force } => {
+            c.client.delete_network(&id, force).await?;
             c.done(format!("removed network {id}"))
         }
     }

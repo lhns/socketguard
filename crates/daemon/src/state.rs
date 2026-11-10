@@ -169,7 +169,7 @@ pub struct Database {
 /// Restrict the database file and its WAL companions to the owner (Unix). Failures are
 /// logged: a daemon that cannot chmod its own database should still run.
 #[cfg(unix)]
-fn protect_files(path: &Path) {
+fn protect_files(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     for suffix in ["", "-wal", "-shm"] {
         let file = with_suffix(path, suffix);
@@ -180,44 +180,71 @@ fn protect_files(path: &Path) {
             warn!("Could not restrict {} to its owner: {e}", file.display());
         }
     }
+    Ok(())
 }
 
+/// Set to `1` to run on Windows with a database file whose ACL could not be restricted.
+/// For tests and development only: the database holds the onion service keys.
+pub const ALLOW_UNPROTECTED_DB_ENV: &str = "SOCKETGUARD_ALLOW_UNPROTECTED_DB";
+
 /// Restrict the database file and its WAL companions to SYSTEM and Administrators
-/// (Windows). Failures are logged: a daemon that cannot change the ACL of a file it does
-/// not own should still run.
+/// (Windows). The database holds onion keys, so a failure fails startup, unless
+/// [`ALLOW_UNPROTECTED_DB_ENV`] is `1` (then it is logged).
 #[cfg(windows)]
-fn protect_files(path: &Path) {
+fn protect_files(path: &Path) -> Result<()> {
     for suffix in ["", "-wal", "-shm"] {
         let file = with_suffix(path, suffix);
         if file.exists() {
-            if let Err(e) = winacl::protect(&file) {
-                warn!(
-                    "Could not restrict {} to SYSTEM and Administrators: {e}",
-                    file.display()
-                );
-            }
+            enforce_protected(winacl::protect(&file), &file)?;
         }
     }
+    Ok(())
+}
+
+/// Fail on `result` unless the override is set.
+#[cfg(windows)]
+fn enforce_protected(result: Result<()>, file: &Path) -> Result<()> {
+    let allow = std::env::var(ALLOW_UNPROTECTED_DB_ENV).as_deref() == Ok("1");
+    enforce_protected_with(result, file, allow)
+}
+
+#[cfg(windows)]
+fn enforce_protected_with(result: Result<()>, file: &Path, allow: bool) -> Result<()> {
+    let Err(e) = result else { return Ok(()) };
+    if allow {
+        warn!(
+            "Could not restrict {} to SYSTEM and Administrators: {e:#} ({ALLOW_UNPROTECTED_DB_ENV}=1, continuing)",
+            file.display()
+        );
+        return Ok(());
+    }
+    Err(e).with_context(|| {
+        format!(
+            "cannot restrict {} to SYSTEM and Administrators; it holds onion service keys \
+             (set {ALLOW_UNPROTECTED_DB_ENV}=1 to run anyway, for tests only)",
+            file.display()
+        )
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
-fn protect_files(_path: &Path) {}
+fn protect_files(_path: &Path) -> Result<()> {
+    Ok(())
+}
 
-/// Create the database file empty, with the protected DACL from the start, so it is never
-/// readable by others (SQLite then opens the existing file). Elsewhere a no-op: the file
-/// is chmod'ed right after SQLite creates it, before any secret is written.
+/// Create the database file empty, with the protected DACL from the start (an existing
+/// file gets it applied), so it is never readable by others (SQLite then opens the
+/// existing file). Elsewhere a no-op: the file is chmod'ed right after SQLite creates it,
+/// before any secret is written.
 #[cfg(windows)]
-fn precreate_protected(path: &Path) {
-    if let Err(e) = winacl::create_protected(path) {
-        warn!(
-            "Could not pre-create {} with a restricted ACL: {e}",
-            path.display()
-        );
-    }
+fn precreate_protected(path: &Path) -> Result<()> {
+    enforce_protected(winacl::create_protected(path), path)
 }
 
 #[cfg(not(windows))]
-fn precreate_protected(_path: &Path) {}
+fn precreate_protected(_path: &Path) -> Result<()> {
+    Ok(())
+}
 
 #[cfg(windows)]
 mod winacl {
@@ -326,10 +353,11 @@ mod winacl {
         path.as_os_str().encode_wide().chain(Some(0)).collect()
     }
 
-    /// Create an empty file with the descriptor; an existing file is left as is.
+    /// Create an empty file with the descriptor; an existing file gets the descriptor
+    /// applied, so a file left by an earlier run or planted by someone else is covered too.
     pub fn create_protected(path: &Path) -> anyhow::Result<()> {
         if path.exists() {
-            return Ok(());
+            return protect(path);
         }
         let sd = Descriptor::new()?;
         let attrs = SECURITY_ATTRIBUTES {
@@ -461,12 +489,12 @@ impl Database {
                 moved.display()
             );
             // The rename keeps the ACL; re-apply it (and to the WAL files) to be sure.
-            protect_files(&moved);
+            protect_files(&moved)?;
         }
         // sqlx maps ":memory:" to a uniquely named shared-cache in-memory DB, so every
         // pooled connection sees the same data (covered by memory_pool_tests).
         if path != ":memory:" {
-            precreate_protected(Path::new(path));
+            precreate_protected(Path::new(path))?;
         }
         let options =
             SqliteConnectOptions::from_str(&format!("sqlite:{path}?mode=rwc"))?.foreign_keys(true);
@@ -475,7 +503,7 @@ impl Database {
             .connect_with(options)
             .await?;
         if path != ":memory:" {
-            protect_files(Path::new(path));
+            protect_files(Path::new(path))?;
         }
         Ok(Self {
             pool,
@@ -523,7 +551,7 @@ impl Database {
         }
         tx.commit().await?;
         if let Some(path) = self.path.as_deref() {
-            protect_files(Path::new(path));
+            protect_files(Path::new(path))?;
         }
         Ok(())
     }
@@ -1898,6 +1926,36 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(with_suffix(&path, suffix));
         }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_existing_database_files_get_the_protected_dacl() {
+        let path = temp_db_path("acl-existing");
+        // A file from before, with the inherited (user-readable) ACL.
+        std::fs::write(&path, b"").unwrap();
+        assert!(!dacl_sddl(&path).starts_with("D:P"));
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(dacl_sddl(&path).starts_with("D:P"), "{}", dacl_sddl(&path));
+        db.pool.close().await;
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(with_suffix(&path, suffix));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_unprotectable_database_fails_startup_unless_overridden() {
+        let file = Path::new("db.sqlite");
+        let err = || Err(anyhow::anyhow!("access denied"));
+        let e = super::enforce_protected_with(err(), file, false).unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(
+            msg.contains("onion service keys") && msg.contains(super::ALLOW_UNPROTECTED_DB_ENV)
+        );
+        assert!(super::enforce_protected_with(err(), file, true).is_ok());
+        assert!(super::enforce_protected_with(Ok(()), file, false).is_ok());
     }
 
     #[tokio::test]

@@ -49,7 +49,19 @@ pub enum BackendConfig {
         /// On a Unix control socket: the uid Tor must run as (checked on the peer).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expect_tor_uid: Option<u32>,
+        /// Windows: the SID (`S-1-5-80-...` for a service) of the account Tor runs as,
+        /// besides SYSTEM and Administrators, that may own the cookie file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cookie_owner: Option<String>,
+        /// Accept a control address that is not loopback (cookie auth only). Off by
+        /// default: whoever is on that path sees the control traffic.
+        #[serde(default, skip_serializing_if = "is_false")]
+        allow_remote_control: bool,
     },
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// How the daemon authenticates to the Tor control port.
@@ -68,6 +80,22 @@ pub enum TorAuth {
     Password(String),
     /// No authentication; accepted on a Unix control socket only.
     None,
+}
+
+impl BackendConfig {
+    /// The Tor network `socketguard networks add tor` makes: default control port, cookie
+    /// authentication, nothing else set.
+    pub fn default_tor() -> Self {
+        BackendConfig::Tor {
+            control: default_tor_control(),
+            auth: TorAuth::default(),
+            cookie_path: None,
+            cookie_dir: None,
+            expect_tor_uid: None,
+            cookie_owner: None,
+            allow_remote_control: false,
+        }
+    }
 }
 
 impl Default for BackendConfig {
@@ -397,13 +425,7 @@ fn parse_single_backend(
                 prefix: None,
             }),
             "dhcpv6" => Ok(BackendConfig::Dhcpv6 { interface: iface }),
-            "tor" => Ok(BackendConfig::Tor {
-                control: default_tor_control(),
-                auth: TorAuth::default(),
-                cookie_path: None,
-                cookie_dir: None,
-                expect_tor_uid: None,
-            }),
+            "tor" => Ok(BackendConfig::default_tor()),
             other => Err(format!("invalid backend: {other}")),
         }
     } else {
@@ -756,6 +778,8 @@ mod tests {
             cookie_path: None,
             cookie_dir: None,
             expect_tor_uid: None,
+            cookie_owner: None,
+            allow_remote_control: false,
         };
         assert_eq!(tor.interface(), None);
         assert!(tor.is_singleton());
@@ -774,6 +798,8 @@ mod tests {
                 cookie_path: None,
                 cookie_dir: None,
                 expect_tor_uid: None,
+                cookie_owner: None,
+                allow_remote_control: false,
             }
         );
         for auth in [
@@ -790,6 +816,8 @@ mod tests {
                     cookie_path: Some("/var/lib/tor/control_auth_cookie".into()),
                     cookie_dir: None,
                     expect_tor_uid: Some(110),
+                    cookie_owner: None,
+                    allow_remote_control: false,
                 },
             };
             let json = serde_json::to_string(&inst).unwrap();
@@ -825,6 +853,8 @@ mod tests {
                 cookie_path: None,
                 cookie_dir: None,
                 expect_tor_uid: None,
+                cookie_owner: None,
+                allow_remote_control: false,
             },
         };
         assert!(DaemonConfig::validate_backends(&[tor("tor")]).is_ok());

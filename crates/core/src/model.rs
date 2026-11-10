@@ -624,12 +624,76 @@ pub fn normalize_credential(
     }
 }
 
+/// The x25519 points of small order (RFC 7748 / libsodium blocklist) in canonical and
+/// non-canonical form, with the unused top bit cleared. A client key like these gives a
+/// shared secret an observer can guess, so an authorization with it protects nothing.
+const SMALL_ORDER: [[u8; 32]; 7] = [
+    [0; 32],
+    {
+        let mut k = [0; 32];
+        k[0] = 1;
+        k
+    },
+    [
+        0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4,
+        0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49,
+        0xb8, 0x00,
+    ],
+    [
+        0x5f, 0x9c, 0x95, 0xbc, 0xa3, 0x50, 0x8c, 0x24, 0xb1, 0xd0, 0xb1, 0x55, 0x9c, 0x83, 0xef,
+        0x5b, 0x04, 0x44, 0x5c, 0xc4, 0x58, 0x1c, 0x8e, 0x86, 0xd8, 0x22, 0x4e, 0xdd, 0xd0, 0x9f,
+        0x11, 0x57,
+    ],
+    p_plus(0xec),
+    p_plus(0xed),
+    p_plus(0xee),
+];
+
+/// A value just below 2^255 (p-1, p, p+1 with p = 2^255 - 19), as little-endian bytes, by
+/// its lowest byte.
+const fn p_plus(low: u8) -> [u8; 32] {
+    let mut k = [0xff; 32];
+    k[0] = low;
+    k[31] = 0x7f;
+    k
+}
+
+/// 52 base32 characters (RFC 4648, no padding) as the 32 bytes they encode.
+fn decode_tor_key(key: &str) -> Option<[u8; 32]> {
+    let (mut out, mut n) = ([0u8; 32], 0usize);
+    let (mut buf, mut bits) = (0u32, 0u32);
+    for b in key.bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'2'..=b'7' => b - b'2' + 26,
+            _ => return None,
+        };
+        buf = (buf << 5) | v as u32;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            if n == 32 {
+                return None;
+            }
+            out[n] = (buf >> bits) as u8;
+            n += 1;
+        }
+    }
+    (n == 32).then_some(out)
+}
+
 /// Whether `key` is a Tor v3 client-auth public key: 52 base32 characters (no padding)
-/// encoding 32 bytes, so the last character carries no extra bits.
+/// encoding 32 bytes, so the last character carries no extra bits, and not a small-order
+/// point.
 fn is_tor_key(key: &str) -> bool {
-    key.len() == 52
+    let well_formed = key.len() == 52
         && key.bytes().all(|b| matches!(b, b'A'..=b'Z' | b'2'..=b'7'))
-        && matches!(key.as_bytes()[51], b'A' | b'Q')
+        && matches!(key.as_bytes()[51], b'A' | b'Q');
+    let Some(mut point) = well_formed.then(|| decode_tor_key(key)).flatten() else {
+        return false;
+    };
+    point[31] &= 0x7f;
+    !SMALL_ORDER.contains(&point)
 }
 
 fn normalize_tor_key(value: &str) -> Result<String, CredentialError> {
@@ -1145,6 +1209,23 @@ mod tests {
         assert_eq!(norm(WgKey, k).unwrap(), (WgKey, k.into()));
         assert!(norm(TlsSpki, "not base64!").is_err());
         assert!(norm(TorClientKey, "").is_err());
+    }
+
+    #[test]
+    fn small_order_tor_keys_are_refused() {
+        use CredentialKind::TorClientKey;
+        for key in [
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "AEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "4DVXU7B3IG4K4FSW4P5PDH6ENLNATDPLTQZLD7MGMICRMX2JXAAA",
+            "L6OJLPFDKCGCJMOQWFKZZA7PLMCEIXGELAOI5BWYEJHN3UE7CFLQ",
+            "5T7777777777777777777777777777777777777777777777757Q",
+            "5X7777777777777777777777777777777777777777777777757Q",
+            "537777777777777777777777777777777777777777777777757Q",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA",
+        ] {
+            assert!(norm(TorClientKey, key).is_err(), "{key}");
+        }
     }
 
     #[test]
