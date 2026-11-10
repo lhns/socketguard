@@ -7,6 +7,8 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
+    // The suite runs in parallel jsdom workers, and a test drives a whole page.
+    testTimeout: 15_000,
   },
   server: {
     port: 5173,

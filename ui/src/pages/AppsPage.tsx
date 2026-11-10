@@ -1,234 +1,372 @@
-import { useMemo, useRef, useState } from "react";
-import type { App } from "../api";
+import { useEffect, useMemo, useState } from "react";
 import { accessSummary, membershipsOf } from "../access";
-import AppDetailView from "../components/AppDetailCard";
-import GrantEditor from "../components/GrantEditor";
-import RevokeDialog from "../components/RevokeDialog";
-import TagDialog from "../components/TagDialog";
-import TagsPanel from "../components/TagsPanel";
-import { useToast } from "../components/Toast";
+import type { App, Tag } from "../api";
+import type { AccessHighlight } from "../components/AccessList";
+import { AppInspector, AppsInspector } from "../components/AppInspector";
+import EntityList, { type ListColumn, type ListRow, type ListSection } from "../components/EntityList";
+import Inspector, { InspectorEmpty } from "../components/Inspector";
+import Picker, { type PickerItem } from "../components/Picker";
+import { NewTagForm, TagInspector, TagsInspector } from "../components/TagInspector";
+import { useColumns } from "../columns";
 import { errorText, portLabel } from "../lib";
-import { useApps, useChanges, useGrants, useNetworks, useTags } from "../queries";
-import type { Focus } from "../nav";
+import { buildColumns, buildRows, cellOf, type Cell, type Col, type Ctx, type Row as MatrixRow } from "../matrix";
+import type { FocusMessage } from "../nav";
+import { useApps, useGrants, useGroups, useNetworks, usePeers, useTags } from "../queries";
 
-type Dialog = "grant" | "revoke" | "tag" | null;
+interface AppRow extends ListRow {
+  m: MatrixRow;
+}
 
-export default function AppsPage({ focus = {} }: { focus?: Focus }) {
-  const toast = useToast();
+const CELL_GLYPH = { granted: "✓", partial: "◐", inherited: "↳", none: "" } as const;
+const CELL_TEXT = { granted: "granted", partial: "granted on some networks", inherited: "inherited", none: "no access" } as const;
+const ALL = "__all__";
+
+const toRow = (m: MatrixRow): AppRow => ({ key: m.key, kind: m.kind, selectable: m.kind !== "port", indent: m.kind === "port", m });
+
+export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage }) {
   const apps = useApps();
   const tags = useTags();
   const grants = useGrants();
+  const peers = usePeers();
+  const groups = useGroups();
   const networks = useNetworks();
-  const changes = useChanges();
+  const columns = useColumns();
 
-  const [detail, setDetail] = useState<string | null>(focus.appId ?? null);
-  const [pendingOnly, setPendingOnly] = useState(focus.pendingOnly ?? false);
-  const [search, setSearch] = useState(focus.search ?? "");
-  const [tagFilter, setTagFilter] = useState<string | null>(focus.tagId ?? null);
-  const [netFilter, setNetFilter] = useState("");
-  const [showSystem, setShowSystem] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [dialog, setDialog] = useState<Dialog>(null);
-  const anchor = useRef<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [search, setSearch] = useState("");
+  const [pendingOnly, setPendingOnly] = useState(false);
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
+  const [showSystem, setShowSystem] = useState(false);
+  const [scope, setScope] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [stripOpen, setStripOpen] = useState(false);
+  const [highlight, setHighlight] = useState<AccessHighlight | null>(null);
+  const [selectLabel, setSelectLabel] = useState<string | null>(null);
 
   const tagList = useMemo(() => tags.data ?? [], [tags.data]);
-  const grantList = grants.data ?? [];
+  const appList = useMemo(() => apps.data ?? [], [apps.data]);
+  const ctx: Ctx = useMemo(
+    () => ({
+      grants: grants.data ?? [], tags: tagList, peers: peers.data ?? [], groups: groups.data ?? [], networks: networks.data ?? [], scope,
+    }),
+    [grants.data, tagList, peers.data, groups.data, networks.data, scope],
+  );
+
+  // A link from elsewhere: show what it points at. The page stays mounted, so the rest of its
+  // state (filters, columns, selection) is kept.
+  useEffect(() => {
+    if (focus.seq === 0) return;
+    if (focus.search !== undefined) setSearch(focus.search);
+    if (focus.pendingOnly) setPendingOnly(true);
+    const key = focus.appId ? `app:${focus.appId}` : focus.tagId ? `tag:${focus.tagId}` : null;
+    if (key) {
+      setSelected(new Set([key]));
+      setCreating(false);
+      setStripOpen(true);
+      setHighlight(null);
+    }
+    // Only a new link counts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus.seq]);
+
+  // A tag that was just created is selected as soon as it is in the list.
+  useEffect(() => {
+    if (!selectLabel) return;
+    const t = tagList.find((x) => x.label === selectLabel);
+    if (t) {
+      setSelected(new Set([`tag:${t.id}`]));
+      setSelectLabel(null);
+    }
+  }, [tagList, selectLabel]);
+
+  // ─── The rows ──────────────────────────────────────────────────────────────
+  const q = search.trim().toLowerCase();
   const tagMembers = useMemo(
     () => new Set(tagList.find((t) => t.id === tagFilter)?.members.map((m) => m.app_id) ?? []),
     [tagList, tagFilter],
   );
+  const shownApps = useMemo(
+    () =>
+      appList
+        .filter((a) => !pendingOnly || !a.reviewed)
+        .filter((a) => !tagFilter || tagMembers.has(a.id))
+        .filter((a) => !q || a.name.toLowerCase().includes(q) || a.process_name.toLowerCase().includes(q))
+        .sort((a, b) => Number(a.reviewed) - Number(b.reviewed) || a.name.localeCompare(b.name)),
+    [appList, pendingOnly, tagFilter, tagMembers, q],
+  );
+  const shownTags = useMemo(() => tagList.filter((t) => !q || t.label.toLowerCase().includes(q)), [tagList, q]);
+  const own = shownApps.filter((a) => !a.system);
+  const system = shownApps.filter((a) => a.system);
+  const selectedSystem = appList.some((a) => a.system && selected.has(`app:${a.id}`));
+  // A search, a filter or a selection that reaches a system service should not hide it.
+  const systemOpen = showSystem || q !== "" || tagFilter !== null || selectedSystem;
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return (apps.data ?? [])
-      .filter((a) => !pendingOnly || !a.reviewed)
-      .filter((a) => !tagFilter || tagMembers.has(a.id))
-      .filter((a) => !netFilter || a.addresses.some((ad) => ad.network_id === netFilter))
-      .filter((a) => !q || a.name.toLowerCase().includes(q) || a.process_name.toLowerCase().includes(q))
-      .sort((a, b) => Number(a.reviewed) - Number(b.reviewed) || a.name.localeCompare(b.name));
-  }, [apps.data, pendingOnly, search, tagFilter, tagMembers, netFilter]);
-  const own = filtered.filter((a) => !a.system);
-  const system = filtered.filter((a) => a.system);
-  // A search or a filter that matches system services should not hide them.
-  const systemOpen = showSystem || search.trim() !== "" || tagFilter !== null;
-  const visible = systemOpen ? [...own, ...system] : own;
-  const pendingCount = (apps.data ?? []).filter((a) => !a.reviewed).length;
+  const allCols = useMemo(() => buildColumns({ ...ctx, scope: null }), [ctx]);
+  const shownCols: Col[] = useMemo(
+    () => allCols.filter((c) => columns.keys.includes(c.key)).filter((c) => scope === null || c.kind !== "segment"),
+    [allCols, columns.keys, scope],
+  );
+  const withCols = shownCols.length > 0;
 
-  const clickBox = (app: App, shift: boolean) => {
-    const next = new Set(selected);
-    if (shift && anchor.current) {
-      const a = visible.findIndex((x) => x.id === anchor.current);
-      const b = visible.findIndex((x) => x.id === app.id);
-      if (a >= 0 && b >= 0) {
-        const on = !selected.has(app.id);
-        for (const x of visible.slice(Math.min(a, b), Math.max(a, b) + 1)) {
-          if (on) next.add(x.id);
-          else next.delete(x.id);
+  const appRows = (list: App[]) => buildRows(list, [], withCols ? expanded : new Set()).map(toRow);
+  const sections: ListSection<AppRow>[] = [
+    {
+      key: "tags",
+      title: "Tags",
+      count: shownTags.length,
+      rows: buildRows([], shownTags, new Set()).map(toRow),
+      action: <button className="btn btn-sm" onClick={() => { setCreating(true); setSelected(new Set()); setStripOpen(true); }}>New tag</button>,
+      emptyText: tagList.length === 0 ? "No tags yet. A tag groups apps so one grant covers all of them, also programs that start later." : "No tag matches.",
+    },
+    { key: "apps", title: "Apps", count: own.length, rows: appRows(own), emptyText: appList.length === 0 ? "No apps detected yet. The daemon discovers listening programs automatically." : "No app matches." },
+    ...(system.length > 0
+      ? [{ key: "system", title: "System services", count: system.length, hint: "Windows services and system processes", rows: appRows(system), collapsed: !systemOpen, onToggle: () => setShowSystem(!showSystem) }]
+      : []),
+  ];
+
+  // ─── The columns of the list ───────────────────────────────────────────────
+  const sumColumns: ListColumn<AppRow>[] = [
+    {
+      key: "tags",
+      header: "Tags",
+      className: "col-tags",
+      cell: (r) => {
+        if (r.m.kind === "tag") {
+          const t = tagList.find((x) => x.id === r.m.target.id);
+          return <span className="muted">{t && t.patterns.length > 0 ? `matches ${t.patterns.join(", ")}` : ""}</span>;
         }
-        setSelected(next);
-        anchor.current = app.id;
-        return;
-      }
-    }
-    if (next.has(app.id)) next.delete(app.id);
-    else next.add(app.id);
-    anchor.current = app.id;
-    setSelected(next);
-  };
-  const allChecked = visible.length > 0 && visible.every((a) => selected.has(a.id));
-  const selectedIds = [...selected];
-
-  const markReviewed = () =>
-    changes.mutate(
-      { ops: selectedIds.map((app_id) => ({ op: "review" as const, app_id, reviewed: true })), dryRun: false },
-      {
-        onSuccess: () => toast.success(`Marked ${selectedIds.length} reviewed`),
-        onError: (e) => toast.error(errorText(e)),
+        const mine = membershipsOf(r.m.target.id, tagList).filter((m) => (r.m.kind === "app" ? true : m.port !== null && r.m.port !== null && portLabel(m.port) === portLabel(r.m.port)));
+        return (
+          <>
+            {mine.map((m) => (
+              <button key={`${m.tag.id}-${m.port ? portLabel(m.port) : "*"}`} className="tag-pill" title="Show only this tag" onClick={() => setTagFilter(m.tag.id)}>
+                {m.tag.label}{m.port && r.m.kind === "app" ? ` ${portLabel(m.port)}` : ""}
+              </button>
+            ))}
+          </>
+        );
       },
-    );
+    },
+    {
+      key: "ports",
+      header: "Ports",
+      className: "ports-cell mono",
+      cell: (r) => {
+        if (r.m.kind === "tag") return <span className="muted">{tagList.find((t) => t.id === r.m.target.id)?.members.length ?? 0} members</span>;
+        if (r.m.kind === "port") return null;
+        const listening = r.m.app?.ports.filter((p) => p.listening) ?? [];
+        return listening.length ? listening.map(portLabel).join(", ") : <span className="muted">not listening</span>;
+      },
+    },
+    {
+      key: "access",
+      header: "Access",
+      className: "col-access",
+      cell: (r) => {
+        if (r.m.kind === "port") return null;
+        if (r.m.kind === "tag") {
+          const n = (grants.data ?? []).filter((g) => g.target.kind === "tag" && g.target.id === r.m.target.id).length;
+          return <span className="muted">{n === 0 ? "no grants" : `${n} grant${n === 1 ? "" : "s"}`}</span>;
+        }
+        const sum = accessSummary(r.m.target.id, grants.data ?? [], tagList);
+        return (
+          <>
+            {sum.open && <span className="badge reach reach-bad">open to anyone</span>}
+            {sum.segment && <span className="badge reach reach-warn">segment</span>}
+            {sum.direct + sum.viaTag === 0 ? (
+              <span className="muted">closed</span>
+            ) : (
+              <span className="muted">
+                {sum.direct > 0 && `${sum.direct} direct`}
+                {sum.direct > 0 && sum.viaTag > 0 && ", "}
+                {sum.viaTag > 0 && `${sum.viaTag} via tag`}
+              </span>
+            )}
+          </>
+        );
+      },
+    },
+  ];
 
-  const renderRow = (a: App) => {
-    const sum = accessSummary(a.id, grantList, tagList);
-    const listening = a.ports.filter((p) => p.listening);
-    const myTags = membershipsOf(a.id, tagList);
-    return (
-      <tr key={a.id} className={a.id === detail ? "row-selected" : undefined}>
-        <td>
-          <input
-            type="checkbox"
-            aria-label={`Select ${a.name}`}
-            checked={selected.has(a.id)}
-            onChange={() => {}}
-            onClick={(e) => clickBox(a, e.shiftKey)}
-          />
-        </td>
-        <td>
-          <button className="link-btn" onClick={() => setDetail(a.id)} aria-pressed={a.id === detail}>{a.name}</button>{" "}
-          {!a.reviewed && <span className="badge badge-pending">pending</span>}
-          {a.identity_note === "unidentified" && <span className="badge reach reach-warn" title="Owner of the socket unknown">unidentified</span>}
-        </td>
-        <td>
-          {myTags.map((m) => (
-            <span key={`${m.tag.id}-${m.port ? portLabel(m.port) : "*"}`} className="tag-pill tag-pill-static">
-              {m.tag.label}{m.port ? ` ${portLabel(m.port)}` : ""}
-            </span>
-          ))}
-        </td>
-        <td className="mono ports-cell">{listening.length ? listening.map(portLabel).join(", ") : <span className="muted">not listening</span>}</td>
-        <td>
-          {sum.open && <span className="badge reach reach-bad">open to anyone</span>}
-          {sum.segment && <span className="badge reach reach-warn">segment</span>}
-          {sum.direct + sum.viaTag === 0 ? (
-            <span className="muted">closed</span>
-          ) : (
-            <span className="muted">
-              {sum.direct > 0 && `${sum.direct} direct`}
-              {sum.direct > 0 && sum.viaTag > 0 && ", "}
-              {sum.viaTag > 0 && `${sum.viaTag} via tag`}
-            </span>
-          )}
-        </td>
-      </tr>
-    );
+  const cellFor = (r: AppRow, c: Col): Cell => cellOf(r.m, c, ctx);
+  const cellTitle = (cell: Cell): string => {
+    switch (cell.state) {
+      case "inherited":
+        return `Inherited through ${cell.origin?.kind} ${cell.origin?.label}`;
+      case "partial":
+        return `Granted on ${cell.networkIds.map((id) => ctx.networks.find((n) => n.id === id)?.name ?? id).join(", ")} only`;
+      case "granted":
+        return cell.allNetworks ? "Granted on all networks" : "Granted";
+      default:
+        return "No access";
+    }
   };
+  const openCell = (r: AppRow, c: Col) => {
+    setSelected(new Set([r.m.kind === "tag" ? r.key : `app:${r.m.target.id}`]));
+    setHighlight({ subject: c.subject, networkId: c.networkId });
+    setCreating(false);
+    setStripOpen(true);
+  };
+  const subjectColumns: ListColumn<AppRow>[] = shownCols.map((c) => ({
+    key: c.key,
+    header: c.label,
+    title: c.label,
+    vertical: true,
+    className: "matrix-cell",
+    cell: (r) => <span aria-hidden="true">{CELL_GLYPH[cellFor(r, c).state]}</span>,
+    cellClass: (r) => `cell-${cellFor(r, c).state}`,
+    cellLabel: (r) => `${r.m.label} – ${c.label}: ${CELL_TEXT[cellFor(r, c).state]}`,
+    cellTitle: (r) => cellTitle(cellFor(r, c)),
+    onCell: (r) => openCell(r, c),
+  }));
+
+  // ─── Selection and the inspector ───────────────────────────────────────────
+  const selectedApps = appList.filter((a) => selected.has(`app:${a.id}`));
+  const selectedTags = tagList.filter((t) => selected.has(`tag:${t.id}`));
+  const clear = () => {
+    setSelected(new Set());
+    setCreating(false);
+    setHighlight(null);
+  };
+  const open = (r: AppRow) => {
+    setSelected(new Set([r.m.kind === "tag" ? r.key : `app:${r.m.target.id}`]));
+    setCreating(false);
+    setHighlight(null);
+    setStripOpen(true);
+  };
+  const collapsed = withCols && !stripOpen;
+  const onCollapse = withCols ? () => setStripOpen(false) : undefined;
+
+  const inspector = (() => {
+    if (collapsed) return <Inspector label="Details" title="" collapsed onExpand={() => setStripOpen(true)} />;
+    if (creating) return <NewTagForm onCreated={(label) => { setCreating(false); setSelectLabel(label); }} onClose={() => setCreating(false)} />;
+    if (selectedApps.length === 1 && selectedTags.length === 0) {
+      return <AppInspector key={selectedApps[0].id} id={selectedApps[0].id} highlight={highlight} onCollapse={onCollapse} onClose={clear} />;
+    }
+    if (selectedApps.length > 1) return <AppsInspector ids={selectedApps.map((a) => a.id)} onCollapse={onCollapse} onClose={clear} />;
+    if (selectedTags.length === 1) {
+      return <TagInspector key={selectedTags[0].id} tag={selectedTags[0]} highlight={highlight} onCollapse={onCollapse} onClose={clear} />;
+    }
+    if (selectedTags.length > 1) return <TagsInspector tags={selectedTags} onCollapse={onCollapse} onClose={clear} />;
+    return <InspectorEmpty>Select an app or a tag to see who can reach it. Tick several to change them together.</InspectorEmpty>;
+  })();
+
+  // ─── The columns picker ────────────────────────────────────────────────────
+  const section = (c: Col) => (c.kind === "group" ? "Groups" : c.kind === "peer" ? "Peers" : "Built-in");
+  const order = { "Built-in": 0, Groups: 1, Peers: 2 } as const;
+  const pickable = [...allCols].sort((a, b) => order[section(a)] - order[section(b)]);
+  const chosen = pickable.filter((c) => columns.keys.includes(c.key)).length;
+  const columnItems: PickerItem[] = [
+    { id: ALL, label: "All", hint: `${pickable.length} columns`, state: chosen === 0 ? "off" : chosen === pickable.length ? "on" : "mixed" },
+    ...pickable.map<PickerItem>((c) => ({ id: c.key, label: c.label, section: section(c), state: columns.keys.includes(c.key) ? "on" : "off" })),
+  ];
+  const toggleColumn = (item: PickerItem) => {
+    if (item.id === ALL) {
+      columns.set(item.state === "on" ? [] : pickable.map((c) => c.key));
+      if (item.state !== "on") setStripOpen(false);
+      return;
+    }
+    const next = columns.keys.includes(item.id) ? columns.keys.filter((k) => k !== item.id) : [...columns.keys, item.id];
+    if (columns.keys.length === 0 && next.length > 0) setStripOpen(false);
+    columns.set(next);
+  };
+
+  const pendingCount = appList.filter((a) => !a.reviewed).length;
+  const filterTag: Tag | undefined = tagList.find((t) => t.id === tagFilter);
+  const grantNetworks = (networks.data ?? []).filter((n) => n.grants_apply);
 
   return (
     <div>
-      <TagsPanel active={tagFilter} onFilter={setTagFilter} />
-      <div className="apps-layout">
-        <section aria-label="Apps">
-          <div className="toolbar">
-            <input
-              className="input grow"
-              type="search"
-              aria-label="Filter apps"
-              placeholder="Filter apps"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-            <label className="check">
-              <input type="checkbox" checked={pendingOnly} onChange={(e) => setPendingOnly(e.target.checked)} />
-              Pending only ({pendingCount})
-            </label>
-            <label className="visually-hidden" htmlFor="net-filter">Network</label>
-            <select id="net-filter" className="input" value={netFilter} onChange={(e) => setNetFilter(e.target.value)}>
-              <option value="">Any network</option>
-              {(networks.data ?? []).map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
+      <div className="toolbar">
+        <input
+          className="input grow"
+          type="search"
+          aria-label="Filter apps"
+          placeholder="Filter apps and tags"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+        <label className="check">
+          <input type="checkbox" checked={pendingOnly} onChange={(e) => setPendingOnly(e.target.checked)} />
+          Pending only ({pendingCount})
+        </label>
+        {filterTag && (
+          <button className="tag-pill tag-pill-active" onClick={() => setTagFilter(null)} aria-label={`Stop filtering by tag ${filterTag.label}`}>
+            tag: {filterTag.label} ×
+          </button>
+        )}
+        {withCols && (
+          <>
+            <label htmlFor="overview-net" className="muted">Network</label>
+            <select id="overview-net" className="input" value={scope ?? ""} onChange={(e) => setScope(e.target.value || null)}>
+              <option value="">All networks</option>
+              {grantNetworks.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
             </select>
-          </div>
-
-          {selected.size > 0 && (
-            <div className="bulk-bar" role="toolbar" aria-label="Bulk actions">
-              <strong>{selected.size} selected</strong>
-              <button className="btn btn-sm btn-primary" onClick={() => setDialog("grant")}>Grant…</button>
-              <button className="btn btn-sm" onClick={() => setDialog("revoke")}>Revoke…</button>
-              <button className="btn btn-sm" onClick={() => setDialog("tag")}>Tag…</button>
-              <button className="btn btn-sm" onClick={markReviewed} disabled={changes.isPending}>Mark reviewed</button>
-              <button className="btn btn-sm" onClick={() => setSelected(new Set())}>Clear</button>
-            </div>
-          )}
-
-          {apps.isLoading && <p className="muted">Loading…</p>}
-          {apps.error && <div className="error-banner">{errorText(apps.error)}</div>}
-          {apps.data && filtered.length === 0 && (
-            <div className="card empty">
-              <p>{apps.data.length === 0 ? "No apps detected yet." : "No apps match."}</p>
-              {apps.data.length === 0 && <p className="hint">The daemon discovers listening programs automatically.</p>}
-            </div>
-          )}
-          {filtered.length > 0 && (
-            <div className="table-wrap">
-              <table className="apps-table">
-                <thead>
-                  <tr>
-                    <th>
-                      <input
-                        type="checkbox"
-                        aria-label="Select all shown apps"
-                        checked={allChecked}
-                        onChange={(e) => setSelected(e.target.checked ? new Set(visible.map((a) => a.id)) : new Set())}
-                      />
-                    </th>
-                    <th>App</th><th>Tags</th><th>Ports</th><th>Access</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {own.map(renderRow)}
-                  {system.length > 0 && (
-                    <tr className="group-row">
-                      <td colSpan={5}>
-                        <button
-                          className="link-btn"
-                          aria-expanded={systemOpen}
-                          onClick={() => setShowSystem(!showSystem)}
-                          disabled={search.trim() !== "" || tagFilter !== null}
-                        >
-                          {systemOpen ? "▾" : "▸"} System services ({system.length})
-                        </button>
-                        <span className="muted"> Windows services and system processes</span>
-                      </td>
-                    </tr>
-                  )}
-                  {systemOpen && system.map(renderRow)}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-        <section aria-label="App details">
-          {detail ? (
-            <AppDetailView key={detail} id={detail} onForgotten={() => setDetail(null)} />
-          ) : (
-            <div className="card empty"><p>Select an app to see its ports and who can reach them.</p></div>
-          )}
-        </section>
+          </>
+        )}
+        <Picker
+          label="Columns"
+          trigger={`Columns${shownCols.length > 0 ? ` (${shownCols.length})` : ""}`}
+          items={columnItems}
+          onToggle={toggleColumn}
+          placeholder="Show who has access"
+          align="right"
+        />
       </div>
-
-      {dialog === "grant" && (
-        <GrantEditor targets={selectedIds.map((id) => ({ kind: "app" as const, id }))} onClose={() => setDialog(null)} />
+      {withCols && (
+        <p className="hint">
+          Columns show who can reach each app: ✓ granted, ◐ some networks, ↳ through a tag or group. Click a cell to change it in the details.
+        </p>
       )}
-      {dialog === "revoke" && <RevokeDialog appIds={selectedIds} onClose={() => setDialog(null)} />}
-      {dialog === "tag" && <TagDialog members={selectedIds.map((app_id) => ({ app_id, port: null }))} onClose={() => setDialog(null)} />}
+
+      {apps.isLoading && <p className="muted">Loading…</p>}
+      {apps.error && <div className="error-banner">{errorText(apps.error)}</div>}
+
+      <div className={`split-layout${collapsed ? " split-collapsed" : ""}`}>
+        <section aria-label="Apps and tags" className="split-list">
+          <EntityList<AppRow>
+            label="Apps and tags"
+            sections={sections}
+            columns={[...sumColumns, ...subjectColumns]}
+            name={(r) => <RowName r={r} />}
+            nameLabel={(r) => r.m.label.replace(/^tag /, "")}
+            selected={selected}
+            onSelect={(keys) => { setSelected(keys); setCreating(false); setHighlight(null); }}
+            onOpen={open}
+            selectAllKind="app"
+            selectAllLabel="Select all shown apps"
+            expand={(r) =>
+              withCols && r.m.kind === "app" && (r.m.app?.ports.length ?? 0) > 0
+                ? {
+                    open: expanded.has(r.m.target.id),
+                    label: `${expanded.has(r.m.target.id) ? "Collapse" : "Expand"} ports of ${r.m.label}`,
+                    toggle: () => {
+                      const next = new Set(expanded);
+                      if (next.has(r.m.target.id)) next.delete(r.m.target.id);
+                      else next.add(r.m.target.id);
+                      setExpanded(next);
+                    },
+                  }
+                : null
+            }
+          />
+        </section>
+        <section aria-label="Details" className="split-inspector">{inspector}</section>
+      </div>
     </div>
+  );
+}
+
+function RowName({ r }: { r: AppRow }) {
+  if (r.m.kind === "tag") return <span className="row-tag"><span className="tag-glyph" aria-hidden="true">#</span>{r.m.label.replace(/^tag /, "")}</span>;
+  if (r.m.kind === "port") return <span className="mono">{r.m.label}</span>;
+  const a = r.m.app!;
+  return (
+    <>
+      {a.name}{" "}
+      {!a.reviewed && <span className="badge badge-pending">pending</span>}
+      {a.identity_note === "unidentified" && <span className="badge reach reach-warn" title="Owner of the socket unknown">unidentified</span>}
+    </>
   );
 }

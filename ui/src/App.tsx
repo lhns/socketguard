@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, onEnforcementNotice, toDaemonError, type Enforcement } from "./api";
 import { errorText } from "./lib";
-import { homeOf, NavContext, readMode, writeMode, type Focus, type Mode, type Page } from "./nav";
-import AccessPage from "./pages/AccessPage";
+import { NavContext, type Focus, type FocusMessage, type Page } from "./nav";
 import ActivityPage from "./pages/ActivityPage";
 import AppsPage from "./pages/AppsPage";
 import PeersPage from "./pages/PeersPage";
@@ -11,8 +10,7 @@ import { useDaemonEvents, useStatus } from "./queries";
 
 const PAGES: { id: Page; label: string }[] = [
   { id: "apps", label: "Apps" },
-  { id: "access", label: "Access" },
-  { id: "peers", label: "Peers & groups" },
+  { id: "peers", label: "Peers" },
   { id: "activity", label: "Activity" },
   { id: "settings", label: "Settings" },
 ];
@@ -51,25 +49,14 @@ function ConnectionBanner({ error }: { error: unknown }) {
   );
 }
 
-/** Simple opens on the apps list, Advanced on the access matrix. */
-function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => void }) {
-  return (
-    <div className="mode-switch" role="group" aria-label="View">
-      {(["simple", "advanced"] as const).map((m) => (
-        <button key={m} className={`nav-btn${mode === m ? " active" : ""}`} aria-pressed={mode === m} onClick={() => onChange(m)}>
-          {m === "simple" ? "Simple" : "Advanced"}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 export default function App() {
   useDaemonEvents();
   const status = useStatus();
-  const [mode, setMode] = useState<Mode>(readMode);
-  const [page, setPage] = useState<Page>(() => homeOf(readMode()));
-  const [focus, setFocus] = useState<Focus & { seq: number }>({ seq: 0 });
+  const [page, setPage] = useState<Page>("apps");
+  // A page stays mounted once it has been opened, so its selection, filters and columns
+  // survive following a link and coming back.
+  const [visited, setVisited] = useState<Set<Page>>(new Set(["apps"]));
+  const [focus, setFocus] = useState<FocusMessage>({ seq: 0 });
   const [notice, setNotice] = useState<Enforcement | null>(null);
 
   // A change the daemon saved but could not enforce everywhere yet (HTTP 202) stays visible.
@@ -78,17 +65,13 @@ export default function App() {
   const nav = useMemo(
     () => ({
       go: (p: Page, f: Focus = {}) => {
-        setFocus((cur) => ({ ...f, seq: cur.seq + 1 }));
+        if (Object.keys(f).length > 0) setFocus((cur) => ({ ...f, seq: cur.seq + 1 }));
+        setVisited((v) => (v.has(p) ? v : new Set(v).add(p)));
         setPage(p);
       },
     }),
     [],
   );
-  const switchMode = (m: Mode) => {
-    writeMode(m);
-    setMode(m);
-    nav.go(homeOf(m));
-  };
   const pending = status.data?.counts.pending_apps ?? 0;
 
   return (
@@ -112,7 +95,6 @@ export default function App() {
               </button>
             ))}
           </nav>
-          <ModeSwitch mode={mode} onChange={switchMode} />
         </div>
       </header>
       <main className="content">
@@ -140,12 +122,23 @@ export default function App() {
             <button className="btn btn-sm" onClick={() => nav.go("settings")}>Settings</button>
           </div>
         )}
-        {page === "apps" && <AppsPage key={focus.seq} focus={focus} />}
-        {page === "access" && <AccessPage key={focus.seq} />}
-        {page === "peers" && <PeersPage key={focus.seq} focus={focus} />}
-        {page === "activity" && <ActivityPage key={focus.seq} />}
-        {page === "settings" && <SettingsPage key={focus.seq} />}
+        {PAGES.map(
+          (p) => visited.has(p.id) && <div key={p.id} hidden={page !== p.id}>{renderPage(p.id, focus)}</div>,
+        )}
       </main>
     </NavContext.Provider>
   );
+}
+
+function renderPage(p: Page, focus: FocusMessage) {
+  switch (p) {
+    case "apps":
+      return <AppsPage focus={focus} />;
+    case "peers":
+      return <PeersPage focus={focus} />;
+    case "activity":
+      return <ActivityPage />;
+    case "settings":
+      return <SettingsPage />;
+  }
 }

@@ -16,19 +16,19 @@ describe("daemon events", () => {
     let peers: Peer[] = [alice];
     const d = mockDaemon({ list_peers: () => peers });
     renderWithProviders(<Harness />);
-    expect(await screen.findByRole("heading", { name: "alice" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "alice" })).toBeInTheDocument();
     expect(d.count("list_peers")).toBe(1);
 
     peers = [alice, { ...alice, id: "p2", label: "carol" }];
     await emit("peers_changed");
-    expect(await screen.findByRole("heading", { name: "carol" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "carol" })).toBeInTheDocument();
     await waitFor(() => expect(d.count("list_peers")).toBe(2));
   });
 
   it("an unrelated event does not refetch peers", async () => {
     const d = mockDaemon();
     renderWithProviders(<Harness />);
-    await screen.findByRole("heading", { name: "alice" });
+    await screen.findByRole("button", { name: "alice" });
     await emit("settings_changed");
     await new Promise((r) => setTimeout(r, 50));
     expect(d.count("list_peers")).toBe(1);

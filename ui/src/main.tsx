@@ -6,6 +6,7 @@ import { createQueryClient } from "./queries";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ToastProvider } from "./components/Toast";
 import "./styles.css";
+import "./inspector.css";
 
 const queryClient = createQueryClient();
 
