@@ -46,6 +46,19 @@ impl Named for PeerGroup {
     }
 }
 
+/// Plain ids (addresses, credentials, grants) have no name: only the id forms match.
+impl Named for String {
+    fn id(&self) -> &str {
+        self
+    }
+    fn name(&self) -> &str {
+        ""
+    }
+    fn describe(&self) -> String {
+        self.clone()
+    }
+}
+
 /// The first 8 characters of an id, as shown in tables.
 pub fn short(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
@@ -85,12 +98,19 @@ impl std::fmt::Display for ResolveError {
 
 impl std::error::Error for ResolveError {}
 
-/// Order: exact id; exact name (case-insensitive); unique id prefix.
+/// Order: exact id; exact name (case-insensitive); unique id prefix. An empty query
+/// matches nothing.
 pub fn resolve<'a, T: Named>(
     kind: &'static str,
     items: &'a [T],
     query: &str,
 ) -> Result<&'a T, ResolveError> {
+    if query.is_empty() {
+        return Err(ResolveError::NotFound {
+            kind,
+            query: String::new(),
+        });
+    }
     if let Some(item) = items.iter().find(|i| i.id() == query) {
         return Ok(item);
     }
@@ -121,33 +141,6 @@ pub fn resolve<'a, T: Named>(
         kind,
         query: query.to_string(),
     })
-}
-
-/// Resolve against plain ids (addresses, credentials, grants), which have no name.
-pub fn resolve_id<'a>(
-    kind: &'static str,
-    ids: &'a [String],
-    query: &str,
-) -> Result<&'a String, ResolveError> {
-    if let Some(id) = ids.iter().find(|i| *i == query) {
-        return Ok(id);
-    }
-    let matches: Vec<&String> = ids
-        .iter()
-        .filter(|i| !query.is_empty() && i.starts_with(query))
-        .collect();
-    match matches.as_slice() {
-        [one] => Ok(one),
-        [] => Err(ResolveError::NotFound {
-            kind,
-            query: query.to_string(),
-        }),
-        many => Err(ResolveError::Ambiguous {
-            kind,
-            query: query.to_string(),
-            candidates: many.iter().map(|s| s.to_string()).collect(),
-        }),
-    }
 }
 
 #[cfg(test)]
@@ -195,8 +188,14 @@ mod tests {
     #[test]
     fn plain_ids() {
         let ids = vec!["aaa1".to_string(), "aab2".to_string()];
-        assert_eq!(resolve_id("grant", &ids, "aab").unwrap(), "aab2");
-        assert!(resolve_id("grant", &ids, "aa").is_err());
-        assert!(resolve_id("grant", &ids, "").is_err());
+        assert_eq!(resolve("grant", &ids, "aab").unwrap(), "aab2");
+        assert_eq!(resolve("grant", &ids, "AAB2").unwrap(), "aab2");
+        assert!(matches!(
+            resolve("grant", &ids, "aa"),
+            Err(ResolveError::Ambiguous { .. })
+        ));
+        assert!(resolve("grant", &ids, "").is_err());
+        // An empty query matches nothing, not even the only item.
+        assert!(resolve("grant", &ids[..1], "").is_err());
     }
 }

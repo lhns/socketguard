@@ -12,10 +12,17 @@ fn set(routes: &[(http::Method, &str)]) -> BTreeSet<(String, String)> {
         .collect()
 }
 
+fn client_set() -> BTreeSet<(String, String)> {
+    CLIENT_ROUTES
+        .iter()
+        .map(|r| (r.method.to_string(), r.path.to_string()))
+        .collect()
+}
+
 #[test]
 fn every_route_has_a_client_method_and_vice_versa() {
     let api = set(ROUTES);
-    let client = set(CLIENT_ROUTES);
+    let client = client_set();
     assert_eq!(api.len(), ROUTES.len(), "duplicate route in ROUTES");
     let missing: Vec<_> = api.difference(&client).collect();
     let extra: Vec<_> = client.difference(&api).collect();

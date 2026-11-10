@@ -415,18 +415,14 @@ async fn export_apply_and_disable() {
     assert!(same.stdout.contains("no changes"), "{}", same.stdout);
 
     // Edit the file: one more peer, and no grant.
-    let mut doc = socketguard_cli::commands::parse_document(&text, &toml_path).unwrap();
+    let mut doc = socketguard_cli::document::parse(&text, &toml_path).unwrap();
     doc.grants.clear();
     doc.peers.push(socketguard_core::api_types::ExportPeer {
         label: "carol".into(),
         credentials: vec![],
     });
     let path = env.dir.join("edited.toml");
-    std::fs::write(
-        &path,
-        socketguard_cli::commands::document_text(&doc, false).unwrap(),
-    )
-    .unwrap();
+    std::fs::write(&path, socketguard_cli::document::text(&doc, false).unwrap()).unwrap();
     let p = path.to_str().unwrap();
 
     let dry = env.ok(&["apply", "-f", p, "--dry-run"]).await;
@@ -492,7 +488,8 @@ async fn export_apply_and_disable() {
 
 // ─── Interactive flows (scripted prompter, in-process client) ─────────────────
 
-use socketguard_cli::commands::{init_flow, pending_flow};
+use socketguard_cli::commands::Ctx;
+use socketguard_cli::flows::{init, pending};
 use socketguard_cli::prompt::Prompter;
 use socketguard_core::api_types::NewPeer;
 use socketguard_core::{GrantView, Subject};
@@ -586,7 +583,9 @@ async fn run_pending(answers: Vec<A>) -> (Env, Script) {
     let env = Env::start().await;
     ip_peer(&env, "friend", "2001:db8::7").await;
     let mut script = Script::new(answers);
-    pending_flow(env.client(), &mut script).await.unwrap();
+    pending(&Ctx::new(env.client(), false), &mut script)
+        .await
+        .unwrap();
     script.finished();
     (env, script)
 }
@@ -647,7 +646,9 @@ async fn init_offers_a_grant_for_sshd_and_checks_protect_host_for_lockout() {
         A::Say(""), // the default interfaces (the LAN)
         A::No,      // not anyway
     ]);
-    init_flow(env.client(), &mut script).await.unwrap();
+    init(&Ctx::new(env.client(), false), &mut script)
+        .await
+        .unwrap();
     script.finished();
     assert!(script
         .asked
@@ -671,10 +672,14 @@ async fn init_offers_a_grant_for_sshd_and_checks_protect_host_for_lockout() {
         A::Yes,
         A::Say("eth0"),
     ]);
-    init_flow(env.client(), &mut script).await.unwrap();
+    init(&Ctx::new(env.client(), false), &mut script)
+        .await
+        .unwrap();
     script.finished();
-    let (_, grants) = the_app(&env).await;
+    let (reviewed, grants) = the_app(&env).await;
     assert_eq!(grants.len(), 1);
+    // One port was granted; the app as a whole is still undecided.
+    assert!(!reviewed);
     assert_eq!(
         env.client().status().await.unwrap().protect_host_interfaces,
         ["eth0"]

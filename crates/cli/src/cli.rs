@@ -1,8 +1,8 @@
 //! The command line: arguments and subcommands (clap derive).
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
-use socketguard_core::ActivityKind;
+use socketguard_core::{ActivityKind, AddressMode};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -225,8 +225,8 @@ pub enum NetworksCmd {
     List,
     /// Add a network (saved to the daemon's config file)
     Add {
-        /// ula, slaac, dhcpv6, yggdrasil or tor
-        r#type: String,
+        #[arg(value_enum, ignore_case = true)]
+        r#type: NetworkType,
         #[arg(long)]
         interface: Option<String>,
         /// Defaults to the type (and interface)
@@ -240,9 +240,16 @@ pub enum NetworksCmd {
         #[arg(long)]
         control: Option<String>,
         /// Tor control password; without it the cookie file named by Tor is used. Like --control,
-        /// refused unless the config file has the same network
-        #[arg(long)]
+        /// refused unless the config file has the same network. WARNING: visible to other
+        /// users in the process list; prefer --password-env or --password-stdin
+        #[arg(long, conflicts_with_all = ["password_env", "password_stdin"])]
         password: Option<String>,
+        /// Read the Tor control password from this environment variable
+        #[arg(long, value_name = "VAR", conflicts_with = "password_stdin")]
+        password_env: Option<String>,
+        /// Read the Tor control password from the first line of stdin
+        #[arg(long)]
+        password_stdin: bool,
     },
     /// Remove a network; its addresses leave the interfaces
     Rm {
@@ -253,14 +260,49 @@ pub enum NetworksCmd {
     },
 }
 
+/// The kinds of network `networks add` can make.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkType {
+    Ula,
+    Slaac,
+    Dhcpv6,
+    Yggdrasil,
+    Tor,
+}
+
+impl std::fmt::Display for NetworkType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.to_possible_value() {
+            Some(v) => f.write_str(v.get_name()),
+            None => Ok(()),
+        }
+    }
+}
+
+/// [`AddressMode`] as a command-line choice (`per-app`, `per-port`).
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddressModeArg {
+    PerApp,
+    PerPort,
+}
+
+impl From<AddressModeArg> for AddressMode {
+    fn from(m: AddressModeArg) -> Self {
+        match m {
+            AddressModeArg::PerApp => AddressMode::PerApp,
+            AddressModeArg::PerPort => AddressMode::PerPort,
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum SettingsCmd {
     /// Show the settings
     Show,
     /// One address per app, or one per port
     AddressMode {
-        #[arg(value_parser = ["per-app", "per-port"])]
-        mode: String,
+        #[arg(value_enum)]
+        mode: AddressModeArg,
     },
 }
 
@@ -280,10 +322,6 @@ pub enum ProtectHostCmd {
     Status,
 }
 
-fn parse_kind(s: &str) -> Result<ActivityKind, String> {
-    s.parse()
-}
-
 #[derive(Args, Debug)]
 pub struct ActivityArgs {
     #[arg(long)]
@@ -291,7 +329,7 @@ pub struct ActivityArgs {
     #[arg(long)]
     pub peer: Option<String>,
     /// app_discovered, grant_added, blocked, ...
-    #[arg(long, value_parser = parse_kind)]
+    #[arg(long)]
     pub kind: Option<ActivityKind>,
     /// Shortcut for --kind blocked
     #[arg(long, conflicts_with = "kind")]
@@ -424,6 +462,33 @@ mod tests {
         assert_eq!(a.kind, Some(ActivityKind::GrantAdded));
         assert!(parse(&["activity", "--kind", "nonsense"]).is_err());
         assert!(parse(&["activity", "--kind", "blocked", "--blocked"]).is_err());
+    }
+
+    #[test]
+    fn network_types_and_address_modes_are_choices() {
+        let c = parse(&["networks", "add", "YGGDRASIL", "--interface", "ygg0"]).unwrap();
+        let Command::Networks(NetworksCmd::Add { r#type, .. }) = c.command else {
+            panic!()
+        };
+        assert_eq!(r#type, NetworkType::Yggdrasil);
+        assert!(parse(&["networks", "add", "wireguard"]).is_err());
+        let c = parse(&["settings", "address-mode", "per-port"]).unwrap();
+        let Command::Settings(SettingsCmd::AddressMode { mode }) = c.command else {
+            panic!()
+        };
+        assert_eq!(AddressMode::from(mode), AddressMode::PerPort);
+    }
+
+    #[test]
+    fn the_tor_password_has_one_source() {
+        let add = ["networks", "add", "tor"];
+        let with = |extra: &[&str]| parse(&[&add[..], extra].concat());
+        assert!(with(&["--password", "x"]).is_ok());
+        assert!(with(&["--password-env", "TOR_PW"]).is_ok());
+        assert!(with(&["--password-stdin"]).is_ok());
+        assert!(with(&["--password", "x", "--password-env", "TOR_PW"]).is_err());
+        assert!(with(&["--password", "x", "--password-stdin"]).is_err());
+        assert!(with(&["--password-env", "TOR_PW", "--password-stdin"]).is_err());
     }
 
     #[test]

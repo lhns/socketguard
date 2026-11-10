@@ -2,7 +2,9 @@
 //! credentials. Pure functions, unit tested.
 
 use anyhow::{anyhow, bail, Result};
-use socketguard_core::{normalize_credential, CredentialKind, NewCredential, PortRef, Protocol};
+use socketguard_core::{
+    normalize_credential, parse_hex32, CredentialKind, NewCredential, PortRef, Protocol,
+};
 
 /// `80`, `80/tcp`, `53/udp`; the protocol defaults to tcp.
 pub fn parse_port(s: &str) -> Result<PortRef> {
@@ -51,10 +53,6 @@ pub fn parse_subject(s: &str) -> SubjectSpec {
     }
 }
 
-fn is_hex64(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
 fn kinds() -> String {
     CredentialKind::ALL.map(|k| k.as_str()).join(", ")
 }
@@ -63,7 +61,7 @@ fn kinds() -> String {
 /// is `ip` (the daemon turns values in 200::/7 into `ygg_addr` or `ygg_subnet`), 52
 /// base32 characters or a `descriptor:x25519:` line are a Tor client key.
 pub fn guess_credential(value: &str) -> Result<NewCredential> {
-    let kind = if is_hex64(value) {
+    let kind = if parse_hex32(value).is_some() {
         CredentialKind::YggKey
     } else if looks_like_ip(value) {
         CredentialKind::Ip

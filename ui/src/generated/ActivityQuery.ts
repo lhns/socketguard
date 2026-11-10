@@ -2,7 +2,8 @@
 import type { ActivityKind } from "./ActivityKind";
 
 /**
- * Filter for listing activity, newest first.
+ * Filter for listing activity, newest first. Also the query string of
+ * `GET /api/activity`, with the same field names.
  */
 export type ActivityQuery = { since: string | null, kind: ActivityKind | null, app_id: string | null, peer_id: string | null, 
 /**

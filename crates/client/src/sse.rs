@@ -11,7 +11,7 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<ApiEvent, Error>> + Send
 
 /// One dispatched event, before it is given a type.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SseRaw {
+pub(crate) struct SseRaw {
     pub event: String,
     pub data: String,
 }
@@ -20,7 +20,7 @@ pub struct SseRaw {
 /// end in LF, CRLF or CR; lines starting with a colon are comments (keep-alives); an empty
 /// line dispatches the event collected so far.
 #[derive(Debug, Default)]
-pub struct SseParser {
+pub(crate) struct SseParser {
     buf: Vec<u8>,
     event: Option<String>,
     data: Vec<String>,
@@ -29,12 +29,12 @@ pub struct SseParser {
 }
 
 impl SseParser {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Feed bytes; returns the events completed by them.
-    pub fn feed(&mut self, chunk: &[u8]) -> Vec<SseRaw> {
+    pub(crate) fn feed(&mut self, chunk: &[u8]) -> Vec<SseRaw> {
         let mut out = Vec::new();
         for &b in chunk {
             if self.after_cr {

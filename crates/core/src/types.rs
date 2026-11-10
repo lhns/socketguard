@@ -30,6 +30,9 @@ impl std::str::FromStr for Protocol {
     }
 }
 
+/// TCP ports of remote administration (ssh, RDP): closing them can lock the user out.
+pub const REMOTE_ADMIN_PORTS: &[u16] = &[22, 3389];
+
 /// A listening socket detected on the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListeningSocket {

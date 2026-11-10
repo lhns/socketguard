@@ -2,6 +2,8 @@
 //! on stdin/stderr and the tests script the answers. Interactive flows run only on a
 //! terminal; scripts use `--yes`.
 
+use crate::Reported;
+use anyhow::{bail, Result};
 use std::io::{BufRead, IsTerminal, Write};
 
 /// Questions a flow can ask. Closed input (ctrl-D) means "no answer": `ask` returns an
@@ -15,6 +17,22 @@ pub trait Prompter {
     fn confirm(&mut self, question: &str) -> bool;
     /// A numbered choice; the index of the option, or `None` when input is closed.
     fn choose(&mut self, question: &str, options: &[String]) -> Option<usize>;
+
+    /// Ask `question` unless `yes` was given. Nobody to ask is an error saying `refusal`;
+    /// a "no" is the already-reported [`Reported`] error.
+    fn confirm_or_yes(&mut self, yes: bool, question: &str, refusal: &str) -> Result<()> {
+        if yes {
+            return Ok(());
+        }
+        if !self.interactive() {
+            bail!("{refusal}");
+        }
+        if !self.confirm(question) {
+            eprintln!("not confirmed; nothing changed");
+            return Err(Reported.into());
+        }
+        Ok(())
+    }
 }
 
 /// Prompts on stderr, answers from stdin.
