@@ -4152,6 +4152,7 @@ dependencies = [
  "socketguard-core",
  "thiserror 2.0.18",
  "tokio",
+ "windows 0.62.2",
 ]
 
 [[package]]
