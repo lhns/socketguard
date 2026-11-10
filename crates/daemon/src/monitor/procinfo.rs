@@ -1,7 +1,8 @@
 //! Process details via the `sysinfo` crate, for the platforms without /proc (Windows,
 //! macOS): the executable path, the full command line and the owning user.
 
-use std::collections::HashMap;
+use socketguard_core::ListeningSocket;
+use std::collections::{BTreeSet, HashMap};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 pub struct ProcDetails {
@@ -51,4 +52,28 @@ pub fn lookup(pids: &[u32]) -> HashMap<u32, ProcDetails> {
             ))
         })
         .collect()
+}
+
+/// Fill the command line, working directory and owner of `sockets` from one lookup of
+/// their processes. The executable path is only replaced when `override_exe` is set (the
+/// caller's own source is less reliable); it is filled in when missing either way.
+pub fn apply(sockets: &mut [ListeningSocket], override_exe: bool) {
+    let pids: Vec<u32> = sockets
+        .iter()
+        .map(|s| s.pid)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let details = lookup(&pids);
+    for s in sockets {
+        let Some(d) = details.get(&s.pid) else {
+            continue;
+        };
+        s.cmdline = d.cmdline.clone();
+        s.cwd = d.cwd.clone();
+        s.uid = d.uid.clone();
+        if d.exe_path.is_some() && (override_exe || s.exe_path.is_none()) {
+            s.exe_path = d.exe_path.clone();
+        }
+    }
 }

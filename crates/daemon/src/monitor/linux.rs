@@ -68,18 +68,15 @@ impl SocketMonitor for LinuxSocketMonitor {
                 }
                 continue;
             };
-            sockets.push(ListeningSocket {
-                pid: p.pid,
-                process_name: p.name.clone(),
-                port: r.port,
-                protocol: r.protocol,
-                bind_address: r.bind_address,
-                exe_path: p.exe_path.clone(),
-                cmdline: p.cmdline.clone(),
-                uid: p.uid.clone(),
-                foreign_mntns: p.foreign_mntns,
-                cwd: p.cwd.clone(),
-            });
+            sockets.push(
+                ListeningSocket::new(p.pid, r.port, r.protocol, r.bind_address)
+                    .with_process_name(p.name.clone())
+                    .with_exe_path(p.exe_path.clone())
+                    .with_cmdline(p.cmdline.clone())
+                    .with_uid(p.uid.clone())
+                    .with_foreign_mntns(p.foreign_mntns)
+                    .with_cwd(p.cwd.clone()),
+            );
         }
         Ok(sockets)
     }

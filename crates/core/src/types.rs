@@ -58,6 +58,54 @@ pub struct ListeningSocket {
     pub cwd: Option<String>,
 }
 
+impl ListeningSocket {
+    /// A socket with no process details yet; fill them in with the `with_*` setters.
+    pub fn new(pid: u32, port: u16, protocol: Protocol, bind_address: IpAddr) -> Self {
+        Self {
+            pid,
+            process_name: String::new(),
+            port,
+            protocol,
+            bind_address,
+            exe_path: None,
+            cmdline: None,
+            uid: None,
+            foreign_mntns: false,
+            cwd: None,
+        }
+    }
+
+    pub fn with_process_name(mut self, name: impl Into<String>) -> Self {
+        self.process_name = name.into();
+        self
+    }
+
+    pub fn with_exe_path(mut self, exe_path: Option<String>) -> Self {
+        self.exe_path = exe_path;
+        self
+    }
+
+    pub fn with_cmdline(mut self, cmdline: Option<Vec<String>>) -> Self {
+        self.cmdline = cmdline;
+        self
+    }
+
+    pub fn with_uid(mut self, uid: Option<String>) -> Self {
+        self.uid = uid;
+        self
+    }
+
+    pub fn with_cwd(mut self, cwd: Option<String>) -> Self {
+        self.cwd = cwd;
+        self
+    }
+
+    pub fn with_foreign_mntns(mut self, foreign: bool) -> Self {
+        self.foreign_mntns = foreign;
+        self
+    }
+}
+
 /// Network backend type
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
