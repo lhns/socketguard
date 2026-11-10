@@ -428,6 +428,9 @@ pub(crate) mod winacl {
     /// SYSTEM and BUILTIN\Administrators.
     const TRUSTED: [&str; 2] = ["S-1-5-18", "S-1-5-32-544"];
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    const ACCESS_DENIED_ACE_TYPE: u8 = 1;
+    const SYSTEM_AUDIT_ACE_TYPE: u8 = 2;
+    const SYSTEM_ALARM_ACE_TYPE: u8 = 3;
     const INHERIT_ONLY_ACE: u8 = 0x08;
     /// FILE_WRITE_DATA, FILE_APPEND_DATA, FILE_WRITE_EA, FILE_WRITE_ATTRIBUTES, DELETE,
     /// WRITE_DAC, WRITE_OWNER, GENERIC_ALL, GENERIC_WRITE.
@@ -540,8 +543,14 @@ pub(crate) mod winacl {
             let mut ace = std::ptr::null_mut();
             GetAce(dacl, i, &mut ace)?;
             let header = *(ace as *const ACE_HEADER);
-            if header.AceType != ACCESS_ALLOWED_ACE_TYPE || header.AceFlags & INHERIT_ONLY_ACE != 0
-            {
+            match header.AceType {
+                ACCESS_ALLOWED_ACE_TYPE => {}
+                // Deny and audit entries grant nothing.
+                ACCESS_DENIED_ACE_TYPE | SYSTEM_AUDIT_ACE_TYPE | SYSTEM_ALARM_ACE_TYPE => continue,
+                // Object, callback and conditional entries grant access with another layout.
+                other => bail!("unsupported ACE type {other} on the Tor cookie file {path}"),
+            }
+            if header.AceFlags & INHERIT_ONLY_ACE != 0 {
                 continue;
             }
             // ACCESS_ALLOWED_ACE: header, 32-bit mask, then the SID.
