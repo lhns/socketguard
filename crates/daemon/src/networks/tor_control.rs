@@ -294,8 +294,6 @@ pub struct AuthOptions {
     pub cookie_owner: Option<String>,
     /// Accept a TCP control address that is not loopback (cookie auth only).
     pub allow_remote_control: bool,
-    /// Tests only (never set from the config): accept `none` over TCP.
-    pub allow_none_over_tcp: bool,
 }
 
 impl AuthOptions {
@@ -756,7 +754,7 @@ impl Control {
             authenticated: false,
         };
         match &opts.auth {
-            TorAuth::None if !unix && !opts.allow_none_over_tcp => bail!(
+            TorAuth::None if !unix => bail!(
                 "auth \"none\" is only accepted on a Unix control socket (unix:/path): anyone \
                  can listen on a TCP control address while Tor is down"
             ),
@@ -813,9 +811,17 @@ impl Control {
             }
         }
         let cookie = read_cookie_file(&path, opts)?;
-        if !safe {
-            return self.send_authenticate(&opts.auth, Some(&cookie));
-        }
+        // Plain COOKIE sends the cookie; SAFECOOKIE a hash after the server proved itself.
+        let proof = if safe {
+            self.safecookie_proof(&cookie)?
+        } else {
+            cookie
+        };
+        self.send_authenticate(&opts.auth, Some(&proof))
+    }
+
+    /// The SAFECOOKIE challenge exchange: the client hash to authenticate with.
+    fn safecookie_proof(&mut self, cookie: &[u8]) -> Result<Vec<u8>> {
         let client_nonce: [u8; 32] = rand::random();
         let reply = self
             .command(&format!("AUTHCHALLENGE SAFECOOKIE {}", hex(&client_nonce)))?
@@ -842,7 +848,7 @@ impl Control {
         }
         // The server must prove it knows the cookie before we send anything that depends
         // on it, let alone onion keys.
-        safecookie_mac(SERVER_TO_CONTROLLER, &cookie, &client_nonce, &server_nonce)
+        safecookie_mac(SERVER_TO_CONTROLLER, cookie, &client_nonce, &server_nonce)
             .verify_slice(&server_hash)
             .map_err(|_| {
                 anyhow!(
@@ -850,13 +856,12 @@ impl Control {
                      something else may be listening there"
                 )
             })?;
-        let client_hash =
-            safecookie_hash(CONTROLLER_TO_SERVER, &cookie, &client_nonce, &server_nonce);
-        self.command(&format!("AUTHENTICATE {}", hex(&client_hash)))?
-            .ok()
-            .context("Tor refused the control authentication")?;
-        self.authenticated = true;
-        Ok(())
+        Ok(safecookie_hash(
+            CONTROLLER_TO_SERVER,
+            cookie,
+            &client_nonce,
+            &server_nonce,
+        ))
     }
 
     /// Send one command and read its reply.
@@ -1347,7 +1352,7 @@ mod tests {
         let err = connect(&mock, &opts).err().unwrap();
         assert!(err.to_string().contains("Unix control socket"), "{err:#}");
         assert!(mock.commands().is_empty(), "nothing was sent");
-        // The test-only escape hatch works.
+        // A password is fine over TCP (the mock accepts any).
         connect(&mock, &mock.auth_options()).unwrap();
     }
 

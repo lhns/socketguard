@@ -150,7 +150,6 @@ pub fn create(
                 expect_tor_uid: *expect_tor_uid,
                 cookie_owner: cookie_owner.clone(),
                 allow_remote_control: *allow_remote_control,
-                allow_none_over_tcp: false,
             };
             tor_control::check_endpoint(&tor_control::Endpoint::parse(control), &opts)?;
             Ok(Arc::new(tor::TorNetwork::with_options(

@@ -717,16 +717,14 @@ impl MockTorControl {
         self.addr.to_string()
     }
 
-    /// Client options that fit this mock: `none` over TCP for an open one, SAFECOOKIE
-    /// pinned to the mock's cookie file otherwise.
+    /// Client options that fit this mock: a password (which the open mock accepts; `none`
+    /// is refused over TCP) for an open one, SAFECOOKIE pinned to the mock's cookie file
+    /// otherwise.
     pub fn auth_options(&self) -> crate::networks::tor_control::AuthOptions {
         use crate::networks::tor_control::AuthOptions;
         use socketguard_core::config::TorAuth;
         match &self.state.lock().unwrap().auth {
-            MockAuth::None => AuthOptions {
-                allow_none_over_tcp: true,
-                ..AuthOptions::new(TorAuth::None)
-            },
+            MockAuth::None => AuthOptions::new(TorAuth::Password("mock".into())),
             MockAuth::SafeCookie { cookie_path, .. } | MockAuth::CookieOnly { cookie_path, .. } => {
                 AuthOptions {
                     cookie_path: Some(cookie_path.clone()),
