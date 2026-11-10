@@ -282,7 +282,7 @@ hook set with `Client::with_header_hook`.
 message, details }`, `Protocol`). The daemon's test `tests/coverage.rs` compares the daemon's
 `api::ROUTES` with the client's `CLIENT_ROUTES` and fails when they differ; the CLI's own table
 (`CLI_ROUTES`, which lists the client method behind every command) is checked against
-`ROUTES` too (ADR 0033).
+`ROUTES` too (ADR 0033). The CLI test also reads `ui/src-tauri/src/main.rs` and fails when a route has no Tauri command, except for the CLI-only `completions` and `watch` (ADR 0042). A change that gets the 202 notice reaches the UI as `{value, enforcement}`.
 
 ## TypeScript types
 

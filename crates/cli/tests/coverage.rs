@@ -62,3 +62,64 @@ fn every_command_in_the_table_exists() {
         }
     }
 }
+
+// ─── The desktop UI covers the whole API too (ADR 0042) ──────────────────────────────
+
+/// The Tauri backend's source. The UI crate is not part of this test build (it needs the
+/// system webview libraries), so its commands are read as text.
+const UI_COMMANDS: &str = include_str!("../../../ui/src-tauri/src/main.rs");
+
+/// CLI commands that deliberately have no UI counterpart: shell completion is meaningless in
+/// a window, and `watch` prints the event stream, which the UI consumes through its own bridge.
+/// Pinned: adding to it needs a decision, not an edit of the route table.
+const CLI_ONLY: &[&str] = &["completions", "watch"];
+
+#[test]
+fn the_cli_only_list_is_exactly_completions_and_watch() {
+    assert_eq!(CLI_ONLY, ["completions", "watch"]);
+    let root = Cli::command();
+    for name in CLI_ONLY {
+        assert!(
+            root.find_subcommand(name).is_some(),
+            "CLI-only command {name:?} does not exist"
+        );
+    }
+}
+
+#[test]
+fn every_route_has_a_tauri_command_unless_only_cli_only_commands_use_it() {
+    let source: String = UI_COMMANDS.split_whitespace().collect();
+    let mut missing = Vec::new();
+    for route in CLIENT_ROUTES {
+        let users: Vec<&str> = CLI_ROUTES
+            .iter()
+            .filter(|r| r.client_method == route.name)
+            .map(|r| r.command)
+            .collect();
+        if !users.is_empty() && users.iter().all(|c| CLI_ONLY.contains(c)) {
+            continue;
+        }
+        if !source.contains(&format!("client().{}(", route.name)) {
+            missing.push(format!("{} {} ({})", route.method, route.path, route.name));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "routes without a Tauri command in ui/src-tauri/src/main.rs: {missing:?}"
+    );
+}
+
+#[test]
+fn every_registered_tauri_command_is_defined() {
+    let start = UI_COMMANDS
+        .find("generate_handler![")
+        .expect("invoke handler");
+    let list = &UI_COMMANDS[start..];
+    let list = &list[list.find('[').unwrap() + 1..list.find(']').unwrap()];
+    for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        assert!(
+            UI_COMMANDS.contains(&format!("async fn {name}(")),
+            "command {name} is registered but not defined"
+        );
+    }
+}

@@ -6,18 +6,20 @@ use tauri::Emitter;
 
 // ======== Data commands ========
 //
-// Thin wrappers over `socketguard_client::Client` (ADR 0033): one command per API call the
-// UI needs. Errors reach the frontend as `{code, message, details}`.
+// Thin wrappers over `socketguard_client::Client` (ADR 0033, 0042): one command per API
+// route. Errors reach the frontend as `{code, message, details}`. The coverage test in
+// crates/cli/tests/coverage.rs reads this file and fails when a route has no command here.
 
 use serde::Serialize;
-use socketguard_client::{Client, Error as ClientError, GrantQuery};
+use socketguard_client::{Client, Error as ClientError, GrantQuery, Saved};
 use socketguard_core::api_types::{
-    ChangesRequest, ChangesResponse, NewPeer, NewTag, ProtectHostRequest, ProtectHostResponse,
-    ShareResponse, StatusResponse, TorKeyResponse, UpdateTag,
+    ApplyRequest, ApplyResponse, ChangesRequest, ChangesResponse, Enforcement, ExportDocument,
+    MergeRequest, NewGroup, NewNetwork, NewPeer, NewTag, ProtectHostRequest, ProtectHostResponse,
+    ShareResponse, SplitRequest, StatusResponse, TorKeyResponse, UpdateSettings, UpdateTag,
 };
 use socketguard_core::{
-    ActivityQuery, ActivityRecord, App, AppDetail, Credential, GrantView, Network, NewCredential,
-    NewGrant, ParsedCredential, Peer, PeerGroup, PortRef, Settings, Tag, TagMember,
+    ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
+    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, PortRef, Settings, Tag, TagMember,
 };
 
 /// Error shape the frontend branches on. API errors keep the daemon's code
@@ -65,14 +67,37 @@ impl From<ClientError> for UiError {
 
 type CmdResult<T> = Result<T, UiError>;
 
+/// What a change returns to the frontend: the value and, after an HTTP 202, the notice that
+/// the change is saved but not yet enforced. The frontend shows it.
+#[derive(Debug, Serialize)]
+struct Done<T> {
+    value: T,
+    enforcement: Option<Enforcement>,
+}
+
+impl<T> From<Saved<T>> for Done<T> {
+    fn from(s: Saved<T>) -> Self {
+        Done {
+            value: s.value,
+            enforcement: s.enforcement,
+        }
+    }
+}
+
+type DoneResult<T> = CmdResult<Done<T>>;
+
 fn client() -> Client {
     Client::from_env()
 }
+
+// ─── Status ──────────────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn status() -> CmdResult<StatusResponse> {
     Ok(client().status().await?)
 }
+
+// ─── Apps ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn list_apps() -> CmdResult<Vec<App>> {
@@ -85,9 +110,31 @@ async fn get_app(id: String) -> CmdResult<AppDetail> {
 }
 
 #[tauri::command]
+async fn delete_app(id: String) -> DoneResult<()> {
+    Ok(client().delete_app(&id).await?.into())
+}
+
+#[tauri::command]
 async fn review_app(id: String, reviewed: bool) -> CmdResult<AppDetail> {
     Ok(client().review_app(&id, reviewed).await?)
 }
+
+#[tauri::command]
+async fn split_app(id: String, req: SplitRequest) -> DoneResult<Address> {
+    Ok(client().split_app(&id, &req).await?.into())
+}
+
+#[tauri::command]
+async fn merge_app(id: String, req: MergeRequest) -> DoneResult<Address> {
+    Ok(client().merge_app(&id, &req).await?.into())
+}
+
+#[tauri::command]
+async fn share_app(id: String) -> CmdResult<ShareResponse> {
+    Ok(client().share_app(&id).await?)
+}
+
+// ─── Peers ───────────────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn list_peers() -> CmdResult<Vec<Peer>> {
@@ -100,27 +147,45 @@ async fn create_peer(req: NewPeer) -> CmdResult<Peer> {
 }
 
 #[tauri::command]
+async fn get_peer(id: String) -> CmdResult<Peer> {
+    Ok(client().get_peer(&id).await?)
+}
+
+#[tauri::command]
+async fn update_peer(id: String, label: String) -> CmdResult<Peer> {
+    Ok(client().update_peer(&id, &label).await?)
+}
+
+#[tauri::command]
+async fn delete_peer(id: String) -> DoneResult<()> {
+    Ok(client().delete_peer(&id).await?.into())
+}
+
+#[tauri::command]
 async fn parse_credentials(text: String) -> CmdResult<Vec<ParsedCredential>> {
     Ok(client().parse_credentials(&text).await?)
 }
 
-// Commands built on `Saved<T>` drop its `enforcement` notice (HTTP 202); the UI does not show it yet.
 #[tauri::command]
-async fn add_credential(peer_id: String, req: NewCredential) -> CmdResult<Credential> {
-    Ok(client().add_credential(&peer_id, &req).await?.value)
+async fn add_credential(peer_id: String, req: NewCredential) -> DoneResult<Credential> {
+    Ok(client().add_credential(&peer_id, &req).await?.into())
 }
 
 #[tauri::command]
-async fn remove_credential(peer_id: String, credential_id: String) -> CmdResult<()> {
-    client().remove_credential(&peer_id, &credential_id).await?;
-    Ok(())
+async fn remove_credential(peer_id: String, credential_id: String) -> DoneResult<()> {
+    Ok(client()
+        .remove_credential(&peer_id, &credential_id)
+        .await?
+        .into())
 }
 
+/// Generate a Tor client key for a peer; the answer carries the private key.
 #[tauri::command]
-async fn delete_peer(id: String) -> CmdResult<()> {
-    client().delete_peer(&id).await?;
-    Ok(())
+async fn generate_tor_key(peer_id: String) -> DoneResult<TorKeyResponse> {
+    Ok(client().generate_tor_key(&peer_id).await?.into())
 }
+
+// ─── Groups ──────────────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn list_groups() -> CmdResult<Vec<PeerGroup>> {
@@ -128,26 +193,54 @@ async fn list_groups() -> CmdResult<Vec<PeerGroup>> {
 }
 
 #[tauri::command]
+async fn create_group(req: NewGroup) -> CmdResult<PeerGroup> {
+    Ok(client().create_group(&req).await?)
+}
+
+#[tauri::command]
+async fn get_group(id: String) -> CmdResult<PeerGroup> {
+    Ok(client().get_group(&id).await?)
+}
+
+#[tauri::command]
+async fn update_group(id: String, label: String) -> CmdResult<PeerGroup> {
+    Ok(client().update_group(&id, &label).await?)
+}
+
+#[tauri::command]
+async fn delete_group(id: String) -> DoneResult<()> {
+    Ok(client().delete_group(&id).await?.into())
+}
+
+#[tauri::command]
+async fn set_group_members(id: String, peer_ids: Vec<String>) -> DoneResult<PeerGroup> {
+    Ok(client().set_group_members(&id, &peer_ids).await?.into())
+}
+
+// ─── Grants and batch changes ────────────────────────────────────────────
+
+#[tauri::command]
 async fn list_grants() -> CmdResult<Vec<GrantView>> {
     Ok(client().list_grants(&GrantQuery::default()).await?)
 }
 
 #[tauri::command]
-async fn create_grant(req: NewGrant) -> CmdResult<GrantView> {
-    Ok(client().create_grant(&req).await?.value)
+async fn create_grant(req: NewGrant) -> DoneResult<GrantView> {
+    Ok(client().create_grant(&req).await?.into())
 }
 
 #[tauri::command]
-async fn delete_grant(id: String) -> CmdResult<()> {
-    client().delete_grant(&id).await?;
-    Ok(())
+async fn delete_grant(id: String) -> DoneResult<()> {
+    Ok(client().delete_grant(&id).await?.into())
 }
 
 /// Many changes at once: all or nothing, one firewall update (ADR 0045).
 #[tauri::command]
-async fn changes(req: ChangesRequest) -> CmdResult<ChangesResponse> {
-    Ok(client().changes(&req).await?.value)
+async fn changes(req: ChangesRequest) -> DoneResult<ChangesResponse> {
+    Ok(client().changes(&req).await?.into())
 }
+
+// ─── Tags ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn list_tags() -> CmdResult<Vec<Tag>> {
@@ -155,8 +248,8 @@ async fn list_tags() -> CmdResult<Vec<Tag>> {
 }
 
 #[tauri::command]
-async fn create_tag(req: NewTag) -> CmdResult<Tag> {
-    Ok(client().create_tag(&req).await?.value)
+async fn create_tag(req: NewTag) -> DoneResult<Tag> {
+    Ok(client().create_tag(&req).await?.into())
 }
 
 #[tauri::command]
@@ -165,19 +258,18 @@ async fn get_tag(id: String) -> CmdResult<Tag> {
 }
 
 #[tauri::command]
-async fn update_tag(id: String, req: UpdateTag) -> CmdResult<Tag> {
-    Ok(client().update_tag(&id, &req).await?.value)
+async fn update_tag(id: String, req: UpdateTag) -> DoneResult<Tag> {
+    Ok(client().update_tag(&id, &req).await?.into())
 }
 
 #[tauri::command]
-async fn delete_tag(id: String) -> CmdResult<()> {
-    client().delete_tag(&id).await?;
-    Ok(())
+async fn delete_tag(id: String) -> DoneResult<()> {
+    Ok(client().delete_tag(&id).await?.into())
 }
 
 #[tauri::command]
-async fn add_tag_member(tag_id: String, member: TagMember) -> CmdResult<Tag> {
-    Ok(client().add_tag_member(&tag_id, &member).await?.value)
+async fn add_tag_member(tag_id: String, member: TagMember) -> DoneResult<Tag> {
+    Ok(client().add_tag_member(&tag_id, &member).await?.into())
 }
 
 #[tauri::command]
@@ -185,27 +277,28 @@ async fn remove_tag_member(
     tag_id: String,
     app_id: String,
     port: Option<PortRef>,
-) -> CmdResult<Tag> {
+) -> DoneResult<Tag> {
     Ok(client()
         .remove_tag_member(&tag_id, &app_id, port)
         .await?
-        .value)
+        .into())
 }
 
-/// Generate a Tor client key for a peer; the answer carries the private key.
-#[tauri::command]
-async fn generate_tor_key(peer_id: String) -> CmdResult<TorKeyResponse> {
-    Ok(client().generate_tor_key(&peer_id).await?.value)
-}
-
-#[tauri::command]
-async fn share_app(id: String) -> CmdResult<ShareResponse> {
-    Ok(client().share_app(&id).await?)
-}
+// ─── Networks and settings ───────────────────────────────────────────────
 
 #[tauri::command]
 async fn list_networks() -> CmdResult<Vec<Network>> {
     Ok(client().list_networks().await?)
+}
+
+#[tauri::command]
+async fn add_network(req: NewNetwork) -> CmdResult<Network> {
+    Ok(client().add_network(&req).await?)
+}
+
+#[tauri::command]
+async fn delete_network(id: String, force: bool) -> CmdResult<()> {
+    Ok(client().delete_network(&id, force).await?)
 }
 
 #[tauri::command]
@@ -214,13 +307,30 @@ async fn get_settings() -> CmdResult<Settings> {
 }
 
 #[tauri::command]
+async fn update_settings(req: UpdateSettings) -> CmdResult<Settings> {
+    Ok(client().update_settings(&req).await?)
+}
+
+#[tauri::command]
 async fn set_protect_host(req: ProtectHostRequest) -> CmdResult<ProtectHostResponse> {
     Ok(client().set_protect_host(&req).await?)
 }
 
+// ─── Activity, export, enforcement ───────────────────────────────────────
+
 #[tauri::command]
 async fn activity(query: ActivityQuery) -> CmdResult<Vec<ActivityRecord>> {
     Ok(client().activity(&query).await?)
+}
+
+#[tauri::command]
+async fn export_state() -> CmdResult<ExportDocument> {
+    Ok(client().export().await?)
+}
+
+#[tauri::command]
+async fn apply_state(req: ApplyRequest) -> CmdResult<ApplyResponse> {
+    Ok(client().apply(&req).await?)
 }
 
 #[tauri::command]
@@ -323,14 +433,26 @@ fn main() {
             status,
             list_apps,
             get_app,
+            delete_app,
             review_app,
+            split_app,
+            merge_app,
+            share_app,
             list_peers,
             create_peer,
+            get_peer,
+            update_peer,
+            delete_peer,
             parse_credentials,
             add_credential,
             remove_credential,
-            delete_peer,
+            generate_tor_key,
             list_groups,
+            create_group,
+            get_group,
+            update_group,
+            delete_group,
+            set_group_members,
             list_grants,
             create_grant,
             delete_grant,
@@ -342,12 +464,15 @@ fn main() {
             delete_tag,
             add_tag_member,
             remove_tag_member,
-            generate_tor_key,
-            share_app,
             list_networks,
+            add_network,
+            delete_network,
             get_settings,
+            update_settings,
             set_protect_host,
             activity,
+            export_state,
+            apply_state,
             enable,
             disable,
             subscribe_events,
