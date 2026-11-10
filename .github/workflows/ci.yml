@@ -64,6 +64,8 @@ jobs:
           test -s netns-bin
       - name: Run as root
         working-directory: crates/daemon
+        # Explicit bash gets -o pipefail, so a failing test fails the step despite tee.
+        shell: bash
         run: sudo env SOCKETGUARD_NETNS_TESTS=1 "$(cat "$GITHUB_WORKSPACE/netns-bin")" --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/netns.log"
       - name: Check the tests did not skip
         run: "! grep -q 'skipping netns test' \"$RUNNER_TEMP/netns.log\""
