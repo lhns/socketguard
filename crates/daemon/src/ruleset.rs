@@ -302,7 +302,8 @@ impl std::fmt::Display for LockoutRisk {
 fn is_remote_admin(l: &ListeningSocket) -> bool {
     let name = l.process_name.to_ascii_lowercase();
     let name = name.strip_suffix(".exe").unwrap_or(&name);
-    matches!(l.port, 22 | 3389) || matches!(name, "sshd" | "xrdp" | "termservice")
+    socketguard_core::REMOTE_ADMIN_PORTS.contains(&l.port)
+        || matches!(name, "sshd" | "xrdp" | "termservice")
 }
 
 /// Check that protecting `interfaces` would not lock out remote administration. A

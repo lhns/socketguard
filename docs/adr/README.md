@@ -48,6 +48,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0038](0038-disabled-latch-and-persisted-networks.md) | Disabled Latch and Persisted Networks | Accepted (refines 0026 and 0032) |
 | [0039](0039-onion-service-lifecycle.md) | Onion Service Lifecycle | Superseded by 0040 |
 | [0040](0040-onion-service-lifecycle-consolidated.md) | Onion Service Lifecycle (Consolidated) | Accepted |
+| [0041](0041-unique-grants.md) | Grants Are Unique in the Database | Accepted |
 
 ## Format
 

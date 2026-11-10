@@ -28,3 +28,7 @@ Users need to see what SocketGuard blocked and discovered ("who tried to reach t
 - Blocked attempts are visible locally on Linux and Windows; on macOS only as counts until pflog capture is added (ADR 0036).
 - Source IPs live in the activity table, not in metric labels, so metric storage stays bounded.
 - Telemetry adds dependencies and a startup config path, but is inert unless configured.
+
+## Amendment (2026-11-10): no client-side trace propagation
+
+The client crate no longer propagates W3C trace context. The only exporter that fits is the daemon's OTLP-over-HTTP one, which would put an HTTP/TLS stack, a pre-runtime tracer and an exit flush into a CLI that only talks to a local socket. Traces start at the daemon's API layer (`TraceLayer`); a CLI or UI action is one daemon-side trace, not one spanning client and daemon.

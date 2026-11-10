@@ -1,4 +1,4 @@
-# ADR 0040: Grants Are Unique in the Database
+# ADR 0041: Grants Are Unique in the Database
 
 ## Status
 

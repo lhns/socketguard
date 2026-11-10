@@ -140,7 +140,7 @@ fn admin_port(app: &App, exposed: &[ActivityRecord]) -> Option<PortRef> {
     app.ports
         .iter()
         .find(|p| p.proto == Protocol::Tcp && REMOTE_ADMIN_PORTS.contains(&p.port))
-        .map(|p| tcp(p.port))
+        .map(|p| p.port_ref())
         .or_else(|| {
             exposed
                 .iter()

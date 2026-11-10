@@ -8,8 +8,8 @@ use socketguard_core::api_types::{
     ApplyResponse, Change, ChangeItem, ChangeKind, LockoutRiskInfo, StatusResponse,
 };
 use socketguard_core::{
-    ActivityRecord, Address, App, AppDetail, AppPort, Credential, GrantView, Locator, Network,
-    NetworkKind, NetworkStatus, Peer, PeerGroup, PortRef, PortSet, Reach, Settings, Subject,
+    ActivityRecord, Address, App, AppDetail, Credential, GrantView, Locator, Network, NetworkKind,
+    NetworkStatus, Peer, PeerGroup, PortSet, Reach, Settings, Subject,
 };
 use std::collections::HashMap;
 
@@ -147,20 +147,12 @@ pub fn locator(l: &Locator) -> String {
     }
 }
 
-/// The port and protocol of an app port, for display and for grants.
-pub(crate) fn port_ref(p: &AppPort) -> PortRef {
-    PortRef {
-        port: p.port,
-        proto: p.proto,
-    }
-}
-
 fn app_ports(app: &App) -> String {
     let ports: Vec<String> = app
         .ports
         .iter()
         .map(|p| {
-            let s = port_ref(p).to_string();
+            let s = p.port_ref().to_string();
             if p.listening {
                 s
             } else {
@@ -377,7 +369,7 @@ pub fn app_detail(d: &AppDetail, names: &Names) -> String {
                 .iter()
                 .map(|p| {
                     vec![
-                        port_ref(p).to_string(),
+                        p.port_ref().to_string(),
                         if p.listening { "yes" } else { "no" }.to_string(),
                     ]
                 })

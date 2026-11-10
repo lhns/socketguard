@@ -102,7 +102,7 @@ does not cause a 202. Every error has the [error body](#errors).
 | GET | `/api/settings` | | `Settings` | |
 | PUT | `/api/settings` | `UpdateSettings` | `Settings` | absent fields stay as they are |
 | PUT | `/api/settings/protect-host` | `ProtectHostRequest` | `ProtectHostResponse` | an empty list turns it off; refused with 409 `protect_host_refused` unless `force` |
-| GET | `/api/activity` | query `since`, `kind`, `app`, `peer`, `limit`, `before` | `ActivityRecord[]` | newest first; `since` is RFC 3339; `before` is a record id, for paging |
+| GET | `/api/activity` | query `since`, `kind`, `app_id`, `peer_id`, `limit`, `before` | `ActivityRecord[]` | newest first; `since` is RFC 3339; `before` is a record id, for paging |
 | GET | `/api/export` | | `ExportDocument` | [export and apply](#export-and-apply) |
 | POST | `/api/apply` | `ApplyRequest` | `ApplyResponse` | |
 | POST | `/api/disable` | `DisableRequest` | 204 | needs `"confirm": true`. Sets the persisted `disabled` latch, then removes all rules and addresses. While it is set the daemon (also after a restart) applies no rules and adds no addresses, but keeps tracking apps. `socketguard-daemon --disable` sets it too |

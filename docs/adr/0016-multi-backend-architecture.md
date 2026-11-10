@@ -2,7 +2,7 @@
 
 ## Status
 
-Superseded by ADR 0027
+Superseded by ADR 0027. The legacy `"backend": "ula"` string form described here has been removed.
 
 ## Context
 

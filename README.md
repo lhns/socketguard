@@ -163,7 +163,7 @@ x25519 public key from `authorized_clients`) lets only that client in.
 
 ```bash
 # tor with: ControlPort 9051 and CookieAuthentication 1
-socketguard networks add tor                    # --control 127.0.0.1:9051 [--password ...]
+socketguard networks add tor                    # --control 127.0.0.1:9051 [--password-env VAR | --password-stdin]
 socketguard peers add bob --tor-key <base32>    # the key bob's Tor client generated
 socketguard grant myapp:8080 bob
 socketguard apps show myapp                     # prints the .onion name

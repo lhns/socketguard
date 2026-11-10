@@ -318,10 +318,7 @@ pub fn enforcement_for(
             .ports
             .iter()
             .filter(|p| p.listening)
-            .map(|p| PortRef {
-                port: p.port,
-                proto: p.proto,
-            })
+            .map(|p| p.port_ref())
             .collect();
         for address in app.addresses.iter().filter(|a| a.network_id == network.id) {
             let ports: Vec<PortRef> = served_ports(app, address)
