@@ -20,10 +20,11 @@ StateDirectory=socketguard
 WorkingDirectory=/var/lib/socketguard
 ReadWritePaths=/run
 
-# nftables and interface addresses need CAP_NET_ADMIN. CAP_NET_RAW covers the DHCPv6
-# and router-advertisement sockets, CAP_SYS_PTRACE reading other users' /proc entries to
-# identify listening processes; CAP_CHOWN/CAP_FOWNER set the API socket's group and mode.
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER
+# nftables, interface addresses and the NFLOG netlink socket need CAP_NET_ADMIN (nothing
+# opens a raw or packet socket: DHCPv6 is a plain UDP socket). CAP_SYS_PTRACE reads other
+# users' /proc entries to identify listening processes; CAP_CHOWN/CAP_FOWNER set the API
+# socket's group and mode.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -36,7 +37,7 @@ RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
 
 [Install]
