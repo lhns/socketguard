@@ -501,7 +501,13 @@ mod tests {
 
     #[test]
     fn group_lookup() {
-        assert_eq!(platform::group_gid("root"), Some(0));
+        // gid 0 is `root` on Linux and `wheel` on macOS.
+        let gid0 = if cfg!(target_os = "macos") {
+            "wheel"
+        } else {
+            "root"
+        };
+        assert_eq!(platform::group_gid(gid0), Some(0));
         assert_eq!(platform::group_gid("no-such-group-sg-test"), None);
     }
 }
