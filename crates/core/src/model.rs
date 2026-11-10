@@ -4,7 +4,7 @@
 //! [`crate::identity`] (app identity).
 
 use crate::reach::GrantReach;
-use crate::types::Protocol;
+use crate::types::{AddrFamily, Protocol};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv6Addr};
@@ -52,6 +52,9 @@ pub struct AppPort {
     pub proto: Protocol,
     pub listening: bool,
     pub last_seen: DateTime<Utc>,
+    /// Over which IP versions the port accepts connections (the monitor's reading).
+    #[serde(default)]
+    pub family: AddrFamily,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -165,6 +168,10 @@ pub struct Network {
     /// resolve `IpSuffix` credentials; None for Local and for networks without a /64.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<Ipv6Addr>,
+    /// The VLAN id when `interface` is a VLAN subinterface (Linux only; other systems
+    /// show the adapter as a plain interface).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vlan_id: Option<u16>,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -514,6 +521,7 @@ pub(crate) mod fixtures {
             grants_apply: kind != NetworkKind::Local,
             status: NetworkStatus::Up,
             prefix: prefix.map(|p| p.parse().unwrap()),
+            vlan_id: None,
         }
     }
 

@@ -194,13 +194,24 @@ function AppDetailCard({ app, networks, peers, groups }: { app: AppDetail; netwo
 function GrantChip({ grant, peers, groups, networks }: { grant: GrantView; peers: Peer[]; groups: PeerGroup[]; networks: Network[] }) {
   const toast = useToast();
   const del = useDeleteGrant();
-  const name = subjectLabel(grant.subject, peers, groups);
   const netName = (id: string) => networks.find((n) => n.id === id)?.name ?? id;
+  const name =
+    grant.subject.kind === "anyone" && grant.network_id
+      ? `Everyone on ${netName(grant.network_id)}`
+      : subjectLabel(grant.subject, peers, groups);
   return (
     <li className="chip">
       <span className="chip-name">{name}</span>
       {grant.port && <span className="muted">{portLabel(grant.port)}</span>}
       {grant.network_id && <span className="muted">on {netName(grant.network_id)}</span>}
+      {grant.network_id && grant.subject.kind === "anyone" && (
+        <span
+          className="badge reach reach-warn"
+          title="Everyone the switch puts on this network can connect; nothing is verified."
+        >
+          segment
+        </span>
+      )}
       <span className="chip-reach">
         {grant.reach.map((r) => (
           <ReachBadge key={r.network_id} reach={r.reach} network={netName(r.network_id)} />

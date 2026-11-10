@@ -12,4 +12,9 @@ grants_apply: boolean, status: NetworkStatus,
  * The /64 the network currently allocates from, as its network address. Needed to
  * resolve `IpSuffix` credentials; None for Local and for networks without a /64.
  */
-prefix?: string | null, };
+prefix?: string | null, 
+/**
+ * The VLAN id when `interface` is a VLAN subinterface (Linux only; other systems
+ * show the adapter as a plain interface).
+ */
+vlan_id?: number | null, };

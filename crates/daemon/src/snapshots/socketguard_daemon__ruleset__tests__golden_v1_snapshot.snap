@@ -28,7 +28,7 @@ DesiredRuleset {
             kind: WholeHost,
             matcher: Interface {
                 name: "eth0",
-                families: V6,
+                families: Both,
             },
         },
     ],
@@ -38,7 +38,9 @@ DesiredRuleset {
             iif: Some(
                 "eth0",
             ),
-            dst: 2001:db8:1:2::100,
+            dst: Addr(
+                2001:db8:1:2::100,
+            ),
             port: 8080,
             proto: Tcp,
             sources: Nets(
@@ -52,7 +54,9 @@ DesiredRuleset {
             iif: Some(
                 "ygg0",
             ),
-            dst: 300:1:2:3::100,
+            dst: Addr(
+                300:1:2:3::100,
+            ),
             port: 8080,
             proto: Tcp,
             sources: Nets(

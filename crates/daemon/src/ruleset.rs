@@ -5,8 +5,8 @@
 //! The lockout guard for whole-host protection (ADR 0026) lives here too, since it asks
 //! "would the ruleset built with this setting still let remote admin in".
 
-use crate::firewall::{DesiredRuleset, Families, Rule, Scope, ScopeKind, ScopeMatch, Sources};
-use ipnet::IpNet;
+use crate::firewall::{DesiredRuleset, Dst, Families, Rule, Scope, ScopeKind, ScopeMatch, Sources};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use socketguard_core::{
     app_identity, credential_source, valid_interface_name, App, AppPort, Credential, Grant,
     ListeningSocket, Network, NetworkKind, Peer, PeerGroup, PortRef, PortSet, Protocol, Subject,
@@ -26,6 +26,8 @@ pub struct Snapshot {
     pub grants: Vec<Grant>,
     /// Interfaces under whole-host protection.
     pub protect_host: Vec<String>,
+    /// The IPv4 subnets of the protected interfaces that carry IPv4 (others are absent).
+    pub v4_subnets: BTreeMap<String, Vec<Ipv4Net>>,
     /// Addresses the daemon owns on interfaces, whether or not an app still has them
     /// (retiring ones included): denied until they are really gone.
     pub owned: Vec<IpAddr>,
@@ -86,13 +88,116 @@ pub(crate) fn subject_credentials<'a>(
     }
 }
 
+/// Whether `grant` is a segment grant: Anyone, scoped to a LAN or Local network.
+fn is_segment(grant: &Grant, network: &Network) -> bool {
+    grant.subject == Subject::Anyone
+        && grant.network_id.is_some()
+        && matches!(network.kind, NetworkKind::Lan | NetworkKind::Local)
+}
+
+/// The IPv6 sources on the link of `network`: its live /64 and link-local.
+fn on_link_v6(network: &Network) -> Vec<IpNet> {
+    let mut nets: Vec<IpNet> = vec!["fe80::/10".parse().expect("valid net")];
+    if let Some(p) = network.prefix.and_then(|p| Ipv6Net::new(p, 64).ok()) {
+        nets.push(IpNet::V6(p.trunc()));
+    }
+    nets
+}
+
+/// The IPv4 networks among `creds` (kind `ip`).
+fn v4_sources(creds: &[&Credential]) -> Vec<IpNet> {
+    creds
+        .iter()
+        .filter(|c| c.kind == socketguard_core::CredentialKind::Ip)
+        .filter_map(|c| c.value.parse::<IpNet>().ok())
+        .filter(|n| n.addr().is_ipv4())
+        .collect()
+}
+
+/// Rules for IPv4 (ADR 0044): per protected interface that carries IPv4, each grant allows
+/// its IPv4 peers (or everyone, or the interface's subnet for a segment) to the app's IPv4
+/// ports on any of the host's IPv4 addresses. Ids are
+/// `v4:<port>:<proto>:<grant>:<interface>:<app>`.
+fn host_ipv4_rules(
+    snap: &Snapshot,
+    networks: &HashMap<&str, &Network>,
+    peers: &HashMap<&str, &Peer>,
+    rules: &mut BTreeMap<String, Rule>,
+) {
+    for app in &snap.apps {
+        let v4_ports: BTreeSet<PortRef> = app
+            .ports
+            .iter()
+            .filter(|p| p.family.has_v4())
+            .map(AppPort::port_ref)
+            .collect();
+        if v4_ports.is_empty() {
+            continue;
+        }
+        for grant in snap.grants.iter().filter(|g| g.app_id == app.id) {
+            let scoped = grant
+                .network_id
+                .as_deref()
+                .map(|id| networks.get(id).copied());
+            let creds = subject_credentials(&snap.groups, peers, &grant.subject);
+            let peer_nets = v4_sources(&creds);
+            for (iface, subnets) in &snap.v4_subnets {
+                if !snap.protect_host.contains(iface) {
+                    continue;
+                }
+                // A network-scoped grant applies only where that network's interface is.
+                let network = match scoped {
+                    None => None,
+                    Some(Some(n))
+                        if n.grants_apply
+                            && n.interface.as_deref() == Some(iface.as_str())
+                            && matches!(n.kind, NetworkKind::Lan | NetworkKind::Local) =>
+                    {
+                        Some(n)
+                    }
+                    Some(_) => continue,
+                };
+                let sources = match (&grant.subject, network) {
+                    (Subject::Anyone, None) => Sources::Any,
+                    (Subject::Anyone, Some(_)) => {
+                        Sources::Nets(subnets.iter().copied().map(IpNet::V4).collect())
+                    }
+                    _ if peer_nets.is_empty() => continue,
+                    _ => Sources::Nets(IpNet::aggregate(&peer_nets)),
+                };
+                for port in v4_ports
+                    .iter()
+                    .filter(|p| grant.port.is_none_or(|gp| gp == **p))
+                {
+                    let id = format!(
+                        "v4:{}:{}:{}:{iface}:{}",
+                        port.port, port.proto, grant.id, app.id
+                    );
+                    rules.insert(
+                        id.clone(),
+                        Rule {
+                            id,
+                            iif: Some(iface.clone()),
+                            dst: Dst::HostV4,
+                            port: port.port,
+                            proto: port.proto,
+                            sources: sources.clone(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Build the desired ruleset, also returning warnings the caller may want to log.
 ///
 /// - Managed scope: every IP locator of every app, so an address is denied from the
 ///   moment it exists.
 /// - An overlay scope per Yggdrasil network, a whole-host scope per protected interface
-///   (IPv6 only: no grant can name an IPv4 address yet, so an IPv4 whole-host scope would
-///   be unremediable).
+///   (both families: IPv4 grants allow the way in, see [`host_ipv4_rules`]).
+/// - A grant to Anyone scoped to a LAN or Local network ("everyone on <network>") admits
+///   only that network's prefix and link-local sources, not every source on the interface.
 /// - Rules: for each IP address, each port it serves, each grant that applies, the
 ///   sources of the subject's credentials that are reachable on the address's network,
 ///   aggregated so that no source network overlaps another (nft rejects overlapping set
@@ -157,6 +262,10 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
                         let Some(net) = credential_source(c, network) else {
                             continue;
                         };
+                        // IPv4 credentials get their own rules (below), not one on a v6 address.
+                        if net.addr().is_ipv4() {
+                            continue;
+                        }
                         if network.kind == NetworkKind::Yggdrasil && iif.is_none() {
                             warnings.insert(format!(
                                 "Network {} has no interface; skipping its Yggdrasil sources",
@@ -179,7 +288,7 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
                             Rule {
                                 id,
                                 iif,
-                                dst,
+                                dst: Dst::Addr(dst),
                                 port: port.port,
                                 proto: port.proto,
                                 sources,
@@ -191,7 +300,15 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
                             Some(i) => format!("{base}:{i}"),
                             None => base,
                         };
-                        push(id, iif.clone(), Sources::Any);
+                        // "Everyone on <network>": the interface alone would also pass a
+                        // router's traffic from other segments, so the sources are the
+                        // network's own prefix and link-local (ADR 0044).
+                        let sources = if is_segment(grant, network) {
+                            Sources::Nets(on_link_v6(network))
+                        } else {
+                            Sources::Any
+                        };
+                        push(id, iif.clone(), sources);
                         continue;
                     }
                     for (bound_iif, nets) in &bound {
@@ -205,6 +322,8 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
             }
         }
     }
+
+    host_ipv4_rules(snap, &networks, &peers, &mut rules);
 
     // Most specific first, which is also how drops get attributed: the managed addresses,
     // then the overlays, then whole-host interfaces.
@@ -246,7 +365,7 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
             kind: ScopeKind::WholeHost,
             matcher: ScopeMatch::Interface {
                 name: iface,
-                families: Families::V6,
+                families: Families::Both,
             },
         });
     }
@@ -366,10 +485,19 @@ pub fn check_protect_host(
         let allowed = ruleset.rules.iter().any(|r| {
             r.port == l.port
                 && r.proto == l.protocol
-                && (ip.is_unspecified() || r.dst == ip)
-                && on_iface.contains(&r.dst)
                 && on_protected(&r.iif)
-                && app_of_dst.get(&r.dst) == Some(&app_id.as_str())
+                && match r.dst {
+                    Dst::Addr(dst) => {
+                        (ip.is_unspecified() || dst == ip)
+                            && on_iface.contains(&dst)
+                            && app_of_dst.get(&dst) == Some(&app_id.as_str())
+                    }
+                    // An IPv4 rule, named after its app (see `host_ipv4_rules`).
+                    Dst::HostV4 => {
+                        (ip.is_unspecified() || ip.is_ipv4())
+                            && r.id.splitn(6, ':').nth(5) == Some(app_id.as_str())
+                    }
+                }
         });
         if !allowed {
             risks.insert((
@@ -428,6 +556,7 @@ mod tests {
             grants_apply: kind != NetworkKind::Local,
             status: NetworkStatus::Up,
             prefix: prefix.map(|p| p.parse().unwrap()),
+            vlan_id: None,
         }
     }
 
@@ -472,6 +601,7 @@ mod tests {
                     proto: Protocol::Tcp,
                     listening: true,
                     last_seen: Utc::now(),
+                    family: Default::default(),
                 })
                 .collect(),
             addresses,
@@ -719,7 +849,7 @@ mod tests {
             .rules
             .iter()
             .filter(|r| r.dst == ip("300:1:2:3::100") || r.dst == ip("300:1:2:3::200"))
-            .map(|r| (r.dst.to_string(), r.port))
+            .map(|r| (r.dst.addr().unwrap().to_string(), r.port))
             .collect();
         ygg_rules.sort();
         assert_eq!(
@@ -801,10 +931,223 @@ mod tests {
         assert!(matches!(
             rs.scopes[2].matcher,
             ScopeMatch::Interface {
-                families: Families::V6,
+                families: Families::Both,
                 ..
             }
         ));
+    }
+
+    // ---- IPv4 and segments (ADR 0044) ----
+
+    /// "web" on 8080 (dual-stack) with a LAN address, eth0 protected with an IPv4 subnet.
+    fn protected_lan() -> Snapshot {
+        let mut s = base();
+        s.protect_host = vec!["eth0".into()];
+        s.v4_subnets = BTreeMap::from([("eth0".into(), vec!["192.168.1.0/24".parse().unwrap()])]);
+        s
+    }
+
+    fn v4_rules(rs: &DesiredRuleset) -> Vec<&Rule> {
+        rs.rules.iter().filter(|r| r.dst == Dst::HostV4).collect()
+    }
+
+    #[test]
+    fn ipv4_peer_is_allowed_on_a_protected_interface() {
+        let mut s = protected_lan();
+        s.peers = vec![peer(
+            "p",
+            &[
+                (CredentialKind::Ip, "192.168.1.5/32"),
+                (CredentialKind::Ip, "10.0.20.0/24"),
+                (CredentialKind::Ip, "fd00::7/128"),
+            ],
+        )];
+        s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
+        let rs = build(&s);
+        let v4 = v4_rules(&rs);
+        assert_eq!(v4.len(), 1);
+        assert_eq!(v4[0].id, "v4:8080:tcp:g:eth0:web");
+        assert_eq!(v4[0].iif.as_deref(), Some("eth0"));
+        assert_eq!(
+            v4[0].sources,
+            Sources::Nets(vec![
+                "10.0.20.0/24".parse().unwrap(),
+                "192.168.1.5/32".parse().unwrap()
+            ])
+        );
+        // The IPv4 sources never end up on a rule for a per-app IPv6 address.
+        for r in rs.rules.iter().filter(|r| r.dst != Dst::HostV4) {
+            if let Sources::Nets(n) = &r.sources {
+                assert!(n.iter().all(|n| n.addr().is_ipv6()), "{r:?}");
+            }
+        }
+        // IPv4 is in scope, so an unknown IPv4 source is dropped.
+        assert!(rs.scopes.iter().any(|sc| sc.id == "host:eth0"));
+    }
+
+    #[test]
+    fn ipv4_rules_follow_the_listener_family_and_the_grant_port() {
+        let mut s = protected_lan();
+        s.apps[0].ports = vec![
+            AppPort {
+                port: 8080,
+                proto: Protocol::Tcp,
+                listening: true,
+                last_seen: Utc::now(),
+                family: socketguard_core::AddrFamily::V6,
+            },
+            AppPort {
+                port: 9090,
+                proto: Protocol::Tcp,
+                listening: true,
+                last_seen: Utc::now(),
+                family: socketguard_core::AddrFamily::Dual,
+            },
+        ];
+        s.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
+        s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
+        let rs = build(&s);
+        let ports: Vec<_> = v4_rules(&rs).iter().map(|r| r.port).collect();
+        assert_eq!(ports, [9090], "an IPv6-only port gets no IPv4 rule");
+        s.grants[0].port = Some(tcp(8080));
+        assert!(v4_rules(&build(&s)).is_empty());
+    }
+
+    #[test]
+    fn ipv4_needs_a_protected_interface_with_ipv4() {
+        let mut s = protected_lan();
+        s.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
+        s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
+        // Protected but no IPv4 subnet on it: nothing to allow.
+        s.v4_subnets.clear();
+        assert!(v4_rules(&build(&s)).is_empty());
+        // Not protected: no rule, the interface is not filtered at all.
+        let mut s = protected_lan();
+        s.protect_host.clear();
+        s.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
+        s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
+        assert!(v4_rules(&build(&s)).is_empty());
+    }
+
+    #[test]
+    fn a_network_scoped_ipv4_grant_applies_only_on_that_networks_interface() {
+        let mut s = protected_lan();
+        s.protect_host.push("eth1".into());
+        s.v4_subnets
+            .insert("eth1".into(), vec!["10.9.0.0/24".parse().unwrap()]);
+        s.networks.push(network(
+            "lan2",
+            NetworkKind::Lan,
+            "eth1",
+            Some("2001:db8:9::"),
+        ));
+        s.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
+        let mut g = grant("g", "web", Subject::Peer("p".into()));
+        let ifaces = |s: &Snapshot| -> Vec<String> {
+            v4_rules(&build(s))
+                .iter()
+                .filter_map(|r| r.iif.clone())
+                .collect()
+        };
+        s.grants = vec![g.clone()];
+        assert_eq!(ifaces(&s), ["eth0", "eth1"]);
+        g.network_id = Some("lan2".into());
+        s.grants = vec![g.clone()];
+        assert_eq!(ifaces(&s), ["eth1"]);
+        // Yggdrasil has no IPv4.
+        g.network_id = Some("ygg".into());
+        s.grants = vec![g];
+        assert!(ifaces(&s).is_empty());
+    }
+
+    #[test]
+    fn anyone_is_open_over_ipv4_on_protected_interfaces() {
+        let mut s = protected_lan();
+        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        let rs = build(&s);
+        let v4 = v4_rules(&rs);
+        assert_eq!(v4.len(), 1);
+        assert_eq!(v4[0].sources, Sources::Any);
+    }
+
+    #[test]
+    fn a_segment_grant_admits_only_the_networks_own_sources() {
+        let mut s = protected_lan();
+        let mut g = grant("g", "web", Subject::Anyone);
+        g.network_id = Some("lan".into());
+        s.grants = vec![g];
+        let rs = build(&s);
+        let lan_rule = rs
+            .rules
+            .iter()
+            .find(|r| r.dst == ip("2001:db8:1:2::100"))
+            .unwrap();
+        assert_eq!(lan_rule.iif.as_deref(), Some("eth0"));
+        assert_eq!(
+            lan_rule.sources,
+            Sources::Nets(vec![
+                "fe80::/10".parse().unwrap(),
+                "2001:db8:1:2::/64".parse().unwrap()
+            ])
+        );
+        // The IPv4 side is the interface's subnet, and only that network's address gets a rule.
+        let v4 = v4_rules(&rs);
+        assert_eq!(v4.len(), 1);
+        assert_eq!(
+            v4[0].sources,
+            Sources::Nets(vec!["192.168.1.0/24".parse().unwrap()])
+        );
+        assert_eq!(rs.rules.len(), 2);
+    }
+
+    #[test]
+    fn segment_sources_follow_the_prefix_and_other_anyone_grants_stay_open() {
+        let mut s = base();
+        let mut g = grant("g", "web", Subject::Anyone);
+        g.network_id = Some("lan".into());
+        s.grants = vec![g];
+        s.networks[1].prefix = Some("2001:db8:7:7::".parse().unwrap());
+        let rs = build(&s);
+        let Sources::Nets(n) = &rs.rules[0].sources else {
+            panic!("a segment grant lists sources")
+        };
+        assert!(n.contains(&"2001:db8:7:7::/64".parse().unwrap()));
+        // Scoped to Yggdrasil, or to nothing, Anyone has no source restriction.
+        for scope in [Some("ygg"), None] {
+            s.grants[0].network_id = scope.map(String::from);
+            let rs = build(&s);
+            assert!(
+                rs.rules.iter().all(|r| r.sources == Sources::Any),
+                "{scope:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lockout_check_counts_ipv4_rules() {
+        let mut s = protected_lan();
+        s.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
+        let l = ListeningSocket::new(1, 22, Protocol::Tcp, ip("0.0.0.0")).with_process_name("sshd");
+        let iface = HostInterface {
+            name: "eth0".into(),
+            addrs: vec![ip("192.168.1.10")],
+        };
+        // The listener's app is identified by its socket, so grant the app that matches it.
+        let app_id = app_identity(&l).id;
+        s.apps[0].id = app_id.clone();
+        s.apps[0].ports = vec![AppPort {
+            port: 22,
+            proto: Protocol::Tcp,
+            listening: true,
+            last_seen: Utc::now(),
+            family: Default::default(),
+        }];
+        s.apps[0].addresses.clear();
+        assert!(
+            check_protect_host(&s, std::slice::from_ref(&l), std::slice::from_ref(&iface)).is_err()
+        );
+        s.grants = vec![grant("g", &app_id, Subject::Peer("p".into()))];
+        assert!(check_protect_host(&s, &[l], &[iface]).is_ok());
     }
 
     #[test]

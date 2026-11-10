@@ -308,6 +308,7 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
         grants_apply: true,
         status: NetworkStatus::Up,
         prefix: None,
+        vlan_id: None,
     };
     let (peers, grants) = if creds.is_empty() {
         (vec![], vec![])
@@ -355,6 +356,7 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
                 proto: Protocol::Tcp,
                 listening: true,
                 last_seen: now,
+                family: Default::default(),
             }],
             addresses: vec![
                 address("lan-addr", "lan", MANAGED),
@@ -693,5 +695,302 @@ fn overlapping_sources_are_aggregated_and_apply() {
     assert!(
         fx.reachable(MANAGED, None),
         "B is inside the aggregated /64"
+    );
+}
+
+// ─── IPv4 and segments (ADR 0044) ────────────────────────────────────────────
+
+use socketguard_daemon::firewall::Dst;
+use std::collections::BTreeMap;
+
+#[test]
+fn ipv4_peer_is_allowed_through_protect_host_and_unknown_ipv4_is_dropped() {
+    if !enabled() {
+        return;
+    }
+    let fx = Fixture::new("v4");
+    for (ns, addr) in [
+        (&fx.ns.a, "10.77.0.1/24"),
+        (&fx.ns.b, "10.77.0.2/24"),
+        (&fx.ns.b, "10.77.0.3/24"),
+    ] {
+        let ifc = if *ns == fx.ns.a { "sgv-a" } else { "sgv-b" };
+        ip(&["-n", ns, "addr", "add", addr, "dev", ifc]);
+    }
+    assert!(
+        eventually(|| fx.reachable("10.77.0.1", Some("10.77.0.3"))),
+        "control: IPv4 reaches the listener before any rules"
+    );
+
+    let mut snap = snapshot(&[(CredentialKind::Ip, "10.77.0.2/32")]);
+    snap.v4_subnets = BTreeMap::from([("sgv-a".into(), vec!["10.77.0.0/24".parse().unwrap()])]);
+    let rs = fx.apply(&snap);
+    assert!(rs.rules.iter().any(|r| r.dst == Dst::HostV4));
+
+    assert!(
+        fx.reachable("10.77.0.1", Some("10.77.0.2")),
+        "the IPv4 peer is allowed"
+    );
+    assert!(
+        !fx.reachable("10.77.0.1", Some("10.77.0.3")),
+        "an unknown IPv4 source is dropped by the protect-host scope"
+    );
+
+    // Revoking the peer closes IPv4 again.
+    let mut snap = snapshot(&[]);
+    snap.v4_subnets = BTreeMap::from([("sgv-a".into(), vec!["10.77.0.0/24".parse().unwrap()])]);
+    fx.apply(&snap);
+    assert!(!fx.reachable("10.77.0.1", Some("10.77.0.2")));
+}
+
+#[test]
+fn a_segment_grant_admits_its_own_prefix_and_not_the_other_segment() {
+    if !enabled() {
+        return;
+    }
+    let fx = Fixture::new("segs");
+    // Segment B: a second veth with its own prefix and its own managed address.
+    ip(&[
+        "link", "add", "sgc-a", "netns", &fx.ns.a, "type", "veth", "peer", "name", "sgc-b",
+        "netns", &fx.ns.b,
+    ]);
+    for (ns, ifc, addrs) in [
+        (&fx.ns.a, "sgc-a", ["fd00:5b::1/64", "fd00:5b::100/128"]),
+        (&fx.ns.b, "sgc-b", ["fd00:5b::2/64", "fd00:5b::3/128"]),
+    ] {
+        for addr in addrs {
+            ip(&["-n", ns, "addr", "add", addr, "dev", ifc, "nodad"]);
+        }
+        ip(&["-n", ns, "link", "set", ifc, "up"]);
+    }
+    const B_ADDR: &str = "fd00:5b::100";
+    // B can also source packets from segment B's prefix towards segment A's address.
+    for dst in [MANAGED, B_ADDR] {
+        assert!(
+            eventually(|| fx.reachable(dst, Some("fd00:5b::2"))),
+            "control: {dst} reachable before any rules"
+        );
+    }
+
+    let mut snap = snapshot(&[]);
+    let now = Utc::now();
+    snap.networks = vec![
+        Network {
+            prefix: Some("fd00:5a::".parse().unwrap()),
+            ..snap.networks[0].clone()
+        },
+        Network {
+            id: "segb".into(),
+            name: "segb".into(),
+            interface: Some("sgc-a".into()),
+            prefix: Some("fd00:5b::".parse().unwrap()),
+            ..snap.networks[0].clone()
+        },
+    ];
+    snap.apps[0].addresses = vec![
+        Address {
+            id: "a-addr".into(),
+            app_id: "web".into(),
+            network_id: "lan".into(),
+            ports: PortSet::All,
+            locator: Locator::Ipv6 {
+                addr: MANAGED.parse().unwrap(),
+            },
+            created_at: now,
+        },
+        Address {
+            id: "b-addr".into(),
+            app_id: "web".into(),
+            network_id: "segb".into(),
+            ports: PortSet::All,
+            locator: Locator::Ipv6 {
+                addr: B_ADDR.parse().unwrap(),
+            },
+            created_at: now,
+        },
+    ];
+    snap.protect_host = vec!["sgv-a".into(), "sgc-a".into()];
+    snap.grants = vec![Grant {
+        id: "seg".into(),
+        app_id: "web".into(),
+        port: None,
+        network_id: Some("lan".into()),
+        subject: Subject::Anyone,
+        created_at: now,
+    }];
+    fx.apply(&snap);
+
+    assert!(
+        fx.reachable(MANAGED, Some("fd00:5a::2")),
+        "a source from segment A's prefix is allowed on A"
+    );
+    assert!(
+        !fx.reachable(B_ADDR, Some("fd00:5b::2")),
+        "segment B has no grant"
+    );
+    assert!(
+        !fx.reachable(MANAGED, Some("fd00:5b::2")),
+        "a segment B source arriving on A's interface is not on A's link"
+    );
+}
+
+/// Namespaces A (the host), R (a router) and H (a host behind it): A and R share segment A
+/// (`fd00:5a::/64`), R and H share segment B (`fd00:5b::/64`). Removed on drop.
+struct Routed {
+    ns: [String; 3],
+    listener: Option<Child>,
+    _serial: MutexGuard<'static, ()>,
+}
+
+impl Routed {
+    fn new(test: &str) -> Self {
+        let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let p = format!("sgr{}{}", std::process::id() % 10000, test);
+        let ns = [format!("{p}-a"), format!("{p}-r"), format!("{p}-h")];
+        // Dropped (and the namespaces removed) even if the setup fails halfway.
+        let mut routed = Self {
+            ns: ns.clone(),
+            listener: None,
+            _serial: serial,
+        };
+        let [a, r, h] = &ns;
+        for n in &ns {
+            ip(&["netns", "add", n]);
+        }
+        ip(&[
+            "link", "add", "sgv-a", "netns", a, "type", "veth", "peer", "name", "sgr-a", "netns", r,
+        ]);
+        ip(&[
+            "link", "add", "sgr-h", "netns", r, "type", "veth", "peer", "name", "sgh-h", "netns", h,
+        ]);
+        for (n, ifc, addr) in [
+            (a, "sgv-a", "fd00:5a::1/64"),
+            (a, "sgv-a", "fd00:5a::100/128"),
+            (r, "sgr-a", "fd00:5a::2/64"),
+            (r, "sgr-h", "fd00:5b::2/64"),
+            (h, "sgh-h", "fd00:5b::7/64"),
+        ] {
+            ip(&["-n", n, "addr", "add", addr, "dev", ifc, "nodad"]);
+        }
+        for (n, ifc) in [
+            (a, "sgv-a"),
+            (r, "sgr-a"),
+            (r, "sgr-h"),
+            (h, "sgh-h"),
+            (a, "lo"),
+            (r, "lo"),
+            (h, "lo"),
+        ] {
+            ip(&["-n", n, "link", "set", ifc, "up"]);
+        }
+        let sysctl = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                r,
+                "sysctl",
+                "-q",
+                "-w",
+                "net.ipv6.conf.all.forwarding=1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            sysctl.status.success(),
+            "forwarding: {}",
+            String::from_utf8_lossy(&sysctl.stderr)
+        );
+        ip(&[
+            "-n",
+            h,
+            "-6",
+            "route",
+            "add",
+            "default",
+            "via",
+            "fd00:5b::2",
+        ]);
+        ip(&[
+            "-n",
+            a,
+            "-6",
+            "route",
+            "add",
+            "fd00:5b::/64",
+            "via",
+            "fd00:5a::2",
+        ]);
+        let listener = Command::new("ip")
+            .args(["netns", "exec", a, "python3", "-c", LISTENER])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start listener");
+        routed.listener = Some(listener);
+        enter_netns(a);
+        routed
+    }
+
+    /// Whether `ns` can open a TCP connection to A's listener at `dst` from `src`.
+    fn reachable_from(&self, ns: &str, dst: &str, src: &str) -> bool {
+        Command::new("ip")
+            .args(["netns", "exec", ns, "python3", "-c", PROBE, dst, src])
+            .output()
+            .expect("run probe")
+            .status
+            .success()
+    }
+}
+
+impl Drop for Routed {
+    fn drop(&mut self) {
+        if let Some(l) = &mut self.listener {
+            let _ = l.kill();
+            let _ = l.wait();
+        }
+        for ns in &self.ns {
+            let _ = Command::new("ip").args(["netns", "del", ns]).output();
+        }
+    }
+}
+
+#[test]
+fn a_router_cannot_deliver_another_segments_source_to_a_segment_grant() {
+    if !enabled() {
+        return;
+    }
+    let rt = Routed::new("route");
+    let [_, r, h] = &rt.ns;
+    // Control: H (behind the router, source in segment B's prefix) reaches A's listener.
+    assert!(
+        eventually(|| rt.reachable_from(h, MANAGED, "fd00:5b::7")),
+        "control: the routed path works before any rules"
+    );
+
+    let mut snap = snapshot(&[]);
+    let now = Utc::now();
+    snap.networks = vec![Network {
+        prefix: Some("fd00:5a::".parse().unwrap()),
+        ..snap.networks[0].clone()
+    }];
+    snap.apps[0].addresses.truncate(1);
+    snap.grants = vec![Grant {
+        id: "seg".into(),
+        app_id: "web".into(),
+        port: None,
+        network_id: Some("lan".into()),
+        subject: Subject::Anyone,
+        created_at: now,
+    }];
+    let fw = NftablesFirewall::new();
+    fw.apply(&ruleset::build(&snap)).expect("apply ruleset");
+
+    assert!(
+        rt.reachable_from(r, MANAGED, "fd00:5a::2"),
+        "a source on A's own link is allowed"
+    );
+    assert!(
+        !rt.reachable_from(h, MANAGED, "fd00:5b::7"),
+        "the router delivers segment B's source on A's interface: dropped"
     );
 }

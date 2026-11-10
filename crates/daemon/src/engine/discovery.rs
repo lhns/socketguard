@@ -7,7 +7,9 @@ use crate::state::NewActivity;
 use crate::AppState;
 use chrono::Utc;
 use socketguard_core::config::ProcessFilter;
-use socketguard_core::{app_identity, ActivityKind, App, AppId, AppIdentity, AppPort, PortRef};
+use socketguard_core::{
+    app_identity, ActivityKind, AddrFamily, App, AppId, AppIdentity, AppPort, PortRef,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
 use tracing::info;
@@ -27,7 +29,7 @@ impl Engine {
             exe_path: Option<String>,
             interpreter_arg: Option<String>,
             identity_note: Option<String>,
-            ports: BTreeSet<PortRef>,
+            ports: BTreeMap<PortRef, AddrFamily>,
         }
         let mut live: BTreeMap<AppId, Live> = BTreeMap::new();
         let mut binds: HashMap<(AppId, PortRef), IpAddr> = HashMap::new();
@@ -58,13 +60,12 @@ impl Engine {
                     exe_path: ls.exe_path.clone(),
                     interpreter_arg,
                     identity_note: note,
-                    ports: BTreeSet::new(),
+                    ports: BTreeMap::new(),
                 })
                 .ports
-                .insert(PortRef {
-                    port: ls.port,
-                    proto: ls.protocol,
-                });
+                .entry(port_ref)
+                .and_modify(|f| *f = f.union(ls.family()))
+                .or_insert(ls.family());
         }
 
         *self.binds.lock().unwrap() = binds;
@@ -80,7 +81,7 @@ impl Engine {
         let mut changed = false;
 
         for (id, l) in &live {
-            let ports: Vec<PortRef> = l.ports.iter().copied().collect();
+            let ports: Vec<(PortRef, AddrFamily)> = l.ports.iter().map(|(p, f)| (*p, *f)).collect();
             if !known.contains_key(id) {
                 info!("New app detected: {} ({id})", l.name);
                 db.insert_app(&App {
@@ -122,8 +123,21 @@ impl Engine {
                         .collect()
                 })
                 .unwrap_or_default();
+            let was_family: BTreeMap<PortRef, AddrFamily> = known
+                .get(id)
+                .map(|a| {
+                    a.ports
+                        .iter()
+                        .filter(|p| p.listening)
+                        .map(|p| (p.port_ref(), p.family))
+                        .collect()
+                })
+                .unwrap_or_default();
             let new_ports = db.sync_app_ports(id, &ports, now).await?;
-            if !new_ports.is_empty() || was_listening != l.ports {
+            if !new_ports.is_empty()
+                || was_listening != l.ports.keys().copied().collect::<BTreeSet<_>>()
+                || was_family != l.ports
+            {
                 changed = true;
             }
         }

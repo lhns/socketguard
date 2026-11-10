@@ -188,6 +188,7 @@ fn reach_of(kind: CredentialKind, value: &str) -> Vec<NetworkReach> {
                 grants_apply: true,
                 status: NetworkStatus::Up,
                 prefix: Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0)),
+                vlan_id: None,
             };
             match reach(&credential, &network) {
                 Reach::NotReachable => None,

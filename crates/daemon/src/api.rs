@@ -358,7 +358,7 @@ async fn status(State(state): State<Shared>) -> ApiResult<Json<StatusResponse>> 
     let addresses = apps.iter().map(|a| a.addresses.len()).sum::<usize>() as u32;
     Ok(Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        networks: engine.networks(),
+        networks: engine.networks_described(),
         protect_host_interfaces: engine.settings(&state).await?.protect_host_interfaces,
         disabled: state.db.disabled().await,
         unadopted: state.db.unadopted().await?,

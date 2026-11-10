@@ -3,7 +3,7 @@
 //! platform; [`super`] turns the specs into WFP filters. See the module docs there for the
 //! layout (weights, layers, interface handling).
 
-use crate::firewall::{DesiredRuleset, Families, ScopeMatch, Sources};
+use crate::firewall::{DesiredRuleset, Dst, Families, ScopeMatch, Sources};
 use ipnet::IpNet;
 use socketguard_core::Protocol;
 use std::collections::HashMap;
@@ -156,12 +156,13 @@ pub(crate) fn plan(desired: &DesiredRuleset) -> Vec<FilterSpec> {
     }
 
     for rule in &desired.rules {
-        let layer = Layer::of(&rule.dst);
-        let mut base = vec![
-            Cond::LocalAddr(rule.dst),
-            Cond::LocalPort(rule.port),
-            Cond::Proto(proto_number(rule.proto)),
-        ];
+        let (layer, mut base) = match rule.dst {
+            Dst::Addr(a) => (Layer::of(&a), vec![Cond::LocalAddr(a)]),
+            // Any IPv4 destination of the host: no address condition on the v4 layer.
+            Dst::HostV4 => (Layer::V4, Vec::new()),
+        };
+        base.push(Cond::LocalPort(rule.port));
+        base.push(Cond::Proto(proto_number(rule.proto)));
         if let Some(iif) = &rule.iif {
             base.push(Cond::ArrivalIf(iif.clone()));
         }
@@ -246,7 +247,7 @@ mod tests {
         Rule {
             id: id.into(),
             iif: iif.map(Into::into),
-            dst: ip(dst),
+            dst: Dst::Addr(ip(dst)),
             port: 8080,
             proto: Protocol::Tcp,
             sources,
@@ -481,6 +482,36 @@ mod tests {
             .conds
             .iter()
             .any(|c| matches!(c, Cond::Remote(_) | Cond::ArrivalIf(_))));
+    }
+
+    #[test]
+    fn host_ipv4_rule_is_on_the_v4_layer_without_a_local_address() {
+        let mut r = rule("v4", "10.0.0.1", Some("Ethernet"), Sources::Any);
+        r.dst = Dst::HostV4;
+        r.sources = Sources::Nets(vec![net("192.168.1.5/32"), net("10.0.20.0/24")]);
+        let p = plan(&DesiredRuleset {
+            scopes: vec![],
+            rules: vec![r],
+        });
+        assert_eq!(p.len(), 2);
+        for s in &p {
+            assert_eq!((s.layer, s.action), (Layer::V4, Action::Permit));
+            assert!(!s.conds.iter().any(|c| matches!(c, Cond::LocalAddr(_))));
+            assert!(s.conds.contains(&Cond::LocalPort(8080)));
+            assert!(s.conds.contains(&Cond::ArrivalIf("Ethernet".into())));
+        }
+        assert!(p[0].conds.contains(&Cond::Remote(net("192.168.1.5/32"))));
+        assert!(p[1].conds.contains(&Cond::Remote(net("10.0.20.0/24"))));
+        // Everyone: a permit with no remote condition, still on the v4 layer only.
+        let mut any = rule("v4any", "10.0.0.1", Some("Ethernet"), Sources::Any);
+        any.dst = Dst::HostV4;
+        let p = plan(&DesiredRuleset {
+            scopes: vec![],
+            rules: vec![any],
+        });
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].layer, Layer::V4);
+        assert!(!p[0].conds.iter().any(|c| matches!(c, Cond::Remote(_))));
     }
 
     #[test]

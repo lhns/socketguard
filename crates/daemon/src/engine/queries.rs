@@ -5,7 +5,7 @@ use crate::ruleset;
 use crate::AppState;
 use socketguard_core::{
     grant_reach, ActivityQuery, ActivityRecord, App, AppDetail, Credential, GrantView, Peer,
-    PeerGroup, Settings, Subject,
+    PeerGroup, Settings, Subject, V4Context,
 };
 use std::collections::HashMap;
 
@@ -82,6 +82,11 @@ impl Engine {
         let groups: HashMap<&str, &PeerGroup> =
             group_list.iter().map(|g| (g.id.as_str(), g)).collect();
         let networks = self.networks();
+        let apps = db.list_apps().await?;
+        let protected: Vec<String> = self
+            .protected_v4_subnets(&db.protect_host().await?)
+            .into_keys()
+            .collect();
         let mut out = Vec::new();
         for grant in db.list_grants().await? {
             if filter.app_id.as_ref().is_some_and(|a| *a != grant.app_id) {
@@ -109,11 +114,23 @@ impl Engine {
                     .into_iter()
                     .cloned()
                     .collect();
+            // IPv4 credentials depend on whether the granted ports listen on IPv4 and on
+            // whether protect-host filters the interface (ADR 0044).
+            let app_listens_v4 = apps.iter().find(|a| a.id == grant.app_id).is_some_and(|a| {
+                a.ports
+                    .iter()
+                    .filter(|p| grant.port.is_none_or(|g| g == p.port_ref()))
+                    .any(|p| p.listening && p.family.has_v4())
+            });
             let reach = grant_reach(
                 &grant.subject,
                 &creds,
                 grant.network_id.as_deref(),
                 &networks,
+                &V4Context {
+                    app_listens_v4,
+                    protected: &protected,
+                },
             );
             out.push(GrantView { grant, reach });
         }

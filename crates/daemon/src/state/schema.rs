@@ -9,7 +9,7 @@ use sqlx::{Connection, SqliteConnection};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Schema v1 -> v2: the service keys of onion addresses (ADR 0037).
 const MIGRATION_1_TO_2: &str = r#"
@@ -51,8 +51,19 @@ CREATE UNIQUE INDEX grants_unique ON grants (
 );
 "#;
 
+/// Listening ports record over which IP versions they accept connections. Rows stored
+/// before count as dual until the next scan says otherwise.
+const MIGRATION_4_TO_5: &str = r#"
+ALTER TABLE app_ports ADD COLUMN family TEXT NOT NULL DEFAULT 'dual';
+"#;
+
 /// `MIGRATIONS[n]` takes the schema from v(n+1) to v(n+2).
-const MIGRATIONS: [&str; 3] = [MIGRATION_1_TO_2, MIGRATION_2_TO_3, MIGRATION_3_TO_4];
+const MIGRATIONS: [&str; 4] = [
+    MIGRATION_1_TO_2,
+    MIGRATION_2_TO_3,
+    MIGRATION_3_TO_4,
+    MIGRATION_4_TO_5,
+];
 
 const SCHEMA: &str = r#"
 CREATE TABLE apps (
@@ -475,6 +486,36 @@ mod tests {
         again.port = None;
         let err = db.insert_grant(&again).await.unwrap_err();
         assert!(super::super::is_unique_violation(&err), "{err:#}");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn v4_database_migrates_to_v5_with_dual_ports() {
+        let path = temp_db_path("v4-to-v5");
+        {
+            let opts = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true);
+            let mut c = SqliteConnection::connect_with(&opts).await.unwrap();
+            for sql in [SCHEMA, MIGRATION_1_TO_2, MIGRATION_2_TO_3, MIGRATION_3_TO_4] {
+                sqlx::raw_sql(sql).execute(&mut c).await.unwrap();
+            }
+            sqlx::query("PRAGMA user_version = 4")
+                .execute(&mut c)
+                .await
+                .unwrap();
+            sqlx::raw_sql(
+                "INSERT INTO apps (id, name, process_name, reviewed, first_seen, last_seen)                  VALUES ('a', 'n', 'p', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');                  INSERT INTO app_ports (app_id, port, proto, listening, last_seen)                  VALUES ('a', 80, 'tcp', 1, '2026-01-01T00:00:00Z');",
+            )
+            .execute(&mut c)
+            .await
+            .unwrap();
+        }
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        let app = db.get_app("a").await.unwrap().unwrap();
+        assert_eq!(app.ports[0].family, socketguard_core::AddrFamily::Dual);
         drop(db);
         let _ = std::fs::remove_file(&path);
     }

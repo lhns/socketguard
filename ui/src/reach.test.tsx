@@ -9,6 +9,7 @@ describe("reach badges", () => {
     ["whole_subnet", "whole subnet"],
     ["ip_only", "IP only"],
     ["open", "open to anyone"],
+    ["unfiltered", "open to everyone over IPv4"],
     ["not_reachable", "not reachable here"],
   ];
 

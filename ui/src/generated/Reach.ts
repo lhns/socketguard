@@ -3,4 +3,4 @@
 /**
  * How strongly a source is identified on a network.
  */
-export type Reach = "verified" | "whole_subnet" | "ip_only" | "open" | "not_reachable";
+export type Reach = "verified" | "whole_subnet" | "ip_only" | "open" | "unfiltered" | "not_reachable";

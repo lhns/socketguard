@@ -697,7 +697,7 @@ async fn grant(c: &Ctx, a: GrantArgs) -> Result<()> {
         Err(e) if e.is_confirmation_required() => {
             prompt::Stdin.confirm_or_yes(
                 false,
-                &format!("Open {} to anyone who can reach it?", a.target),
+                &render::open_question(&a.target, req.network_id.as_deref()),
                 &format!(
                     "this opens {} to every host that can reach it; repeat with --yes to confirm",
                     a.target

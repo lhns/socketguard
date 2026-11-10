@@ -1,5 +1,6 @@
-use super::InterfaceManager;
+use super::{InterfaceInfo, InterfaceManager};
 use anyhow::{Context, Result};
+use ipnet::Ipv4Net;
 use std::net::Ipv6Addr;
 use std::process::Command;
 
@@ -70,7 +71,7 @@ impl InterfaceManager for MacosInterfaces {
             .collect())
     }
 
-    fn list_interfaces(&self) -> Result<Vec<String>> {
+    fn list_interfaces(&self) -> Result<Vec<InterfaceInfo>> {
         let output = Command::new("ifconfig")
             .args(["-l"])
             .output()
@@ -86,6 +87,61 @@ impl InterfaceManager for MacosInterfaces {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut names: Vec<String> = stdout.split_whitespace().map(|s| s.to_string()).collect();
         names.sort();
-        Ok(names)
+        // macOS VLANs (vlan0) carry their id in `ifconfig`; not read yet.
+        Ok(names
+            .into_iter()
+            .map(|name| InterfaceInfo {
+                name,
+                vlan_id: None,
+            })
+            .collect())
+    }
+
+    fn list_ipv4_subnets(&self, iface: &str) -> Result<Vec<Ipv4Net>> {
+        let output = Command::new("ifconfig")
+            .args([iface, "inet"])
+            .output()
+            .context("failed to run ifconfig")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "ifconfig {iface} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(parse_ifconfig_inet(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
+    }
+}
+
+/// Subnets from "	inet 192.168.1.5 netmask 0xffffff00 broadcast ..." lines.
+fn parse_ifconfig_inet(out: &str) -> Vec<Ipv4Net> {
+    out.lines()
+        .filter_map(|l| {
+            let mut words = l.split_whitespace();
+            (words.next()? == "inet").then_some(())?;
+            let addr: std::net::Ipv4Addr = words.next()?.parse().ok()?;
+            (words.next()? == "netmask").then_some(())?;
+            let mask = u32::from_str_radix(words.next()?.strip_prefix("0x")?, 16).ok()?;
+            Ipv4Net::with_netmask(addr, mask.into())
+                .ok()
+                .map(|n| n.trunc())
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ifconfig_inet_lines() {
+        let out =
+            "en0: flags=8863<UP>\n\tinet 192.168.1.5 netmask 0xffffff00 broadcast 192.168.1.255\n";
+        assert_eq!(
+            parse_ifconfig_inet(out),
+            vec!["192.168.1.0/24".parse::<Ipv4Net>().unwrap()]
+        );
     }
 }

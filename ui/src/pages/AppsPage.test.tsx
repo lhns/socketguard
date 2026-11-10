@@ -63,6 +63,32 @@ describe("Apps page", () => {
     expect(d.last("create_grant")?.args.req).toMatchObject({ subject: { kind: "anyone" }, confirm_open: true });
   });
 
+  it("words the Anyone confirmation for a network as everyone on it, and sends the network", async () => {
+    const d = mockDaemon({ create_grant: () => grantView({ subject: { kind: "anyone" }, network_id: "n-lan" }) });
+    const { user, dialog } = await openGrantDialog();
+    await user.selectOptions(within(dialog).getByLabelText("Who"), "Anyone");
+    await user.selectOptions(within(dialog).getByLabelText("Network"), "LAN");
+    await user.click(within(dialog).getByRole("button", { name: "Grant" }));
+    const confirm = await screen.findByRole("dialog", { name: "Open to everyone on LAN?" });
+    await user.click(within(confirm).getByRole("button", { name: "Open to everyone on LAN" }));
+    await waitFor(() => expect(d.count("create_grant")).toBe(1));
+    expect(d.last("create_grant")?.args.req).toMatchObject({ network_id: "n-lan", confirm_open: true });
+  });
+
+  it("badges a network-scoped Anyone grant as a segment", async () => {
+    mockDaemon({
+      get_app: () => ({
+        ...appDetail,
+        grants: [grantView({ subject: { kind: "anyone" }, network_id: "n-lan", reach: [{ network_id: "n-lan", reach: "open" }] })],
+      }),
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await screen.findByRole("button", { name: /nginx/ }));
+    expect(await screen.findByText("segment")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Revoke access for Everyone on LAN" })).toBeInTheDocument();
+  });
+
   it("cancelling the Anyone confirmation grants nothing", async () => {
     const d = mockDaemon();
     const { user, dialog } = await openGrantDialog();

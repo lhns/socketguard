@@ -1,6 +1,7 @@
-use super::InterfaceManager;
+use super::{InterfaceInfo, InterfaceManager};
 use anyhow::Result;
-use std::net::Ipv6Addr;
+use ipnet::Ipv4Net;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
     ERROR_BUFFER_OVERFLOW, ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS, WIN32_ERROR,
@@ -12,7 +13,7 @@ use windows::Win32::NetworkManagement::IpHelper::{
 };
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows::Win32::Networking::WinSock::{
-    IpDadStatePreferred, AF_INET6, SOCKADDR_IN6, SOCKADDR_INET,
+    IpDadStatePreferred, AF_INET, AF_INET6, SOCKADDR_IN6, SOCKADDR_INET,
 };
 
 pub struct WindowsInterfaces;
@@ -159,8 +160,42 @@ impl InterfaceManager for WindowsInterfaces {
         Ok(addrs)
     }
 
-    fn list_interfaces(&self) -> Result<Vec<String>> {
-        enumerate_interface_names()
+    fn list_interfaces(&self) -> Result<Vec<InterfaceInfo>> {
+        // Windows has no generic API for VLAN ids; adapters show as plain interfaces.
+        Ok(enumerate_interface_names()?
+            .into_iter()
+            .map(|name| InterfaceInfo {
+                name,
+                vlan_id: None,
+            })
+            .collect())
+    }
+
+    fn list_ipv4_subnets(&self, iface: &str) -> Result<Vec<Ipv4Net>> {
+        let luid = get_interface_luid(iface)?;
+
+        let mut table_ptr = std::ptr::null_mut();
+        let ret = unsafe { GetUnicastIpAddressTable(AF_INET, &mut table_ptr) };
+        if !ret.is_ok() {
+            anyhow::bail!("GetUnicastIpAddressTable failed: {}", ret.0);
+        }
+
+        let table = unsafe { &*table_ptr };
+        let entries =
+            unsafe { std::slice::from_raw_parts(table.Table.as_ptr(), table.NumEntries as usize) };
+        let nets = entries
+            .iter()
+            .filter(|e| unsafe { e.InterfaceLuid.Value } == unsafe { luid.Value })
+            .filter_map(|e| {
+                // The address bytes are in network order in memory.
+                let octets = unsafe { e.Address.Ipv4.sin_addr.S_un.S_addr }.to_ne_bytes();
+                Ipv4Net::new(Ipv4Addr::from(octets), e.OnLinkPrefixLength)
+                    .ok()
+                    .map(|n| n.trunc())
+            })
+            .collect();
+        unsafe { FreeMibTable(table_ptr as *const _) };
+        Ok(nets)
     }
 }
 
@@ -172,6 +207,10 @@ mod tests {
     fn listed_interfaces_resolve_to_a_luid() {
         let names = enumerate_interface_names().unwrap();
         assert!(!names.is_empty());
+        // Every adapter can be asked for its IPv4 subnets.
+        for n in &names {
+            WindowsInterfaces.list_ipv4_subnets(n).unwrap();
+        }
         for n in names {
             assert!(alias_to_luid(&n).is_some(), "{n}");
         }

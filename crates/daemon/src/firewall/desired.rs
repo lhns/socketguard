@@ -129,6 +129,35 @@ pub enum Families {
     Both,
 }
 
+/// The destination a rule applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Dst {
+    /// One address of the host (a SocketGuard-managed address).
+    Addr(IpAddr),
+    /// Any IPv4 address of the host: IPv4 grants name a port, not an address (ADR 0044).
+    HostV4,
+}
+
+impl Dst {
+    /// The address, for a rule on one.
+    pub fn addr(self) -> Option<IpAddr> {
+        match self {
+            Dst::Addr(a) => Some(a),
+            Dst::HostV4 => None,
+        }
+    }
+
+    pub fn is_ipv6(self) -> bool {
+        matches!(self, Dst::Addr(a) if a.is_ipv6())
+    }
+}
+
+impl PartialEq<IpAddr> for Dst {
+    fn eq(&self, other: &IpAddr) -> bool {
+        *self == Dst::Addr(*other)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     /// Stable identifier, used for counters (e.g. derived from grant or socket+backend).
@@ -137,7 +166,7 @@ pub struct Rule {
     /// When set, the packet must arrive on this interface. Required for sources whose
     /// identity is only guaranteed by that interface (Yggdrasil `200::/7`, WireGuard).
     pub iif: Option<String>,
-    pub dst: IpAddr,
+    pub dst: Dst,
     pub port: u16,
     pub proto: Protocol,
     pub sources: Sources,
@@ -178,7 +207,7 @@ pub type DropSink = Box<dyn Fn(DropEvent) + Send + Sync>;
 /// kill them explicitly.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Revocation {
-    pub dst: IpAddr,
+    pub dst: Dst,
     pub port: u16,
     pub proto: Protocol,
     /// The revoked source network; None when every source of the destination is revoked
@@ -190,7 +219,7 @@ pub struct Revocation {
 /// Interface bindings are ignored: a flow that stays allowed from the same source is not
 /// cut when only its binding moved.
 pub fn revocations(old: &DesiredRuleset, new: &DesiredRuleset) -> Vec<Revocation> {
-    type Key = (IpAddr, u16, Protocol);
+    type Key = (Dst, u16, Protocol);
     #[derive(Default)]
     struct Allowed {
         any: bool,
@@ -245,7 +274,7 @@ mod tests {
         Rule {
             id: id.into(),
             iif: None,
-            dst: "fd00::9".parse().unwrap(),
+            dst: Dst::Addr("fd00::9".parse().unwrap()),
             port: 80,
             proto: Protocol::Tcp,
             sources,
@@ -288,6 +317,24 @@ mod tests {
         let new = rs(vec![rule("a", nets(&["fd00::1/128"]))]);
         let r = revocations(&old, &new);
         assert_eq!(r[0].src, Some("fd00::/64".parse().unwrap()));
+    }
+
+    #[test]
+    fn host_ipv4_rules_are_revoked_by_port_not_address() {
+        let host = |sources| {
+            let mut r = rule("v4", sources);
+            r.dst = Dst::HostV4;
+            rs(vec![r])
+        };
+        let old = host(nets(&["192.168.1.5/32", "192.168.1.6/32"]));
+        let r = revocations(&old, &host(nets(&["192.168.1.6/32"])));
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].dst, Dst::HostV4);
+        assert_eq!(r[0].src, Some("192.168.1.5/32".parse().unwrap()));
+        // An IPv6 rule on the same port does not cover the IPv4 one.
+        let mut both = host(nets(&["192.168.1.6/32"]));
+        both.rules.push(rule("v6", Sources::Any));
+        assert_eq!(revocations(&old, &both).len(), 1);
     }
 
     #[test]

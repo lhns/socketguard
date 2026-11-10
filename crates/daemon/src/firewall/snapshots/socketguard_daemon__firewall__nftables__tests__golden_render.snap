@@ -3,6 +3,8 @@ source: crates/daemon/src/firewall/nftables.rs
 expression: render(&golden_ruleset())
 ---
 table inet socketguard {
+	# a:al1:443:tcp:g6:eth0
+	counter c5974b503e9ae6ea5 { }
 	# a:al1:53:udp:g1:eth0
 	counter c9df8651d2d5bf950 { }
 	# a:av4:22:tcp:g3:eth0
@@ -19,6 +21,10 @@ table inet socketguard {
 	counter c7fdfda5f50a433ae { }
 	# overlay:ygg0
 	counter c6095c103ed141158 { }
+	# v4:app1:22:tcp:g4:eth0
+	counter cb4eb05cab53476bc { }
+	# v4:app2:53:udp:g5:eth0
+	counter cffbfb7eefbced7eb { }
 	chain input {
 		type filter hook input priority 0; policy accept;
 		# always allowed
@@ -38,6 +44,9 @@ table inet socketguard {
 		ip6 saddr { fd00::10/128, fd00:5::/32 } ip6 daddr 301::1 tcp dport 8080 counter name "cd998f0c373c765fb" accept
 		iifname "ygg0" ip6 saddr { 200:1::5/128 } ip6 daddr 301::1 tcp dport 8080 counter name "c91f26dc41cb2bb42" accept
 		iifname "eth0" ip saddr { 198.51.100.0/24 } ip daddr 192.0.2.9 tcp dport 22 counter name "c026b186ec0a6b738" accept
+		iifname "eth0" ip saddr { 192.168.1.5/32, 10.0.20.0/24 } tcp dport 22 counter name "cb4eb05cab53476bc" accept
+		iifname "eth0" meta nfproto ipv4 udp dport 53 counter name "cffbfb7eefbced7eb" accept
+		iifname "eth0" ip6 saddr { fd00:1:2:3::/64, fe80::/10 } ip6 daddr fd00::9 tcp dport 443 counter name "c5974b503e9ae6ea5" accept
 		# scopes
 		ip6 daddr { fd00::1, 301::1 } limit rate 10/second burst 20 packets log group 7 prefix "sg:managed"
 		ip6 daddr { fd00::1, 301::1 } counter name "c7fdfda5f50a433ae" drop

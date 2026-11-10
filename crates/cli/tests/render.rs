@@ -49,18 +49,21 @@ fn nginx() -> App {
                 proto: Protocol::Tcp,
                 listening: true,
                 last_seen: t("2026-11-09T12:30:00Z"),
+                family: Default::default(),
             },
             AppPort {
                 port: 443,
                 proto: Protocol::Tcp,
                 listening: true,
                 last_seen: t("2026-11-09T12:30:00Z"),
+                family: Default::default(),
             },
             AppPort {
                 port: 8125,
                 proto: Protocol::Udp,
                 listening: false,
                 last_seen: t("2026-11-08T12:30:00Z"),
+                family: Default::default(),
             },
         ],
         addresses: vec![
@@ -92,6 +95,7 @@ fn redis() -> App {
             proto: Protocol::Tcp,
             listening: true,
             last_seen: t("2026-11-09T12:30:00Z"),
+            family: Default::default(),
         }],
         addresses: vec![],
     }
@@ -191,6 +195,7 @@ fn networks() -> Vec<Network> {
             grants_apply: false,
             status: NetworkStatus::Up,
             prefix: None,
+            vlan_id: None,
         },
         Network {
             id: "ygg".into(),
@@ -200,6 +205,7 @@ fn networks() -> Vec<Network> {
             grants_apply: true,
             status: NetworkStatus::Up,
             prefix: None,
+            vlan_id: None,
         },
         Network {
             id: "lan".into(),
@@ -211,6 +217,7 @@ fn networks() -> Vec<Network> {
                 reason: "no prefix".into(),
             },
             prefix: None,
+            vlan_id: None,
         },
     ]
 }
@@ -358,12 +365,14 @@ fn share_onion_addresses() {
         proto: Protocol::Tcp,
         listening: true,
         last_seen: t("2026-11-09T12:30:00Z"),
+        family: Default::default(),
     });
     app.ports.push(AppPort {
         port: 22,
         proto: Protocol::Tcp,
         listening: true,
         last_seen: t("2026-11-09T12:30:00Z"),
+        family: Default::default(),
     });
     let mut onion = address("d4e5f6a1b2c3", "tor", "::1", PortSet::All);
     onion.locator = Locator::Onion {

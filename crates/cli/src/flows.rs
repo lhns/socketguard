@@ -61,7 +61,7 @@ async fn grant_to(
         confirm_open: false,
     };
     if req.subject == Subject::Anyone {
-        if !p.confirm(&format!("Open {} to anyone who can reach it?", app.name)) {
+        if !p.confirm(&render::open_question(&app.name, None)) {
             println!("skipped");
             return Ok(false);
         }

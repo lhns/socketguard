@@ -320,6 +320,7 @@ impl Engine {
             grants_apply: active.network.capabilities().grants_apply,
             status,
             prefix,
+            vlan_id: None,
         }
     }
 
@@ -329,6 +330,20 @@ impl Engine {
             .into_iter()
             .map(|id| Self::network_of(id, &self.backends[id]))
             .collect()
+    }
+
+    /// [`Engine::networks`] for display, with the VLAN id of VLAN interfaces (this lists the
+    /// host's interfaces, so the firewall's own passes do not use it).
+    pub fn networks_described(&self) -> Vec<Network> {
+        let interfaces = self.ifaces.list_interfaces().unwrap_or_default();
+        let mut networks = self.networks();
+        for n in &mut networks {
+            n.vlan_id = interfaces
+                .iter()
+                .find(|i| Some(&i.name) == n.interface.as_ref())
+                .and_then(|i| i.vlan_id);
+        }
+        networks
     }
 
     /// The configs of the networks that are live, ordered by id (what the config file

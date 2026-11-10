@@ -27,6 +27,11 @@ export const REACH_INFO: Record<Reach, BadgeInfo> = {
     tip: "Any source on this network can connect.",
     cls: "bad",
   },
+  unfiltered: {
+    label: "open to everyone over IPv4",
+    tip: "The app listens on IPv4 and protect-host is off for this interface, so every IPv4 source can connect, not only the peer.",
+    cls: "bad",
+  },
   not_reachable: {
     label: "not reachable here",
     tip: "This peer has no credential that works on this network, so nothing is allowed.",

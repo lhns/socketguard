@@ -30,6 +30,60 @@ impl std::str::FromStr for Protocol {
     }
 }
 
+/// Which IP versions a listening port accepts connections over.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum AddrFamily {
+    V4,
+    V6,
+    /// Both: a dual-stack socket, or separate IPv4 and IPv6 sockets on the port. Also what
+    /// a port stored before the family was recorded counts as, the cautious reading.
+    #[default]
+    Dual,
+}
+
+impl AddrFamily {
+    pub fn has_v4(self) -> bool {
+        self != AddrFamily::V6
+    }
+
+    pub fn has_v6(self) -> bool {
+        self != AddrFamily::V4
+    }
+
+    /// The family of a port served by sockets of `self` and `other`.
+    pub fn union(self, other: AddrFamily) -> AddrFamily {
+        if self == other {
+            self
+        } else {
+            AddrFamily::Dual
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AddrFamily::V4 => "v4",
+            AddrFamily::V6 => "v6",
+            AddrFamily::Dual => "dual",
+        }
+    }
+}
+
+impl std::str::FromStr for AddrFamily {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "v4" => Ok(AddrFamily::V4),
+            "v6" => Ok(AddrFamily::V6),
+            "dual" => Ok(AddrFamily::Dual),
+            _ => Err(format!("invalid address family: {s}")),
+        }
+    }
+}
+
 /// TCP ports of remote administration (ssh, RDP): closing them can lock the user out.
 pub const REMOTE_ADMIN_PORTS: &[u16] = &[22, 3389];
 
@@ -72,6 +126,22 @@ impl ListeningSocket {
             uid: None,
             foreign_mntns: false,
             cwd: None,
+        }
+    }
+
+    /// The IP versions this socket accepts. An IPv4 bind is v4 and a specific IPv6 bind v6.
+    /// The IPv6 wildcard `::` is dual-stack on Unix (IPV6_V6ONLY is off by default and not
+    /// visible in /proc) and v6-only on Windows, where a dual-stack listener shows up
+    /// as a separate IPv4 socket; ports merge their sockets' families.
+    pub fn family(&self) -> AddrFamily {
+        self.family_on(cfg!(windows))
+    }
+
+    pub fn family_on(&self, windows: bool) -> AddrFamily {
+        match self.bind_address {
+            IpAddr::V4(_) => AddrFamily::V4,
+            IpAddr::V6(a) if a.is_unspecified() && !windows => AddrFamily::Dual,
+            IpAddr::V6(_) => AddrFamily::V6,
         }
     }
 
@@ -187,5 +257,29 @@ mod tests {
             serde_json::from_str::<Protocol>(&json).unwrap(),
             Protocol::Tcp
         );
+    }
+
+    fn sock(bind: &str) -> ListeningSocket {
+        ListeningSocket::new(1, 80, Protocol::Tcp, bind.parse().unwrap())
+    }
+
+    #[test]
+    fn socket_family_by_bind_address_and_platform() {
+        assert_eq!(sock("0.0.0.0").family_on(false), AddrFamily::V4);
+        assert_eq!(sock("127.0.0.1").family_on(true), AddrFamily::V4);
+        assert_eq!(sock("fd00::1").family_on(false), AddrFamily::V6);
+        assert_eq!(sock("::").family_on(false), AddrFamily::Dual);
+        assert_eq!(sock("::").family_on(true), AddrFamily::V6);
+    }
+
+    #[test]
+    fn families_merge_per_port() {
+        use AddrFamily::*;
+        assert_eq!(V4.union(V6), Dual);
+        assert_eq!(V6.union(V6), V6);
+        assert!(Dual.has_v4() && Dual.has_v6() && !V6.has_v4() && !V4.has_v6());
+        for f in [V4, V6, Dual] {
+            assert_eq!(f.as_str().parse::<AddrFamily>().unwrap(), f);
+        }
     }
 }
