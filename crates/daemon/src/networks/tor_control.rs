@@ -1056,6 +1056,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("control_auth_cookie");
         std::fs::write(&path, contents).unwrap();
+        // Explicit modes: a permissive umask (CI runners) would otherwise make the file
+        // group/world-writable, which the cookie check rightly refuses.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let s = path.to_string_lossy().into_owned();
         (dir, s)
     }
