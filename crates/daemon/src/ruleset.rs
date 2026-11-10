@@ -62,7 +62,7 @@ pub(crate) fn served_ports(app: &App, address: &socketguard_core::Address) -> BT
 
 /// The credentials of a grant's peers (all members of a group); empty for Anyone.
 pub(crate) fn subject_credentials<'a>(
-    snap: &'a Snapshot,
+    groups: &'a [PeerGroup],
     peers: &HashMap<&'a str, &'a Peer>,
     subject: &Subject,
 ) -> Vec<&'a Credential> {
@@ -72,8 +72,7 @@ pub(crate) fn subject_credentials<'a>(
             .get(id.as_str())
             .map(|p| p.credentials.iter().collect())
             .unwrap_or_default(),
-        Subject::Group(id) => snap
-            .groups
+        Subject::Group(id) => groups
             .iter()
             .find(|g| &g.id == id)
             .map(|g| {
@@ -150,7 +149,7 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
                         .as_deref()
                         .is_none_or(|n| n == address.network_id)
             }) {
-                let creds = subject_credentials(snap, &peers, &grant.subject);
+                let creds = subject_credentials(&snap.groups, &peers, &grant.subject);
                 // Sources per interface binding; the same for every port of this grant.
                 let mut bound: BTreeMap<Option<String>, Vec<IpNet>> = BTreeMap::new();
                 if grant.subject != Subject::Anyone {

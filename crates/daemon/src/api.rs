@@ -724,26 +724,21 @@ async fn protect_host_put(
             overridden: risks.iter().map(risk_info).collect(),
         })
         .into_response()),
-        Err(ProtectHostError::Lockout(risks)) => {
-            let infos: Vec<LockoutRiskInfo> = risks.iter().map(risk_info).collect();
-            Err(ApiErr {
-                status: StatusCode::CONFLICT,
-                body: ApiError {
-                    code: error_code::PROTECT_HOST_REFUSED.to_string(),
-                    message: format!(
-                        "whole-host protection would lock out remote administration: {}",
-                        risks
-                            .iter()
-                            .map(|r| r.to_string())
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    ),
-                    details: serde_json::to_value(infos).ok(),
-                },
-            })
-        }
-        Err(ProtectHostError::Invalid(msg)) => Err(ApiErr::invalid(msg)),
-        Err(ProtectHostError::Other(e)) => Err(e.into()),
+        Err(e) => Err(match e {
+            ProtectHostError::Lockout(ref risks) => {
+                let infos: Vec<LockoutRiskInfo> = risks.iter().map(risk_info).collect();
+                ApiErr {
+                    status: StatusCode::CONFLICT,
+                    body: ApiError {
+                        code: error_code::PROTECT_HOST_REFUSED.to_string(),
+                        message: e.to_string(),
+                        details: serde_json::to_value(infos).ok(),
+                    },
+                }
+            }
+            ProtectHostError::Invalid(msg) => ApiErr::invalid(msg),
+            ProtectHostError::Other(e) => e.into(),
+        }),
     }
 }
 

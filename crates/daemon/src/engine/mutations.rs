@@ -68,7 +68,7 @@ impl Engine {
         Ok(())
     }
 
-    pub(super) fn clean_label(label: &str, what: &str) -> Result<String, EngineError> {
+    pub(crate) fn clean_label(label: &str, what: &str) -> Result<String, EngineError> {
         let label = label.trim();
         if label.is_empty() {
             return Err(EngineError::Invalid(format!(

@@ -339,7 +339,7 @@ pub fn enforcement_for(
                     subject: match &g.subject {
                         Subject::Anyone => EnforcedSubject::Anyone,
                         s => EnforcedSubject::Credentials(
-                            subject_credentials(snap, &peers, s)
+                            subject_credentials(&snap.groups, &peers, s)
                                 .into_iter()
                                 .cloned()
                                 .collect(),

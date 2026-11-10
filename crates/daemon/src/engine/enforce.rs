@@ -11,6 +11,23 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
+/// Complete `enforcement` with the service ids this daemon owns and the ledger's
+/// tombstones, and return with it the ledger that is being passed to the network, to
+/// settle once the network confirms.
+fn with_ledger(
+    mut enforcement: networks::NetworkEnforcement,
+    owned: BTreeSet<String>,
+    ledger: &networks::ledger::Ledger,
+) -> (networks::NetworkEnforcement, networks::ledger::Ledger) {
+    enforcement.owned = owned;
+    enforcement.tombstones = ledger.tombstones.clone();
+    let passed = networks::ledger::Ledger {
+        owned: enforcement.owned.clone(),
+        tombstones: enforcement.tombstones.clone(),
+    };
+    (enforcement, passed)
+}
+
 impl Engine {
     /// Enforce the grants on the networks that do not use the firewall (Tor). The caller
     /// holds the firewall lock, which also keeps two enforcements from interleaving. A
@@ -70,12 +87,11 @@ impl Engine {
             if let Err(e) = networks::ledger::add_owned(&state.db, &wanted).await {
                 warn!("Could not record the onion services: {e:#}");
             }
-            enforcement.owned = ledger.owned.union(&wanted).cloned().collect();
-            enforcement.tombstones = ledger.tombstones.clone();
-            let passed = networks::ledger::Ledger {
-                owned: enforcement.owned.clone(),
-                tombstones: enforcement.tombstones.clone(),
-            };
+            let (enforcement, passed) = with_ledger(
+                enforcement,
+                ledger.owned.union(&wanted).cloned().collect(),
+                &ledger,
+            );
             let result = tokio::task::spawn_blocking(move || net.enforce(&enforcement)).await;
             let outcome = match result {
                 Ok(r) => r,
@@ -218,15 +234,11 @@ impl Engine {
         if ledger.owned.is_empty() && ledger.tombstones.is_empty() {
             return Ok(ledger);
         }
-        let enforcement = networks::NetworkEnforcement {
-            addresses: Vec::new(),
-            owned: ledger.owned.union(&ledger.tombstones).cloned().collect(),
-            tombstones: ledger.tombstones.clone(),
-        };
-        let passed = networks::ledger::Ledger {
-            owned: enforcement.owned.clone(),
-            tombstones: enforcement.tombstones.clone(),
-        };
+        let (enforcement, passed) = with_ledger(
+            networks::NetworkEnforcement::default(),
+            ledger.owned.union(&ledger.tombstones).cloned().collect(),
+            &ledger,
+        );
         tokio::task::spawn_blocking(move || net.enforce(&enforcement)).await??;
         networks::ledger::settle(&state.db, &passed, &BTreeSet::new()).await?;
         Ok(passed)

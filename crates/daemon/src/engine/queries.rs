@@ -1,6 +1,7 @@
 //! Read-only queries.
 
 use super::*;
+use crate::ruleset;
 use crate::AppState;
 use socketguard_core::{
     grant_reach, ActivityQuery, ActivityRecord, App, AppDetail, Credential, GrantView, Peer,
@@ -75,18 +76,11 @@ impl Engine {
         filter: GrantFilter,
     ) -> Result<Vec<GrantView>, EngineError> {
         let db = &state.db;
-        let peers: HashMap<String, Peer> = db
-            .list_peers()
-            .await?
-            .into_iter()
-            .map(|p| (p.id.clone(), p))
-            .collect();
-        let groups: HashMap<String, PeerGroup> = db
-            .list_groups()
-            .await?
-            .into_iter()
-            .map(|g| (g.id.clone(), g))
-            .collect();
+        let peer_list = db.list_peers().await?;
+        let group_list = db.list_groups().await?;
+        let peers: HashMap<&str, &Peer> = peer_list.iter().map(|p| (p.id.as_str(), p)).collect();
+        let groups: HashMap<&str, &PeerGroup> =
+            group_list.iter().map(|g| (g.id.as_str(), g)).collect();
         let networks = self.networks();
         let mut out = Vec::new();
         for grant in db.list_grants().await? {
@@ -96,7 +90,9 @@ impl Engine {
             if let Some(pid) = &filter.peer_id {
                 let hit = match &grant.subject {
                     Subject::Peer(p) => p == pid,
-                    Subject::Group(g) => groups.get(g).is_some_and(|g| g.members.contains(pid)),
+                    Subject::Group(g) => groups
+                        .get(g.as_str())
+                        .is_some_and(|g| g.members.contains(pid)),
                     Subject::Anyone => false,
                 };
                 if !hit {
@@ -108,20 +104,11 @@ impl Engine {
                     continue;
                 }
             }
-            let creds: Vec<Credential> = match &grant.subject {
-                Subject::Anyone => Vec::new(),
-                Subject::Peer(p) => peers
-                    .get(p)
-                    .map(|p| p.credentials.clone())
-                    .unwrap_or_default(),
-                Subject::Group(g) => groups
-                    .get(g)
+            let creds: Vec<Credential> =
+                ruleset::subject_credentials(&group_list, &peers, &grant.subject)
                     .into_iter()
-                    .flat_map(|g| g.members.iter())
-                    .filter_map(|m| peers.get(m))
-                    .flat_map(|p| p.credentials.clone())
-                    .collect(),
-            };
+                    .cloned()
+                    .collect();
             let reach = grant_reach(
                 &grant.subject,
                 &creds,

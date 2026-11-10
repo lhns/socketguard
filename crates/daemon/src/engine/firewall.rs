@@ -37,6 +37,38 @@ impl Engine {
         })
     }
 
+    /// Whether the ruleset last applied is still what the firewall enforces. The cheap
+    /// interface check runs every time; [`Firewall::verify`] (it can spawn a process) at most
+    /// every `verify_interval`. A verify that cannot tell counts as in force.
+    async fn still_in_force(&self) -> anyhow::Result<bool> {
+        let now = Instant::now();
+        let verify_due = {
+            let mut last = self.last_verified.lock().unwrap();
+            let due = last.is_none_or(|t| now.duration_since(t) >= self.verify_interval);
+            if due {
+                *last = Some(now);
+            }
+            due
+        };
+        let fw = self.firewall.clone();
+        Ok(tokio::task::spawn_blocking(move || {
+            if fw.interfaces_changed() {
+                return false;
+            }
+            if !verify_due {
+                return true;
+            }
+            match fw.verify() {
+                Ok(in_force) => in_force,
+                Err(e) => {
+                    debug!("Could not verify the firewall state: {e:#}");
+                    true
+                }
+            }
+        })
+        .await?)
+    }
+
     /// Build the desired ruleset from the current state and apply it atomically. The
     /// caller holds the firewall lock. With `only_if_changed`, an unchanged ruleset is
     /// not re-sent (except every `REAPPLY_EVERY` passes).
@@ -51,42 +83,17 @@ impl Engine {
         let snapshot = self.gather_snapshot(state).await?;
         let (desired, warnings) = ruleset::build_with_warnings(&snapshot);
 
-        if only_if_changed && !self.apply_failed.load(Ordering::Relaxed) {
-            let unchanged = self.last_applied.lock().unwrap().as_ref() == Some(&desired);
-            if unchanged {
-                let passes = self.passes_since_apply.fetch_add(1, Ordering::Relaxed) + 1;
-                let fw = self.firewall.clone();
-                let verify_due = self
-                    .last_verified
-                    .lock()
-                    .unwrap()
-                    .is_none_or(|t| t.elapsed() >= self.verify_interval);
-                if verify_due {
-                    *self.last_verified.lock().unwrap() = Some(Instant::now());
-                }
-                let in_force = tokio::task::spawn_blocking(move || {
-                    // The interface check is cheap; `verify` may spawn a process.
-                    if fw.interfaces_changed() {
-                        return false;
-                    }
-                    if !verify_due {
-                        return true;
-                    }
-                    match fw.verify() {
-                        Ok(in_force) => in_force,
-                        Err(e) => {
-                            debug!("Could not verify the firewall state: {e:#}");
-                            true
-                        }
-                    }
-                })
-                .await?;
-                if in_force && passes < REAPPLY_EVERY {
-                    return Ok(());
-                }
-                if !in_force {
-                    warn!("The firewall state changed under us; re-applying the ruleset");
-                }
+        let unchanged = only_if_changed
+            && !self.apply_failed.load(Ordering::Relaxed)
+            && self.last_applied.lock().unwrap().as_ref() == Some(&desired);
+        if unchanged {
+            let passes = self.passes_since_apply.fetch_add(1, Ordering::Relaxed) + 1;
+            let in_force = self.still_in_force().await?;
+            if in_force && passes < REAPPLY_EVERY {
+                return Ok(());
+            }
+            if !in_force {
+                warn!("The firewall state changed under us; re-applying the ruleset");
             }
         }
         self.passes_since_apply.store(0, Ordering::Relaxed);
