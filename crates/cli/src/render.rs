@@ -5,11 +5,13 @@ use crate::resolve::short;
 use chrono::{DateTime, Utc};
 use comfy_table::{presets, Table};
 use socketguard_core::api_types::{
-    ApplyResponse, Change, ChangeItem, ChangeKind, LockoutRiskInfo, StatusResponse,
+    ApplyResponse, BatchChange, Change, ChangeItem, ChangeKind, ChangesResponse, LockoutRiskInfo,
+    ShareResponse, StatusResponse, TorKeyResponse,
 };
 use socketguard_core::{
-    ActivityRecord, Address, App, AppDetail, Credential, GrantView, Locator, Network, NetworkKind,
-    NetworkStatus, ParsedCredential, Peer, PeerGroup, PortSet, Reach, Settings, Subject,
+    AccessOrigin, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Locator, Network,
+    NetworkKind, NetworkStatus, ParsedCredential, Peer, PeerGroup, PortSet, Reach, Settings,
+    Subject, Tag, Target,
 };
 use std::collections::HashMap;
 
@@ -19,11 +21,13 @@ pub struct Names {
     pub apps: HashMap<String, String>,
     pub peers: HashMap<String, String>,
     pub groups: HashMap<String, String>,
+    pub tags: HashMap<String, String>,
 }
 
 impl Names {
     pub fn new(apps: &[App], peers: &[Peer], groups: &[PeerGroup]) -> Self {
         Self {
+            tags: HashMap::new(),
             apps: apps
                 .iter()
                 .map(|a| (a.id.clone(), a.name.clone()))
@@ -39,8 +43,29 @@ impl Names {
         }
     }
 
+    /// The names of `tags` too.
+    pub fn with_tags(mut self, tags: &[Tag]) -> Self {
+        self.tags = tags
+            .iter()
+            .map(|t| (t.id.clone(), t.label.clone()))
+            .collect();
+        self
+    }
+
     pub fn app(&self, id: &str) -> String {
         label(&self.apps, id)
+    }
+
+    pub fn tag(&self, id: &str) -> String {
+        label(&self.tags, id)
+    }
+
+    /// What a grant covers: an app's name, or `tag:<label>`.
+    pub fn target(&self, t: &Target) -> String {
+        match t {
+            Target::App(id) => self.app(id),
+            Target::Tag(id) => format!("tag:{}", self.tag(id)),
+        }
     }
 
     pub fn peer(&self, id: &str) -> String {
@@ -297,7 +322,11 @@ pub fn apps(apps: &[App]) -> String {
                     short(&a.id).to_string(),
                     a.name.clone(),
                     app_ports(a),
-                    if a.reviewed { "reviewed" } else { "pending" }.to_string(),
+                    format!(
+                        "{}{}",
+                        if a.reviewed { "reviewed" } else { "pending" },
+                        if a.system { ", system" } else { "" }
+                    ),
                     a.addresses.len().to_string(),
                 ]
             })
@@ -343,7 +372,7 @@ pub fn grants(grants: &[GrantView], names: &Names, with_app: bool) -> String {
                 let (port, net) = grant_scope(g);
                 let mut row = vec![short(&g.grant.id).to_string()];
                 if with_app {
-                    row.push(names.app(&g.grant.app_id));
+                    row.push(names.target(&g.grant.target));
                 }
                 row.extend([port, net, names.grantee(&g.grant), reach_summary(g)]);
                 row
@@ -370,6 +399,13 @@ pub fn app_detail(d: &AppDetail, names: &Names) -> String {
         head.push_str(&format!(
             "\n  identity    {note} (not shared with other apps)"
         ));
+    }
+    if app.system {
+        head.push_str("\n  kind        system component");
+    }
+    if !d.tags.is_empty() {
+        let labels: Vec<String> = d.tags.iter().map(|t| names.tag(t)).collect();
+        head.push_str(&format!("\n  tags        {}", labels.join(", ")));
     }
     head.push_str(&format!(
         "\n  first seen  {}\n  last seen   {}",
@@ -411,6 +447,36 @@ pub fn app_detail(d: &AppDetail, names: &Names) -> String {
             },
         ),
     ];
+    let via_tags: Vec<_> = d
+        .access
+        .iter()
+        .filter_map(|a| match &a.origin {
+            AccessOrigin::Tag { tag_id } => Some((tag_id, a)),
+            _ => None,
+        })
+        .collect();
+    if !via_tags.is_empty() {
+        parts.push(section(
+            "Through tags",
+            table(
+                &["TAG", "PORT", "NETWORK", "WHO"],
+                via_tags
+                    .into_iter()
+                    .map(|(tag_id, a)| {
+                        vec![
+                            names.tag(tag_id),
+                            a.port.map_or("all ports".to_string(), |p| p.to_string()),
+                            a.network_id.clone().unwrap_or_else(|| "all".to_string()),
+                            match (&a.subject, &a.network_id) {
+                                (Subject::Anyone, Some(n)) => format!("everyone on {n} (segment)"),
+                                (s, _) => names.subject(s),
+                            },
+                        ]
+                    })
+                    .collect(),
+            ),
+        ));
+    }
     if !d.counters.is_empty() {
         parts.push(section(
             "Allowed traffic",
@@ -692,6 +758,9 @@ fn change_line(c: &Change) -> String {
         ChangeItem::Peer => "peer",
         ChangeItem::Group => "group",
         ChangeItem::Grant => "grant",
+        ChangeItem::Tag => "tag",
+        ChangeItem::TagMember => "tag member",
+        ChangeItem::App => "app",
     };
     let mut line = format!("{sign} {item} {}", c.name);
     if let Some(d) = &c.detail {
@@ -701,6 +770,127 @@ fn change_line(c: &Change) -> String {
         line.push_str("  [opens to anyone]");
     }
     line
+}
+
+/// The diff of a batch (`grant` and `revoke` with several targets), one line per change
+/// and, for a grant, how well its subject is identified per network.
+pub fn batch(r: &ChangesResponse) -> String {
+    if r.changes.is_empty() {
+        return "no changes".to_string();
+    }
+    r.changes
+        .iter()
+        .map(|b: &BatchChange| {
+            let mut line = change_line(&b.change);
+            if !b.reach.is_empty() {
+                let reach: Vec<String> = b
+                    .reach
+                    .iter()
+                    .map(|g| format!("{}: {}", g.network_id, reach_label(g.reach)))
+                    .collect();
+                line.push_str(&format!("  [{}]", reach.join(", ")));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// ─── Tags ────────────────────────────────────────────────────────────────────
+
+/// The members of a tag, as `app` or `app:port/proto`.
+fn tag_members(t: &Tag, names: &Names) -> String {
+    if t.members.is_empty() {
+        return "none".to_string();
+    }
+    t.members
+        .iter()
+        .map(|m| match m.port {
+            Some(p) => format!("{}:{p}", names.app(&m.app_id)),
+            None => names.app(&m.app_id),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn tags(tags: &[Tag], names: &Names) -> String {
+    if tags.is_empty() {
+        return "no tags".to_string();
+    }
+    table(
+        &["ID", "LABEL", "PATTERNS", "MEMBERS"],
+        tags.iter()
+            .map(|t| {
+                vec![
+                    short(&t.id).to_string(),
+                    t.label.clone(),
+                    if t.patterns.is_empty() {
+                        "-".to_string()
+                    } else {
+                        t.patterns.join(", ")
+                    },
+                    tag_members(t, names),
+                ]
+            })
+            .collect(),
+    )
+}
+
+pub fn tag_detail(t: &Tag, names: &Names, grants_on_tag: &[GrantView]) -> String {
+    let mut head = format!("{}  ({})", t.label, t.id);
+    head.push_str(&format!(
+        "\n  patterns    {}",
+        if t.patterns.is_empty() {
+            "none".to_string()
+        } else {
+            t.patterns.join(", ")
+        }
+    ));
+    head.push_str(&format!("\n  members     {}", tag_members(t, names)));
+    if !t.excluded.is_empty() {
+        let out: Vec<String> = t.excluded.iter().map(|a| names.app(a)).collect();
+        head.push_str(&format!(
+            "\n  kept out    {} (removed by hand although a pattern matches)",
+            out.join(", ")
+        ));
+    }
+    let grants = if grants_on_tag.is_empty() {
+        "none".to_string()
+    } else {
+        grants(grants_on_tag, names, true)
+    };
+    format!("{head}\n\n{}", section("Grants on this tag", grants))
+}
+
+// ─── Tor keys and sharing ────────────────────────────────────────────────────
+
+/// The result of generating a Tor client key: the private key is shown here and by `share`.
+pub fn tor_key(peer: &str, k: &TorKeyResponse) -> String {
+    format!(
+        "generated a Tor client key for {peer}\n  public key   {}\n  private key  {}\n\n\
+         The public key is now one of the peer's credentials. Keep the private key secret: \
+         it is what the peer puts into its ClientOnionAuthDir. `socketguard share <app>` \
+         prints the finished line for each onion service the peer is granted.",
+        k.credential.value, k.private_key
+    )
+}
+
+/// The client authorization lines for the app's onion services.
+pub fn tor_share(s: &ShareResponse) -> Vec<String> {
+    s.tor
+        .iter()
+        .flat_map(|t| {
+            [
+                format!(
+                    "tor client access for {} to {}: save as {}.auth_private in its ClientOnionAuthDir",
+                    t.peer_label,
+                    t.hostname,
+                    t.hostname.strip_suffix(".onion").unwrap_or(&t.hostname)
+                ),
+                t.auth_private.clone(),
+            ]
+        })
+        .collect()
 }
 
 pub fn lockout_risks(risks: &[LockoutRiskInfo]) -> String {

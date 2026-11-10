@@ -4,8 +4,8 @@ use super::*;
 use crate::ruleset;
 use crate::AppState;
 use socketguard_core::{
-    grant_reach, ActivityQuery, ActivityRecord, App, AppDetail, Credential, GrantView, Peer,
-    PeerGroup, Settings, Subject, V4Context,
+    covered_ports, effective_access, grant_reach, ActivityQuery, ActivityRecord, App, AppDetail,
+    Credential, GrantView, Peer, PeerGroup, Settings, Subject, Target, V4Context,
 };
 use std::collections::HashMap;
 
@@ -38,8 +38,16 @@ impl Engine {
                 },
             )
             .await?;
+        let all_grants = state.db.list_grants().await?;
+        let tags = state.db.list_tags().await?;
         Ok(AppDetail {
             counters: self.metrics.app_counters(&app.id),
+            access: effective_access(&all_grants, &tags, &app.id),
+            tags: tags
+                .iter()
+                .filter(|t| t.members.iter().any(|m| m.app_id == app.id))
+                .map(|t| t.id.clone())
+                .collect(),
             app,
             grants,
         })
@@ -75,21 +83,25 @@ impl Engine {
         state: &AppState,
         filter: GrantFilter,
     ) -> Result<Vec<GrantView>, EngineError> {
-        let db = &state.db;
-        let peer_list = db.list_peers().await?;
-        let group_list = db.list_groups().await?;
-        let peers: HashMap<&str, &Peer> = peer_list.iter().map(|p| (p.id.as_str(), p)).collect();
+        let cat = super::mutations::Catalog::load(state).await?;
         let groups: HashMap<&str, &PeerGroup> =
-            group_list.iter().map(|g| (g.id.as_str(), g)).collect();
+            cat.groups.iter().map(|g| (g.id.as_str(), g)).collect();
         let networks = self.networks();
-        let apps = db.list_apps().await?;
-        let protected: Vec<String> = self
-            .protected_v4_subnets(&db.protect_host().await?)
-            .into_keys()
-            .collect();
+        let protected = self.protected_interfaces(state).await?;
         let mut out = Vec::new();
-        for grant in db.list_grants().await? {
-            if filter.app_id.as_ref().is_some_and(|a| *a != grant.app_id) {
+        for grant in cat.grants.iter().cloned() {
+            if filter
+                .app_id
+                .as_ref()
+                .is_some_and(|a| grant.target != Target::App(a.clone()))
+            {
+                continue;
+            }
+            if filter
+                .tag_id
+                .as_ref()
+                .is_some_and(|t| grant.target != Target::Tag(t.clone()))
+            {
                 continue;
             }
             if let Some(pid) = &filter.peer_id {
@@ -109,32 +121,55 @@ impl Engine {
                     continue;
                 }
             }
-            let creds: Vec<Credential> =
-                ruleset::subject_credentials(&group_list, &peers, &grant.subject)
-                    .into_iter()
-                    .cloned()
-                    .collect();
-            // IPv4 credentials depend on whether the granted ports listen on IPv4 and on
-            // whether protect-host filters the interface (ADR 0044).
-            let app_listens_v4 = apps.iter().find(|a| a.id == grant.app_id).is_some_and(|a| {
-                a.ports
-                    .iter()
-                    .filter(|p| grant.port.is_none_or(|g| g == p.port_ref()))
-                    .any(|p| p.listening && p.family.has_v4())
-            });
-            let reach = grant_reach(
-                &grant.subject,
-                &creds,
-                grant.network_id.as_deref(),
-                &networks,
-                &V4Context {
-                    app_listens_v4,
-                    protected: &protected,
-                },
-            );
+            let reach = Self::reach_of(&grant, &cat, &networks, &protected);
             out.push(GrantView { grant, reach });
         }
         Ok(out)
+    }
+
+    /// The interfaces under protect-host that carry IPv4 (what decides IPv4 reach).
+    pub(super) async fn protected_interfaces(
+        &self,
+        state: &AppState,
+    ) -> Result<Vec<String>, EngineError> {
+        Ok(self
+            .protected_v4_subnets(&state.db.protect_host().await?)
+            .into_keys()
+            .collect())
+    }
+
+    /// How well the subject of `grant` is identified on each network the grant applies to.
+    pub(super) fn reach_of(
+        grant: &socketguard_core::Grant,
+        cat: &super::mutations::Catalog,
+        networks: &[socketguard_core::Network],
+        protected: &[String],
+    ) -> Vec<socketguard_core::GrantReach> {
+        let peers: HashMap<&str, &Peer> = cat.peers.iter().map(|p| (p.id.as_str(), p)).collect();
+        let creds: Vec<Credential> =
+            ruleset::subject_credentials(&cat.groups, &peers, &grant.subject)
+                .into_iter()
+                .cloned()
+                .collect();
+        // IPv4 credentials depend on whether the granted ports listen on IPv4 and on
+        // whether protect-host filters the interface (ADR 0044).
+        let app_listens_v4 = cat.apps.iter().any(|a| {
+            let covered = covered_ports(grant, &cat.tags, &a.id);
+            a.ports
+                .iter()
+                .filter(|p| covered.iter().any(|c| c.is_none_or(|c| c == p.port_ref())))
+                .any(|p| p.listening && p.family.has_v4())
+        });
+        grant_reach(
+            &grant.subject,
+            &creds,
+            grant.network_id.as_deref(),
+            networks,
+            &V4Context {
+                app_listens_v4,
+                protected,
+            },
+        )
     }
 
     pub async fn get_grant(&self, state: &AppState, id: &str) -> Result<GrantView, EngineError> {
@@ -146,7 +181,14 @@ impl Engine {
         self.list_grants(
             state,
             GrantFilter {
-                app_id: Some(grant.app_id.clone()),
+                app_id: match &grant.target {
+                    Target::App(id) => Some(id.clone()),
+                    Target::Tag(_) => None,
+                },
+                tag_id: match &grant.target {
+                    Target::Tag(id) => Some(id.clone()),
+                    Target::App(_) => None,
+                },
                 ..Default::default()
             },
         )

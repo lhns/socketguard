@@ -14,6 +14,7 @@ pub type NetworkId = String;
 pub type PeerId = String;
 pub type PeerGroupId = String;
 pub type GrantId = String;
+pub type TagId = String;
 pub type AddressId = String;
 
 /// A fresh random identifier (uuid v4) for peers, groups, grants, addresses, credentials.
@@ -39,6 +40,10 @@ pub struct App {
     pub identity_note: Option<String>,
     /// False = pending: no decision has been made about this app yet.
     pub reviewed: bool,
+    /// An OS component (service or system process), so frontends can group it away from
+    /// the user's own apps.
+    #[serde(default)]
+    pub system: bool,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
     pub ports: Vec<AppPort>,
@@ -290,11 +295,21 @@ pub enum Subject {
     Anyone,
 }
 
+/// What a grant applies to (ADR 0043).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum Target {
+    App(AppId),
+    Tag(TagId),
+}
+
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grant {
     pub id: GrantId,
-    pub app_id: AppId,
+    /// One app, or every member of a tag.
+    pub target: Target,
     /// None = every port of the app.
     pub port: Option<PortRef>,
     /// None = every network on which grants apply.
@@ -318,7 +333,14 @@ pub struct GrantView {
 pub struct AppDetail {
     #[serde(flatten)]
     pub app: App,
+    /// Grants on the app itself.
     pub grants: Vec<GrantView>,
+    /// Everything that gives the app access, tag grants included, each with its origin.
+    #[serde(default)]
+    pub access: Vec<crate::tags::EffectiveAccess>,
+    /// The tags the app is a member of (as a whole or one port).
+    #[serde(default)]
+    pub tags: Vec<TagId>,
     /// Packets and bytes the firewall allowed in, per network and grant subject, as of
     /// the last reconcile pass. Empty where the platform has no counters.
     #[serde(default)]
@@ -343,7 +365,7 @@ pub struct AppCounter {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewGrant {
-    pub app_id: AppId,
+    pub target: Target,
     #[serde(default)]
     pub port: Option<PortRef>,
     #[serde(default)]
@@ -419,13 +441,16 @@ pub enum ActivityKind {
     GroupAdded,
     GroupChanged,
     GroupRemoved,
+    TagAdded,
+    TagChanged,
+    TagRemoved,
     ProtectHostChanged,
     Blocked,
     RemoteAdminExposed,
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 13] = [
+    pub const ALL: [ActivityKind; 16] = [
         ActivityKind::AppDiscovered,
         ActivityKind::AppRemoved,
         ActivityKind::GrantAdded,
@@ -436,6 +461,9 @@ impl ActivityKind {
         ActivityKind::GroupAdded,
         ActivityKind::GroupChanged,
         ActivityKind::GroupRemoved,
+        ActivityKind::TagAdded,
+        ActivityKind::TagChanged,
+        ActivityKind::TagRemoved,
         ActivityKind::ProtectHostChanged,
         ActivityKind::Blocked,
         ActivityKind::RemoteAdminExposed,
@@ -453,6 +481,9 @@ impl ActivityKind {
             ActivityKind::GroupAdded => "group_added",
             ActivityKind::GroupChanged => "group_changed",
             ActivityKind::GroupRemoved => "group_removed",
+            ActivityKind::TagAdded => "tag_added",
+            ActivityKind::TagChanged => "tag_changed",
+            ActivityKind::TagRemoved => "tag_removed",
             ActivityKind::ProtectHostChanged => "protect_host_changed",
             ActivityKind::Blocked => "blocked",
             ActivityKind::RemoteAdminExposed => "remote_admin_exposed",

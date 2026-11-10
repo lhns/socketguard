@@ -15,6 +15,7 @@ use socketguard_core::api_types::{
 };
 use socketguard_core::{
     normalize_credential, AddressMode, NewCredential, NewGrant, Peer, PeerGroup, PortRef, Subject,
+    Target,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -77,7 +78,11 @@ pub async fn export(engine: &Engine, state: &AppState) -> Result<ExportDocument,
     let mut out_grants: Vec<ExportGrant> = Vec::new();
     for g in engine.list_grants(state, GrantFilter::default()).await? {
         let g = g.grant;
-        let Some(name) = apps.get(&g.app_id) else {
+        // Tags are not part of the document (yet): grants on tags are left out.
+        let Target::App(app_id) = &g.target else {
+            continue;
+        };
+        let Some(name) = apps.get(app_id) else {
             continue;
         };
         let Some(subject) = export_subject(&g.subject, &peers, &groups) else {
@@ -85,7 +90,7 @@ pub async fn export(engine: &Engine, state: &AppState) -> Result<ExportDocument,
         };
         out_grants.push(ExportGrant {
             app: ExportAppRef {
-                id: g.app_id.clone(),
+                id: app_id.clone(),
                 name: name.clone(),
             },
             port: g.port,
@@ -501,7 +506,10 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
         let found = current_grants.iter().find(|v| {
             export_subject(&v.grant.subject, &peers, &groups).is_some_and(|subject| {
                 (
-                    v.grant.app_id.clone(),
+                    match &v.grant.target {
+                        Target::App(id) => id.clone(),
+                        Target::Tag(_) => return false,
+                    },
                     v.grant.port,
                     v.grant.network_id.clone(),
                     subject_key(&subject),
@@ -595,7 +603,7 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
             .create_grant(
                 state,
                 &NewGrant {
-                    app_id: g.app.id.clone(),
+                    target: Target::App(g.app.id.clone()),
                     port: g.port,
                     network_id: g.network.clone(),
                     subject,

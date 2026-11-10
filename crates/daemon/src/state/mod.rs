@@ -11,12 +11,14 @@
 mod protect;
 mod schema;
 mod settings;
+mod tags;
 #[cfg(windows)]
 mod winacl;
 
 pub use protect::ALLOW_UNPROTECTED_DB_ENV;
 pub use schema::SCHEMA_VERSION;
 pub use settings::parse_protect_host;
+pub use tags::Write;
 
 use protect::{precreate_protected, protect_files};
 use schema::{archive_pre_v1, is_pre_v1};
@@ -25,7 +27,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use socketguard_core::{
     ActivityKind, ActivityQuery, ActivityRecord, AddrFamily, Address, App, AppPort, Credential,
-    CredentialKind, Grant, Locator, Peer, PeerGroup, PortRef, PortSet, Protocol, Subject,
+    CredentialKind, Grant, Locator, Peer, PeerGroup, PortRef, PortSet, Protocol, Subject, Target,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
@@ -129,7 +131,7 @@ impl Database {
     pub async fn insert_app(&self, app: &App) -> Result<()> {
         sqlx::query(
             "INSERT INTO apps (id, name, process_name, exe_path, interpreter_arg, identity_note, \
-             reviewed, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             reviewed, system, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&app.id)
         .bind(&app.name)
@@ -138,6 +140,7 @@ impl Database {
         .bind(&app.interpreter_arg)
         .bind(&app.identity_note)
         .bind(app.reviewed)
+        .bind(app.system)
         .bind(ts(app.first_seen))
         .bind(ts(app.last_seen))
         .execute(&self.pool)
@@ -151,11 +154,15 @@ impl Database {
         id: &str,
         process_name: &str,
         exe_path: Option<&str>,
+        system: bool,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        sqlx::query("UPDATE apps SET process_name = ?, exe_path = ?, last_seen = ? WHERE id = ?")
+        sqlx::query(
+            "UPDATE apps SET process_name = ?, exe_path = ?, system = ?, last_seen = ? WHERE id = ?",
+        )
             .bind(process_name)
             .bind(exe_path)
+            .bind(system)
             .bind(ts(now))
             .bind(id)
             .execute(&self.pool)
@@ -175,10 +182,16 @@ impl Database {
 
     /// Delete an app; its ports, addresses and grants go with it. False if unknown.
     pub async fn delete_app(&self, id: &str) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM grants WHERE target_kind = 'app' AND target_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         let r = sqlx::query("DELETE FROM apps WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -193,13 +206,13 @@ impl Database {
     async fn load_apps(&self, only: Option<&str>) -> Result<Vec<App>> {
         let rows = match only {
             Some(id) => {
-                sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, identity_note, reviewed, first_seen, last_seen FROM apps WHERE id = ?")
+                sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, identity_note, reviewed, system, first_seen, last_seen FROM apps WHERE id = ?")
                     .bind(id)
                     .fetch_all(&self.pool)
                     .await?
             }
             None => {
-                sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, identity_note, reviewed, first_seen, last_seen FROM apps ORDER BY name, id")
+                sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, identity_note, reviewed, system, first_seen, last_seen FROM apps ORDER BY name, id")
                     .fetch_all(&self.pool)
                     .await?
             }
@@ -214,6 +227,7 @@ impl Database {
                 interpreter_arg: r.get("interpreter_arg"),
                 identity_note: r.get("identity_note"),
                 reviewed: r.get("reviewed"),
+                system: r.get("system"),
                 first_seen: parse_ts(r.get("first_seen"))?,
                 last_seen: parse_ts(r.get("last_seen"))?,
                 ports: Vec::new(),
@@ -536,15 +550,7 @@ impl Database {
     /// Insert a peer with its credentials in one transaction.
     pub async fn insert_peer(&self, peer: &Peer) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("INSERT INTO peers (id, label, created_at) VALUES (?, ?, ?)")
-            .bind(&peer.id)
-            .bind(&peer.label)
-            .bind(ts(peer.created_at))
-            .execute(&mut *tx)
-            .await?;
-        for c in &peer.credentials {
-            insert_credential(&mut tx, &peer.id, c).await?;
-        }
+        insert_peer_in(&mut tx, peer).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -782,25 +788,9 @@ impl Database {
     // ======== Grants ========
 
     pub async fn insert_grant(&self, g: &Grant) -> Result<()> {
-        let (kind, subject_id) = match &g.subject {
-            Subject::Peer(id) => ("peer", Some(id.as_str())),
-            Subject::Group(id) => ("group", Some(id.as_str())),
-            Subject::Anyone => ("anyone", None),
-        };
-        sqlx::query(
-            "INSERT INTO grants (id, app_id, port, proto, network_id, subject_kind, subject_id, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&g.id)
-        .bind(&g.app_id)
-        .bind(g.port.map(|p| p.port))
-        .bind(g.port.map(|p| p.proto.to_string()))
-        .bind(&g.network_id)
-        .bind(kind)
-        .bind(subject_id)
-        .bind(ts(g.created_at))
-        .execute(&self.pool)
-        .await?;
+        let mut tx = self.pool.begin().await?;
+        insert_grant_in(&mut tx, g).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -957,8 +947,51 @@ impl NewActivity {
 const ADDRESS_SELECT: &str = "SELECT id, app_id, network_id, ports, locator_kind, locator, \
      created_at FROM addresses";
 
-const GRANT_SELECT: &str = "SELECT id, app_id, port, proto, network_id, subject_kind, subject_id, \
-     created_at FROM grants";
+const GRANT_SELECT: &str = "SELECT id, target_kind, target_id, port, proto, network_id, \
+     subject_kind, subject_id, created_at FROM grants";
+
+type Tx<'a> = sqlx::Transaction<'a, sqlx::Sqlite>;
+
+async fn insert_peer_in(tx: &mut Tx<'_>, peer: &Peer) -> Result<()> {
+    sqlx::query("INSERT INTO peers (id, label, created_at) VALUES (?, ?, ?)")
+        .bind(&peer.id)
+        .bind(&peer.label)
+        .bind(ts(peer.created_at))
+        .execute(&mut **tx)
+        .await?;
+    for c in &peer.credentials {
+        insert_credential(tx, &peer.id, c).await?;
+    }
+    Ok(())
+}
+
+async fn insert_grant_in(tx: &mut Tx<'_>, g: &Grant) -> Result<()> {
+    let (kind, subject_id) = match &g.subject {
+        Subject::Peer(id) => ("peer", Some(id.as_str())),
+        Subject::Group(id) => ("group", Some(id.as_str())),
+        Subject::Anyone => ("anyone", None),
+    };
+    let (target_kind, target_id) = match &g.target {
+        Target::App(id) => ("app", id),
+        Target::Tag(id) => ("tag", id),
+    };
+    sqlx::query(
+        "INSERT INTO grants (id, target_kind, target_id, port, proto, network_id, subject_kind, \
+         subject_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&g.id)
+    .bind(target_kind)
+    .bind(target_id)
+    .bind(g.port.map(|p| p.port))
+    .bind(g.port.map(|p| p.proto.to_string()))
+    .bind(&g.network_id)
+    .bind(kind)
+    .bind(subject_id)
+    .bind(ts(g.created_at))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
 
 async fn insert_address_in(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -1061,9 +1094,15 @@ fn grant_from_row(r: sqlx::sqlite::SqliteRow) -> Result<Grant> {
         ("anyone", _) => Subject::Anyone,
         (k, _) => bail!("bad grant subject {k:?}"),
     };
+    let target_id: String = r.get("target_id");
+    let target = match r.get::<String, _>("target_kind").as_str() {
+        "app" => Target::App(target_id),
+        "tag" => Target::Tag(target_id),
+        k => bail!("bad grant target {k:?}"),
+    };
     Ok(Grant {
         id: r.get("id"),
-        app_id: r.get("app_id"),
+        target,
         port,
         network_id: r.get("network_id"),
         subject,
@@ -1119,6 +1158,7 @@ mod test_util {
             interpreter_arg: None,
             identity_note: None,
             reviewed: false,
+            system: false,
             first_seen: now(),
             last_seen: now(),
             ports: vec![],
@@ -1160,7 +1200,7 @@ mod test_util {
     pub(super) fn grant(app_id: &str, subject: Subject) -> Grant {
         Grant {
             id: new_id(),
-            app_id: app_id.into(),
+            target: Target::App(app_id.into()),
             port: Some(PortRef {
                 port: 80,
                 proto: Protocol::Tcp,

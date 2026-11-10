@@ -737,6 +737,7 @@ mod tests {
             exe_path: None,
             interpreter_arg: None,
             identity_note: None,
+            system: false,
             reviewed: false,
             first_seen: now,
             last_seen: now,

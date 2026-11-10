@@ -22,6 +22,8 @@ fn listener(name: &str, port: u16) -> ListeningSocket {
         uid: Some("1000".into()),
         foreign_mntns: false,
         cwd: None,
+        unidentified: false,
+        in_service_unit: false,
     }
 }
 

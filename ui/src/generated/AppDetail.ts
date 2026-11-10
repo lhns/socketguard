@@ -2,12 +2,25 @@
 import type { Address } from "./Address";
 import type { AppCounter } from "./AppCounter";
 import type { AppPort } from "./AppPort";
+import type { EffectiveAccess } from "./EffectiveAccess";
 import type { GrantView } from "./GrantView";
 
 /**
  * An app with its grants.
  */
-export type AppDetail = { grants: Array<GrantView>, 
+export type AppDetail = { 
+/**
+ * Grants on the app itself.
+ */
+grants: Array<GrantView>, 
+/**
+ * Everything that gives the app access, tag grants included, each with its origin.
+ */
+access: Array<EffectiveAccess>, 
+/**
+ * The tags the app is a member of (as a whole or one port).
+ */
+tags: Array<string>, 
 /**
  * Packets and bytes the firewall allowed in, per network and grant subject, as of
  * the last reconcile pass. Empty where the platform has no counters.
@@ -29,4 +42,9 @@ identity_note: string | null,
 /**
  * False = pending: no decision has been made about this app yet.
  */
-reviewed: boolean, first_seen: string, last_seen: string, ports: Array<AppPort>, addresses: Array<Address>, };
+reviewed: boolean, 
+/**
+ * An OS component (service or system process), so frontends can group it away from
+ * the user's own apps.
+ */
+system: boolean, first_seen: string, last_seen: string, ports: Array<AppPort>, addresses: Array<Address>, };

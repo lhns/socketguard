@@ -71,7 +71,7 @@ export default function GrantDialog({ appId, source, onClose }: Props) {
       }
       const portRef = port === "all" ? null : (ports.find((p) => portLabel(p) === port) ?? null);
       await createGrant.mutateAsync({
-        app_id: appId,
+        target: { kind: "app", id: appId },
         port: portRef ? { port: portRef.port, proto: portRef.proto } : null,
         network_id: network || null,
         subject,

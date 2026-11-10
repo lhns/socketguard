@@ -44,7 +44,7 @@ describe("Apps page", () => {
     await user.click(within(dialog).getByRole("button", { name: "Grant" }));
     await waitFor(() => expect(d.count("create_grant")).toBe(1));
     expect(d.last("create_grant")?.args.req).toMatchObject({
-      app_id: "a1",
+      target: { kind: "app", id: "a1" },
       subject: { kind: "peer", id: "p1" },
       confirm_open: false,
       port: null,

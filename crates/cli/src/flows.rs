@@ -54,7 +54,7 @@ async fn grant_to(
     subject: Subject,
 ) -> Result<bool> {
     let mut req = NewGrant {
-        app_id: app.id.clone(),
+        target: socketguard_core::Target::App(app.id.clone()),
         port,
         network_id: None,
         subject,

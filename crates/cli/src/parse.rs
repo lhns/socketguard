@@ -32,6 +32,27 @@ pub fn parse_target(s: &str) -> (String, Option<PortRef>) {
     (s.to_string(), None)
 }
 
+/// What a grant covers, by name as typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetSpec {
+    App(String),
+    Tag(String),
+}
+
+/// [`parse_target`] that also takes `tag:<label>[:port[/proto]]`.
+pub fn parse_target_spec(s: &str) -> (TargetSpec, Option<PortRef>) {
+    match s.strip_prefix("tag:") {
+        Some(rest) => {
+            let (label, port) = parse_target(rest);
+            (TargetSpec::Tag(label), port)
+        }
+        None => {
+            let (app, port) = parse_target(s);
+            (TargetSpec::App(app), port)
+        }
+    }
+}
+
 /// Who a grant is for, by name as typed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubjectSpec {
@@ -126,6 +147,21 @@ mod tests {
             ("node:server.js".into(), None)
         );
         assert_eq!(parse_target(":80"), (":80".into(), None));
+    }
+
+    #[test]
+    fn tag_targets() {
+        assert_eq!(
+            parse_target_spec("tag:dev"),
+            (TargetSpec::Tag("dev".into()), None)
+        );
+        let (t, p) = parse_target_spec("tag:dev:53/udp");
+        assert_eq!(t, TargetSpec::Tag("dev".into()));
+        assert_eq!(p.unwrap().proto, Protocol::Udp);
+        assert_eq!(
+            parse_target_spec("nginx:80").0,
+            TargetSpec::App("nginx".into())
+        );
     }
 
     #[test]

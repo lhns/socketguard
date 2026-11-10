@@ -8,8 +8,9 @@
 use crate::firewall::{DesiredRuleset, Dst, Families, Rule, Scope, ScopeKind, ScopeMatch, Sources};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use socketguard_core::{
-    app_identity, credential_source, valid_interface_name, App, AppPort, Credential, Grant,
-    ListeningSocket, Network, NetworkKind, Peer, PeerGroup, PortRef, PortSet, Protocol, Subject,
+    app_identity, credential_source, grants_for_app, valid_interface_name, App, AppPort,
+    Credential, Grant, ListeningSocket, Network, NetworkKind, Peer, PeerGroup, PortRef, PortSet,
+    Protocol, Subject, Tag,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
@@ -24,6 +25,8 @@ pub struct Snapshot {
     pub peers: Vec<Peer>,
     pub groups: Vec<PeerGroup>,
     pub grants: Vec<Grant>,
+    /// Tags, to expand the grants that target them (ADR 0043).
+    pub tags: Vec<Tag>,
     /// Interfaces under whole-host protection.
     pub protect_host: Vec<String>,
     /// The IPv4 subnets of the protected interfaces that carry IPv4 (others are absent).
@@ -134,7 +137,7 @@ fn host_ipv4_rules(
         if v4_ports.is_empty() {
             continue;
         }
-        for grant in snap.grants.iter().filter(|g| g.app_id == app.id) {
+        for grant in &grants_for_app(&snap.grants, &snap.tags, &app.id) {
             let scoped = grant
                 .network_id
                 .as_deref()
@@ -224,6 +227,7 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
     let mut managed: BTreeSet<IpAddr> = snap.owned.iter().copied().collect();
 
     for app in &snap.apps {
+        let app_grants = grants_for_app(&snap.grants, &snap.tags, &app.id);
         for address in &app.addresses {
             let Some(addr) = address.locator.ipv6() else {
                 continue; // not an IP locator: enforced elsewhere (ADR 0037)
@@ -248,11 +252,10 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
                 None => None,
             };
             let served = served_ports(app, address);
-            for grant in snap.grants.iter().filter(|g| {
-                g.app_id == app.id
-                    && g.network_id
-                        .as_deref()
-                        .is_none_or(|n| n == address.network_id)
+            for grant in app_grants.iter().filter(|g| {
+                g.network_id
+                    .as_deref()
+                    .is_none_or(|n| n == address.network_id)
             }) {
                 let creds = subject_credentials(&snap.groups, &peers, &grant.subject);
                 // Sources per interface binding; the same for every port of this grant.
@@ -531,7 +534,9 @@ pub fn check_protect_host(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use socketguard_core::{Address, AppPort, CredentialKind, Locator, NetworkStatus, Reach};
+    use socketguard_core::{
+        Address, AppPort, CredentialKind, Locator, NetworkStatus, Reach, Target,
+    };
 
     const KEY: &str = "ba83a2e554a8a087cebdb3f053468cd3ff915b5dd94bf11b7a5fc2e36f13158b";
     const KEY_ADDR: &str = "200:8af8:ba35:56ae:bef0:6284:981f:5972/128";
@@ -592,6 +597,7 @@ mod tests {
             interpreter_arg: None,
             identity_note: None,
             reviewed: true,
+            system: false,
             first_seen: Utc::now(),
             last_seen: Utc::now(),
             ports: ports
@@ -630,7 +636,7 @@ mod tests {
     fn grant(id: &str, app: &str, subject: Subject) -> Grant {
         Grant {
             id: id.into(),
-            app_id: app.into(),
+            target: Target::App(app.into()),
             port: None,
             network_id: None,
             subject,
@@ -1290,6 +1296,8 @@ mod tests {
             uid: Some("0".into()),
             foreign_mntns: false,
             cwd: None,
+            unidentified: false,
+            in_service_unit: false,
         }
     }
 
@@ -1311,7 +1319,7 @@ mod tests {
             grants: grants
                 .into_iter()
                 .map(|g| Grant {
-                    app_id: id.clone(),
+                    target: Target::App(id.clone()),
                     ..g
                 })
                 .collect(),
@@ -1380,7 +1388,7 @@ mod tests {
         let mut s = sshd_snap(vec![grant("g", "", Subject::Anyone)]);
         s.apps[0].id = "someone-else".into();
         s.apps[0].addresses[0].app_id = "someone-else".into();
-        s.grants[0].app_id = "someone-else".into();
+        s.grants[0].target = Target::App("someone-else".into());
         assert!(check_protect_host(&s, &[listener("sshd", 22, "::")], &eth0()).is_err());
         // The address is on a network whose interface is not the protected one.
         let mut s = sshd_snap(vec![grant("g", "", Subject::Anyone)]);
@@ -1398,7 +1406,7 @@ mod tests {
             networks: vec![ygg()],
             peers: vec![peer("admin", &[(CredentialKind::YggKey, KEY)])],
             grants: vec![Grant {
-                app_id: id,
+                target: Target::App(id),
                 ..grant("g", "", Subject::Peer("admin".into()))
             }],
             ..Snapshot::default()

@@ -4096,6 +4096,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "curve25519-dalek",
+ "data-encoding",
  "futures-util",
  "hmac",
  "http",

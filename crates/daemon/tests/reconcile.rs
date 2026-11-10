@@ -7,7 +7,7 @@ use socketguard_core::config::{
 use socketguard_core::ListeningSocket;
 use socketguard_core::{
     ActivityKind, ActivityQuery, AddressMode, App, CredentialKind, NetworkStatus, NewCredential,
-    NewGrant, PortRef, PortSet, Protocol, Reach, Subject,
+    NewGrant, PortRef, PortSet, Protocol, Reach, Subject, Target,
 };
 use socketguard_daemon::api::DaemonEvent;
 use socketguard_daemon::engine::{Engine, EngineError, GrantFilter, ProtectHostError};
@@ -139,7 +139,7 @@ impl Harness {
             .create_grant(
                 &self.state,
                 &NewGrant {
-                    app_id: app_id.into(),
+                    target: Target::App(app_id.into()),
                     port: None,
                     network_id: None,
                     subject,
@@ -175,6 +175,8 @@ fn listener(name: &str, port: u16, protocol: Protocol) -> ListeningSocket {
         uid: Some("1000".into()),
         foreign_mntns: false,
         cwd: None,
+        unidentified: false,
+        in_service_unit: false,
     }
 }
 
@@ -194,6 +196,8 @@ fn script(interpreter: &str, script: &str, port: u16) -> ListeningSocket {
         uid: Some("1000".into()),
         foreign_mntns: false,
         cwd: None,
+        unidentified: false,
+        in_service_unit: false,
     }
 }
 
@@ -818,7 +822,7 @@ async fn a_grant_to_anyone_needs_confirmation_and_local_grants_are_rejected() {
     h.reconcile().await;
     let app = h.app().await;
     let grant = |subject, network: Option<&str>, confirm| NewGrant {
-        app_id: app.id.clone(),
+        target: Target::App(app.id.clone()),
         port: None,
         network_id: network.map(str::to_string),
         subject,
@@ -1351,7 +1355,7 @@ async fn adding_and_removing_a_network() {
         .create_grant(
             &h.state,
             &NewGrant {
-                app_id: app.id.clone(),
+                target: Target::App(app.id.clone()),
                 port: None,
                 network_id: Some("ygg".into()),
                 subject: Subject::Anyone,
@@ -1552,7 +1556,7 @@ async fn local_on_a_non_loopback_interface_takes_grants_like_a_lan() {
         .create_grant(
             &h.state,
             &NewGrant {
-                app_id: app.id.clone(),
+                target: Target::App(app.id.clone()),
                 port: None,
                 network_id: Some("local".into()),
                 subject: Subject::Anyone,
@@ -2108,7 +2112,7 @@ async fn identical_requests_racing_create_one_grant_peer_and_group() {
     assert!(matches!(loser, EngineError::Conflict(_)), "{loser:?}");
 
     let req = NewGrant {
-        app_id: app.id.clone(),
+        target: Target::App(app.id.clone()),
         port: None,
         network_id: None,
         subject: Subject::Anyone,
@@ -2139,7 +2143,7 @@ async fn a_failed_apply_still_records_the_change_and_announces_it() {
         .create_grant(
             s,
             &NewGrant {
-                app_id: app.id.clone(),
+                target: Target::App(app.id.clone()),
                 port: None,
                 network_id: None,
                 subject: Subject::Anyone,
@@ -2249,7 +2253,7 @@ async fn a_segment_grant_is_limited_to_the_networks_prefix() {
         .create_grant(
             &h.state,
             &NewGrant {
-                app_id: app.id.clone(),
+                target: Target::App(app.id.clone()),
                 port: None,
                 network_id: Some("lan".into()),
                 subject: Subject::Anyone,

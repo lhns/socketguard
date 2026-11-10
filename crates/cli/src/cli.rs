@@ -35,12 +35,16 @@ pub enum Command {
     /// Manage peers (who may be granted access) and their credentials
     #[command(subcommand)]
     Peers(PeersCmd),
+    /// Manage tags: named sets of apps (or ports) that grants can target
+    #[command(subcommand)]
+    Tags(TagsCmd),
     /// Manage peer groups
     #[command(subcommand)]
     Groups(GroupsCmd),
-    /// Let a peer, a group or anyone reach an app: <app>[:port[/proto]] <subject>
+    /// Let a peer, a group or anyone reach an app or a tag: <app>[:port[/proto]] <subject>, or
+    /// repeat --app/--tag, --port, --to and --network to grant many at once (one batch)
     Grant(GrantArgs),
-    /// Remove a grant: by id, or by <app>[:port] <subject>
+    /// Remove a grant: by id, by <app>[:port] <subject>, or with the repeatable flags of `grant`
     Revoke(RevokeArgs),
     /// List grants
     Grants(GrantsArgs),
@@ -132,6 +136,9 @@ pub enum PeersCmd {
         #[arg(required = true)]
         values: Vec<String>,
     },
+    /// Generate a Tor client key for a peer (replaces the one generated before). The
+    /// private key is shown; `share` prints it as a ClientOnionAuthDir line per app
+    TorKey { peer: String },
     /// Rename a peer
     Rename { peer: String, new_label: String },
     /// Remove a peer and the grants naming it
@@ -192,33 +199,111 @@ pub enum GroupsCmd {
     Members { group: String, peers: Vec<String> },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum TagsCmd {
+    /// List tags
+    List,
+    /// Show a tag: patterns, members and the grants on it
+    Show { tag: String },
+    /// Create a tag, optionally with patterns and members. Apps whose process name or
+    /// executable path matches a pattern join it, now and when they start later
+    Add {
+        label: String,
+        /// Members: <app>[:port[/proto]]
+        members: Vec<String>,
+        /// A glob on the process name or the executable path (repeatable), e.g. 'python*'
+        #[arg(long = "match", value_name = "PATTERN")]
+        patterns: Vec<String>,
+    },
+    /// Rename a tag
+    Rename { tag: String, new_label: String },
+    /// Replace the patterns of a tag (none: clear them)
+    Patterns { tag: String, patterns: Vec<String> },
+    /// Remove a tag and the grants on it
+    Rm { tag: String },
+    /// Add or remove members
+    #[command(subcommand)]
+    Members(TagMembersCmd),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TagMembersCmd {
+    /// Add apps (or one port of an app): <app>[:port[/proto]]
+    Add {
+        tag: String,
+        #[arg(required = true)]
+        members: Vec<String>,
+    },
+    /// Remove members; an app a pattern matches stays out afterwards
+    Rm {
+        tag: String,
+        #[arg(required = true)]
+        members: Vec<String>,
+    },
+}
+
 #[derive(Args, Debug)]
 pub struct GrantArgs {
-    /// <app>[:port[/proto]]: an app id, unique id prefix or name
-    pub target: String,
+    /// <app>[:port[/proto]] or tag:<label>[:port[/proto]]: an app id, unique id prefix or
+    /// name. Alternatively use the flags below
+    pub target: Option<String>,
     /// A peer label, group:<label> or anyone
-    pub subject: String,
-    /// Only on this network (default: all networks)
-    #[arg(long)]
-    pub network: Option<String>,
+    pub subject: Option<String>,
+    /// An app, `<app>[:port[/proto]]` (repeatable)
+    #[arg(long = "app", value_name = "APP")]
+    pub apps: Vec<String>,
+    /// A tag, `<label>[:port[/proto]]` (repeatable)
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+    /// Limit the apps and tags to this port, `<port>[/proto]` (repeatable)
+    #[arg(long = "port", value_name = "PORT")]
+    pub ports: Vec<String>,
+    /// A peer label, group:<label> or anyone (repeatable)
+    #[arg(long = "to", value_name = "SUBJECT")]
+    pub to: Vec<String>,
+    /// Only on this network (repeatable; default: all networks)
+    #[arg(long = "network")]
+    pub networks: Vec<String>,
     /// Confirm a grant to anyone without asking
     #[arg(long, short = 'y')]
     pub yes: bool,
+    /// With the flags: show what would change, change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct RevokeArgs {
-    /// A grant id, or <app>[:port[/proto]] together with a subject
-    pub target: String,
+    /// A grant id, or <app>[:port[/proto]] or tag:<label>[:port[/proto]] with a subject
+    pub target: Option<String>,
     pub subject: Option<String>,
+    /// An app, `<app>[:port[/proto]]` (repeatable)
+    #[arg(long = "app", value_name = "APP")]
+    pub apps: Vec<String>,
+    /// A tag, `<label>[:port[/proto]]` (repeatable)
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+    /// Limit the apps and tags to this port, `<port>[/proto]` (repeatable)
+    #[arg(long = "port", value_name = "PORT")]
+    pub ports: Vec<String>,
+    /// A peer label, group:<label> or anyone (repeatable)
+    #[arg(long = "to", value_name = "SUBJECT")]
+    pub to: Vec<String>,
+    /// Only the grants on this network (repeatable; default: any network)
+    #[arg(long = "network")]
+    pub networks: Vec<String>,
+    /// With the flags: show what would change, change nothing
     #[arg(long)]
-    pub network: Option<String>,
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct GrantsArgs {
     #[arg(long)]
     pub app: Option<String>,
+    /// Grants on this tag
+    #[arg(long)]
+    pub tag: Option<String>,
     #[arg(long)]
     pub peer: Option<String>,
     #[arg(long)]
@@ -442,15 +527,70 @@ mod tests {
             panic!()
         };
         assert_eq!(
-            (g.target.as_str(), g.subject.as_str(), g.yes),
-            ("nginx:80/tcp", "group:team", true)
+            (g.target.as_deref(), g.subject.as_deref(), g.yes),
+            (Some("nginx:80/tcp"), Some("group:team"), true)
         );
-        assert_eq!(g.network.as_deref(), Some("ygg"));
+        assert_eq!(g.networks, ["ygg"]);
         let c = parse(&["revoke", "abc123"]).unwrap();
         let Command::Revoke(r) = c.command else {
             panic!()
         };
         assert!(r.subject.is_none());
+    }
+
+    #[test]
+    fn grant_takes_repeatable_flags() {
+        let c = parse(&[
+            "grant",
+            "--app",
+            "a",
+            "--app",
+            "b:80",
+            "--tag",
+            "dev",
+            "--port",
+            "80",
+            "--port",
+            "443",
+            "--to",
+            "alice",
+            "--to",
+            "group:team",
+            "--network",
+            "lan",
+            "--network",
+            "ygg",
+        ])
+        .unwrap();
+        let Command::Grant(g) = c.command else {
+            panic!()
+        };
+        assert_eq!(g.apps, ["a", "b:80"]);
+        assert_eq!(g.tags, ["dev"]);
+        assert_eq!(g.ports, ["80", "443"]);
+        assert_eq!(g.to, ["alice", "group:team"]);
+        assert_eq!(g.networks, ["lan", "ygg"]);
+        assert!(g.target.is_none());
+    }
+
+    #[test]
+    fn tags_commands() {
+        let c = parse(&[
+            "tags", "add", "dev", "web:80", "--match", "py*", "--match", "node",
+        ])
+        .unwrap();
+        let Command::Tags(TagsCmd::Add {
+            label,
+            members,
+            patterns,
+        }) = c.command
+        else {
+            panic!()
+        };
+        assert_eq!((label.as_str(), members.len()), ("dev", 1));
+        assert_eq!(patterns, ["py*", "node"]);
+        assert!(parse(&["tags", "members", "add", "dev"]).is_err());
+        assert!(parse(&["tags", "members", "rm", "dev", "web"]).is_ok());
     }
 
     #[test]

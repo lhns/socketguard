@@ -50,7 +50,7 @@ describe("Activity page", () => {
       credentials: [{ kind: "ip", value: "192.0.2.9", label: null }],
     });
     expect(d.last("create_grant")?.args.req).toMatchObject({
-      app_id: "a1",
+      target: { kind: "app", id: "a1" },
       subject: { kind: "peer", id: "p9" },
     });
   });

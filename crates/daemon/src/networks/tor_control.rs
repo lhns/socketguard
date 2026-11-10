@@ -602,21 +602,7 @@ pub fn authenticate_command(auth: &TorAuth, cookie: Option<&[u8]>) -> Result<Str
 
 /// RFC 4648 base32, uppercase, no padding (Tor's encoding for x25519 client keys).
 pub fn base32(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    let mut out = String::new();
-    let (mut buf, mut bits) = (0u32, 0u32);
-    for &b in bytes {
-        buf = (buf << 8) | b as u32;
-        bits += 8;
-        while bits >= 5 {
-            out.push(ALPHABET[((buf >> (bits - 5)) & 31) as usize] as char);
-            bits -= 5;
-        }
-    }
-    if bits > 0 {
-        out.push(ALPHABET[((buf << (5 - bits)) & 31) as usize] as char);
-    }
-    out
+    data_encoding::BASE32_NOPAD.encode(bytes)
 }
 
 /// What an onion service should be, for ADD_ONION.

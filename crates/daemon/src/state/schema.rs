@@ -1,4 +1,4 @@
-//! The schema (v4), its migrations and the archive of pre-v1 databases.
+//! The schema (v6), its migrations and the archive of pre-v1 databases.
 
 use super::protect::protect_files;
 use super::settings::FRESH_DB_KEY;
@@ -9,7 +9,7 @@ use sqlx::{Connection, SqliteConnection};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Schema v1 -> v2: the service keys of onion addresses (ADR 0037).
 const MIGRATION_1_TO_2: &str = r#"
@@ -57,12 +57,73 @@ const MIGRATION_4_TO_5: &str = r#"
 ALTER TABLE app_ports ADD COLUMN family TEXT NOT NULL DEFAULT 'dual';
 "#;
 
+/// Schema v5 -> v6: tags, grants that target an app or a tag, the system flag of apps and
+/// the private Tor client keys the daemon generated (ADRs 0043, 0045).
+///
+/// A grant's target has no foreign key (it points at two tables), so deleting an app or a
+/// tag deletes its grants explicitly. SQLite cannot drop `NOT NULL` or retarget a column,
+/// hence the rebuild of `grants`.
+const MIGRATION_5_TO_6: &str = r#"
+CREATE TABLE tags (
+    id TEXT PRIMARY KEY,
+    label TEXT UNIQUE NOT NULL,
+    patterns TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
+CREATE TABLE tag_members (
+    tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    port INTEGER,
+    proto TEXT
+);
+CREATE UNIQUE INDEX tag_members_unique ON tag_members (
+    tag_id, app_id, COALESCE(port, -1), COALESCE(proto, '')
+);
+CREATE INDEX tag_members_app ON tag_members(app_id);
+CREATE TABLE tag_exclusions (
+    tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    PRIMARY KEY (tag_id, app_id)
+);
+
+CREATE TABLE grants_new (
+    id TEXT PRIMARY KEY,
+    target_kind TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    port INTEGER,
+    proto TEXT,
+    network_id TEXT,
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT,
+    created_at TEXT NOT NULL
+);
+INSERT INTO grants_new (id, target_kind, target_id, port, proto, network_id, subject_kind,
+                        subject_id, created_at)
+    SELECT id, 'app', app_id, port, proto, network_id, subject_kind, subject_id, created_at
+    FROM grants;
+DROP TABLE grants;
+ALTER TABLE grants_new RENAME TO grants;
+CREATE INDEX grants_target ON grants(target_kind, target_id);
+CREATE UNIQUE INDEX grants_unique ON grants (
+    target_kind, target_id, COALESCE(port, -1), COALESCE(proto, ''), COALESCE(network_id, ''),
+    subject_kind, COALESCE(subject_id, '')
+);
+
+ALTER TABLE apps ADD COLUMN system INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE tor_client_keys (
+    credential_id TEXT PRIMARY KEY REFERENCES peer_credentials(id) ON DELETE CASCADE,
+    private_key TEXT NOT NULL
+);
+"#;
+
 /// `MIGRATIONS[n]` takes the schema from v(n+1) to v(n+2).
-const MIGRATIONS: [&str; 4] = [
+const MIGRATIONS: [&str; 5] = [
     MIGRATION_1_TO_2,
     MIGRATION_2_TO_3,
     MIGRATION_3_TO_4,
     MIGRATION_4_TO_5,
+    MIGRATION_5_TO_6,
 ];
 
 const SCHEMA: &str = r#"
@@ -267,7 +328,11 @@ mod tests {
                 "peer_group_members",
                 "peer_groups",
                 "peers",
-                "settings"
+                "settings",
+                "tag_exclusions",
+                "tag_members",
+                "tags",
+                "tor_client_keys"
             ]
         );
         db.migrate().await.expect("migrate is idempotent");
@@ -516,6 +581,57 @@ mod tests {
         db.migrate().await.unwrap();
         let app = db.get_app("a").await.unwrap().unwrap();
         assert_eq!(app.ports[0].family, socketguard_core::AddrFamily::Dual);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn v5_database_migrates_to_v6_with_app_targets() {
+        let path = temp_db_path("v5-to-v6");
+        {
+            let opts = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true);
+            let mut c = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::raw_sql(SCHEMA).execute(&mut c).await.unwrap();
+            for sql in &MIGRATIONS[..4] {
+                sqlx::raw_sql(sql).execute(&mut c).await.unwrap();
+            }
+            sqlx::query("PRAGMA user_version = 5")
+                .execute(&mut c)
+                .await
+                .unwrap();
+            sqlx::raw_sql(
+                "INSERT INTO apps (id, name, process_name, reviewed, first_seen, last_seen) \
+                 VALUES ('a', 'n', 'p', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'); \
+                 INSERT INTO grants (id, app_id, port, proto, network_id, subject_kind, \
+                 subject_id, created_at) VALUES \
+                 ('g1', 'a', 80, 'tcp', NULL, 'peer', 'p1', '2026-01-01T00:00:00Z'), \
+                 ('g2', 'a', NULL, NULL, 'lan', 'anyone', NULL, '2026-01-01T00:00:00Z');",
+            )
+            .execute(&mut c)
+            .await
+            .unwrap();
+        }
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        let grants = db.list_grants().await.unwrap();
+        assert_eq!(grants.len(), 2);
+        assert!(grants
+            .iter()
+            .all(|g| g.target == socketguard_core::Target::App("a".into())));
+        assert_eq!(grants[0].network_id, None);
+        assert_eq!(grants[1].network_id.as_deref(), Some("lan"));
+        assert!(!db.get_app("a").await.unwrap().unwrap().system);
+        // The unique index still holds, and now covers the target.
+        let mut dup = grant("a", Subject::Peer("p1".into()));
+        dup.id = "g3".into();
+        let err = db.insert_grant(&dup).await.unwrap_err();
+        assert!(super::super::is_unique_violation(&err), "{err:#}");
+        dup.target = socketguard_core::Target::Tag("a".into());
+        db.insert_grant(&dup)
+            .await
+            .expect("a tag with the same id is another target");
         drop(db);
         let _ = std::fs::remove_file(&path);
     }

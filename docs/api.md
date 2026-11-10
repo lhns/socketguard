@@ -75,7 +75,8 @@ does not cause a 202. Every error has the [error body](#errors).
 | GET | `/api/status` | | `StatusResponse` | version, networks, protect-host interfaces, `disabled`, `unadopted` (an existing ruleset was found with an empty database and is left alone until `enable` or `disable`), counts |
 | GET | `/api/events` | | SSE stream | [events](#events) |
 | GET | `/api/apps` | query `pending=true` (optional) | `App[]` | `pending=true`: only apps without a decision |
-| GET | `/api/apps/{id}` | | `AppDetail` | app with addresses, ports, grants (with reach) and counters |
+| GET | `/api/apps/{id}` | | `AppDetail` | app with addresses, ports, grants on it (with reach), `access` (every access with its origin: direct, tag or group, tag grants expanded per member), its `tags` and counters |
+| GET | `/api/apps/{id}/share` | | `ShareResponse` | per onion service and granted peer with a Tor client key the daemon generated: the `<onion>:descriptor:x25519:<key>` line for the client's `ClientOnionAuthDir`. Holds private keys |
 | DELETE | `/api/apps/{id}` | | 204 | forgets the app, its addresses and its grants; **it reappears as pending the next time it listens** |
 | POST | `/api/apps/{id}/review` | `ReviewRequest` | `AppDetail` | mark reviewed (or pending again); it stays closed until granted |
 | POST | `/api/apps/{id}/split` | `SplitRequest` | `Address` (201) | gives one port its own address on a network |
@@ -87,6 +88,7 @@ does not cause a 202. Every error has the [error body](#errors).
 | DELETE | `/api/peers/{id}` | | 204 | also deletes the grants naming the peer |
 | POST | `/api/credentials/parse` | `ParseCredentialsRequest` | `ParsedCredential[]` | classifies pasted values (newline, comma or space separated); changes nothing |
 | POST | `/api/peers/{id}/credentials` | `NewCredential` | `Credential` (201) | |
+| POST | `/api/peers/{id}/tor-key` | | `TorKeyResponse` (201) | generates an x25519 pair: the public key becomes a `tor_client_key` credential, the private key is stored in the database (like the onion service keys) and returned. Replaces the key generated before; a pasted key stays |
 | DELETE | `/api/peers/{id}/credentials/{cred_id}` | | 204 | |
 | GET | `/api/peer-groups` | | `PeerGroup[]` | |
 | POST | `/api/peer-groups` | `NewGroup` | `PeerGroup` (201) | |
@@ -94,9 +96,17 @@ does not cause a 202. Every error has the [error body](#errors).
 | PATCH | `/api/peer-groups/{id}` | `UpdateLabel` | `PeerGroup` | rename |
 | DELETE | `/api/peer-groups/{id}` | | 204 | also deletes the grants naming the group |
 | PUT | `/api/peer-groups/{id}/members` | `SetMembers` | `PeerGroup` | replaces the members |
-| GET | `/api/grants` | query `app`, `peer`, `group` (all optional) | `GrantView[]` | `peer` matches grants to the peer or to a group it is in |
-| POST | `/api/grants` | `NewGrant` | `GrantView` (201) | Anyone needs `"confirm_open": true` |
+| GET | `/api/grants` | query `app`, `tag`, `peer`, `group` (all optional) | `GrantView[]` | `app`/`tag`: grants whose target is that app/tag; `peer` matches grants to the peer or to a group it is in |
+| POST | `/api/grants` | `NewGrant` | `GrantView` (201) | `target` is `{"kind": "app" or "tag", "id"}`. Anyone needs `"confirm_open": true` |
 | DELETE | `/api/grants/{id}` | | 204 | |
+| POST | `/api/changes` | `ChangesRequest` | `ChangesResponse` | [batch changes](#batch-changes): many operations, one transaction, one firewall update |
+| GET | `/api/tags` | | `Tag[]` | [tags](#tags) |
+| POST | `/api/tags` | `NewTag` | `Tag` (201) | apps already matching the patterns join |
+| GET | `/api/tags/{id}` | | `Tag` | |
+| PATCH | `/api/tags/{id}` | `UpdateTag` | `Tag` | rename and/or replace the patterns; apps matching a new pattern join, none leaves |
+| DELETE | `/api/tags/{id}` | | 204 | also deletes the grants on the tag |
+| POST | `/api/tags/{id}/members` | `TagMember` | `Tag` | an app, or one of its ports (`port`); a manual addition clears an exclusion |
+| DELETE | `/api/tags/{id}/members/{app_id}` | query `port`, `proto` (optional) | `Tag` | without `port` the whole-app membership goes. Removing a whole app that a pattern matches records an exclusion (`excluded`) |
 | GET | `/api/networks` | | `Network[]` | |
 | POST | `/api/networks` | `NewNetwork` | `Network` (201) | a backend instance: `{"id"?, "type": "slaac", "interface": "eth0", ...}`; also written to the `backends` key of the config file (`SOCKETGUARD_CONFIG` or the default; created if missing), so it survives a restart |
 | DELETE | `/api/networks/{id}` | | 204 | its addresses leave the interfaces first; removed from the config file as well. Query `force=true`; a Tor network whose services cannot be removed is 409 `conflict` without it |
@@ -192,6 +202,7 @@ carries the meaning; `data` is empty unless stated. Clients re-fetch what change
 | `app_discovered` | a new, pending app; `data` is its id |
 | `peers_changed` | peers, credentials or groups changed |
 | `grants_changed` | grants (or what they resolve to) changed |
+| `tags_changed` | tags, their patterns or members changed |
 | `networks_changed` | a network was added, removed or changed state |
 | `settings_changed` | address mode or whole-host protection changed |
 | `activity` | new activity records |
@@ -199,6 +210,25 @@ carries the meaning; `data` is empty unless stated. Clients re-fetch what change
 The client crate parses them into `ApiEvent`.
 
 The desktop UI's Tauri backend re-emits these events to the frontend under the same names and adds two UI-local ones, `daemon_connected` and `daemon_disconnected`, for its own connection to the stream; the daemon never sends them.
+
+## Tags
+
+A tag (ADR 0043) is a label with members (an app, or one port of an app) and optional glob `patterns` on the process name or the executable path. A grant whose `target` is a tag covers each member, narrowed to the member's port and the grant's port (both set and different: nothing). Apps matching the patterns join when they are first seen; removing a matched app by hand keeps it out. `AppDetail.access` lists every access an app has with its `origin`: `direct`, `tag` (with `tag_id`) or `group` (with `group_id`). Export and apply (below) leave grants on tags out.
+
+## Batch changes
+
+`POST /api/changes` (ADR 0045) takes `{"ops": [...], "dry_run": false}`. The operations are checked and applied in order, all or nothing, with one firewall update and (when something is pending) the usual 202. The first operation that fails refuses the batch and nothing is saved; the message names it (`operation 2: ...`).
+
+| `op` | Fields |
+|---|---|
+| `create_peer` | `label`, `credentials` (`NewCredential[]`), `ref?` |
+| `create_tag` | `label`, `patterns`, `ref?` |
+| `add_grant` | `target`, `port?`, `network_id?`, `subject`, `confirm_open` |
+| `remove_grant` | `grant_id` |
+| `add_tag_member`, `remove_tag_member` | `tag_id`, `app_id`, `port?` |
+| `review` | `app_id`, `reviewed` |
+
+A `ref` is a client-chosen name starting with `$` (`$new0`). Wherever an id goes in a later operation (a tag target, a subject, `tag_id`, `grant_id`), the ref stands for it; the response's `refs` maps each ref to the id it got. An `add_grant` to Anyone without `confirm_open` refuses the whole batch with 409 `confirmation_required`. The answer lists the `changes` (a diff: `kind`, `item`, `name`, `id`, and for grants the `reach` per network, for removed grants the reach that is lost). With `dry_run` nothing is saved or applied; the operations still run against the database's constraints, so a conflict shows.
 
 ## Export and apply
 

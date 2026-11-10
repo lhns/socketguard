@@ -7,8 +7,8 @@ use crate::state::{self, NewActivity};
 use crate::AppState;
 use chrono::Utc;
 use socketguard_core::{
-    new_id, normalize_credential, ActivityKind, AddressMode, Credential, Grant, GrantView,
-    NewCredential, NewGrant, Peer, PeerGroup, Subject,
+    new_id, normalize_credential, ActivityKind, AddressMode, App, Credential, Grant, GrantView,
+    NewCredential, NewGrant, Peer, PeerGroup, Subject, Tag, Target,
 };
 use std::collections::{BTreeSet, HashSet};
 
@@ -364,57 +364,18 @@ impl Engine {
     }
 
     /// Create a grant. Rejected: a grant on Local ([`EngineError::LocalNetwork`]), a grant
-    /// to Anyone without `confirm_open`, and unknown apps, ports, networks or subjects.
+    /// to Anyone without `confirm_open`, and unknown apps, tags, ports, networks or
+    /// subjects.
     pub async fn create_grant(
         &self,
         state: &AppState,
         req: &NewGrant,
     ) -> Result<GrantView, EngineError> {
-        let app = state
-            .db
-            .get_app(&req.app_id)
-            .await?
-            .ok_or_else(|| EngineError::NotFound(format!("app {}", req.app_id)))?;
-        if let Some(nid) = &req.network_id {
-            let net = self
-                .networks()
-                .into_iter()
-                .find(|n| n.id == *nid)
-                .ok_or_else(|| EngineError::NotFound(format!("network {nid}")))?;
-            if !net.grants_apply {
-                return Err(EngineError::LocalNetwork);
-            }
-        }
-        if let Some(p) = req.port {
-            if !app.has_port(p) {
-                return Err(EngineError::Invalid(format!(
-                    "{} has no port {p}",
-                    app.name
-                )));
-            }
-        }
-        let subject_label = match &req.subject {
-            Subject::Anyone => {
-                if !req.confirm_open {
-                    return Err(EngineError::ConfirmationRequired);
-                }
-                "Anyone".to_string()
-            }
-            Subject::Peer(id) => self.get_peer(state, id).await?.label,
-            Subject::Group(id) => self.get_group(state, id).await?.label,
-        };
-        let existing = state.db.list_grants().await?;
-        if existing.iter().any(|g| {
-            g.app_id == req.app_id
-                && g.port == req.port
-                && g.network_id == req.network_id
-                && g.subject == req.subject
-        }) {
-            return Err(EngineError::Conflict("this grant already exists".into()));
-        }
+        let cat = Catalog::load(state).await?;
+        let info = self.check_new_grant(&cat, req)?;
         let grant = Grant {
             id: new_id(),
-            app_id: req.app_id.clone(),
+            target: req.target.clone(),
             port: req.port,
             network_id: req.network_id.clone(),
             subject: req.subject.clone(),
@@ -427,20 +388,98 @@ impl Engine {
             .await
             .map_err(|e| Self::conflict_or_internal(e, "this grant"))?;
         let applied = self.apply_firewall(state).await;
-        let peer_id = match &grant.subject {
-            Subject::Peer(id) => Some(id.clone()),
-            _ => None,
-        };
-        let mut act = NewActivity::new(
-            ActivityKind::GrantAdded,
-            format!("Granted {} access to {}", subject_label, app.name),
-        )
-        .app(&app.id);
-        act.peer_id = peer_id;
-        act.network_id = grant.network_id.clone();
+        let act = Self::grant_added_activity(&grant, &info);
         self.commit(state, applied, Some(act), &[DaemonEvent::GrantsChanged])
             .await?;
         self.get_grant(state, &grant.id).await
+    }
+
+    pub(super) fn grant_added_activity(grant: &Grant, info: &GrantInfo) -> NewActivity {
+        let mut act = NewActivity::new(
+            ActivityKind::GrantAdded,
+            format!(
+                "Granted {} access to {}",
+                info.subject_label, info.target_name
+            ),
+        );
+        if let Target::App(id) = &grant.target {
+            act = act.app(id);
+        }
+        if let Subject::Peer(id) = &grant.subject {
+            act.peer_id = Some(id.clone());
+        }
+        act.network_id = grant.network_id.clone();
+        act
+    }
+
+    /// Check a new grant against `cat`; the labels for the activity record.
+    pub(super) fn check_new_grant(
+        &self,
+        cat: &Catalog,
+        req: &NewGrant,
+    ) -> Result<GrantInfo, EngineError> {
+        let target_name = match &req.target {
+            Target::App(id) => {
+                let app = cat
+                    .app(id)
+                    .ok_or_else(|| EngineError::NotFound(format!("app {id}")))?;
+                if let Some(p) = req.port {
+                    if !app.has_port(p) {
+                        return Err(EngineError::Invalid(format!(
+                            "{} has no port {p}",
+                            app.name
+                        )));
+                    }
+                }
+                app.name.clone()
+            }
+            Target::Tag(id) => format!(
+                "tag {}",
+                cat.tag(id)
+                    .ok_or_else(|| EngineError::NotFound(format!("tag {id}")))?
+                    .label
+            ),
+        };
+        if let Some(nid) = &req.network_id {
+            let net = self
+                .networks()
+                .into_iter()
+                .find(|n| n.id == *nid)
+                .ok_or_else(|| EngineError::NotFound(format!("network {nid}")))?;
+            if !net.grants_apply {
+                return Err(EngineError::LocalNetwork);
+            }
+        }
+        let subject_label = match &req.subject {
+            Subject::Anyone => {
+                if !req.confirm_open {
+                    return Err(EngineError::ConfirmationRequired);
+                }
+                "Anyone".to_string()
+            }
+            Subject::Peer(id) => cat
+                .peer(id)
+                .ok_or_else(|| EngineError::NotFound(format!("peer {id}")))?
+                .label
+                .clone(),
+            Subject::Group(id) => cat
+                .group(id)
+                .ok_or_else(|| EngineError::NotFound(format!("peer group {id}")))?
+                .label
+                .clone(),
+        };
+        if cat.grants.iter().any(|g| {
+            g.target == req.target
+                && g.port == req.port
+                && g.network_id == req.network_id
+                && g.subject == req.subject
+        }) {
+            return Err(EngineError::Conflict("this grant already exists".into()));
+        }
+        Ok(GrantInfo {
+            target_name,
+            subject_label,
+        })
     }
 
     pub async fn delete_grant(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
@@ -451,23 +490,92 @@ impl Engine {
             .ok_or_else(|| EngineError::NotFound(format!("grant {id}")))?;
         state.db.delete_grant(id).await?;
         let applied = self.apply_firewall(state).await;
-        let app_name = state
-            .db
-            .get_app(&grant.app_id)
-            .await?
-            .map(|a| a.name)
-            .unwrap_or_else(|| grant.app_id.clone());
+        let act = self.grant_removed_activity(state, &grant).await;
+        self.commit(state, applied, Some(act), &[DaemonEvent::GrantsChanged])
+            .await?;
+        Ok(())
+    }
+
+    pub(super) async fn grant_removed_activity(
+        &self,
+        state: &AppState,
+        grant: &Grant,
+    ) -> NewActivity {
+        let name = match &grant.target {
+            Target::App(id) => state
+                .db
+                .get_app(id)
+                .await
+                .ok()
+                .flatten()
+                .map(|a| a.name)
+                .unwrap_or_else(|| id.clone()),
+            Target::Tag(id) => state
+                .db
+                .get_tag(id)
+                .await
+                .ok()
+                .flatten()
+                .map(|t| format!("tag {}", t.label))
+                .unwrap_or_else(|| format!("tag {id}")),
+        };
         let mut act = NewActivity::new(
             ActivityKind::GrantRemoved,
-            format!("Removed a grant for {app_name}"),
-        )
-        .app(&grant.app_id);
+            format!("Removed a grant for {name}"),
+        );
+        if let Target::App(id) = &grant.target {
+            act = act.app(id);
+        }
         if let Subject::Peer(p) = &grant.subject {
             act.peer_id = Some(p.clone());
         }
         act.network_id = grant.network_id.clone();
-        self.commit(state, applied, Some(act), &[DaemonEvent::GrantsChanged])
-            .await?;
-        Ok(())
+        act
+    }
+}
+
+/// Labels for the activity record of a new grant.
+pub(super) struct GrantInfo {
+    pub target_name: String,
+    pub subject_label: String,
+}
+
+/// The apps, peers, groups, tags and grants a change is checked against. A batch edits its
+/// own copy as it goes, so later operations see earlier ones (including created refs).
+#[derive(Default, Clone)]
+pub(super) struct Catalog {
+    pub apps: Vec<App>,
+    pub peers: Vec<Peer>,
+    pub groups: Vec<PeerGroup>,
+    pub tags: Vec<Tag>,
+    pub grants: Vec<Grant>,
+}
+
+impl Catalog {
+    pub async fn load(state: &AppState) -> anyhow::Result<Self> {
+        let db = &state.db;
+        Ok(Self {
+            apps: db.list_apps().await?,
+            peers: db.list_peers().await?,
+            groups: db.list_groups().await?,
+            tags: db.list_tags().await?,
+            grants: db.list_grants().await?,
+        })
+    }
+
+    pub fn app(&self, id: &str) -> Option<&App> {
+        self.apps.iter().find(|a| a.id == id)
+    }
+
+    pub fn peer(&self, id: &str) -> Option<&Peer> {
+        self.peers.iter().find(|p| p.id == id)
+    }
+
+    pub fn group(&self, id: &str) -> Option<&PeerGroup> {
+        self.groups.iter().find(|g| g.id == id)
+    }
+
+    pub fn tag(&self, id: &str) -> Option<&Tag> {
+        self.tags.iter().find(|t| t.id == id)
     }
 }

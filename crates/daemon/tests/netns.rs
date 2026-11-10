@@ -84,7 +84,7 @@ impl Drop for NsPair {
 use chrono::Utc;
 use socketguard_core::{
     Address, App, AppPort, Credential, CredentialKind, Grant, Locator, Network, NetworkKind,
-    NetworkStatus, Peer, PortSet, Protocol, Subject,
+    NetworkStatus, Peer, PortSet, Protocol, Subject, Target,
 };
 use socketguard_daemon::firewall::nftables::NftablesFirewall;
 use socketguard_daemon::firewall::{DesiredRuleset, DropEvent, Firewall};
@@ -332,7 +332,7 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
             }],
             vec![Grant {
                 id: "g".into(),
-                app_id: "web".into(),
+                target: Target::App("web".into()),
                 port: None,
                 network_id: None,
                 subject: Subject::Peer("b".into()),
@@ -349,6 +349,7 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
             interpreter_arg: None,
             identity_note: None,
             reviewed: true,
+            system: false,
             first_seen: now,
             last_seen: now,
             ports: vec![AppPort {
@@ -429,6 +430,69 @@ fn granted_source_reaches_the_listener_others_do_not() {
     ];
     ip(&other);
     assert!(!fx.reachable(MANAGED, Some("fd00:5a::3")));
+}
+
+/// ADR 0043: a tag with a match pattern and a grant on the tag. The listener starts after
+/// the grant exists; discovery (the real `auto_tag_app`) puts it in the tag, the producer
+/// expands the tag grant, and nftables lets the granted peer in and nobody else.
+#[test]
+fn a_tag_grant_covers_a_new_matching_listener_for_the_granted_peer_only() {
+    use socketguard_daemon::state::{Database, Write};
+
+    if !enabled() {
+        return;
+    }
+    let fx = Fixture::new("tag");
+    let mut snap = snapshot(&[(CredentialKind::Ip, "fd00:5a::2/128")]);
+    // The grant is on a tag, not on the app; the tag matches by process name.
+    let now = Utc::now();
+    snap.grants[0].target = Target::Tag("dev".into());
+    let tag = socketguard_core::Tag {
+        id: "dev".into(),
+        label: "dev".into(),
+        patterns: vec!["pytho*".into()],
+        members: vec![],
+        excluded: vec![],
+        created_at: now,
+    };
+    snap.tags = vec![tag.clone()];
+    fx.apply(&snap);
+    assert!(
+        !fx.reachable(MANAGED, None),
+        "the app is not in the tag yet: nothing is granted"
+    );
+
+    // The app is discovered: the tag takes it in.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let tags = rt.block_on(async {
+        let db = Database::new(":memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        db.insert_app(&snap.apps[0]).await.unwrap();
+        db.apply_writes(&[Write::InsertTag(tag)]).await.unwrap();
+        assert_eq!(db.auto_tag_app(&snap.apps[0]).await.unwrap(), ["dev"]);
+        db.list_tags().await.unwrap()
+    });
+    snap.tags = tags;
+    fx.apply(&snap);
+    assert!(fx.reachable(MANAGED, None), "B is granted through the tag");
+    assert!(
+        !fx.reachable("fd00:5a::1", None),
+        "not the rest of the interface"
+    );
+    ip(&[
+        "-n",
+        &fx.ns.b,
+        "addr",
+        "add",
+        "fd00:5a::3/128",
+        "dev",
+        "sgv-b",
+        "nodad",
+    ]);
+    assert!(
+        !fx.reachable(MANAGED, Some("fd00:5a::3")),
+        "another source is still denied"
+    );
 }
 
 #[test]
@@ -812,7 +876,7 @@ fn a_segment_grant_admits_its_own_prefix_and_not_the_other_segment() {
     snap.protect_host = vec!["sgv-a".into(), "sgc-a".into()];
     snap.grants = vec![Grant {
         id: "seg".into(),
-        app_id: "web".into(),
+        target: Target::App("web".into()),
         port: None,
         network_id: Some("lan".into()),
         subject: Subject::Anyone,
@@ -976,7 +1040,7 @@ fn a_router_cannot_deliver_another_segments_source_to_a_segment_grant() {
     snap.apps[0].addresses.truncate(1);
     snap.grants = vec![Grant {
         id: "seg".into(),
-        app_id: "web".into(),
+        target: Target::App("web".into()),
         port: None,
         network_id: Some("lan".into()),
         subject: Subject::Anyone,

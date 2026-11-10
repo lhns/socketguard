@@ -4,6 +4,7 @@ pub mod credential;
 pub mod identity;
 pub mod model;
 pub mod reach;
+pub mod tags;
 pub mod types;
 pub mod yggdrasil;
 
@@ -12,5 +13,6 @@ pub use credential::*;
 pub use identity::*;
 pub use model::*;
 pub use reach::*;
+pub use tags::*;
 pub use types::*;
 pub use yggdrasil::{derive_yggdrasil_ipv6, subnet_for_key};

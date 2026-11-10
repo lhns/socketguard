@@ -7,7 +7,7 @@ use axum::http::{Method, StatusCode};
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig, DaemonConfig, TorAuth};
 use socketguard_core::{
     CredentialKind, ListeningSocket, Locator, NetworkKind, NetworkStatus, NewCredential, NewGrant,
-    Protocol, Subject,
+    Protocol, Subject, Target,
 };
 use socketguard_daemon::api;
 use socketguard_daemon::engine::{ActiveBackend, Engine};
@@ -134,7 +134,7 @@ impl Harness {
             .create_grant(
                 &self.state,
                 &NewGrant {
-                    app_id: app.id,
+                    target: Target::App(app.id),
                     port: None,
                     network_id: None,
                     subject,
@@ -417,7 +417,7 @@ async fn mutations_answer_202_while_enforcement_is_pending() {
     h.reconcile().await;
     let app = h.app().await;
     let new_grant = serde_json::json!({
-        "app_id": app.id, "subject": {"kind": "anyone"}, "confirm_open": true
+        "target": {"kind": "app", "id": app.id}, "subject": {"kind": "anyone"}, "confirm_open": true
     });
 
     // Healthy: the usual 201 and 204, no enforcement field.
@@ -439,7 +439,7 @@ async fn mutations_answer_202_while_enforcement_is_pending() {
 
     // A create that changes what Tor must publish keeps its body and gains the field.
     let peer = h.peer(TOR_KEY).await;
-    let keyed = serde_json::json!({"app_id": app.id, "subject": {"kind": "peer", "id": peer}});
+    let keyed = serde_json::json!({"target": {"kind": "app", "id": app.id}, "subject": {"kind": "peer", "id": peer}});
     let (s, body) = call(&h, Method::POST, "/api/grants", Some(keyed)).await;
     assert_eq!(s, StatusCode::ACCEPTED, "{body}");
     assert!(body["id"].is_string());
@@ -677,4 +677,123 @@ async fn removing_a_network_with_nothing_published_needs_no_tor() {
     h.tor.set_down(true);
     let (s, body) = call(&h, Method::DELETE, "/api/networks/tor", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+}
+
+// ─── Generated client keys and share (ADR 0045) ──────────────────────────────
+
+#[tokio::test]
+async fn a_generated_tor_key_authorizes_the_peer_and_share_hands_out_the_client_line() {
+    let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let svc = h.svc().await;
+    // A peer with no credentials; pasted keys have no private half to share.
+    let (s, peer) = call(
+        &h,
+        Method::POST,
+        "/api/peers",
+        Some(serde_json::json!({"label": "bnode"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{peer}");
+    let peer_id = peer["id"].as_str().unwrap().to_string();
+    let pasted = serde_json::json!({"kind": "tor_client_key", "value": TOR_KEY});
+    call(
+        &h,
+        Method::POST,
+        &format!("/api/peers/{peer_id}/credentials"),
+        Some(pasted),
+    )
+    .await;
+
+    let (s, key) = call(
+        &h,
+        Method::POST,
+        &format!("/api/peers/{peer_id}/tor-key"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{key}");
+    let public = key["credential"]["value"].as_str().unwrap().to_string();
+    let private = key["private_key"].as_str().unwrap().to_string();
+    assert_eq!((public.len(), private.len()), (52, 52));
+    assert_eq!(key["credential"]["kind"], "tor_client_key");
+
+    // Granted: the service is published for the generated key (and the pasted one).
+    h.grant(Subject::Peer(peer_id.clone())).await;
+    h.reconcile().await;
+    let add = h.tor.add_commands().join("\n");
+    assert!(
+        add.contains(&public),
+        "the generated key is authorized: {add}"
+    );
+
+    // share: one line for the generated key, none for the pasted one.
+    let (s, share) = call(
+        &h,
+        Method::GET,
+        &format!("/api/apps/{}/share", app.id),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{share}");
+    let tor = share["tor"].as_array().unwrap();
+    assert_eq!(tor.len(), 1, "{share}");
+    assert_eq!(
+        tor[0]["auth_private"],
+        format!("{svc}:descriptor:x25519:{private}")
+    );
+    assert_eq!(tor[0]["hostname"], format!("{svc}.onion"));
+    assert_eq!(tor[0]["peer_label"], "bnode");
+
+    // Regenerating replaces the key: the old one stops being authorized, the pasted stays.
+    let (s, again) = call(
+        &h,
+        Method::POST,
+        &format!("/api/peers/{peer_id}/tor-key"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_ne!(again["private_key"], key["private_key"]);
+    let (_, peer) = call(&h, Method::GET, &format!("/api/peers/{peer_id}"), None).await;
+    let values: Vec<_> = peer["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["value"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(values.len(), 2);
+    assert!(values.contains(&TOR_KEY.to_string()));
+    assert!(!values.contains(&public), "the old generated key is gone");
+    let (_, share) = call(
+        &h,
+        Method::GET,
+        &format!("/api/apps/{}/share", app.id),
+        None,
+    )
+    .await;
+    assert_eq!(
+        share["tor"][0]["auth_private"],
+        format!(
+            "{svc}:descriptor:x25519:{}",
+            again["private_key"].as_str().unwrap()
+        )
+    );
+
+    // A peer without a grant gets no line; unknown peers and apps are 404.
+    h.revoke(&h.state.db.list_grants().await.unwrap()[0].id)
+        .await;
+    let (_, share) = call(
+        &h,
+        Method::GET,
+        &format!("/api/apps/{}/share", app.id),
+        None,
+    )
+    .await;
+    assert_eq!(share["tor"], serde_json::json!([]));
+    let (s, _) = call(&h, Method::POST, "/api/peers/nope/tor-key", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = call(&h, Method::GET, "/api/apps/nope/share", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
 }

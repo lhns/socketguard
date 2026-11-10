@@ -2,11 +2,16 @@
 import type { GrantReach } from "./GrantReach";
 import type { PortRef } from "./PortRef";
 import type { Subject } from "./Subject";
+import type { Target } from "./Target";
 
 /**
  * A grant with the reach the daemon computed for it, for frontends.
  */
-export type GrantView = { reach: Array<GrantReach>, id: string, app_id: string, 
+export type GrantView = { reach: Array<GrantReach>, id: string, 
+/**
+ * One app, or every member of a tag.
+ */
+target: Target, 
 /**
  * None = every port of the app.
  */

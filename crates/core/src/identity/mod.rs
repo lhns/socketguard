@@ -54,6 +54,53 @@ pub struct AppIdentity {
     pub interpreter_arg: Option<String>,
     /// Why this identity is special, for the frontends.
     pub note: Option<String>,
+    /// An OS component rather than one of the user's programs.
+    pub system: bool,
+}
+
+/// Whether the process is part of the operating system (a service or a system process), by
+/// the facts the monitor reads: the executable, the process name, the owner and (Linux)
+/// whether a systemd service unit runs it. `system_root` is `%SystemRoot%` on Windows.
+///
+/// - Windows: the executable lies under the system root, or it is `System`, `svchost.exe`
+///   or `services.exe`.
+/// - Linux: an owner below uid 1000 whose process runs in a service unit or from a system
+///   directory.
+/// - macOS: the executable lies under `/System` or `/usr/libexec`.
+pub fn is_system_process(
+    platform: Platform,
+    ls: &ListeningSocket,
+    system_root: Option<&str>,
+) -> bool {
+    let exe = ls
+        .exe_path
+        .as_deref()
+        .map(|p| normalize_exe_path(p, platform));
+    let under = |dir: &str| exe.as_deref().is_some_and(|e| e.starts_with(dir));
+    match platform {
+        Platform::Windows => {
+            let root = system_root
+                .unwrap_or("C:\\Windows")
+                .trim_end_matches('\\')
+                .to_lowercase();
+            let name = ls.process_name.to_lowercase();
+            under(&format!("{root}\\"))
+                || matches!(name.as_str(), "system" | "svchost.exe" | "services.exe")
+        }
+        Platform::Linux => {
+            let low_uid = ls
+                .uid
+                .as_deref()
+                .and_then(|u| u.parse::<u32>().ok())
+                .is_some_and(|u| u < 1000);
+            low_uid
+                && (ls.in_service_unit
+                    || ["/usr/sbin/", "/usr/lib/", "/lib/", "/sbin/"]
+                        .iter()
+                        .any(|d| under(d)))
+        }
+        Platform::Macos => under("/System/") || under("/usr/libexec/"),
+    }
 }
 
 mod interpreters;
@@ -133,6 +180,18 @@ pub fn app_identity(ls: &ListeningSocket) -> AppIdentity {
 
 /// [`app_identity`] with the platform's conventions chosen explicitly.
 pub(crate) fn app_identity_on(platform: Platform, ls: &ListeningSocket) -> AppIdentity {
+    if ls.unidentified {
+        // Nothing is known about the owner, so the port is the identity: each such socket
+        // is its own app and grants never carry over from one to another (ADR 0046).
+        let name = format!("unknown:{}/{}", ls.protocol, ls.port);
+        return AppIdentity {
+            id: hex32(&["v4", "unknown", &name]),
+            name,
+            interpreter_arg: None,
+            note: Some("unidentified".to_string()),
+            system: false,
+        };
+    }
     let process_name = ls.process_name.as_str();
     let exe = ls
         .exe_path
@@ -214,6 +273,7 @@ pub(crate) fn app_identity_on(platform: Platform, ls: &ListeningSocket) -> AppId
         name,
         interpreter_arg,
         note: (!notes.is_empty()).then(|| notes.join(", ")),
+        system: is_system_process(platform, ls, std::env::var("SystemRoot").ok().as_deref()),
     }
 }
 
@@ -239,6 +299,8 @@ mod tests {
             uid: Some("1000".into()),
             foreign_mntns: false,
             cwd: None,
+            unidentified: false,
+            in_service_unit: false,
         }
     }
 
@@ -692,5 +754,81 @@ mod tests {
         let mut other_user = forged.clone();
         other_user.uid = Some("1001".into());
         assert_ne!(f.id, app_identity_on(Platform::Linux, &other_user).id);
+    }
+
+    fn unknown(proto: Protocol, port: u16) -> ListeningSocket {
+        let mut s = ListeningSocket::new(0, port, proto, "::".parse().unwrap())
+            .with_process_name("unknown");
+        s.unidentified = true;
+        s
+    }
+
+    #[test]
+    fn an_unidentified_socket_is_an_app_per_protocol_and_port() {
+        let a = app_identity_on(Platform::Windows, &unknown(Protocol::Tcp, 8080));
+        assert_eq!(a.name, "unknown:tcp/8080");
+        assert_eq!(a.note.as_deref(), Some("unidentified"));
+        assert!(!a.system);
+        // Stable, and separate per port and protocol, so grants never carry over.
+        assert_eq!(
+            a.id,
+            app_identity_on(Platform::Linux, &unknown(Protocol::Tcp, 8080)).id
+        );
+        assert_ne!(
+            a.id,
+            app_identity_on(Platform::Windows, &unknown(Protocol::Tcp, 8081)).id
+        );
+        assert_ne!(
+            a.id,
+            app_identity_on(Platform::Windows, &unknown(Protocol::Udp, 8080)).id
+        );
+        // And not the id of any identified process called "unknown".
+        let mut named = sock(None, "unknown", None);
+        named.port = 8080;
+        assert_ne!(a.id, app_identity_on(Platform::Windows, &named).id);
+    }
+
+    #[test]
+    fn system_components_by_platform() {
+        let win = |exe: Option<&str>, name: &str| {
+            let mut s = sock(exe, name, None);
+            s.uid = None;
+            is_system_process(Platform::Windows, &s, Some("C:\\Windows"))
+        };
+        assert!(win(
+            Some("C:\\Windows\\System32\\svchost.exe"),
+            "svchost.exe"
+        ));
+        assert!(win(
+            Some("c:\\windows\\system32\\services.exe"),
+            "services.exe"
+        ));
+        assert!(win(None, "System"));
+        assert!(win(None, "svchost.exe"));
+        assert!(!win(Some("C:\\Program Files\\App\\app.exe"), "app.exe"));
+        assert!(!win(Some("C:\\WindowsApps\\app.exe"), "app.exe"));
+
+        let lin = |exe: Option<&str>, uid: &str, unit: bool| {
+            let mut s = sock(exe, "x", None);
+            s.uid = Some(uid.into());
+            s.in_service_unit = unit;
+            is_system_process(Platform::Linux, &s, None)
+        };
+        assert!(lin(Some("/opt/x/bin/x"), "0", true), "a service unit");
+        assert!(
+            lin(Some("/usr/sbin/sshd"), "0", false),
+            "a system directory"
+        );
+        assert!(lin(Some("/usr/lib/systemd/systemd-resolved"), "101", false));
+        assert!(
+            !lin(Some("/usr/sbin/sshd"), "1000", true),
+            "a user's process"
+        );
+        assert!(!lin(Some("/home/me/app"), "0", false));
+
+        let mac = |exe: &str| is_system_process(Platform::Macos, &sock(Some(exe), "x", None), None);
+        assert!(mac("/System/Library/CoreServices/x"));
+        assert!(mac("/usr/libexec/rapportd"));
+        assert!(!mac("/Applications/App.app/x"));
     }
 }

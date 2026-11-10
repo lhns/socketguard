@@ -27,6 +27,7 @@ impl Engine {
             peers: db.list_peers().await?,
             groups: db.list_groups().await?,
             grants: db.list_grants().await?,
+            tags: db.list_tags().await?,
             v4_subnets: self.protected_v4_subnets(&protect_host),
             protect_host,
             // Owned addresses stay denied until they are really off their interface.
