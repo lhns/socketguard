@@ -497,18 +497,24 @@ impl Engine {
         }
     }
 
-    /// Set when the last enforcement on a network that is not an IP network failed, so a
-    /// change that was saved is not yet in effect there. Mutations report it to their
-    /// caller (HTTP 202).
+    /// Some network has a saved change it has not confirmed yet
+    /// ([`networks::Network::pending`]), e.g. Tor is down and a service must be published
+    /// or removed. Mutations report it to their caller (HTTP 202); a network that is merely
+    /// down with nothing to do does not count.
     pub fn enforcement_pending(&self) -> Option<socketguard_core::api_types::Enforcement> {
         let failing = self.enforce_failing.lock().unwrap();
-        if failing.is_empty() {
+        let mut parts: Vec<String> = self
+            .backends
+            .iter()
+            .filter(|(_, b)| b.network.pending())
+            .map(|(id, _)| match failing.get(id) {
+                Some(msg) => format!("network '{id}': {msg}"),
+                None => format!("network '{id}': not yet applied"),
+            })
+            .collect();
+        if parts.is_empty() {
             return None;
         }
-        let mut parts: Vec<String> = failing
-            .iter()
-            .map(|(id, msg)| format!("network '{id}': {msg}"))
-            .collect();
         parts.sort();
         Some(socketguard_core::api_types::Enforcement {
             status: socketguard_core::api_types::EnforcementStatus::Pending,
@@ -594,6 +600,9 @@ impl Engine {
     /// Startup: apply the desired state over whatever the previous run left (never a
     /// flush, ADR 0026), then make sure the addresses are on their interfaces.
     pub async fn startup_reconcile(&self, state: &AppState) {
+        if let Err(e) = networks::ledger::adopt_stored_keys(&state.db).await {
+            warn!("Could not adopt existing onion services: {e:#}");
+        }
         if let Err(e) = self.apply_firewall(state).await {
             error!("Startup: could not apply the firewall ruleset: {e}");
         }

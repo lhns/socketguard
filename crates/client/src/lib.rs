@@ -338,12 +338,12 @@ impl Client {
         .await
     }
 
-    pub async fn split_app(&self, id: &str, req: &SplitRequest) -> Result<Address> {
-        self.call(&routes::SPLIT_APP, &[id], None, json(req)).await
+    pub async fn split_app(&self, id: &str, req: &SplitRequest) -> Result<Saved<Address>> {
+        self.call_saved(&routes::SPLIT_APP, &[id], json(req)).await
     }
 
-    pub async fn merge_app(&self, id: &str, req: &MergeRequest) -> Result<Address> {
-        self.call(&routes::MERGE_APP, &[id], None, json(req)).await
+    pub async fn merge_app(&self, id: &str, req: &MergeRequest) -> Result<Saved<Address>> {
+        self.call_saved(&routes::MERGE_APP, &[id], json(req)).await
     }
 
     // ─── Peers ───────────────────────────────────────────────────────────────
@@ -406,16 +406,20 @@ impl Client {
         self.call(&routes::UPDATE_GROUP, &[id], None, body).await
     }
 
-    pub async fn delete_group(&self, id: &str) -> Result<()> {
-        self.call_unit(&routes::DELETE_GROUP, &[id], None).await
+    pub async fn delete_group(&self, id: &str) -> Result<Saved<()>> {
+        self.call_saved(&routes::DELETE_GROUP, &[id], None).await
     }
 
     /// Replace a group's members.
-    pub async fn set_group_members(&self, id: &str, peer_ids: &[String]) -> Result<PeerGroup> {
+    pub async fn set_group_members(
+        &self,
+        id: &str,
+        peer_ids: &[String],
+    ) -> Result<Saved<PeerGroup>> {
         let body = json(&SetMembers {
             peer_ids: peer_ids.to_vec(),
         });
-        self.call(&routes::SET_GROUP_MEMBERS, &[id], None, body)
+        self.call_saved(&routes::SET_GROUP_MEMBERS, &[id], body)
             .await
     }
 

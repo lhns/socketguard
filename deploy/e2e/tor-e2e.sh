@@ -17,7 +17,8 @@ NODE_A=sg-tor-e2e-a
 NODE_B=sg-tor-e2e-b
 PORT=8080
 BOOTSTRAP_SECS=${BOOTSTRAP_SECS:-180}
-PUBLISH_SECS=${PUBLISH_SECS:-240}
+PUBLISH_SECS=${PUBLISH_SECS:-420}      # onion service publication + descriptor fetch window
+FETCH_RETRY_SECS=${FETCH_RETRY_SECS:-10} # pause between fetch attempts (each one waits up to 60s itself)
 failures=0
 
 pass() { echo "PASS  $*"; }
@@ -26,12 +27,12 @@ step() { # step "description" command...
   local desc=$1; shift
   if "$@"; then pass "$desc"; else fail "$desc"; return 1; fi
 }
-retry() { # retry SECONDS command...
+retry() { # retry SECONDS command...  (pause between attempts: $RETRY_EVERY, default 2s)
   local secs=$1; shift
   local end=$((SECONDS + secs))
   while ! "$@" >/dev/null 2>&1; do
     [ "$SECONDS" -ge "$end" ] && return 1
-    sleep 2
+    sleep "${RETRY_EVERY:-2}"
   done
 }
 
@@ -191,6 +192,10 @@ step "the peer's key is stored normalized" sh -c "docker exec $NODE_A $SG peers 
 step "grant the listener's port to that peer" A $SG grant "$APP_ID:$PORT" bnode --network tor
 step "the grant is verified on Tor" sh -c "docker exec $NODE_A $SG grants --app $APP_ID --json | jq -e '.[0].reach[0].reach == \"verified\"' >/dev/null"
 step "granted: the service is published" retry 30 one_published
+# The daemon generated the key and name itself; the ServiceID Tor derived from that key on
+# the first ADD_ONION must be the same name (`apps show` reports the local one).
+service_is_local_name() { [ "$(detached)" = "${ONION%.onion}" ]; }
+step "Tor's ServiceID equals the locally computed name" service_is_local_name
 step "share prints the onion URL" sh -c "docker exec $NODE_A $SG share $APP_ID --network tor | grep -q 'http://$ONION:$PORT'"
 
 echo "      waiting for B's tor to bootstrap and for the onion service to publish (up to ${PUBLISH_SECS}s)"
@@ -198,9 +203,10 @@ retry "$BOOTSTRAP_SECS" bootstrapped "$NODE_B" /var/log/tor-b.log || { fail "tor
 retry "$BOOTSTRAP_SECS" bootstrapped "$NODE_B" /var/log/tor-c.log || { fail "tor bootstrapped on the third client"; exit 1; }
 pass "tor bootstrapped on B and on the third client"
 
+fetch_retry() { RETRY_EVERY=$FETCH_RETRY_SECS retry "$@"; }
 fetch_b() { B curl -fsS --max-time 60 --socks5-hostname 127.0.0.1:9050 "http://$ONION:$PORT/" | grep -q sg-e2e-ok; }
 fetch_c() { B curl -fsS --max-time 60 --socks5-hostname 127.0.0.1:9060 "http://$ONION:$PORT/" | grep -q sg-e2e-ok; }
-step "B (holding the key) fetches the page over Tor" retry "$PUBLISH_SECS" fetch_b || exit 1
+step "B (holding the key) fetches the page over Tor" fetch_retry "$PUBLISH_SECS" fetch_b || exit 1
 step "a third client without the key cannot fetch it" sh -c "! docker exec $NODE_B curl -fsS --max-time 60 --socks5-hostname 127.0.0.1:9060 http://$ONION:$PORT/"
 
 # ── Revoke ───────────────────────────────────────────────────────────────────

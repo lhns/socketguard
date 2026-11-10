@@ -823,7 +823,12 @@ impl MockTorControl {
             "ADD_ONION" => {
                 let key = rest.split(' ').next().unwrap_or_default();
                 let (id, private) = match key.strip_prefix("ED25519-V3:") {
-                    Some(name) => (name.to_string(), None),
+                    // A real key blob gives its derived name; a plain name names itself.
+                    Some(name) => (
+                        crate::networks::onion_key::service_id_of_secret(key)
+                            .unwrap_or_else(|_| name.to_string()),
+                        None,
+                    ),
                     None => {
                         st.created += 1;
                         let id = format!("mocksvc{}", st.created);

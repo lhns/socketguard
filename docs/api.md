@@ -59,9 +59,10 @@ Bodies are JSON (`Content-Type: application/json`). Types are Rust names in
 `socketguard_core::api_types` or `socketguard_core` (model). Statuses are 200 unless noted;
 creates return 201 with the new object, deletes 204 with no body. A change to apps, peers,
 credentials, groups or grants is saved before it is enforced; if a network that is not
-enforced by the firewall (Tor) cannot enforce it, the response is **202** instead, with the
-same body (deletes: a body with only the notice) plus
-[`enforcement`](#pending-enforcement). Every error has the [error body](#errors).
+enforced by the firewall (Tor) still has a change waiting that it could not apply, the
+response is **202** instead, with the same body (deletes: a body with only the notice) plus
+[`enforcement`](#pending-enforcement). A network that is down but has nothing outstanding
+does not cause a 202. Every error has the [error body](#errors).
 
 | Method | Path | Request | Response | Notes |
 |---|---|---|---|---|
@@ -142,7 +143,8 @@ removed until it is back.
     {"enforcement": {"status": "pending", "message": "saved, but not yet enforced; retrying (network 'tor': cannot reach the Tor control port ...)"}}
 
 `Enforcement { status, message }` (`EnforcementNotice` for a body without other content). It
-means the change is in the database but a network could not apply it yet, for example a
+means the change is in the database but a network has not applied it yet (it is *pending*:
+a service to publish, change or remove is unconfirmed), for example a
 grant was revoked while Tor was down, so the onion service is still published. The daemon
 keeps the removal on a persisted list and retries on every pass until Tor confirms it. The
 CLI prints `warning: ...` to stderr, and the client's `Saved<T>` carries `enforcement`.

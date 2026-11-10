@@ -33,6 +33,9 @@ opentelemetry_sdk = { version = "0.33", features = ["logs", "metrics"] }
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "logs", "metrics"] }
 opentelemetry-appender-tracing = "0.33"
 tracing-opentelemetry = "0.34"
+curve25519-dalek = "4"
+sha3 = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
 insta = { workspace = true }
