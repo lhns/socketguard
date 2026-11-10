@@ -20,9 +20,9 @@ use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use socketguard_core::api_types::{
     error_code, event_name, ApiError, ApplyRequest, Counts, DisableRequest, EnforcementNotice,
-    LockoutRiskInfo, MergeRequest, NewGroup, NewNetwork, NewPeer, ProtectHostRequest,
-    ProtectHostResponse, ReviewRequest, SetMembers, SplitRequest, StatusResponse, UpdateLabel,
-    UpdateSettings,
+    LockoutRiskInfo, MergeRequest, NewGroup, NewNetwork, NewPeer, ParseCredentialsRequest,
+    ProtectHostRequest, ProtectHostResponse, ReviewRequest, SetMembers, SplitRequest,
+    StatusResponse, UpdateLabel, UpdateSettings,
 };
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
 use socketguard_core::{ActivityQuery, NewCredential, NewGrant, PortRef};
@@ -85,6 +85,7 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::GET, "/api/peers/{id}"),
     (Method::PATCH, "/api/peers/{id}"),
     (Method::DELETE, "/api/peers/{id}"),
+    (Method::POST, "/api/credentials/parse"),
     (Method::POST, "/api/peers/{id}/credentials"),
     (Method::DELETE, "/api/peers/{id}/credentials/{cred_id}"),
     (Method::GET, "/api/peer-groups"),
@@ -128,6 +129,7 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("GET", "/api/peers/{id}") => get(peer_get),
         ("PATCH", "/api/peers/{id}") => patch(peer_update),
         ("DELETE", "/api/peers/{id}") => delete(peer_delete),
+        ("POST", "/api/credentials/parse") => post(credentials_parse),
         ("POST", "/api/peers/{id}/credentials") => post(credential_add),
         ("DELETE", "/api/peers/{id}/credentials/{cred_id}") => delete(credential_remove),
         ("GET", "/api/peer-groups") => get(groups_list),
@@ -356,7 +358,7 @@ async fn status(State(state): State<Shared>) -> ApiResult<Json<StatusResponse>> 
     let addresses = apps.iter().map(|a| a.addresses.len()).sum::<usize>() as u32;
     Ok(Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        networks: engine.networks(),
+        networks: engine.networks_described(),
         protect_host_interfaces: engine.settings(&state).await?.protect_host_interfaces,
         disabled: state.db.disabled().await,
         unadopted: state.db.unadopted().await?,
@@ -470,6 +472,10 @@ async fn peer_create(
         .create_peer(&state, &req.label, &req.credentials)
         .await?;
     Ok((StatusCode::CREATED, Json(peer)).into_response())
+}
+
+async fn credentials_parse(ApiJson(req): ApiJson<ParseCredentialsRequest>) -> ApiResult<Response> {
+    Ok(Json(socketguard_core::parse_input(&req.text)).into_response())
 }
 
 async fn peer_get(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {

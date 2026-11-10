@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import {
+  keepPreviousData,
   QueryClient,
   useInfiniteQuery,
   useMutation,
@@ -34,6 +35,18 @@ export const useGroups = () => useQuery({ queryKey: ["groups"], queryFn: api.lis
 export const useGrants = () => useQuery({ queryKey: ["grants"], queryFn: api.listGrants });
 export const useNetworks = () => useQuery({ queryKey: ["networks"], queryFn: api.listNetworks });
 export const useSettings = () => useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
+
+/** Classify pasted credential text with the daemon's parser (kept while typing). */
+export const useParsedCredentials = (text: string) => {
+  const t = text.trim();
+  return useQuery({
+    queryKey: ["parse", t],
+    queryFn: () => api.parseCredentials(t),
+    enabled: t !== "",
+    placeholderData: keepPreviousData,
+    staleTime: Infinity,
+  });
+};
 
 export const ACTIVITY_PAGE = 50;
 

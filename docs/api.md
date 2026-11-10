@@ -85,6 +85,7 @@ does not cause a 202. Every error has the [error body](#errors).
 | GET | `/api/peers/{id}` | | `Peer` | |
 | PATCH | `/api/peers/{id}` | `UpdateLabel` | `Peer` | rename |
 | DELETE | `/api/peers/{id}` | | 204 | also deletes the grants naming the peer |
+| POST | `/api/credentials/parse` | `ParseCredentialsRequest` | `ParsedCredential[]` | classifies pasted values (newline, comma or space separated); changes nothing |
 | POST | `/api/peers/{id}/credentials` | `NewCredential` | `Credential` (201) | |
 | DELETE | `/api/peers/{id}/credentials/{cred_id}` | | 204 | |
 | GET | `/api/peer-groups` | | `PeerGroup[]` | |

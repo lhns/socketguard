@@ -20,13 +20,13 @@ use hyper_util::rt::TokioIo;
 use serde::{de::DeserializeOwned, Serialize};
 use socketguard_core::api_types::{
     ApiError, ApplyRequest, ApplyResponse, DisableRequest, Enforcement, EnforcementNotice,
-    ExportDocument, MergeRequest, NewGroup, NewNetwork, NewPeer, ProtectHostRequest,
-    ProtectHostResponse, ReviewRequest, SetMembers, SplitRequest, StatusResponse, UpdateLabel,
-    UpdateSettings,
+    ExportDocument, MergeRequest, NewGroup, NewNetwork, NewPeer, ParseCredentialsRequest,
+    ProtectHostRequest, ProtectHostResponse, ReviewRequest, SetMembers, SplitRequest,
+    StatusResponse, UpdateLabel, UpdateSettings,
 };
 use socketguard_core::{
     ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
-    NewCredential, NewGrant, Peer, PeerGroup, Settings,
+    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, Settings,
 };
 
 /// Environment variable that overrides the endpoint (socket path or pipe name).
@@ -305,6 +305,14 @@ impl Client {
 
     pub async fn create_peer(&self, req: &NewPeer) -> Result<Peer> {
         self.call(&routes::CREATE_PEER, &[], None, json(req)).await
+    }
+
+    /// Classify pasted text: one result per value, with the kind, the canonical value and
+    /// where it works, or an error.
+    pub async fn parse_credentials(&self, text: &str) -> Result<Vec<ParsedCredential>> {
+        let req = ParseCredentialsRequest { text: text.into() };
+        self.call(&routes::PARSE_CREDENTIALS, &[], None, json(&req))
+            .await
     }
 
     pub async fn get_peer(&self, id: &str) -> Result<Peer> {

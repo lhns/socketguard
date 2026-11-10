@@ -16,7 +16,7 @@ use socketguard_core::api_types::{
 };
 use socketguard_core::{
     ActivityQuery, ActivityRecord, App, AppDetail, Credential, GrantView, Network, NewCredential,
-    NewGrant, Peer, PeerGroup, Settings,
+    NewGrant, ParsedCredential, Peer, PeerGroup, Settings,
 };
 
 /// Error shape the frontend branches on. API errors keep the daemon's code
@@ -96,6 +96,11 @@ async fn list_peers() -> CmdResult<Vec<Peer>> {
 #[tauri::command]
 async fn create_peer(req: NewPeer) -> CmdResult<Peer> {
     Ok(client().create_peer(&req).await?)
+}
+
+#[tauri::command]
+async fn parse_credentials(text: String) -> CmdResult<Vec<ParsedCredential>> {
+    Ok(client().parse_credentials(&text).await?)
 }
 
 // Commands built on `Saved<T>` drop its `enforcement` notice (HTTP 202); the UI does not show it yet.
@@ -260,6 +265,7 @@ fn main() {
             review_app,
             list_peers,
             create_peer,
+            parse_credentials,
             add_credential,
             remove_credential,
             delete_peer,

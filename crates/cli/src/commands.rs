@@ -546,6 +546,10 @@ async fn peers(c: &Ctx, cmd: PeersCmd) -> Result<()> {
                 )
             })
         }
+        PeersCmd::Parse { values } => {
+            let parsed = c.client.parse_credentials(&values.join(" ")).await?;
+            c.print(&parsed, || render::parsed_credentials(&parsed))
+        }
         PeersCmd::Rename { peer, new_label } => {
             let peer = c.peer(&peer).await?;
             let p = c.client.update_peer(&peer.id, &new_label).await?;
@@ -601,8 +605,8 @@ pub fn peer_credentials(a: &PeerAddArgs) -> Result<Vec<NewCredential>> {
     for cred in &a.creds {
         out.push(parse::parse_cred(cred)?);
     }
-    for v in &a.values {
-        out.push(parse::guess_credential(v)?);
+    if !a.values.is_empty() {
+        out.extend(parse::guess_credentials(&a.values.join(" "))?);
     }
     Ok(out)
 }
@@ -693,7 +697,7 @@ async fn grant(c: &Ctx, a: GrantArgs) -> Result<()> {
         Err(e) if e.is_confirmation_required() => {
             prompt::Stdin.confirm_or_yes(
                 false,
-                &format!("Open {} to anyone who can reach it?", a.target),
+                &render::open_question(&a.target, req.network_id.as_deref()),
                 &format!(
                     "this opens {} to every host that can reach it; repeat with --yes to confirm",
                     a.target

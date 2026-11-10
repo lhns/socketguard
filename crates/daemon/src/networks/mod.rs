@@ -269,6 +269,7 @@ mod tests {
             grants_apply: true,
             status: NetworkStatus::Up,
             prefix: None,
+            vlan_id: None,
         }
     }
 

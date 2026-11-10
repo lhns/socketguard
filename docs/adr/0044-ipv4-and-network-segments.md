@@ -35,3 +35,10 @@ Per-app addresses are IPv6 only (ADR 0036), so ADR 0026's amendment turned IPv4 
 - IPv4 LAN peers become useful, and an app listening on IPv4 shows honestly whether SocketGuard filters it.
 - Segment grants follow prefix changes the way scopes do. The interface layer must report IPv4 subnets.
 - A segment grant trusts whoever the switch puts on that VLAN, so frontends badge it "segment", not "verified".
+
+## Implementation notes
+
+- **IPv4 rules** have no destination address (`Dst::HostV4` in the desired ruleset): they match the port on any IPv4 address of the host, bound to the protected interface. Ids are `v4:<port>:<proto>:<grant>:<interface>:<app>`.
+- **Anyone** (not scoped to a network) also gets an IPv4 rule on every protected interface that carries IPv4, so protect-host does not close IPv4 for an app opened to everyone. Anyone scoped to a LAN or Local network gets the interface's IPv4 subnet instead.
+- **Address family** is stored per port (schema v5, `app_ports.family`, default `dual` for old rows). Unix `::` counts as dual-stack (IPV6_V6ONLY is not visible in /proc); Windows `::` as v6-only, merged with the IPv4 sockets of the same port.
+- **Reach for an IPv4 credential** is computed per app and grant (`reach_for_app`): the listener family and the protected interfaces decide between `IpOnly`, `Unfiltered` and `NotReachable`.

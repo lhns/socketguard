@@ -9,8 +9,8 @@ pub mod desired;
 
 use anyhow::{Context, Result};
 pub use desired::{
-    revocations, safe_text, Counter, DesiredRuleset, DropEvent, DropSink, Families, Revocation,
-    Rule, Scope, ScopeKind, ScopeMatch, Sources,
+    revocations, safe_text, Counter, DesiredRuleset, DropEvent, DropSink, Dst, Families,
+    Revocation, Rule, Scope, ScopeKind, ScopeMatch, Sources,
 };
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -115,7 +115,7 @@ pub(crate) fn golden_ruleset() -> DesiredRuleset {
     let rule = |id: &str, iif: Option<&str>, dst: &str, port, proto, sources| Rule {
         id: id.to_string(),
         iif: iif.map(str::to_string),
-        dst: dst.parse().unwrap(),
+        dst: Dst::Addr(dst.parse().unwrap()),
         port,
         proto,
         sources,
@@ -191,6 +191,38 @@ pub(crate) fn golden_ruleset() -> DesiredRuleset {
                 22,
                 Protocol::Tcp,
                 Sources::Nets(vec!["198.51.100.0/24".parse().unwrap()]),
+            ),
+            // IPv4 grants to the host's own addresses (ADR 0044): peers, and everyone.
+            Rule {
+                id: "v4:app1:22:tcp:g4:eth0".into(),
+                iif: Some("eth0".into()),
+                dst: Dst::HostV4,
+                port: 22,
+                proto: Protocol::Tcp,
+                sources: Sources::Nets(vec![
+                    "192.168.1.5/32".parse().unwrap(),
+                    "10.0.20.0/24".parse().unwrap(),
+                ]),
+            },
+            Rule {
+                id: "v4:app2:53:udp:g5:eth0".into(),
+                iif: Some("eth0".into()),
+                dst: Dst::HostV4,
+                port: 53,
+                proto: Protocol::Udp,
+                sources: Sources::Any,
+            },
+            // A segment grant: everyone on the interface's prefix and link-local range.
+            rule(
+                "a:al1:443:tcp:g6:eth0",
+                Some("eth0"),
+                "fd00::9",
+                443,
+                Protocol::Tcp,
+                Sources::Nets(vec![
+                    "fd00:1:2:3::/64".parse().unwrap(),
+                    "fe80::/10".parse().unwrap(),
+                ]),
             ),
         ],
     }

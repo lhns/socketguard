@@ -22,6 +22,9 @@ pub enum Reach {
     IpOnly,
     /// Anyone.
     Open,
+    /// An IPv4 credential on an interface that protect-host does not cover: the app
+    /// listens on IPv4 and nothing filters it, so everyone reaches it, not only the peer.
+    Unfiltered,
     NotReachable,
 }
 
@@ -32,7 +35,7 @@ impl Reach {
             Reach::Verified => 4,
             Reach::WholeSubnet => 3,
             Reach::IpOnly => 2,
-            Reach::Open => 1,
+            Reach::Open | Reach::Unfiltered => 1,
             Reach::NotReachable => 0,
         }
     }
@@ -62,6 +65,47 @@ fn is_ygg_subnet_host(addr: Ipv6Addr) -> bool {
 pub fn is_loopback_interface(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     n == "lo" || n == "lo0" || n.contains("loopback")
+}
+
+/// What decides the reach of IPv4 credentials for one app (ADR 0044): whether it listens on
+/// IPv4 at all, and which interfaces protect-host covers (those that carry IPv4).
+#[derive(Debug, Clone, Copy)]
+pub struct V4Context<'a> {
+    pub app_listens_v4: bool,
+    pub protected: &'a [String],
+}
+
+impl V4Context<'_> {
+    /// An app listening on IPv4 with no protected interface.
+    pub const OPEN: V4Context<'static> = V4Context {
+        app_listens_v4: true,
+        protected: &[],
+    };
+}
+
+fn is_v4_ip_credential(credential: &Credential) -> bool {
+    credential.kind == CredentialKind::Ip
+        && credential
+            .value
+            .parse::<IpNet>()
+            .is_ok_and(|n| matches!(n, IpNet::V4(_)))
+}
+
+/// [`reach`] for an app, which decides IPv4 credentials: `IpOnly` where protect-host
+/// filters the network's interface, `Unfiltered` where it does not, `NotReachable` when
+/// the app has no IPv4 listener.
+pub fn reach_for_app(credential: &Credential, network: &Network, v4: &V4Context) -> Reach {
+    let base = reach(credential, network);
+    if base == Reach::NotReachable || !is_v4_ip_credential(credential) {
+        return base;
+    }
+    if !v4.app_listens_v4 {
+        return Reach::NotReachable;
+    }
+    match &network.interface {
+        Some(i) if v4.protected.contains(i) => Reach::IpOnly,
+        _ => Reach::Unfiltered,
+    }
 }
 
 /// How well `credential` identifies a source on `network` (ADR 0028). A network on which
@@ -107,6 +151,13 @@ pub fn best_reach(credentials: &[Credential], network: &Network) -> Reach {
         .fold(Reach::NotReachable, |acc, c| acc.best(reach(c, network)))
 }
 
+/// [`best_reach`] for an app, see [`reach_for_app`].
+pub fn best_reach_for_app(credentials: &[Credential], network: &Network, v4: &V4Context) -> Reach {
+    credentials.iter().fold(Reach::NotReachable, |acc, c| {
+        acc.best(reach_for_app(c, network, v4))
+    })
+}
+
 /// The source network a credential contributes on `network`, or None when it is
 /// `NotReachable` there. Yggdrasil sources must additionally be bound to the network's
 /// interface by the caller.
@@ -125,9 +176,8 @@ pub fn credential_source(credential: &Credential, network: &Network) -> Option<I
             let a: Ipv6Addr = credential.value.parse().ok()?;
             Some(IpNet::V6(Ipv6Net::new(a, 128).ok()?))
         }
-        CredentialKind::YggSubnet | CredentialKind::Ip => {
-            credential.value.parse::<Ipv6Net>().ok().map(IpNet::V6)
-        }
+        CredentialKind::YggSubnet => credential.value.parse::<Ipv6Net>().ok().map(IpNet::V6),
+        CredentialKind::Ip => credential.value.parse::<IpNet>().ok(),
         CredentialKind::IpSuffix => {
             let suffix: Ipv6Addr = credential.value.parse().ok()?;
             let prefix = network.prefix?;
@@ -140,13 +190,14 @@ pub fn credential_source(credential: &Credential, network: &Network) -> Option<I
 }
 
 /// The reach of a grant on each network it applies to: `network_id`, or every network on
-/// which grants apply. `credentials` are those of the subject's peers (all peers of a
+/// which grants apply. `v4` decides IPv4 credentials. `credentials` are those of the subject's peers (all peers of a
 /// group); `Subject::Anyone` is open everywhere.
 pub fn grant_reach(
     subject: &Subject,
     credentials: &[Credential],
     network_id: Option<&str>,
     networks: &[Network],
+    v4: &V4Context,
 ) -> Vec<GrantReach> {
     networks
         .iter()
@@ -159,7 +210,7 @@ pub fn grant_reach(
             reach: match subject {
                 Subject::Anyone if n.grants_apply => Reach::Open,
                 Subject::Anyone => Reach::NotReachable,
-                _ => best_reach(credentials, n),
+                _ => best_reach_for_app(credentials, n, v4),
             },
         })
         .collect()
@@ -364,7 +415,13 @@ mod tests {
             net("ygg", NetworkKind::Yggdrasil, None),
         ];
         let creds = [cred(CredentialKind::YggKey, KEY)];
-        let r = grant_reach(&Subject::Peer("p".into()), &creds, None, &nets);
+        let r = grant_reach(
+            &Subject::Peer("p".into()),
+            &creds,
+            None,
+            &nets,
+            &V4Context::OPEN,
+        );
         assert_eq!(
             r,
             vec![
@@ -378,9 +435,49 @@ mod tests {
                 },
             ]
         );
-        let r = grant_reach(&Subject::Anyone, &[], None, &nets);
+        let r = grant_reach(&Subject::Anyone, &[], None, &nets, &V4Context::OPEN);
         assert!(r.iter().all(|g| g.reach == Reach::Open) && r.len() == 2);
-        let r = grant_reach(&Subject::Anyone, &[], Some("ygg"), &nets);
+        let r = grant_reach(&Subject::Anyone, &[], Some("ygg"), &nets, &V4Context::OPEN);
         assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn ipv4_reach_depends_on_listener_and_protect_host() {
+        let c = cred(CredentialKind::Ip, "192.168.1.5/32");
+        let mut lan = net("lan", NetworkKind::Lan, None);
+        lan.interface = Some("eth0".into());
+        let protected = ["eth0".to_string()];
+        let on = |listens, protected: &[String]| {
+            reach_for_app(
+                &c,
+                &lan,
+                &V4Context {
+                    app_listens_v4: listens,
+                    protected,
+                },
+            )
+        };
+        assert_eq!(on(true, &protected), Reach::IpOnly);
+        assert_eq!(on(true, &[]), Reach::Unfiltered);
+        assert_eq!(on(true, &["eth1".to_string()]), Reach::Unfiltered);
+        assert_eq!(on(false, &protected), Reach::NotReachable);
+        // Not on other kinds of network, and IPv6 credentials do not care.
+        let ygg = net("ygg", NetworkKind::Yggdrasil, None);
+        assert_eq!(
+            reach_for_app(&c, &ygg, &V4Context::OPEN),
+            Reach::NotReachable
+        );
+        let v6 = cred(CredentialKind::Ip, "fd00::5/128");
+        let none = V4Context {
+            app_listens_v4: false,
+            protected: &[],
+        };
+        assert_eq!(reach_for_app(&v6, &lan, &none), Reach::IpOnly);
+        // Unfiltered is no better than Open; a real IP match beats it.
+        assert_eq!(Reach::Unfiltered.best(Reach::IpOnly), Reach::IpOnly);
+        assert_eq!(
+            credential_source(&c, &lan),
+            Some("192.168.1.5/32".parse().unwrap())
+        );
     }
 }

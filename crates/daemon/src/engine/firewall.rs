@@ -20,13 +20,15 @@ impl Engine {
     /// Gather the producer's input from the DB and the active networks.
     pub(super) async fn gather_snapshot(&self, state: &AppState) -> anyhow::Result<Snapshot> {
         let db = &state.db;
+        let protect_host = db.protect_host().await?;
         Ok(Snapshot {
             apps: db.list_apps().await?,
             networks: self.networks(),
             peers: db.list_peers().await?,
             groups: db.list_groups().await?,
             grants: db.list_grants().await?,
-            protect_host: db.protect_host().await?,
+            v4_subnets: self.protected_v4_subnets(&protect_host),
+            protect_host,
             // Owned addresses stay denied until they are really off their interface.
             owned: db
                 .list_owned_addresses()
@@ -35,6 +37,20 @@ impl Engine {
                 .map(|o| IpAddr::V6(o.addr))
                 .collect(),
         })
+    }
+
+    /// The IPv4 subnets of the protected interfaces; one without IPv4 is left out.
+    pub(super) fn protected_v4_subnets(
+        &self,
+        protect_host: &[String],
+    ) -> std::collections::BTreeMap<String, Vec<ipnet::Ipv4Net>> {
+        protect_host
+            .iter()
+            .filter_map(|i| {
+                let subnets = self.ifaces.list_ipv4_subnets(i).ok()?;
+                (!subnets.is_empty()).then(|| (i.clone(), subnets))
+            })
+            .collect()
     }
 
     /// Whether the ruleset last applied is still what the firewall enforces. The cheap

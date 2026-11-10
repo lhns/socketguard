@@ -11,6 +11,7 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 ipnet = { workspace = true }
+data-encoding = { workspace = true }
 sha2 = "0.10"
 
 ts-rs = { version = "11", optional = true, features = ["chrono-impl", "serde-json-impl"] }

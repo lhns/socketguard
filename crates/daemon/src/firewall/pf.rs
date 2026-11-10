@@ -3,19 +3,18 @@
 //! on macOS.
 
 use super::{
-    brace_list, run_with_stdin, safe_text, DesiredRuleset, Families, Firewall, Revocation, Rule,
-    Scope, ScopeMatch, Sources,
+    brace_list, run_with_stdin, safe_text, DesiredRuleset, Dst, Families, Firewall, Revocation,
+    Rule, Scope, ScopeMatch, Sources,
 };
 use anyhow::{bail, Result};
 use ipnet::IpNet;
 use std::fmt::Write as _;
-use std::net::IpAddr;
 use tracing::error;
 
 const ANCHOR: &str = "socketguard";
 
-fn inet(ip: &IpAddr) -> &'static str {
-    if ip.is_ipv6() {
+fn inet(dst: &Dst) -> &'static str {
+    if dst.is_ipv6() {
         "inet6"
     } else {
         "inet"
@@ -32,11 +31,14 @@ fn rule_line(r: &Rule) -> String {
         Sources::Any => "any".to_string(),
         Sources::Nets(n) => brace_list(n),
     };
+    let to = match r.dst {
+        Dst::Addr(a) => a.to_string(),
+        Dst::HostV4 => "any".to_string(),
+    };
     format!(
-        "pass in quick{on} {} proto {} from {from} to {} port {} keep state",
+        "pass in quick{on} {} proto {} from {from} to {to} port {} keep state",
         inet(&r.dst),
         r.proto,
-        r.dst,
         r.port
     )
 }
@@ -109,12 +111,14 @@ pub fn render(rs: &DesiredRuleset) -> String {
 }
 
 /// The `pfctl -k` arguments killing the states from `src` (any source if None) to `dst`.
-fn kill_pair(src: Option<IpNet>, dst: IpAddr) -> Vec<String> {
+fn kill_pair(src: Option<IpNet>, dst: Dst) -> Vec<String> {
     let any = if dst.is_ipv6() { "::/0" } else { "0.0.0.0/0" };
     let src = src.map(|n| n.to_string()).unwrap_or_else(|| any.into());
-    ["-k", &src, "-k", &dst.to_string()]
-        .map(String::from)
-        .to_vec()
+    // Any IPv4 destination of the host is the whole IPv4 space to pf.
+    let dst = dst
+        .addr()
+        .map_or_else(|| any.to_string(), |a| a.to_string());
+    ["-k", &src, "-k", &dst].map(String::from).to_vec()
 }
 
 /// `pfctl -k` commands killing the states from revoked sources to revoked destinations.
@@ -130,10 +134,13 @@ fn kill_commands(revoked: &[Revocation]) -> Vec<Vec<String>> {
 /// `pfctl -k` commands for the daemon's first apply: every destination the ruleset scopes
 /// (rule destinations and managed addresses), from any source.
 fn startup_kill_commands(rs: &DesiredRuleset) -> Vec<Vec<String>> {
-    let mut dsts: Vec<IpAddr> = rs.rules.iter().map(|r| r.dst).collect();
+    // Rules for any IPv4 destination of the host name no address to kill states to; states
+    // opened before the anchor existed on those stay until they end.
+    let mut dsts: Vec<Dst> = rs.rules.iter().map(|r| r.dst).collect();
+    dsts.retain(|d| d.addr().is_some());
     for sc in &rs.scopes {
         if let ScopeMatch::Destinations(d) = &sc.matcher {
-            dsts.extend(d.iter().copied());
+            dsts.extend(d.iter().copied().map(Dst::Addr));
         }
     }
     dsts.sort();
@@ -237,7 +244,7 @@ mod tests {
     fn state_kill_commands() {
         use socketguard_core::Protocol;
         let r = |src: Option<&str>, dst: &str| Revocation {
-            dst: dst.parse().unwrap(),
+            dst: Dst::Addr(dst.parse().unwrap()),
             port: 80,
             proto: Protocol::Tcp,
             src: src.map(|s| s.parse().unwrap()),

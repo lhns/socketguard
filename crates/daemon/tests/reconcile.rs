@@ -11,7 +11,7 @@ use socketguard_core::{
 };
 use socketguard_daemon::api::DaemonEvent;
 use socketguard_daemon::engine::{Engine, EngineError, GrantFilter, ProtectHostError};
-use socketguard_daemon::firewall::{DropEvent, ScopeMatch, Sources};
+use socketguard_daemon::firewall::{DropEvent, Dst, ScopeMatch, Sources};
 use socketguard_daemon::iface::InterfaceManager as _;
 use socketguard_daemon::networks::ip::{ula::UlaBackend, Ipv6Backend as _};
 use socketguard_daemon::test_support::*;
@@ -980,12 +980,16 @@ async fn peers_validate_and_stay_unique() {
         label: None,
     };
     let e = engine
-        .create_peer(&h.state, "v4", &[cred(CredentialKind::Ip, "192.168.1.5")])
+        .create_peer(&h.state, "all", &[cred(CredentialKind::Ip, "0.0.0.0/0")])
         .await;
     assert!(
-        matches!(&e, Err(EngineError::Invalid(m)) if m.contains("IPv4")),
+        matches!(&e, Err(EngineError::Invalid(m)) if m.contains("grant to Anyone")),
         "{e:?}"
     );
+    let e = engine
+        .create_peer(&h.state, "base", &[cred(CredentialKind::Ip, "200::")])
+        .await;
+    assert!(matches!(&e, Err(EngineError::Invalid(_))), "{e:?}");
     let e = engine.create_peer(&h.state, "  ", &[]).await;
     assert!(matches!(e, Err(EngineError::Invalid(_))));
     let e = engine
@@ -2172,4 +2176,117 @@ async fn groups_are_recorded_in_the_activity_log() {
     let removed = h.activity(ActivityKind::GroupRemoved).await;
     assert_eq!(removed.len(), 1);
     assert!(removed[0].message.contains("household"), "{removed:?}");
+}
+
+// ─── IPv4 and segments (ADR 0044) ────────────────────────────────────────────
+
+fn socket_on(name: &str, port: u16, bind: &str) -> ListeningSocket {
+    ListeningSocket {
+        bind_address: bind.parse().unwrap(),
+        ..listener(name, port, Protocol::Tcp)
+    }
+}
+
+async fn reach_of(h: &Harness, grant_id: &str) -> Reach {
+    let views = h
+        .engine()
+        .await
+        .list_grants(&h.state, GrantFilter::default())
+        .await
+        .unwrap();
+    let view = views.iter().find(|v| v.grant.id == grant_id).unwrap();
+    assert_eq!(view.reach.len(), 1, "{view:?}");
+    view.reach[0].reach
+}
+
+#[tokio::test]
+async fn ipv4_peer_reach_follows_the_listener_and_protect_host() {
+    use socketguard_core::AddrFamily;
+    let h = Harness::new(vec![lan_net()], vec![socket_on("nginx", 80, "0.0.0.0")]).await;
+    h.net.set_ipv4_subnets("eth0", &["192.168.1.0/24"]);
+    h.reconcile().await;
+    let app = h.app().await;
+    assert_eq!(app.ports[0].family, AddrFamily::V4);
+    let peer = h.peer("laptop", CredentialKind::Ip, "192.168.1.5").await;
+    let gid = h.grant(&app.id, Subject::Peer(peer)).await.grant.id;
+
+    // Nothing filters IPv4 yet: the peer's grant lets everyone in.
+    assert_eq!(reach_of(&h, &gid).await, Reach::Unfiltered);
+    assert!(h.last_ruleset().rules.iter().all(|r| r.dst != Dst::HostV4));
+
+    h.engine()
+        .await
+        .set_protect_host(&h.state, vec!["eth0".into()], false)
+        .await
+        .unwrap();
+    assert_eq!(reach_of(&h, &gid).await, Reach::IpOnly);
+    let rs = h.last_ruleset();
+    let v4: Vec<_> = rs.rules.iter().filter(|r| r.dst == Dst::HostV4).collect();
+    assert_eq!(v4.len(), 1);
+    assert_eq!(v4[0].port, 80);
+    assert_eq!(v4[0].iif.as_deref(), Some("eth0"));
+    assert_eq!(
+        v4[0].sources,
+        Sources::Nets(vec!["192.168.1.5/32".parse().unwrap()])
+    );
+
+    // The service moves to IPv6 only: the IPv4 credential reaches nothing.
+    h.set_sockets(vec![socket_on("nginx", 80, "fd00::1")]);
+    h.reconcile().await;
+    assert_eq!(h.app().await.ports[0].family, AddrFamily::V6);
+    assert_eq!(reach_of(&h, &gid).await, Reach::NotReachable);
+    assert!(h.last_ruleset().rules.iter().all(|r| r.dst != Dst::HostV4));
+}
+
+#[tokio::test]
+async fn a_segment_grant_is_limited_to_the_networks_prefix() {
+    let h = Harness::new(vec![lan_net()], vec![socket_on("nginx", 80, "::")]).await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let view = h
+        .engine()
+        .await
+        .create_grant(
+            &h.state,
+            &NewGrant {
+                app_id: app.id.clone(),
+                port: None,
+                network_id: Some("lan".into()),
+                subject: Subject::Anyone,
+                confirm_open: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(view.reach[0].reach, Reach::Open);
+    let rs = h.last_ruleset();
+    assert_eq!(rs.rules.len(), 1);
+    assert_eq!(
+        rs.rules[0].sources,
+        Sources::Nets(vec![
+            "fe80::/10".parse().unwrap(),
+            "2001:db8:1:2::/64".parse().unwrap()
+        ])
+    );
+}
+
+#[tokio::test]
+async fn vlan_interfaces_report_their_id() {
+    let vlan = Net {
+        id: "mgmt",
+        config: BackendConfig::Slaac {
+            interface: "eth0.20".into(),
+            prefix: None,
+        },
+        mock: {
+            let m = MockIpv6Backend::new("2001:db8:20::", 128, "eth0.20");
+            m.set_prefix("2001:db8:20::");
+            m
+        },
+    };
+    let h = Harness::new(vec![vlan], vec![]).await;
+    h.net.set_vlan("eth0.20", 20);
+    let nets = h.engine().await.networks_described();
+    assert_eq!(nets[0].vlan_id, Some(20));
+    assert_eq!(h.engine().await.networks()[0].vlan_id, None);
 }

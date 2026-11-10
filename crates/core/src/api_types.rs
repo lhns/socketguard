@@ -100,6 +100,13 @@ pub struct StatusResponse {
 
 // ─── Apps ────────────────────────────────────────────────────────────────────
 
+/// Body of `POST /api/credentials/parse`: pasted text with any number of values.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParseCredentialsRequest {
+    pub text: String,
+}
+
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewRequest {

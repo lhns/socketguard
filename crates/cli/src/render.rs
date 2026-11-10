@@ -9,7 +9,7 @@ use socketguard_core::api_types::{
 };
 use socketguard_core::{
     ActivityRecord, Address, App, AppDetail, Credential, GrantView, Locator, Network, NetworkKind,
-    NetworkStatus, Peer, PeerGroup, PortSet, Reach, Settings, Subject,
+    NetworkStatus, ParsedCredential, Peer, PeerGroup, PortSet, Reach, Settings, Subject,
 };
 use std::collections::HashMap;
 
@@ -49,6 +49,14 @@ impl Names {
 
     pub fn group(&self, id: &str) -> String {
         label(&self.groups, id)
+    }
+
+    /// Who a grant is for. Anyone scoped to a network is "everyone on <network>", a segment.
+    pub fn grantee(&self, g: &socketguard_core::Grant) -> String {
+        match (&g.subject, &g.network_id) {
+            (Subject::Anyone, Some(n)) => format!("everyone on {n} (segment)"),
+            (s, _) => self.subject(s),
+        }
     }
 
     pub fn subject(&self, s: &Subject) -> String {
@@ -105,6 +113,14 @@ fn indent(s: &str) -> String {
         .join("\n")
 }
 
+/// The confirmation question for opening an app to Anyone (ADR 0027, 0044).
+pub fn open_question(app: &str, network: Option<&str>) -> String {
+    match network {
+        Some(n) => format!("Open {app} to everyone on {n}?"),
+        None => format!("Open {app} to anyone who can reach it?"),
+    }
+}
+
 pub fn time(t: DateTime<Utc>) -> String {
     t.format("%Y-%m-%d %H:%M:%S").to_string()
 }
@@ -115,6 +131,7 @@ fn reach_label(r: Reach) -> &'static str {
         Reach::WholeSubnet => "whole subnet",
         Reach::IpOnly => "IP only",
         Reach::Open => "open",
+        Reach::Unfiltered => "open to everyone over IPv4",
         Reach::NotReachable => "not reachable",
     }
 }
@@ -328,7 +345,7 @@ pub fn grants(grants: &[GrantView], names: &Names, with_app: bool) -> String {
                 if with_app {
                     row.push(names.app(&g.grant.app_id));
                 }
-                row.extend([port, net, names.subject(&g.grant.subject), reach_summary(g)]);
+                row.extend([port, net, names.grantee(&g.grant), reach_summary(g)]);
                 row
             })
             .collect(),
@@ -528,6 +545,35 @@ pub fn peers(peers: &[Peer], names: &Names) -> String {
     )
 }
 
+/// What `peers parse` found: one line per value.
+pub fn parsed_credentials(parsed: &[ParsedCredential]) -> String {
+    table(
+        &["VALUE", "KIND", "STORED AS", "WORKS ON"],
+        parsed
+            .iter()
+            .map(|p| {
+                let works = match &p.error {
+                    Some(e) => format!("error: {e}"),
+                    None => p
+                        .reach
+                        .iter()
+                        .map(|r| {
+                            format!("{} ({})", kind_label(r.network_kind), reach_label(r.reach))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                };
+                vec![
+                    p.input.clone(),
+                    p.kind.map(|k| k.to_string()).unwrap_or_default(),
+                    p.normalized.clone().unwrap_or_default(),
+                    works,
+                ]
+            })
+            .collect(),
+    )
+}
+
 pub fn peer_detail(p: &Peer, names: &Names, grants_of: &[GrantView]) -> String {
     let groups = if p.groups.is_empty() {
         "none".to_string()
@@ -682,6 +728,7 @@ mod tests {
             Reach::WholeSubnet,
             Reach::IpOnly,
             Reach::Open,
+            Reach::Unfiltered,
             Reach::NotReachable,
         ];
         let labels: Vec<_> = all.into_iter().map(reach_label).collect();
@@ -692,6 +739,7 @@ mod tests {
                 "whole subnet",
                 "IP only",
                 "open",
+                "open to everyone over IPv4",
                 "not reachable"
             ]
         );

@@ -34,7 +34,7 @@ async fn pick_subject(c: &Ctx, p: &mut dyn Prompter) -> Result<Option<Subject>> 
             .client
             .create_peer(&NewPeer {
                 label,
-                credentials: vec![parse::guess_credential(&value)?],
+                credentials: parse::guess_credentials(&value)?,
             })
             .await?;
         println!("added peer {}", peer.label);
@@ -61,7 +61,7 @@ async fn grant_to(
         confirm_open: false,
     };
     if req.subject == Subject::Anyone {
-        if !p.confirm(&format!("Open {} to anyone who can reach it?", app.name)) {
+        if !p.confirm(&render::open_question(&app.name, None)) {
             println!("skipped");
             return Ok(false);
         }

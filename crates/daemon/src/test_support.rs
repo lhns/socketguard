@@ -1,10 +1,11 @@
 use crate::firewall::{Counter, DesiredRuleset, DropEvent, DropSink, Firewall, Revocation};
-use crate::iface::InterfaceManager;
+use crate::iface::{InterfaceInfo, InterfaceManager};
 use crate::monitor::SocketMonitor;
 use crate::networks::ip::yggdrasil::{NodeInfo, YggdrasilNode};
 use crate::networks::ip::{with_prefix64, AllocatedAddress, Ipv6Backend, Prefix};
 use crate::AppState;
 use anyhow::Result;
+use ipnet::Ipv4Net;
 use socketguard_core::config::DaemonConfig;
 use socketguard_core::{BackendType, ListeningSocket};
 use std::collections::{HashMap, HashSet};
@@ -169,6 +170,8 @@ pub struct MockInterfaceManager {
     addrs: Arc<Mutex<HashMap<String, HashSet<Ipv6Addr>>>>,
     missing_ifaces: Arc<Mutex<HashSet<String>>>,
     remove_failing: Arc<Mutex<bool>>,
+    ipv4: Arc<Mutex<HashMap<String, Vec<Ipv4Net>>>>,
+    vlans: Arc<Mutex<HashMap<String, u16>>>,
 }
 
 impl MockInterfaceManager {
@@ -178,7 +181,22 @@ impl MockInterfaceManager {
             addrs: Arc::default(),
             missing_ifaces: Arc::default(),
             remove_failing: Arc::default(),
+            ipv4: Arc::default(),
+            vlans: Arc::default(),
         }
+    }
+
+    /// Give `iface` the IPv4 subnets `nets` (e.g. "192.168.1.0/24"); empty clears them.
+    pub fn set_ipv4_subnets(&self, iface: &str, nets: &[&str]) {
+        self.ipv4.lock().unwrap().insert(
+            iface.to_string(),
+            nets.iter().map(|n| n.parse().unwrap()).collect(),
+        );
+    }
+
+    /// Make `iface` a VLAN subinterface with this id.
+    pub fn set_vlan(&self, iface: &str, id: u16) {
+        self.vlans.lock().unwrap().insert(iface.to_string(), id);
     }
 
     /// Addresses currently configured on `iface`.
@@ -258,8 +276,31 @@ impl InterfaceManager for MockInterfaceManager {
         Ok(())
     }
 
-    fn list_interfaces(&self) -> Result<Vec<String>> {
-        Ok(vec!["lo".to_string()])
+    fn list_interfaces(&self) -> Result<Vec<InterfaceInfo>> {
+        let vlans = self.vlans.lock().unwrap();
+        let mut names: Vec<String> = vec!["lo".to_string()];
+        names.extend(vlans.keys().cloned());
+        names.sort();
+        Ok(names
+            .into_iter()
+            .map(|name| InterfaceInfo {
+                vlan_id: vlans.get(&name).copied(),
+                name,
+            })
+            .collect())
+    }
+
+    fn list_ipv4_subnets(&self, iface: &str) -> Result<Vec<Ipv4Net>> {
+        if self.missing_ifaces.lock().unwrap().contains(iface) {
+            anyhow::bail!("interface {iface} does not exist");
+        }
+        Ok(self
+            .ipv4
+            .lock()
+            .unwrap()
+            .get(iface)
+            .cloned()
+            .unwrap_or_default())
     }
 
     fn list_addresses(&self, iface: &str) -> Result<Vec<Ipv6Addr>> {

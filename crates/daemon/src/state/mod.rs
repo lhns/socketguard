@@ -24,8 +24,8 @@ use schema::{archive_pre_v1, is_pre_v1};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use socketguard_core::{
-    ActivityKind, ActivityQuery, ActivityRecord, Address, App, AppPort, Credential, CredentialKind,
-    Grant, Locator, Peer, PeerGroup, PortRef, PortSet, Protocol, Subject,
+    ActivityKind, ActivityQuery, ActivityRecord, AddrFamily, Address, App, AppPort, Credential,
+    CredentialKind, Grant, Locator, Peer, PeerGroup, PortRef, PortSet, Protocol, Subject,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
@@ -233,7 +233,7 @@ impl Database {
 
     async fn load_ports(&self, only: Option<&str>) -> Result<HashMap<String, Vec<AppPort>>> {
         let rows = sqlx::query(
-            "SELECT app_id, port, proto, listening, last_seen FROM app_ports \
+            "SELECT app_id, port, proto, listening, last_seen, family FROM app_ports \
              WHERE (?1 IS NULL OR app_id = ?1) ORDER BY port, proto",
         )
         .bind(only)
@@ -249,6 +249,10 @@ impl Database {
                     .map_err(anyhow::Error::msg)?,
                 listening: r.get("listening"),
                 last_seen: parse_ts(r.get("last_seen"))?,
+                family: r
+                    .get::<String, _>("family")
+                    .parse()
+                    .map_err(anyhow::Error::msg)?,
             });
         }
         Ok(out)
@@ -260,7 +264,7 @@ impl Database {
     pub async fn sync_app_ports(
         &self,
         app_id: &str,
-        live: &[PortRef],
+        live: &[(PortRef, AddrFamily)],
         now: DateTime<Utc>,
     ) -> Result<Vec<PortRef>> {
         let mut tx = self.pool.begin().await?;
@@ -279,23 +283,25 @@ impl Database {
             })
             .collect::<Result<_>>()?;
         let mut new_ports = Vec::new();
-        for p in live {
+        for (p, family) in live {
             if !known.contains(p) {
                 new_ports.push(*p);
             }
             sqlx::query(
-                "INSERT INTO app_ports (app_id, port, proto, listening, last_seen) \
-                 VALUES (?, ?, ?, 1, ?) ON CONFLICT(app_id, port, proto) \
-                 DO UPDATE SET listening = 1, last_seen = excluded.last_seen",
+                "INSERT INTO app_ports (app_id, port, proto, listening, last_seen, family) \
+                 VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(app_id, port, proto) \
+                 DO UPDATE SET listening = 1, last_seen = excluded.last_seen, \
+                 family = excluded.family",
             )
             .bind(app_id)
             .bind(p.port)
             .bind(p.proto.to_string())
             .bind(ts(now))
+            .bind(family.as_str())
             .execute(&mut *tx)
             .await?;
         }
-        for k in known.iter().filter(|k| !live.contains(k)) {
+        for k in known.iter().filter(|k| !live.iter().any(|(p, _)| p == *k)) {
             sqlx::query(
                 "UPDATE app_ports SET listening = 0 WHERE app_id = ? AND port = ? AND proto = ?",
             )
@@ -1216,14 +1222,27 @@ mod tests {
             port: 53,
             proto: Protocol::Udp,
         };
-        let new = db.sync_app_ports("a1", &[p80, p53], now()).await.unwrap();
+        let d = AddrFamily::Dual;
+        let new = db
+            .sync_app_ports("a1", &[(p80, AddrFamily::V4), (p53, d)], now())
+            .await
+            .unwrap();
         assert_eq!(new.len(), 2);
-        let new = db.sync_app_ports("a1", &[p80], now()).await.unwrap();
+        let new = db
+            .sync_app_ports("a1", &[(p80, AddrFamily::V6)], now())
+            .await
+            .unwrap();
         assert!(new.is_empty());
         let got = db.get_app("a1").await.unwrap().unwrap();
         let listening: Vec<_> = got.ports.iter().map(|p| (p.port, p.listening)).collect();
         assert_eq!(listening, [(53, false), (80, true)]);
-        let new = db.sync_app_ports("a1", &[p80, p53], now()).await.unwrap();
+        // The family follows the latest scan.
+        let families: Vec<_> = got.ports.iter().map(|p| p.family).collect();
+        assert_eq!(families, [AddrFamily::Dual, AddrFamily::V6]);
+        let new = db
+            .sync_app_ports("a1", &[(p80, d), (p53, d)], now())
+            .await
+            .unwrap();
         assert!(new.is_empty(), "a returning port is not new");
     }
 
@@ -1458,10 +1477,13 @@ mod tests {
         for id in ["a1", "a2"] {
             db.sync_app_ports(
                 id,
-                &[PortRef {
-                    port: 80,
-                    proto: Protocol::Tcp,
-                }],
+                &[(
+                    PortRef {
+                        port: 80,
+                        proto: Protocol::Tcp,
+                    },
+                    AddrFamily::Dual,
+                )],
                 now(),
             )
             .await

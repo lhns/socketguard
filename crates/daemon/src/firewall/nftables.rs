@@ -2,8 +2,8 @@
 //! `nft -f -` transaction. `render` is pure and golden-tested on every platform.
 
 use super::{
-    brace_list, run_with_stdin, safe_text, Counter, DesiredRuleset, DropSink, Families, Firewall,
-    Revocation, Rule, Scope, ScopeMatch, Sources,
+    brace_list, run_with_stdin, safe_text, Counter, DesiredRuleset, DropSink, Dst, Families,
+    Firewall, Revocation, Rule, Scope, ScopeMatch, Sources,
 };
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -38,8 +38,8 @@ fn counter_names(rs: &DesiredRuleset) -> HashMap<String, String> {
         .collect()
 }
 
-fn l3(ip: &IpAddr) -> &'static str {
-    if ip.is_ipv6() {
+fn l3(dst: &Dst) -> &'static str {
+    if dst.is_ipv6() {
         "ip6"
     } else {
         "ip"
@@ -51,14 +51,20 @@ fn rule_line(r: &Rule) -> String {
     if let Some(iif) = &r.iif {
         let _ = write!(s, "iifname \"{}\" ", safe_text(iif));
     }
-    if let Sources::Nets(nets) = &r.sources {
-        let _ = write!(s, "{} saddr {} ", l3(&r.dst), brace_list(nets));
+    match &r.sources {
+        Sources::Nets(nets) => {
+            let _ = write!(s, "{} saddr {} ", l3(&r.dst), brace_list(nets));
+        }
+        // A rule for any IPv4 destination must not match IPv6 packets.
+        Sources::Any if r.dst == Dst::HostV4 => s.push_str("meta nfproto ipv4 "),
+        Sources::Any => {}
+    }
+    if let Dst::Addr(addr) = r.dst {
+        let _ = write!(s, "{} daddr {addr} ", l3(&r.dst));
     }
     let _ = write!(
         s,
-        "{} daddr {} {} dport {} counter name \"{}\" accept",
-        l3(&r.dst),
-        r.dst,
+        "{} dport {} counter name \"{}\" accept",
         r.proto,
         r.port,
         counter_name(&r.id)
@@ -177,16 +183,20 @@ fn run_nft(args: &[&str], stdin: Option<&str>) -> Result<std::process::Output> {
 /// `conntrack` arguments selecting the flows to a revoked destination: the original
 /// direction's destination, protocol and port.
 fn conntrack_selector(r: &Revocation) -> Vec<String> {
-    vec![
-        "-f".into(),
+    let mut a = vec![
+        "-f".to_string(),
         if r.dst.is_ipv6() { "ipv6" } else { "ipv4" }.into(),
-        "-d".into(),
-        r.dst.to_string(),
-        "-p".into(),
+    ];
+    if let Some(dst) = r.dst.addr() {
+        a.extend(["-d".to_string(), dst.to_string()]);
+    }
+    a.extend([
+        "-p".to_string(),
         r.proto.to_string(),
-        "--dport".into(),
+        "--dport".to_string(),
         r.port.to_string(),
-    ]
+    ]);
+    a
 }
 
 fn conntrack_args(verb: &str, r: &Revocation, src: Option<IpAddr>) -> Vec<String> {
@@ -418,11 +428,25 @@ mod tests {
 
     fn revocation(src: Option<&str>) -> Revocation {
         Revocation {
-            dst: "fd00::9".parse().unwrap(),
+            dst: Dst::Addr("fd00::9".parse().unwrap()),
             port: 80,
             proto: Protocol::Tcp,
             src: src.map(|s| s.parse().unwrap()),
         }
+    }
+
+    #[test]
+    fn conntrack_selects_host_ipv4_flows_without_a_destination() {
+        let r = Revocation {
+            dst: Dst::HostV4,
+            port: 22,
+            proto: Protocol::Tcp,
+            src: None,
+        };
+        assert_eq!(
+            conntrack_args("-D", &r, Some("192.168.1.5".parse().unwrap())).join(" "),
+            "-D -f ipv4 -p tcp --dport 22 -s 192.168.1.5"
+        );
     }
 
     #[test]
@@ -494,7 +518,7 @@ mod tests {
         let r = Rule {
             id: "x".into(),
             iif: None,
-            dst: "10.0.0.1".parse().unwrap(),
+            dst: Dst::Addr("10.0.0.1".parse().unwrap()),
             port: 53,
             proto: Protocol::Udp,
             sources: Sources::Any,

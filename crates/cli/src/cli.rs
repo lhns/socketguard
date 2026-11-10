@@ -122,10 +122,16 @@ pub enum PeersCmd {
     List,
     /// Show a peer with its credentials and grants
     Show { peer: String },
-    /// Add a peer. Bare values are guessed: 64 hex characters are a Yggdrasil key, an IP
-    /// address or CIDR is an IP credential, 52 base32 characters (or a
+    /// Add a peer. Bare values are classified like `peers parse`: 64 hex characters are a
+    /// Yggdrasil key, an IP address or CIDR is an IP credential, 52 base32 characters (or a
     /// `descriptor:x25519:` line) are a Tor client key
     Add(PeerAddArgs),
+    /// Show what pasted credentials are and where they work, without adding anything
+    Parse {
+        /// Values separated by spaces, commas or newlines
+        #[arg(required = true)]
+        values: Vec<String>,
+    },
     /// Rename a peer
     Rename { peer: String, new_label: String },
     /// Remove a peer and the grants naming it

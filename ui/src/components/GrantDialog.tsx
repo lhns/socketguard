@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { toDaemonError, type Subject } from "../api";
 import { errorText, portLabel } from "../lib";
-import { useApp, useCreateGrant, useCreatePeer, useGroups, usePeers } from "../queries";
+import { useApp, useCreateGrant, useCreatePeer, useGroups, useNetworks, usePeers } from "../queries";
 import ConfirmDialog from "./ConfirmDialog";
 import { useToast } from "./Toast";
 
@@ -20,9 +20,11 @@ export default function GrantDialog({ appId, source, onClose }: Props) {
   const groups = useGroups();
   const createGrant = useCreateGrant();
   const createPeer = useCreatePeer();
+  const networks = useNetworks();
 
   const [who, setWho] = useState<string>(source ? "new" : "");
   const [port, setPort] = useState("all");
+  const [network, setNetwork] = useState("");
   const [newLabel, setNewLabel] = useState(source ?? "");
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,6 +45,8 @@ export default function GrantDialog({ appId, source, onClose }: Props) {
   }, [asking, onClose]);
 
   const ports = app.data?.ports ?? [];
+  const takesGrants = (networks.data ?? []).filter((n) => n.grants_apply);
+  const networkName = takesGrants.find((n) => n.id === network)?.name;
 
   async function submit(confirmOpen: boolean) {
     setError(null);
@@ -69,7 +73,7 @@ export default function GrantDialog({ appId, source, onClose }: Props) {
       await createGrant.mutateAsync({
         app_id: appId,
         port: portRef ? { port: portRef.port, proto: portRef.proto } : null,
-        network_id: null,
+        network_id: network || null,
         subject,
         confirm_open: confirmOpen,
       });
@@ -134,6 +138,15 @@ export default function GrantDialog({ appId, source, onClose }: Props) {
               ))}
             </select>
           </div>
+          <div className="form-row">
+            <label htmlFor={`${id}-net`}>Network</label>
+            <select id={`${id}-net`} className="input" value={network} onChange={(e) => setNetwork(e.target.value)}>
+              <option value="">All networks</option>
+              {takesGrants.map((n) => (
+                <option key={n.id} value={n.id}>{n.name}</option>
+              ))}
+            </select>
+          </div>
           {error && <div className="error-banner" role="alert">{error}</div>}
           <div className="modal-actions">
             <button type="button" className="btn" onClick={onClose}>Cancel</button>
@@ -143,8 +156,8 @@ export default function GrantDialog({ appId, source, onClose }: Props) {
       </div>
       {asking && (
         <ConfirmDialog
-          title="Open to anyone?"
-          confirmLabel="Open to anyone"
+          title={networkName ? `Open to everyone on ${networkName}?` : "Open to anyone?"}
+          confirmLabel={networkName ? `Open to everyone on ${networkName}` : "Open to anyone"}
           onCancel={() => setAsking(false)}
           onConfirm={() => {
             setAsking(false);
@@ -152,8 +165,9 @@ export default function GrantDialog({ appId, source, onClose }: Props) {
           }}
         >
           <p>
-            Any source that can reach this machine on the app&apos;s networks will be able to
-            connect. This is not limited to your peers.
+            {networkName
+              ? `Any host on ${networkName} will be able to connect, nothing is verified. Hosts on other networks, even when routed here, will not.`
+              : "Any source that can reach this machine on the app's networks will be able to connect. This is not limited to your peers."}
           </p>
         </ConfirmDialog>
       )}
