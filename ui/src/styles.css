@@ -216,29 +216,11 @@ body {
   border-color: var(--accent-hover);
 }
 
-.btn-danger {
-  color: var(--red);
-  border-color: transparent;
-  background: transparent;
-  padding: 4px 8px;
-}
-
-.btn-danger:hover {
-  background: var(--red-bg);
-}
+.btn-danger { background: var(--red); border-color: var(--red); color: #fff; }
 
 .btn-sm {
   padding: 4px 10px;
   font-size: 12px;
-}
-
-.btn-ghost {
-  border-color: transparent;
-  background: transparent;
-}
-
-.btn-ghost:hover {
-  background: var(--bg-hover);
 }
 
 /* Inputs */
@@ -277,9 +259,6 @@ select.input option {
 }
 
 /* Table */
-.table-wrap {
-  overflow-x: auto;
-}
 
 table {
   width: 100%;
@@ -324,50 +303,6 @@ tr.clickable:hover {
   letter-spacing: 0.2px;
 }
 
-.badge-group {
-  background: rgba(91, 141, 239, 0.12);
-  color: var(--accent);
-}
-
-.badge-closed {
-  background: var(--red-bg);
-  color: var(--red);
-}
-
-.badge-open {
-  background: var(--green-bg);
-  color: var(--green);
-}
-
-.badge-mixed {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
-.badge-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-/* Info grid */
-.info-grid {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 6px 20px;
-  font-size: 13px;
-}
-
-.info-label {
-  color: var(--text-muted);
-  font-weight: 500;
-}
-
-.info-value {
-  color: var(--text);
-}
-
 .mono {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -377,21 +312,6 @@ tr.clickable:hover {
 .empty {
   text-align: center;
   padding: 40px 20px;
-  color: var(--text-muted);
-}
-
-.empty-icon {
-  font-size: 32px;
-  margin-bottom: 12px;
-  opacity: 0.4;
-}
-
-/* Loading */
-.loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 40px;
   color: var(--text-muted);
 }
 
@@ -503,7 +423,6 @@ tr.clickable:hover {
   background: var(--text-muted);
 }
 
-
 /* ---- Redesign (API v1) ---- */
 .visually-hidden {
   position: absolute;
@@ -523,7 +442,6 @@ code { font-family: var(--font-mono); font-size: 12px; background: var(--bg-inpu
 .nav-count { margin-left: 6px; background: var(--yellow); color: #fff; border-radius: 10px; padding: 0 6px; font-size: 11px; }
 .nav-btn.active .nav-count { background: #fff; color: var(--accent); }
 
-.btn-red { background: var(--red); border-color: var(--red); color: #fff; }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .actions { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
 .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
@@ -582,3 +500,17 @@ code { font-family: var(--font-mono); font-size: 12px; background: var(--bg-inpu
 .timeline-item.kind-blocked, .timeline-item.kind-remote_admin_exposed { border-left-color: var(--red); }
 .timeline-item.kind-app_discovered { border-left-color: var(--yellow); }
 .timeline-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+
+/* ErrorBoundary (rendered outside the app shell) */
+.error-boundary { padding: 40px 24px; max-width: 600px; margin: 0 auto; color: var(--text); }
+.error-boundary h2 { color: var(--red); margin-bottom: 16px; font-size: 18px; }
+.error-boundary pre {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 20px;
+}

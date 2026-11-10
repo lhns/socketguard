@@ -5,7 +5,7 @@ import { useToast } from "../components/Toast";
 import { errorText, formatTime } from "../lib";
 import { useActivity, useApps, useReviewApp } from "../queries";
 
-export const KIND_LABEL: Record<ActivityKind, string> = {
+const KIND_LABEL: Record<ActivityKind, string> = {
   app_discovered: "New app",
   app_removed: "App removed",
   grant_added: "Access granted",

@@ -89,12 +89,8 @@ export const api = {
   subscribeEvents: () => call<void>("subscribe_events"),
 };
 
-/** Daemon events re-emitted by the Tauri backend (same names as the SSE events). */
-export const DAEMON_EVENTS = [
-  "apps_changed", "app_discovered", "peers_changed", "grants_changed",
-  "networks_changed", "settings_changed", "activity", "daemon_connected",
-] as const;
-
+/** Subscribe to a daemon event re-emitted by the Tauri backend (same names as the SSE events, plus
+ * the UI-local `daemon_connected` / `daemon_disconnected`). */
 export function onDaemonEvent(name: string, cb: () => void): Promise<UnlistenFn> {
   return listen(name, () => cb());
 }

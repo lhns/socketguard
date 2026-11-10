@@ -105,6 +105,7 @@ export const EVENT_INVALIDATIONS: Record<string, string[][]> = {
   networks_changed: [["networks"], ["status"], ["app"]],
   settings_changed: [["settings"], ["status"]],
   activity: [["activity"]],
+  daemon_disconnected: [["status"]],
   daemon_connected: [["status"], ["apps"], ["app"], ["peers"], ["groups"], ["grants"], ["networks"], ["settings"], ["activity"]],
 };
 

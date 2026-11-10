@@ -10,12 +10,11 @@ import { ReachBadge } from "../reach";
 
 interface Props {
   initialSearch?: string;
-  initialAppId?: string | null;
 }
 
-export default function AppsPage({ initialSearch = "", initialAppId = null }: Props) {
+export default function AppsPage({ initialSearch = "" }: Props) {
   const apps = useApps();
-  const [selected, setSelected] = useState<string | null>(initialAppId);
+  const [selected, setSelected] = useState<string | null>(null);
   const [pendingOnly, setPendingOnly] = useState(false);
   const [search, setSearch] = useState(initialSearch);
 

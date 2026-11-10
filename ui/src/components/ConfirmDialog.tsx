@@ -30,7 +30,7 @@ export default function ConfirmDialog({ title, children, confirmLabel = "Confirm
         <div className="modal-body">{children}</div>
         <div className="modal-actions">
           <button className="btn" ref={cancelRef} onClick={onCancel}>Cancel</button>
-          <button className={danger ? "btn btn-red" : "btn btn-primary"} onClick={onConfirm}>
+          <button className={danger ? "btn btn-danger" : "btn btn-primary"} onClick={onConfirm}>
             {confirmLabel}
           </button>
         </div>
