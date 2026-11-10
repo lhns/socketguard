@@ -1,5 +1,5 @@
 //! Every route of the API has a client method, and the client has no method for a route
-//! that does not exist (ADR 0033). Phase 7a extends this to CLI commands.
+//! that does not exist (ADR 0033).
 
 use socketguard_client::CLIENT_ROUTES;
 use socketguard_daemon::api::ROUTES;
@@ -38,18 +38,7 @@ fn the_router_serves_every_route() {
         .unwrap();
     rt.block_on(async {
         let state = socketguard_daemon::test_support::test_app_state(
-            socketguard_daemon::engine::Engine::new_injectable(
-                Box::new(socketguard_daemon::test_support::MockSocketMonitor::new(
-                    vec![],
-                )),
-                std::sync::Arc::new(socketguard_daemon::test_support::MockFirewall::new(
-                    Default::default(),
-                )),
-                std::sync::Arc::new(socketguard_daemon::test_support::MockNetworkInterface::new(
-                    Default::default(),
-                )),
-                Default::default(),
-            ),
+            socketguard_daemon::test_support::empty_engine(),
             Default::default(),
         )
         .await;
