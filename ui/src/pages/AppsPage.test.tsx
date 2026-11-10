@@ -212,7 +212,7 @@ describe("Apps page", () => {
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0]).toEqual([
       { op: "create_tag", ref: "$tag", label: "web", patterns: [] },
-      { op: "add_tag_member", tag_id: "$tag", app_id: "a1" },
+      { op: "add_tag_member", tag_id: "$tag", app_id: "a1", confirm_open: false },
     ]);
   });
 

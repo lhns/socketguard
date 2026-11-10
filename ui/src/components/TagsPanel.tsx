@@ -119,7 +119,7 @@ function TagEditor({ tag, onGone }: { tag: Tag; onGone: () => void }) {
   const save = (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    update.mutate({ id: tag.id, req: { label: label.trim(), patterns: patternsOf(patterns) } }, {
+    update.mutate({ id: tag.id, req: { label: label.trim(), patterns: patternsOf(patterns), confirm_open: false } }, {
       onSuccess: () => toast.success("Tag saved"),
       onError: (err) => setError({ field: errorField(err), text: errorText(err) }),
     });

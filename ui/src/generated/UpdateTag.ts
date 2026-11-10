@@ -3,4 +3,9 @@
 /**
  * Body of `PATCH /api/tags/{id}`. Absent fields stay as they are.
  */
-export type UpdateTag = { label?: string, patterns?: Array<string>, };
+export type UpdateTag = { label?: string, patterns?: Array<string>, 
+/**
+ * Needed when new patterns add existing apps to a tag that has a grant to Anyone
+ * (ADR 0043); without it the daemon answers `confirmation_required`.
+ */
+confirm_open: boolean, };

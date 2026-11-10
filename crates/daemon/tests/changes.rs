@@ -298,7 +298,7 @@ async fn patterns_add_matching_apps_now_and_new_ones_later_but_not_excluded_ones
     let (_, tag) = d
         .post(
             &format!("/api/tags/{tag_id}/members"),
-            json!({"app_id": new_app.id}),
+            json!({"app_id": new_app.id, "confirm_open": true}),
         )
         .await;
     assert_eq!(tag["excluded"], json!([]));
@@ -558,4 +558,213 @@ async fn batch_tag_member_operations_and_removal_of_grants() {
         )
         .await;
     assert_eq!((s, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
+}
+
+// ─── Joining a tag that is open to anyone ────────────────────────────────────
+
+/// A tag with a grant to Anyone, and a second app that is not in it.
+async fn open_tag_and_spare_app(d: &Daemon) -> (String, String) {
+    let (_, tag) = d.post("/api/tags", json!({"label": "web"})).await;
+    let tag_id = id(&tag);
+    let (s, g) = d
+        .post(
+            "/api/grants",
+            json!({"target": tag_target(&tag_id), "subject": {"kind": "anyone"}, "confirm_open": true}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{g}");
+    (tag_id, d.app_id().await)
+}
+
+#[tokio::test]
+async fn adding_a_member_to_a_tag_open_to_anyone_needs_confirm_open() {
+    let d = Daemon::new().await;
+    let (tag_id, app_id) = open_tag_and_spare_app(&d).await;
+    let path = format!("/api/tags/{tag_id}/members");
+
+    let (s, body) = d.post(&path, json!({"app_id": app_id})).await;
+    assert_eq!(
+        (s, code(&body)),
+        (StatusCode::CONFLICT, "confirmation_required"),
+        "{body}"
+    );
+    assert!(d.get(&format!("/api/tags/{tag_id}")).await.1["members"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let (s, body) = d
+        .post(&path, json!({"app_id": app_id, "confirm_open": true}))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["members"].as_array().unwrap().len(), 1);
+
+    // Already a member: nothing opens, so nothing to confirm.
+    let (s, body) = d.post(&path, json!({"app_id": app_id})).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn a_tag_without_an_anyone_grant_takes_members_unconfirmed() {
+    let d = Daemon::new().await;
+    let app_id = d.app_id().await;
+    let peer = d.ygg_peer("alice").await;
+    let (_, tag) = d.post("/api/tags", json!({"label": "web"})).await;
+    let tag_id = id(&tag);
+    d.post(
+        "/api/grants",
+        json!({"target": tag_target(&tag_id), "subject": {"kind": "peer", "id": peer}}),
+    )
+    .await;
+    let (s, body) = d
+        .post(
+            &format!("/api/tags/{tag_id}/members"),
+            json!({"app_id": app_id}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn a_batch_member_of_an_open_tag_needs_confirm_open_and_says_so_in_a_dry_run() {
+    let d = Daemon::new().await;
+    let (tag_id, app_id) = open_tag_and_spare_app(&d).await;
+    let op = |confirm: bool| {
+        json!({"ops": [{"op": "add_tag_member", "tag_id": tag_id, "app_id": app_id,
+                        "confirm_open": confirm}]})
+    };
+
+    // Without the confirmation the batch is refused, a dry run included.
+    let (s, body) = d.post("/api/changes", op(false)).await;
+    assert_eq!(
+        (s, code(&body)),
+        (StatusCode::CONFLICT, "confirmation_required"),
+        "{body}"
+    );
+    let mut dry = op(true);
+    dry["dry_run"] = json!(true);
+    let (s, body) = d.post("/api/changes", dry).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["changes_reach"], true);
+    let change = &body["changes"][0];
+    assert_eq!(change["item"], "tag_member");
+    assert_eq!(change["opens_to_anyone"], true);
+    assert!(change["detail"].as_str().unwrap().contains("Anyone"));
+    assert!(!change["reach"].as_array().unwrap().is_empty());
+    assert!(d.state.db.list_tags().await.unwrap()[0].members.is_empty());
+
+    let (s, body) = d.post("/api/changes", op(true)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(d.state.db.list_tags().await.unwrap()[0].members.len(), 1);
+}
+
+#[tokio::test]
+async fn new_patterns_that_add_apps_to_an_open_tag_need_confirm_open() {
+    let d = Daemon::new().await;
+    let (tag_id, app_id) = open_tag_and_spare_app(&d).await;
+    let path = format!("/api/tags/{tag_id}");
+    let patch = |body: Value| d.send(axum::http::Method::PATCH, &path, body);
+
+    // A rename adds nobody; a pattern nothing matches adds nobody.
+    let (s, body) = patch(json!({"label": "web2", "patterns": ["zzz*"]})).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+
+    let (s, body) = patch(json!({"patterns": ["ngi*"]})).await;
+    assert_eq!(
+        (s, code(&body)),
+        (StatusCode::CONFLICT, "confirmation_required"),
+        "{body}"
+    );
+    assert!(d.get(&path).await.1["members"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let (s, body) = patch(json!({"patterns": ["ngi*"], "confirm_open": true})).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["members"], json!([{"app_id": app_id, "port": null}]));
+}
+
+#[tokio::test]
+async fn changes_reach_is_set_by_opening_edits_only() {
+    let d = Daemon::new().await;
+    let app_id = d.app_id().await;
+    let peer = d.ygg_peer("alice").await;
+    let dry = |ops: Value| json!({"dry_run": true, "ops": ops});
+
+    // Granting a verified peer widens reach.
+    let grant = json!({"op": "add_grant", "target": app_target(&app_id),
+                       "subject": {"kind": "peer", "id": peer}});
+    let (_, body) = d.post("/api/changes", dry(json!([grant.clone()]))).await;
+    assert_eq!(body["changes_reach"], true, "{body}");
+
+    // A tag without grants gains a member: nobody gains access.
+    let (_, tag) = d.post("/api/tags", json!({"label": "plain"})).await;
+    let (_, body) = d
+        .post(
+            "/api/changes",
+            dry(json!([{"op": "add_tag_member", "tag_id": id(&tag), "app_id": app_id}])),
+        )
+        .await;
+    assert_eq!(body["changes_reach"], false, "{body}");
+
+    // A member of a tag granted to a verified peer: the peer gains access.
+    let (_, shared) = d.post("/api/tags", json!({"label": "shared"})).await;
+    d.post(
+        "/api/grants",
+        json!({"target": tag_target(&id(&shared)), "subject": {"kind": "peer", "id": peer}}),
+    )
+    .await;
+    let (_, body) = d
+        .post(
+            "/api/changes",
+            dry(json!([{"op": "add_tag_member", "tag_id": id(&shared), "app_id": app_id}])),
+        )
+        .await;
+    assert_eq!(body["changes_reach"], true, "{body}");
+    assert!(body["changes"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("alice"));
+
+    // Removing and reviewing never widen it.
+    let (_, created) = d
+        .post("/api/grants", {
+            let mut g = grant.clone();
+            g.as_object_mut().unwrap().remove("op");
+            g
+        })
+        .await;
+    let (_, body) = d
+        .post(
+            "/api/changes",
+            dry(json!([{"op": "remove_grant", "grant_id": id(&created)},
+                       {"op": "review", "app_id": app_id, "reviewed": true}])),
+        )
+        .await;
+    assert_eq!(body["changes_reach"], false, "{body}");
+}
+
+#[tokio::test]
+async fn a_new_tag_has_no_grants_so_only_the_anyone_grant_itself_is_confirmed() {
+    let d = Daemon::new().await;
+    let app_id = d.app_id().await;
+    let ops = |confirm: bool| {
+        json!({"ops": [
+            {"op": "create_tag", "ref": "$t", "label": "web", "patterns": ["ngi*"]},
+            {"op": "add_grant", "target": tag_target("$t"),
+             "subject": {"kind": "anyone"}, "confirm_open": confirm}
+        ]})
+    };
+    let (s, body) = d.post("/api/changes", ops(false)).await;
+    assert_eq!(
+        (s, code(&body)),
+        (StatusCode::CONFLICT, "confirmation_required"),
+        "{body}"
+    );
+    assert!(d.state.db.list_tags().await.unwrap().is_empty());
+    let (s, body) = d.post("/api/changes", ops(true)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let tags = d.state.db.list_tags().await.unwrap();
+    assert_eq!(tags[0].members[0].app_id, app_id);
 }

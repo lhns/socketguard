@@ -21,9 +21,9 @@ use serde::{de::DeserializeOwned, Serialize};
 use socketguard_core::api_types::{
     ApiError, ApplyRequest, ApplyResponse, ChangesRequest, ChangesResponse, DisableRequest,
     Enforcement, EnforcementNotice, ExportDocument, MemberQuery, MergeRequest, NewGroup,
-    NewNetwork, NewPeer, NewTag, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse,
-    ReviewRequest, SetMembers, ShareResponse, SplitRequest, StatusResponse, TorKeyResponse,
-    UpdateLabel, UpdateSettings, UpdateTag,
+    NewNetwork, NewPeer, NewTag, NewTagMember, ParseCredentialsRequest, ProtectHostRequest,
+    ProtectHostResponse, ReviewRequest, SetMembers, ShareResponse, SplitRequest, StatusResponse,
+    TorKeyResponse, UpdateLabel, UpdateSettings, UpdateTag,
 };
 use socketguard_core::{
     ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
@@ -454,8 +454,20 @@ impl Client {
         self.call_saved(&routes::DELETE_TAG, &[id], None).await
     }
 
-    pub async fn add_tag_member(&self, tag_id: &str, member: &TagMember) -> Result<Saved<Tag>> {
-        self.call_saved(&routes::ADD_TAG_MEMBER, &[tag_id], json(member))
+    /// Add an app (or one port of it) to a tag. A tag with a grant to Anyone opens the app,
+    /// so it needs `confirm_open`, else the error code is `confirmation_required`.
+    pub async fn add_tag_member(
+        &self,
+        tag_id: &str,
+        member: &TagMember,
+        confirm_open: bool,
+    ) -> Result<Saved<Tag>> {
+        let body = NewTagMember {
+            app_id: member.app_id.clone(),
+            port: member.port,
+            confirm_open,
+        };
+        self.call_saved(&routes::ADD_TAG_MEMBER, &[tag_id], json(&body))
             .await
     }
 

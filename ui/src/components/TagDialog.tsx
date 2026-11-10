@@ -46,7 +46,7 @@ export default function TagDialog({ members, onClose }: Props) {
       });
     }
     for (const m of members) {
-      out.push({ op: "add_tag_member", tag_id: tagId, app_id: m.app_id, ...(m.port ? { port: m.port } : {}) });
+      out.push({ op: "add_tag_member", tag_id: tagId, app_id: m.app_id, confirm_open: false, ...(m.port ? { port: m.port } : {}) });
     }
     return out;
   }, [ready, choice, label, patterns, members]);
