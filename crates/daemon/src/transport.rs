@@ -103,12 +103,12 @@ pub fn bind_unix(path: &std::path::Path, group: &str) -> anyhow::Result<Server> 
         std::fs::remove_file(path)
             .with_context(|| format!("cannot remove stale socket {}", path.display()))?;
     }
-    // Created owner-only, so there is no window with wider access before the chown/chmod.
-    // SAFETY: umask only changes this process's file creation mask.
-    let old_umask = unsafe { libc::umask(0o177) };
-    let bound = tokio::net::UnixListener::bind(path);
-    unsafe { libc::umask(old_umask) };
-    let inner = bound.with_context(|| format!("cannot bind {}", path.display()))?;
+    // No umask games: it is process-wide, and concurrent binds could leave it restrictive
+    // and break other threads' mkdir. Until the chmod below the socket has the default
+    // mode, which for a unix socket still needs write access to connect, and every
+    // connection is checked by peer credentials anyway.
+    let inner = tokio::net::UnixListener::bind(path)
+        .with_context(|| format!("cannot bind {}", path.display()))?;
 
     let gid = platform::group_gid(group);
     match gid {
