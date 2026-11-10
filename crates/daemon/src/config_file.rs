@@ -11,13 +11,23 @@ pub fn config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("socketguard.json"))
 }
 
+/// The file's text without a leading UTF-8 BOM, which Windows tools (PowerShell 5.1's
+/// `Set-Content -Encoding utf8`, Notepad) write and serde_json rejects.
+pub fn read(path: &Path) -> std::io::Result<String> {
+    let text = std::fs::read_to_string(path)?;
+    Ok(match text.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_string(),
+        None => text,
+    })
+}
+
 /// Write `config.backends` to the `backends` key of the file at `path`, keeping its other
 /// keys. A missing file is created from the full `config`. The write goes to a temp file
 /// in the same directory and is renamed over the original, so a crash leaves either the
 /// old or the new file. A file that is not a JSON object is left alone and reported.
 pub fn persist_backends(path: &Path, config: &DaemonConfig) -> anyhow::Result<()> {
     use anyhow::Context;
-    let mut doc = match std::fs::read_to_string(path) {
+    let mut doc = match read(path) {
         Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(v) if v.is_object() => v,
             _ => anyhow::bail!(
@@ -47,4 +57,21 @@ pub fn persist_backends(path: &Path, config: &DaemonConfig) -> anyhow::Result<()
         let _ = std::fs::remove_file(&tmp);
     }
     result.with_context(|| format!("writing {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_config_with_a_bom_is_read() {
+        let dir = std::env::temp_dir().join(format!("sg-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("socketguard.json");
+        std::fs::write(&path, "\u{feff}{\"poll_interval_secs\": 7}").unwrap();
+        let config: DaemonConfig = serde_json::from_str(&read(&path).unwrap()).unwrap();
+        assert_eq!(config.poll_interval_secs, 7);
+        persist_backends(&path, &config).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

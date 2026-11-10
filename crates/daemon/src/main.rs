@@ -168,7 +168,7 @@ async fn shutdown_signal() {
 /// Load config before tracing is initialized, so we can't use tracing macros here.
 fn load_config_sync() -> DaemonConfig {
     let config_path = config_file::config_path().display().to_string();
-    if let Ok(content) = std::fs::read_to_string(&config_path) {
+    if let Ok(content) = config_file::read(std::path::Path::new(&config_path)) {
         match serde_json::from_str(&content) {
             Ok(config) => {
                 eprintln!("[socketguard] Loaded config from {config_path}");
