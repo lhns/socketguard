@@ -303,6 +303,15 @@ impl Engine {
             .collect()
     }
 
+    /// The configs of the networks that are live, ordered by id (what the config file
+    /// should list).
+    pub fn backend_configs(&self) -> Vec<BackendInstanceConfig> {
+        self.sorted_backend_ids()
+            .into_iter()
+            .map(|id| self.backends[id].config.clone())
+            .collect()
+    }
+
     fn interface_of(&self, network_id: &str) -> Option<&str> {
         self.backends
             .get(network_id)

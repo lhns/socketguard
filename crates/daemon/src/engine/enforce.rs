@@ -189,8 +189,7 @@ impl Engine {
                 inst.id
             )));
         }
-        let mut all: Vec<BackendInstanceConfig> =
-            self.backends.values().map(|b| b.config.clone()).collect();
+        let mut all = self.backend_configs();
         all.push(inst.clone());
         DaemonConfig::validate_backends(&all).map_err(|e| {
             if e.starts_with("at most one") {

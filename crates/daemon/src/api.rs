@@ -619,8 +619,11 @@ async fn network_create(
         id,
         backend: req.backend,
     };
-    let network = state.engine.write().await.add_network(&state, inst).await?;
-    persist_networks(&state).await;
+    // The write lock stays held until the file is written: two requests cannot save each
+    // other's stale list.
+    let mut engine = state.engine.write().await;
+    let network = engine.add_network(&state, inst).await?;
+    persist_networks(&state, &engine).await;
     Ok((StatusCode::CREATED, Json(network)).into_response())
 }
 
@@ -635,13 +638,9 @@ async fn network_delete(
     Path(id): Path<String>,
     ApiQuery(q): ApiQuery<NetworkDeleteParams>,
 ) -> ApiResult<StatusCode> {
-    state
-        .engine
-        .write()
-        .await
-        .remove_network(&state, &id, q.force)
-        .await?;
-    persist_networks(&state).await;
+    let mut engine = state.engine.write().await;
+    engine.remove_network(&state, &id, q.force).await?;
+    persist_networks(&state, &engine).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -674,12 +673,14 @@ async fn check_tor_settings(state: &AppState, backend: &BackendConfig) -> Result
 }
 
 /// Save the network list to the config file so it survives a restart. The change is
-/// already live, so a failure is logged rather than failing the request.
-async fn persist_networks(state: &AppState) {
+/// already live, so a failure is logged rather than failing the request. The caller holds
+/// the engine's write lock, so the list is current and writes do not interleave.
+async fn persist_networks(state: &AppState, engine: &Engine) {
     let Some(path) = &state.config_path else {
         return;
     };
-    let config = state.config.read().await.clone();
+    let mut config = state.config.read().await.clone();
+    config.backends = engine.backend_configs();
     let path = path.clone();
     let result =
         tokio::task::spawn_blocking(move || crate::config_file::persist_backends(&path, &config))

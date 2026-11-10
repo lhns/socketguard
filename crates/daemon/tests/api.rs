@@ -636,7 +636,7 @@ async fn networks_are_saved_to_the_config_file() {
         .post("/api/networks", add("lan2", "eth9", "2001:db8:9:9::/64"))
         .await;
     assert_eq!(s, StatusCode::CREATED);
-    assert_eq!(backends(&path), ["local", "lan", "ygg", "lan2"]);
+    assert_eq!(backends(&path), ["lan", "lan2", "local", "ygg"]);
 
     // An existing file keeps its other keys; nothing is left behind.
     let mut v: serde_json::Value =
@@ -648,7 +648,7 @@ async fn networks_are_saved_to_the_config_file() {
         d.delete("/api/networks/lan2").await.0,
         StatusCode::NO_CONTENT
     );
-    assert_eq!(backends(&path), ["local", "lan", "ygg"]);
+    assert_eq!(backends(&path), ["lan", "local", "ygg"]);
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(v["poll_interval_secs"], 17);
@@ -667,6 +667,38 @@ async fn networks_are_saved_to_the_config_file() {
         .await;
     assert_eq!(s, StatusCode::CREATED);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "[1]");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn concurrent_network_changes_are_all_saved() {
+    let dir = std::env::temp_dir().join(format!("sg-cfg-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("socketguard.json");
+    let d = Daemon::new_at(Some(path.clone())).await;
+    let add = |id: &str, iface: &str, prefix: &str| json!({"id": id, "type": "slaac", "interface": iface, "prefix": prefix});
+    let ((s1, _), (s2, _), (s3, _)) = tokio::join!(
+        d.post("/api/networks", add("lan2", "eth7", "2001:db8:7:7::/64")),
+        d.post("/api/networks", add("lan3", "eth8", "2001:db8:8:8::/64")),
+        d.post("/api/networks", add("lan4", "eth9", "2001:db8:9:9::/64")),
+    );
+    assert_eq!(
+        (s1, s2, s3),
+        (
+            StatusCode::CREATED,
+            StatusCode::CREATED,
+            StatusCode::CREATED
+        )
+    );
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let ids: Vec<&str> = saved["backends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["lan", "lan2", "lan3", "lan4", "local", "ygg"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
