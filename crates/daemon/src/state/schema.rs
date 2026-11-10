@@ -1,4 +1,4 @@
-//! The schema (v3), its migrations and the archive of pre-v1 databases.
+//! The schema (v4), its migrations and the archive of pre-v1 databases.
 
 use super::protect::protect_files;
 use super::settings::FRESH_DB_KEY;
@@ -9,7 +9,7 @@ use sqlx::{Connection, SqliteConnection};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Schema v1 -> v2: the service keys of onion addresses (ADR 0037).
 const MIGRATION_1_TO_2: &str = r#"
@@ -35,6 +35,24 @@ CREATE TABLE owned_addresses (
     since TEXT
 );
 "#;
+
+/// Schema v3 -> v4: a grant exists once. Two requests racing past the engine's check used
+/// to store the same grant twice. Duplicates are dropped first (the oldest stays); NULLs
+/// are folded because a unique index treats them as distinct.
+const MIGRATION_3_TO_4: &str = r#"
+DELETE FROM grants WHERE rowid NOT IN (
+    SELECT MIN(rowid) FROM grants
+    GROUP BY app_id, COALESCE(port, -1), COALESCE(proto, ''), COALESCE(network_id, ''),
+             subject_kind, COALESCE(subject_id, '')
+);
+CREATE UNIQUE INDEX grants_unique ON grants (
+    app_id, COALESCE(port, -1), COALESCE(proto, ''), COALESCE(network_id, ''),
+    subject_kind, COALESCE(subject_id, '')
+);
+"#;
+
+/// `MIGRATIONS[n]` takes the schema from v(n+1) to v(n+2).
+const MIGRATIONS: [&str; 3] = [MIGRATION_1_TO_2, MIGRATION_2_TO_3, MIGRATION_3_TO_4];
 
 const SCHEMA: &str = r#"
 CREATE TABLE apps (
@@ -174,31 +192,25 @@ impl Database {
                 "database schema v{version} is newer than this daemon supports (v{SCHEMA_VERSION})"
             );
         }
-        let mut current = version;
-        if current == 0 {
+        if version == 0 {
             sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
             sqlx::query("INSERT INTO settings (key, value) VALUES (?, 'true')")
                 .bind(FRESH_DB_KEY)
                 .execute(&mut *tx)
                 .await?;
-            current = 1;
         }
-        if current == 1 {
-            sqlx::raw_sql(MIGRATION_1_TO_2).execute(&mut *tx).await?;
-            current = 2;
+        // `SCHEMA` is v1; MIGRATIONS[n] takes vN+1 to vN+2.
+        for sql in &MIGRATIONS[usize::try_from(version.max(1) - 1)?..] {
+            sqlx::raw_sql(sql).execute(&mut *tx).await?;
         }
-        if current == 2 {
-            sqlx::raw_sql(MIGRATION_2_TO_3).execute(&mut *tx).await?;
-            current = 3;
-        }
-        if current != version {
-            sqlx::query(&format!("PRAGMA user_version = {current}"))
+        if version != SCHEMA_VERSION {
+            sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
                 .execute(&mut *tx)
                 .await?;
             if version == 0 {
-                info!("Created database schema v{current}");
+                info!("Created database schema v{SCHEMA_VERSION}");
             } else {
-                info!("Migrated database schema v{version} to v{current}");
+                info!("Migrated database schema v{version} to v{SCHEMA_VERSION}");
             }
         }
         tx.commit().await?;
@@ -213,6 +225,7 @@ impl Database {
 mod tests {
     use super::*;
     use crate::state::test_util::*;
+    use socketguard_core::Subject;
 
     #[tokio::test]
     async fn schema_v1_is_created_once() {
@@ -402,6 +415,66 @@ mod tests {
         let app = db.get_app("old").await.unwrap().unwrap();
         assert_eq!(app.identity_note, None);
         assert_eq!(db.list_owned_addresses().await.unwrap().len(), 0);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn v3_database_migrates_to_v4_and_drops_duplicate_grants() {
+        let path = temp_db_path("v3-to-v4");
+        {
+            let opts = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true);
+            let mut c = SqliteConnection::connect_with(&opts).await.unwrap();
+            for sql in [SCHEMA, MIGRATION_1_TO_2, MIGRATION_2_TO_3] {
+                sqlx::raw_sql(sql).execute(&mut c).await.unwrap();
+            }
+            sqlx::query("PRAGMA user_version = 3")
+                .execute(&mut c)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO apps (id, name, process_name, reviewed, first_seen, last_seen)                  VALUES ('a', 'n', 'p', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            )
+            .execute(&mut c)
+            .await
+            .unwrap();
+            // Two grants to Anyone on the whole app (NULL port and network), one to a peer.
+            for (id, port, kind, subject) in [
+                ("g1", None, "anyone", None),
+                ("g2", None, "anyone", None),
+                ("g3", Some(80), "peer", Some("p1")),
+                ("g4", Some(80), "peer", Some("p1")),
+            ] {
+                sqlx::query(
+                    "INSERT INTO grants (id, app_id, port, proto, network_id, subject_kind,                      subject_id, created_at) VALUES (?, 'a', ?, ?, NULL, ?, ?, '2026-01-01T00:00:00Z')",
+                )
+                .bind(id)
+                .bind(port)
+                .bind(port.map(|_| "tcp"))
+                .bind(kind)
+                .bind(subject)
+                .execute(&mut c)
+                .await
+                .unwrap();
+            }
+        }
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        let ids: Vec<String> = db
+            .list_grants()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|g| g.id)
+            .collect();
+        assert_eq!(ids, ["g1", "g3"], "the oldest of each duplicate stays");
+
+        let mut again = grant("a", Subject::Anyone);
+        again.port = None;
+        let err = db.insert_grant(&again).await.unwrap_err();
+        assert!(super::super::is_unique_violation(&err), "{err:#}");
         drop(db);
         let _ = std::fs::remove_file(&path);
     }

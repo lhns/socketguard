@@ -1,4 +1,4 @@
-//! SQLite persistence, schema v3 (ADR 0027, 0037): apps, ports, addresses, peers, credentials,
+//! SQLite persistence, schema v4 (ADR 0027, 0037, 0040): apps, ports, addresses, peers, credentials,
 //! groups, grants, settings, activity and onion service keys. Versioned with
 //! `PRAGMA user_version`; a database from before the redesign is renamed out of the way,
 //! never migrated.

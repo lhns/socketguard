@@ -2171,3 +2171,45 @@ async fn identity_is_per_user_and_never_shared_with_forgeries() {
         .unwrap();
     assert_eq!(trusted.ports.len(), 1, "the inline process did not join it");
 }
+
+#[tokio::test]
+async fn identical_requests_racing_create_one_grant_peer_and_group() {
+    let h = Harness::new(
+        vec![local(), ygg()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let e = h.engine().await;
+    let s = &h.state;
+
+    let (a, b) = tokio::join!(
+        e.create_peer(s, "laptop", &[]),
+        e.create_peer(s, "laptop", &[])
+    );
+    assert_eq!([a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(), 1);
+    let loser = a.err().or(b.err()).unwrap();
+    assert!(matches!(loser, EngineError::Conflict(_)), "{loser:?}");
+
+    let (a, b) = tokio::join!(
+        e.create_group(s, "family", &[]),
+        e.create_group(s, "family", &[])
+    );
+    assert_eq!([a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(), 1);
+    let loser = a.err().or(b.err()).unwrap();
+    assert!(matches!(loser, EngineError::Conflict(_)), "{loser:?}");
+
+    let req = NewGrant {
+        app_id: app.id.clone(),
+        port: None,
+        network_id: None,
+        subject: Subject::Anyone,
+        confirm_open: true,
+    };
+    let (a, b) = tokio::join!(e.create_grant(s, &req), e.create_grant(s, &req));
+    assert_eq!([a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(), 1);
+    let loser = a.err().or(b.err()).unwrap();
+    assert!(matches!(loser, EngineError::Conflict(_)), "{loser:?}");
+    assert_eq!(s.db.list_grants().await.unwrap().len(), 1);
+}

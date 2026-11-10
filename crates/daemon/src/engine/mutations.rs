@@ -399,7 +399,12 @@ impl Engine {
             subject: req.subject.clone(),
             created_at: Utc::now(),
         };
-        state.db.insert_grant(&grant).await?;
+        // The unique index settles a race with an identical request.
+        state
+            .db
+            .insert_grant(&grant)
+            .await
+            .map_err(|e| Self::conflict_or_internal(e, "this grant"))?;
         self.apply_firewall(state).await?;
         let peer_id = match &grant.subject {
             Subject::Peer(id) => Some(id.clone()),
