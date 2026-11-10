@@ -2,9 +2,7 @@
 //! credentials. Pure functions, unit tested.
 
 use anyhow::{anyhow, bail, Result};
-use socketguard_core::{
-    normalize_credential, parse_hex32, CredentialKind, NewCredential, PortRef, Protocol,
-};
+use socketguard_core::{parse_input, CredentialKind, NewCredential, PortRef, Protocol};
 
 /// `80`, `80/tcp`, `53/udp`; the protocol defaults to tcp.
 pub fn parse_port(s: &str) -> Result<PortRef> {
@@ -57,29 +55,25 @@ fn kinds() -> String {
     CredentialKind::ALL.map(|k| k.as_str()).join(", ")
 }
 
-/// A bare credential value: 64 hex characters are a Yggdrasil key, an IP address or CIDR
-/// is `ip` (the daemon turns values in 200::/7 into `ygg_addr` or `ygg_subnet`), 52
-/// base32 characters or a `descriptor:x25519:` line are a Tor client key.
-pub fn guess_credential(value: &str) -> Result<NewCredential> {
-    let kind = if parse_hex32(value).is_some() {
-        CredentialKind::YggKey
-    } else if looks_like_ip(value) {
-        CredentialKind::Ip
-    } else if normalize_credential(CredentialKind::TorClientKey, value).is_ok() {
-        CredentialKind::TorClientKey
-    } else {
-        bail!(
-            "cannot tell what {value:?} is; use --key, --addr, --subnet, --suffix or \
-             --cred kind=value (kinds: {})",
-            kinds()
-        );
-    };
-    Ok(cred(kind, value))
-}
-
-fn looks_like_ip(s: &str) -> bool {
-    let addr = s.split_once('/').map_or(s, |(a, _)| a);
-    addr.parse::<std::net::IpAddr>().is_ok()
+/// Bare credential values (any mix of spaces, commas and newlines), classified by the one
+/// parser in core: see `socketguard_core::parse_input`.
+pub fn guess_credentials(text: &str) -> Result<Vec<NewCredential>> {
+    let parsed = parse_input(text);
+    if parsed.is_empty() {
+        bail!("no credential given");
+    }
+    parsed
+        .into_iter()
+        .map(|p| match (p.kind, p.normalized, p.error) {
+            (Some(kind), Some(value), None) => Ok(cred(kind, &value)),
+            (_, _, error) => bail!(
+                "{}: {} (or use --key, --addr, --subnet, --suffix, --cred kind=value;                  kinds: {})",
+                p.input,
+                error.unwrap_or_default(),
+                kinds()
+            ),
+        })
+        .collect()
 }
 
 /// `kind=value`.
@@ -145,26 +139,32 @@ mod tests {
     }
 
     #[test]
-    fn bare_credentials_are_guessed() {
+    fn bare_credentials_are_classified_by_the_core_parser() {
         let key = "ba83a2e554a8a087cebdb3f053468cd3ff915b5dd94bf11b7a5fc2e36f13158b";
-        assert_eq!(guess_credential(key).unwrap().kind, CredentialKind::YggKey);
-        for ip in ["2001:db8::1", "2001:db8::/64", "10.0.0.1"] {
-            assert_eq!(guess_credential(ip).unwrap().kind, CredentialKind::Ip);
-        }
+        let got = guess_credentials(key).unwrap();
+        assert_eq!(got[0].kind, CredentialKind::YggKey);
+        let got = guess_credentials(
+            "2001:db8::1, 10.0.0.1
+200:1::5",
+        )
+        .unwrap();
+        let kinds: Vec<_> = got.iter().map(|c| c.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                CredentialKind::Ip,
+                CredentialKind::Ip,
+                CredentialKind::YggAddr
+            ]
+        );
+        assert_eq!(got[1].value, "10.0.0.1/32");
         let tor = "ZGBMJ4VIRNVUOQ5SJ2JXPSSWHB2R4YGTKPDGSMZ4HWCD5WLT2YKQ";
-        for v in [
-            tor.to_string(),
-            tor.to_lowercase(),
-            format!("descriptor:x25519:{tor}"),
-        ] {
-            assert_eq!(
-                guess_credential(&v).unwrap().kind,
-                CredentialKind::TorClientKey,
-                "{v}"
-            );
-        }
-        let err = guess_credential("hello").unwrap_err().to_string();
+        let got = guess_credentials(&format!("descriptor:x25519:{tor}")).unwrap();
+        assert_eq!(got[0].kind, CredentialKind::TorClientKey);
+        let err = guess_credentials("hello").unwrap_err().to_string();
         assert!(err.contains("--cred kind=value"), "{err}");
+        assert!(guess_credentials("200::").is_err());
+        assert!(guess_credentials("  ").is_err());
     }
 
     #[test]

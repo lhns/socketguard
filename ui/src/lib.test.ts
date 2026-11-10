@@ -1,22 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { guessCredentialKind } from "./lib";
+import type { ParsedCredential } from "./api";
+import { CREDENTIAL_EXAMPLES } from "./generated/credentialExamples";
+import { CREDENTIAL_PLACEHOLDER, credentialsFromParsed } from "./lib";
 
-const TOR_KEY = "ZGBMJ4VIRNVUOQ5SJ2JXPSSWHB2R4YGTKPDGSMZ4HWCD5WLT2YKQ";
+const ok = (input: string, normalized: string): ParsedCredential => ({
+  input, kind: "ip", normalized, reach: [], error: null,
+});
 
-describe("guessCredentialKind", () => {
-  it("recognises a Yggdrasil key", () => {
-    expect(guessCredentialKind("ba83a2e554a8a087cebdb3f053468cd3ff915b5dd94bf11b7a5fc2e36f13158b")).toBe("ygg_key");
+describe("credentialsFromParsed", () => {
+  it("sends the daemon's kind and normalized value", () => {
+    expect(credentialsFromParsed([ok("10.0.0.7", "10.0.0.7/32")])).toEqual({
+      credentials: [{ kind: "ip", value: "10.0.0.7/32", label: null }],
+    });
   });
 
-  it("recognises Tor client keys, bare or as an authorized_clients line", () => {
-    expect(guessCredentialKind(TOR_KEY)).toBe("tor_client_key");
-    expect(guessCredentialKind(` ${TOR_KEY.toLowerCase()} `)).toBe("tor_client_key");
-    expect(guessCredentialKind(`descriptor:x25519:${TOR_KEY}`)).toBe("tor_client_key");
+  it("reports the first error, or nothing to add", () => {
+    const bad: ParsedCredential = { input: "200::", kind: "ygg_addr", normalized: null, reach: [], error: "not a node" };
+    expect(credentialsFromParsed([ok("a", "a"), bad])).toEqual({ error: "200::: not a node" });
+    expect(credentialsFromParsed([])).toHaveProperty("error");
   });
+});
 
-  it("falls back to an IP credential", () => {
-    expect(guessCredentialKind("2001:db8::1")).toBe("ip");
-    expect(guessCredentialKind("10.0.0.0/8")).toBe("ip");
-    expect(guessCredentialKind(`other:${TOR_KEY}`)).toBe("ip");
+describe("credential examples", () => {
+  it("come from the daemon's core crate and include IPv4", () => {
+    expect(CREDENTIAL_EXAMPLES.some((e) => e.kind === "ip" && e.value.includes("."))).toBe(true);
+    expect(CREDENTIAL_PLACEHOLDER).toContain(CREDENTIAL_EXAMPLES.find((e) => e.kind === "ygg_addr")!.value);
   });
 });

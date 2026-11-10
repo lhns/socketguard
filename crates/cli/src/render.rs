@@ -9,7 +9,7 @@ use socketguard_core::api_types::{
 };
 use socketguard_core::{
     ActivityRecord, Address, App, AppDetail, Credential, GrantView, Locator, Network, NetworkKind,
-    NetworkStatus, Peer, PeerGroup, PortSet, Reach, Settings, Subject,
+    NetworkStatus, ParsedCredential, Peer, PeerGroup, PortSet, Reach, Settings, Subject,
 };
 use std::collections::HashMap;
 
@@ -522,6 +522,35 @@ pub fn peers(peers: &[Peer], names: &Names) -> String {
                         .map(|g| names.group(g))
                         .collect::<Vec<_>>()
                         .join(", "),
+                ]
+            })
+            .collect(),
+    )
+}
+
+/// What `peers parse` found: one line per value.
+pub fn parsed_credentials(parsed: &[ParsedCredential]) -> String {
+    table(
+        &["VALUE", "KIND", "STORED AS", "WORKS ON"],
+        parsed
+            .iter()
+            .map(|p| {
+                let works = match &p.error {
+                    Some(e) => format!("error: {e}"),
+                    None => p
+                        .reach
+                        .iter()
+                        .map(|r| {
+                            format!("{} ({})", kind_label(r.network_kind), reach_label(r.reach))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                };
+                vec![
+                    p.input.clone(),
+                    p.kind.map(|k| k.to_string()).unwrap_or_default(),
+                    p.normalized.clone().unwrap_or_default(),
+                    works,
                 ]
             })
             .collect(),

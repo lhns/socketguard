@@ -34,7 +34,7 @@ async fn pick_subject(c: &Ctx, p: &mut dyn Prompter) -> Result<Option<Subject>> 
             .client
             .create_peer(&NewPeer {
                 label,
-                credentials: vec![parse::guess_credential(&value)?],
+                credentials: parse::guess_credentials(&value)?,
             })
             .await?;
         println!("added peer {}", peer.label);

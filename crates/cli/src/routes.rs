@@ -35,6 +35,7 @@ pub const CLI_ROUTES: &[CliRoute] = &[
     r("peers show", "get_peer"),
     r("peers rename", "update_peer"),
     r("peers rm", "delete_peer"),
+    r("peers parse", "parse_credentials"),
     r("peers cred add", "add_credential"),
     r("peers cred rm", "remove_credential"),
     r("groups list", "list_groups"),

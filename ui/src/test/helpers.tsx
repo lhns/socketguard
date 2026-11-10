@@ -5,7 +5,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { ToastProvider } from "../components/Toast";
 import { createQueryClient } from "../queries";
 import type {
-  AppDetail, App, GrantView, Network, Peer, PeerGroup, Settings, StatusResponse,
+  AppDetail, App, GrantView, Network, ParsedCredential, Peer, PeerGroup, Settings, StatusResponse,
 } from "../api";
 
 export const networks: Network[] = [
@@ -42,6 +42,20 @@ export const grantView = (over: Partial<GrantView> = {}): GrantView => ({
   created_at: "2026-01-01T00:00:00Z", reach: [{ network_id: "n-ygg", reach: "verified" }], ...over,
 });
 
+/** Stand-in for the daemon's parser: 64 hex characters are a key, anything with a colon or dot
+ * an IP, the rest an error. The real classification is tested in the core crate. */
+export function fakeParse({ text }: { text?: unknown }): ParsedCredential[] {
+  return String(text ?? "")
+    .split(/[\s,]+/)
+    .filter(Boolean)
+    .map((input) => {
+      const kind = /^[0-9a-f]{64}$/i.test(input) ? "ygg_key" : /[:.]/.test(input) ? "ip" : null;
+      return kind
+        ? { input, kind, normalized: input, reach: [], error: null }
+        : { input, kind: null, normalized: null, reach: [], error: `cannot tell what "${input}" is` };
+    });
+}
+
 type Args = Record<string, unknown>;
 export type Handlers = Record<string, (args: Args) => unknown>;
 export interface Call { cmd: string; args: Args }
@@ -54,6 +68,7 @@ export function mockDaemon(handlers: Handlers = {}) {
     list_apps: () => [app1],
     get_app: () => appDetail,
     list_peers: () => [alice],
+    parse_credentials: (a) => fakeParse(a),
     list_groups: () => groups,
     list_grants: () => [],
     list_networks: () => networks,

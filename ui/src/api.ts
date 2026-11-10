@@ -14,6 +14,7 @@ import type { Network } from "./generated/Network";
 import type { NewCredential } from "./generated/NewCredential";
 import type { NewGrant } from "./generated/NewGrant";
 import type { NewPeer } from "./generated/NewPeer";
+import type { ParsedCredential } from "./generated/ParsedCredential";
 import type { Peer } from "./generated/Peer";
 import type { PeerGroup } from "./generated/PeerGroup";
 import type { ProtectHostRequest } from "./generated/ProtectHostRequest";
@@ -23,13 +24,15 @@ import type { StatusResponse } from "./generated/StatusResponse";
 
 export type {
   ActivityKind, ActivityQuery, ActivityRecord, App, AppDetail, Credential, GrantView,
-  LockoutRiskInfo, Network, NewCredential, NewGrant, NewPeer, Peer, PeerGroup,
+  LockoutRiskInfo, Network, NewCredential, NewGrant, NewPeer, ParsedCredential, Peer, PeerGroup,
   ProtectHostRequest, ProtectHostResponse, Settings, StatusResponse,
 };
 export type { Reach } from "./generated/Reach";
 export type { CredentialKind } from "./generated/CredentialKind";
 export type { Subject } from "./generated/Subject";
 export type { GrantReach } from "./generated/GrantReach";
+export type { NetworkReach } from "./generated/NetworkReach";
+export type { NetworkKind } from "./generated/NetworkKind";
 
 /** Error from a command: the daemon's `{code, message, details}` or a `connection` error. */
 export class DaemonError extends Error {
@@ -66,6 +69,7 @@ export const api = {
   reviewApp: (id: string, reviewed: boolean) => call<AppDetail>("review_app", { id, reviewed }),
   listPeers: () => call<Peer[]>("list_peers"),
   createPeer: (req: NewPeer) => call<Peer>("create_peer", { req }),
+  parseCredentials: (text: string) => call<ParsedCredential[]>("parse_credentials", { text }),
   addCredential: (peerId: string, req: NewCredential) =>
     call<Credential>("add_credential", { peerId, req }),
   removeCredential: (peerId: string, credentialId: string) =>

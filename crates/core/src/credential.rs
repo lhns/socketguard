@@ -1,8 +1,13 @@
 //! Credential normalization (ADR 0028): validate what a user typed and store one canonical
 //! form per credential.
 
-use crate::model::CredentialKind;
+use crate::model::{Credential, CredentialKind, Network, NetworkKind, NetworkStatus};
+use crate::reach::{reach, Reach};
+use data_encoding::{
+    BASE32_NOPAD, BASE64, BASE64URL, BASE64URL_NOPAD, BASE64_NOPAD, HEXLOWER_PERMISSIVE,
+};
 use ipnet::{IpNet, Ipv6Net};
+use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv6Addr};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -23,40 +28,37 @@ pub(crate) fn ygg_subnet_range() -> Ipv6Net {
     "300::/8".parse().unwrap()
 }
 
-/// Parse an IPv6 address or CIDR, with a clear error for IPv4.
-fn parse_ip_or_net(value: &str) -> Result<Ipv6Net, CredentialError> {
+/// Parse an IP address or CIDR.
+fn parse_ip_or_net(value: &str) -> Result<IpNet, CredentialError> {
     let value = value.trim();
-    let net: IpNet = match value.parse::<IpNet>() {
-        Ok(n) => n,
+    match value.parse::<IpNet>() {
+        Ok(n) => Ok(n),
         Err(_) => match value.parse::<IpAddr>() {
-            Ok(a) => IpNet::from(a),
-            Err(_) => return invalid(format!("{value:?} is not an IP address or network")),
+            Ok(a) => Ok(IpNet::from(a)),
+            Err(_) => invalid(format!("{value:?} is not an IP address or network")),
         },
-    };
-    match net {
-        IpNet::V4(_) => invalid("IPv4 isn't supported yet"),
-        IpNet::V6(n) => Ok(n),
     }
 }
 
 /// Decode `value` as 64 hex characters (either case).
 pub fn parse_hex32(value: &str) -> Option<[u8; 32]> {
-    // `from_str_radix` would also take a leading `+`.
-    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if value.len() != 64 {
         return None;
     }
-    let mut out = [0u8; 32];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&value[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
+    HEXLOWER_PERMISSIVE
+        .decode(value.as_bytes())
+        .ok()?
+        .try_into()
+        .ok()
 }
 
+/// Base64 in the standard or URL-safe alphabet, with or without padding.
 fn is_base64(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_'))
+    let v = value.as_bytes();
+    !v.is_empty()
+        && [BASE64, BASE64_NOPAD, BASE64URL, BASE64URL_NOPAD]
+            .iter()
+            .any(|e| e.decode(v).is_ok())
 }
 
 /// Validate and normalize a credential value, returning the kind to store and the
@@ -65,8 +67,8 @@ fn is_base64(value: &str) -> bool {
 /// - `YggKey`: 64 hex characters, stored lowercase.
 /// - `YggAddr`: one address in `200::/7`, stored as an address.
 /// - `YggSubnet`: a /64 in `300::/8`, stored as `net/64`.
-/// - `Ip`: an IPv6 address or CIDR, stored as `net/len` (`/128` for a single address).
-///   IPv4 is rejected. A value inside `200::/7` becomes `YggAddr` or `YggSubnet`; other
+/// - `Ip`: an IPv4 or IPv6 address or CIDR, stored as `net/len` (`/32` or `/128` for a
+///   single address). A value inside `200::/7` becomes `YggAddr` or `YggSubnet`; other
 ///   networks in that range are rejected.
 /// - `IpSuffix`: an interface ID written as an address with zero upper 64 bits
 ///   (`::a:b:c:d`, optionally followed by `/64`), stored as the address.
@@ -107,7 +109,18 @@ pub fn normalize_credential(
             Ok((kind, addr.to_string()))
         }
         CredentialKind::YggAddr | CredentialKind::YggSubnet | CredentialKind::Ip => {
-            let net = parse_ip_or_net(value)?;
+            let net = match parse_ip_or_net(value)? {
+                IpNet::V6(n) => n,
+                IpNet::V4(n) if kind == CredentialKind::Ip => {
+                    if n.prefix_len() == 0 {
+                        return invalid(
+                            "0.0.0.0/0 would match every source; grant to Anyone instead",
+                        );
+                    }
+                    return Ok((kind, n.trunc().to_string()));
+                }
+                IpNet::V4(_) => return invalid("a Yggdrasil value is an IPv6 address in 200::/7"),
+            };
             let in_ygg = ygg_range().contains(&net);
             // A plain IP network must not contain the Yggdrasil range (`::/6`, `::/0`): it
             // would trust overlay sources without the interface binding. Networks inside
@@ -126,6 +139,166 @@ pub fn normalize_credential(
         }
     }
 }
+
+// --- Parsing pasted input ----------------------------------------------------
+
+/// Where a credential identifies its holder: one network kind and how strongly.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkReach {
+    pub network_kind: NetworkKind,
+    pub reach: Reach,
+}
+
+/// One value of pasted input, classified (ADR 0045). Exactly one of `normalized` and
+/// `error` is set.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParsedCredential {
+    /// The value as typed.
+    pub input: String,
+    /// The kind it would be stored as; on an error, the kind it looked like (if any).
+    pub kind: Option<CredentialKind>,
+    /// The canonical value to store.
+    pub normalized: Option<String>,
+    /// The network kinds it works on; empty on error.
+    pub reach: Vec<NetworkReach>,
+    pub error: Option<String>,
+}
+
+/// Network kinds worth showing a reach for.
+const REACH_KINDS: [NetworkKind; 3] = [NetworkKind::Lan, NetworkKind::Yggdrasil, NetworkKind::Tor];
+
+fn reach_of(kind: CredentialKind, value: &str) -> Vec<NetworkReach> {
+    let credential = Credential {
+        id: String::new(),
+        kind,
+        value: value.to_string(),
+        label: None,
+    };
+    REACH_KINDS
+        .into_iter()
+        .filter_map(|network_kind| {
+            // A /64, so that an `IpSuffix` resolves.
+            let network = Network {
+                id: String::new(),
+                kind: network_kind,
+                name: String::new(),
+                interface: None,
+                grants_apply: true,
+                status: NetworkStatus::Up,
+                prefix: Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0)),
+            };
+            match reach(&credential, &network) {
+                Reach::NotReachable => None,
+                r => Some(NetworkReach {
+                    network_kind,
+                    reach: r,
+                }),
+            }
+        })
+        .collect()
+}
+
+fn looks_like_ip(value: &str) -> bool {
+    value.parse::<IpNet>().is_ok() || value.parse::<IpAddr>().is_ok()
+}
+
+/// Split pasted text into values (newlines, commas, whitespace) and classify each one, in
+/// this order: 64 hex characters are a `ygg_key`; an IP address or CIDR is an `ip`
+/// (`normalize_credential` files 200::/7 values under `ygg_addr` / `ygg_subnet`); a Tor
+/// client key or `descriptor:x25519:` line is a `tor_client_key`. `wg_key` and `tls_spki`
+/// are never guessed (base64 overlaps the other formats): they need an explicit kind.
+pub fn parse_input(text: &str) -> Vec<ParsedCredential> {
+    text.split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|v| !v.is_empty())
+        .map(parse_value)
+        .collect()
+}
+
+fn parse_value(value: &str) -> ParsedCredential {
+    let detected = if parse_hex32(value).is_some() {
+        Some(CredentialKind::YggKey)
+    } else if looks_like_ip(value) {
+        Some(CredentialKind::Ip)
+    } else if normalize_credential(CredentialKind::TorClientKey, value).is_ok() {
+        Some(CredentialKind::TorClientKey)
+    } else {
+        None
+    };
+    let result = match detected {
+        Some(kind) => normalize_credential(kind, value).map_err(|e| e.to_string()),
+        None => Err(format!(
+            "cannot tell what {value:?} is: expected a 64-character Yggdrasil key, an IP              address or network, or a Tor client key (a WireGuard or TLS key needs its kind              stated)"
+        )),
+    };
+    match result {
+        Ok((kind, normalized)) => ParsedCredential {
+            input: value.to_string(),
+            kind: Some(kind),
+            reach: reach_of(kind, &normalized),
+            normalized: Some(normalized),
+            error: None,
+        },
+        Err(error) => ParsedCredential {
+            input: value.to_string(),
+            kind: detected,
+            normalized: None,
+            reach: Vec::new(),
+            error: Some(error),
+        },
+    }
+}
+
+/// One realistic value per kind of credential, for placeholders and help text. The UI gets
+/// them as generated TypeScript (`credentialExamples.ts`), so no frontend invents its own.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CredentialExample {
+    /// What `parse_input` files the value under.
+    pub kind: CredentialKind,
+    pub value: &'static str,
+    /// What the value is, in a few words.
+    pub what: &'static str,
+}
+
+pub const CREDENTIAL_EXAMPLES: &[CredentialExample] = &[
+    CredentialExample {
+        kind: CredentialKind::YggKey,
+        value: "ba83a2e554a8a087cebdb3f053468cd3ff915b5dd94bf11b7a5fc2e36f13158b",
+        what: "Yggdrasil public key",
+    },
+    CredentialExample {
+        kind: CredentialKind::YggAddr,
+        value: "200:8af8:ba35:56ae:bef0:6284:981f:5972",
+        what: "Yggdrasil address",
+    },
+    CredentialExample {
+        kind: CredentialKind::YggSubnet,
+        value: "301:5c1a:8e4b:2f90::/64",
+        what: "Yggdrasil subnet",
+    },
+    CredentialExample {
+        kind: CredentialKind::Ip,
+        value: "192.168.1.20",
+        what: "IPv4 address",
+    },
+    CredentialExample {
+        kind: CredentialKind::Ip,
+        value: "10.0.20.0/24",
+        what: "IPv4 network",
+    },
+    CredentialExample {
+        kind: CredentialKind::Ip,
+        value: "fd00:1234:5678::5",
+        what: "IPv6 address",
+    },
+    CredentialExample {
+        kind: CredentialKind::TorClientKey,
+        value: "ZGBMJ4VIRNVUOQ5SJ2JXPSSWHB2R4YGTKPDGSMZ4HWCD5WLT2YKQ",
+        what: "Tor client key",
+    },
+];
 
 /// The x25519 points of small order (RFC 7748 / libsodium blocklist) in canonical and
 /// non-canonical form, with the unused top bit cleared. A client key like these gives a
@@ -161,38 +334,17 @@ const fn p_plus(low: u8) -> [u8; 32] {
     k
 }
 
-/// 52 base32 characters (RFC 4648, no padding) as the 32 bytes they encode.
+/// 52 base32 characters (RFC 4648, no padding, no stray trailing bits) as the 32 bytes
+/// they encode.
 fn decode_tor_key(key: &str) -> Option<[u8; 32]> {
-    let (mut out, mut n) = ([0u8; 32], 0usize);
-    let (mut buf, mut bits) = (0u32, 0u32);
-    for b in key.bytes() {
-        let v = match b {
-            b'A'..=b'Z' => b - b'A',
-            b'2'..=b'7' => b - b'2' + 26,
-            _ => return None,
-        };
-        buf = (buf << 5) | v as u32;
-        bits += 5;
-        if bits >= 8 {
-            bits -= 8;
-            if n == 32 {
-                return None;
-            }
-            out[n] = (buf >> bits) as u8;
-            n += 1;
-        }
-    }
-    (n == 32).then_some(out)
+    BASE32_NOPAD.decode(key.as_bytes()).ok()?.try_into().ok()
 }
 
 /// Whether `key` is a Tor v3 client-auth public key: 52 base32 characters (no padding)
 /// encoding 32 bytes, so the last character carries no extra bits, and not a small-order
 /// point.
 pub(crate) fn is_tor_key(key: &str) -> bool {
-    let well_formed = key.len() == 52
-        && key.bytes().all(|b| matches!(b, b'A'..=b'Z' | b'2'..=b'7'))
-        && matches!(key.as_bytes()[51], b'A' | b'Q');
-    let Some(mut point) = well_formed.then(|| decode_tor_key(key)).flatten() else {
+    let Some(mut point) = decode_tor_key(key) else {
         return false;
     };
     point[31] &= 0x7f;
@@ -227,6 +379,16 @@ fn normalize_ygg(
     if !ygg_range().contains(&net) {
         return invalid("a Yggdrasil address is in 200::/7");
     }
+    // The network bases are what a placeholder or a half-typed address looks like.
+    let base = net.network();
+    if base == Ipv6Addr::new(0x200, 0, 0, 0, 0, 0, 0, 0)
+        || base == Ipv6Addr::new(0x300, 0, 0, 0, 0, 0, 0, 0)
+    {
+        return invalid(format!(
+            "{} is the start of the Yggdrasil range, not a node's address",
+            net.addr()
+        ));
+    }
     match net.prefix_len() {
         128 if kind != CredentialKind::YggSubnet => {
             Ok((CredentialKind::YggAddr, net.addr().to_string()))
@@ -256,18 +418,19 @@ mod tests {
     }
 
     #[test]
-    fn ipv4_is_rejected() {
-        for k in [
-            CredentialKind::Ip,
-            CredentialKind::YggAddr,
-            CredentialKind::YggSubnet,
-        ] {
-            let err = norm(k, "192.168.1.5").unwrap_err();
-            assert!(err.contains("IPv4"), "{err}");
-        }
-        assert!(norm(CredentialKind::Ip, "10.0.0.0/8")
+    fn ipv4_is_an_ip_credential_only() {
+        use CredentialKind::*;
+        assert_eq!(
+            norm(Ip, "192.168.1.5").unwrap(),
+            (Ip, "192.168.1.5/32".into())
+        );
+        assert_eq!(norm(Ip, "10.1.2.3/8").unwrap(), (Ip, "10.0.0.0/8".into()));
+        assert!(norm(Ip, "0.0.0.0/0")
             .unwrap_err()
-            .contains("IPv4"));
+            .contains("grant to Anyone"));
+        for k in [YggAddr, YggSubnet, IpSuffix] {
+            assert!(norm(k, "192.168.1.5").is_err(), "{k}");
+        }
     }
 
     #[test]
@@ -405,5 +568,143 @@ mod tests {
         // A client's private-key line carries the onion name first.
         assert!(norm(TorClientKey, &format!("abc:descriptor:x25519:{TOR_KEY}")).is_err());
         assert!(norm(TorClientKey, &format!("other:{TOR_KEY}")).is_err());
+    }
+
+    fn one(text: &str) -> ParsedCredential {
+        let mut v = parse_input(text);
+        assert_eq!(v.len(), 1, "{text:?}: {v:?}");
+        v.remove(0)
+    }
+
+    #[test]
+    fn parse_input_splits_on_newlines_commas_and_whitespace() {
+        let v = parse_input(&format!("{KEY},\n 10.0.0.1  fd00::1\r\n\n{TOR_KEY}"));
+        let kinds: Vec<_> = v.iter().map(|p| p.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                Some(CredentialKind::YggKey),
+                Some(CredentialKind::Ip),
+                Some(CredentialKind::Ip),
+                Some(CredentialKind::TorClientKey)
+            ]
+        );
+        assert!(parse_input(" , \n").is_empty());
+    }
+
+    #[test]
+    fn parse_input_detects_and_normalizes() {
+        use CredentialKind::*;
+        let p = one(&KEY.to_uppercase());
+        assert_eq!((p.kind, p.normalized.as_deref()), (Some(YggKey), Some(KEY)));
+        let p = one("200:1::5");
+        assert_eq!(
+            (p.kind, p.normalized.as_deref()),
+            (Some(YggAddr), Some("200:1::5"))
+        );
+        let p = one("300:1:2:3::9/64");
+        assert_eq!(
+            (p.kind, p.normalized.as_deref()),
+            (Some(YggSubnet), Some("300:1:2:3::/64"))
+        );
+        let p = one("2001:DB8::7/48");
+        assert_eq!(
+            (p.kind, p.normalized.as_deref()),
+            (Some(Ip), Some("2001:db8::/48"))
+        );
+        let p = one(&format!("descriptor:x25519:{}", TOR_KEY.to_lowercase()));
+        assert_eq!(
+            (p.kind, p.normalized.as_deref()),
+            (Some(TorClientKey), Some(TOR_KEY))
+        );
+    }
+
+    #[test]
+    fn parse_input_reports_reach_per_network_kind() {
+        let reach_of = |text: &str| -> Vec<(NetworkKind, Reach)> {
+            one(text)
+                .reach
+                .into_iter()
+                .map(|r| (r.network_kind, r.reach))
+                .collect()
+        };
+        assert_eq!(reach_of(KEY), [(NetworkKind::Yggdrasil, Reach::Verified)]);
+        assert_eq!(reach_of("fd00::5"), [(NetworkKind::Lan, Reach::IpOnly)]);
+        assert_eq!(reach_of(TOR_KEY), [(NetworkKind::Tor, Reach::Verified)]);
+        assert_eq!(
+            reach_of("300:1:2:3::/64"),
+            [(NetworkKind::Yggdrasil, Reach::WholeSubnet)]
+        );
+    }
+
+    #[test]
+    fn parse_input_rejects_the_bare_network_bases() {
+        // A live peer was stored as `200::`, copied from a placeholder.
+        for bad in ["200::", "300::", "300::/64", "200::/128"] {
+            let p = one(bad);
+            assert!(p.error.is_some() && p.normalized.is_none(), "{bad}: {p:?}");
+        }
+        // The same through the daemon's explicit kinds.
+        for (k, v) in [
+            (CredentialKind::YggAddr, "200::"),
+            (CredentialKind::YggAddr, "300::"),
+            (CredentialKind::YggSubnet, "300::/64"),
+        ] {
+            assert!(norm(k, v).is_err(), "{v}");
+        }
+    }
+
+    #[test]
+    fn parse_input_never_guesses_base64_kinds() {
+        let wg = "mFZTRZ0v3m0/yN7Zf3zH1yG2m1pE2n3YhQ5b7kqVQXY=";
+        let p = one(wg);
+        assert_eq!((p.kind, p.normalized), (None, None));
+        assert!(p.error.unwrap().contains("cannot tell"));
+        assert!(one("hello").error.is_some());
+        // Looks like an IP but is refused: the kind stays visible.
+        let p = one("::/0");
+        assert_eq!(p.kind, Some(CredentialKind::Ip));
+        assert!(p.error.unwrap().contains("grant to Anyone"));
+    }
+
+    #[test]
+    fn every_example_parses_to_its_kind() {
+        for e in CREDENTIAL_EXAMPLES {
+            let p = one(e.value);
+            assert_eq!(p.error, None, "{}", e.value);
+            assert_eq!(p.kind, Some(e.kind), "{}", e.value);
+            assert!(!p.reach.is_empty(), "{} works nowhere", e.value);
+        }
+        let kinds: Vec<_> = CREDENTIAL_EXAMPLES.iter().map(|e| e.kind).collect();
+        for k in [
+            CredentialKind::YggKey,
+            CredentialKind::YggAddr,
+            CredentialKind::YggSubnet,
+            CredentialKind::Ip,
+            CredentialKind::TorClientKey,
+        ] {
+            assert!(kinds.contains(&k), "no example for {k}");
+        }
+    }
+
+    /// Emits the examples as TypeScript next to the ts-rs types (`export_bindings`).
+    #[cfg(feature = "ts")]
+    #[test]
+    fn export_bindings_credential_examples() {
+        let dir = std::env::var("TS_RS_EXPORT_DIR").unwrap_or_else(|_| "ui/src/generated".into());
+        let mut out = String::from(
+            "// Generated by `cargo test -p socketguard-core --features ts export_bindings` from\n\
+             // CREDENTIAL_EXAMPLES in crates/core/src/credential.rs. Do not edit this file manually.\n\
+             import type { CredentialExample } from \"./CredentialExample\";\n\n\
+             export const CREDENTIAL_EXAMPLES: CredentialExample[] = ",
+        );
+        out.push_str(&serde_json::to_string_pretty(CREDENTIAL_EXAMPLES).unwrap());
+        out.push_str(";\n");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            std::path::Path::new(&dir).join("credentialExamples.ts"),
+            out,
+        )
+        .unwrap();
     }
 }

@@ -1,4 +1,4 @@
-import type { CredentialKind, Reach } from "./api";
+import type { CredentialKind, NetworkKind, ParsedCredential, Reach } from "./api";
 
 interface BadgeInfo {
   label: string;
@@ -71,5 +71,31 @@ export function CredentialBadge({ kind }: { kind: CredentialKind }) {
     >
       {info.label}
     </span>
+  );
+}
+
+const NETWORK_KIND_NAME: Record<NetworkKind, string> = {
+  local: "this machine", lan: "LAN", yggdrasil: "Yggdrasil", wireguard: "WireGuard", tor: "Tor",
+};
+
+/** What the daemon's parser made of pasted text: kind and where each value works, or why not. */
+export function ParsedHint({ parsed }: { parsed: ParsedCredential[] | undefined }) {
+  if (!parsed) return null;
+  return (
+    <ul className="plain-list hint">
+      {parsed.map((p, i) => (
+        <li key={i}>
+          {p.error !== null ? (
+            <span>{p.input}: {p.error}</span>
+          ) : (
+            <span>
+              {p.input.length > 24 ? `${p.input.slice(0, 21)}…` : p.input} will be added as{" "}
+              {p.kind ? CREDENTIAL_INFO[p.kind].name : "a credential"}
+              {p.reach.length > 0 && ` (works on ${p.reach.map((r) => `${NETWORK_KIND_NAME[r.network_kind]}: ${REACH_INFO[r.reach].label}`).join(", ")})`}
+            </span>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }

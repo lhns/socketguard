@@ -980,12 +980,16 @@ async fn peers_validate_and_stay_unique() {
         label: None,
     };
     let e = engine
-        .create_peer(&h.state, "v4", &[cred(CredentialKind::Ip, "192.168.1.5")])
+        .create_peer(&h.state, "all", &[cred(CredentialKind::Ip, "0.0.0.0/0")])
         .await;
     assert!(
-        matches!(&e, Err(EngineError::Invalid(m)) if m.contains("IPv4")),
+        matches!(&e, Err(EngineError::Invalid(m)) if m.contains("grant to Anyone")),
         "{e:?}"
     );
+    let e = engine
+        .create_peer(&h.state, "base", &[cred(CredentialKind::Ip, "200::")])
+        .await;
+    assert!(matches!(&e, Err(EngineError::Invalid(_))), "{e:?}");
     let e = engine.create_peer(&h.state, "  ", &[]).await;
     assert!(matches!(e, Err(EngineError::Invalid(_))));
     let e = engine

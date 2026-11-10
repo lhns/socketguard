@@ -2,11 +2,12 @@ import { useId, useState } from "react";
 import type { Peer } from "../api";
 import ConfirmDialog from "../components/ConfirmDialog";
 import { useToast } from "../components/Toast";
-import { errorText, guessCredentialKind } from "../lib";
+import { CREDENTIAL_PLACEHOLDER, credentialsFromParsed, errorText } from "../lib";
+import { api } from "../api";
 import {
-  useAddCredential, useCreatePeer, useDeletePeer, useGroups, usePeers, useRemoveCredential,
+  useAddCredential, useCreatePeer, useDeletePeer, useGroups, useParsedCredentials, usePeers, useRemoveCredential,
 } from "../queries";
-import { CREDENTIAL_INFO, CredentialBadge } from "../reach";
+import { CREDENTIAL_INFO, CredentialBadge, ParsedHint } from "../reach";
 
 export default function PeersPage() {
   const peers = usePeers();
@@ -46,11 +47,20 @@ function AddPeerForm() {
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const submit = (e: React.FormEvent) => {
+  const parsed = useParsedCredentials(value);
+
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    let result;
+    try {
+      result = credentialsFromParsed(await api.parseCredentials(value));
+    } catch (err) {
+      return setError(errorText(err));
+    }
+    if ("error" in result) return setError(result.error);
     create.mutate(
-      { label: label.trim(), credentials: [{ kind: guessCredentialKind(value), value: value.trim(), label: null }] },
+      { label: label.trim(), credentials: result.credentials },
       {
         onSuccess: (p) => {
           toast.success(`Added ${p.label}`);
@@ -77,13 +87,13 @@ function AddPeerForm() {
             className="input mono"
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            placeholder="64-hex Yggdrasil key, 200:… address, 192.0.2.1 or 10.0.0.0/24"
+            placeholder={CREDENTIAL_PLACEHOLDER}
             required
           />
         </div>
         <button type="submit" className="btn btn-primary" disabled={create.isPending}>Add peer</button>
       </div>
-      {value.trim() && <p className="hint">Will be added as: {CREDENTIAL_INFO[guessCredentialKind(value)].name}. The daemon checks the value.</p>}
+      {value.trim() && <ParsedHint parsed={parsed.data} />}
       {error && <div className="error-banner" role="alert">{error}</div>}
     </form>
   );
@@ -99,13 +109,24 @@ function PeerCard({ peer, groupLabel }: { peer: Peer; groupLabel: (id: string) =
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
 
-  const addCred = (e: React.FormEvent) => {
+  const addCred = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    add.mutate(
-      { peerId: peer.id, req: { kind: guessCredentialKind(value), value: value.trim(), label: null } },
-      { onSuccess: () => setValue(""), onError: (err) => setError(errorText(err)) },
-    );
+    let result;
+    try {
+      result = credentialsFromParsed(await api.parseCredentials(value));
+    } catch (err) {
+      return setError(errorText(err));
+    }
+    if ("error" in result) return setError(result.error);
+    for (const req of result.credentials) {
+      try {
+        await add.mutateAsync({ peerId: peer.id, req });
+      } catch (err) {
+        return setError(errorText(err));
+      }
+    }
+    setValue("");
   };
 
   return (

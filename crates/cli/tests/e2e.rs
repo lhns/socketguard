@@ -564,7 +564,7 @@ async fn ip_peer(env: &Env, label: &str, ip: &str) -> socketguard_core::Peer {
     env.client()
         .create_peer(&NewPeer {
             label: label.into(),
-            credentials: vec![socketguard_cli::parse::guess_credential(ip).unwrap()],
+            credentials: socketguard_cli::parse::guess_credentials(ip).unwrap(),
         })
         .await
         .unwrap()

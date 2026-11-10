@@ -64,6 +64,7 @@ routes! {
     GET_PEER = get_peer: GET "/api/peers/{id}",
     UPDATE_PEER = update_peer: PATCH "/api/peers/{id}",
     DELETE_PEER = delete_peer: DELETE "/api/peers/{id}",
+    PARSE_CREDENTIALS = parse_credentials: POST "/api/credentials/parse",
     ADD_CREDENTIAL = add_credential: POST "/api/peers/{id}/credentials",
     REMOVE_CREDENTIAL = remove_credential: DELETE "/api/peers/{id}/credentials/{cred_id}",
     LIST_GROUPS = list_groups: GET "/api/peer-groups",
