@@ -402,11 +402,12 @@ async fn verify_runs_on_a_cadence_and_after_a_failed_apply() {
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
-    h.state
-        .engine
-        .write()
-        .await
-        .set_verify_interval(Duration::from_millis(1500));
+    let clock = ManualClock::new();
+    {
+        let mut engine = h.state.engine.write().await;
+        engine.set_verify_interval(Duration::from_secs(5));
+        engine.set_clock(clock.clone());
+    }
     h.reconcile().await; // applies; counts as verified
     let base = h.fw.verify_count();
     for _ in 0..5 {
@@ -414,7 +415,7 @@ async fn verify_runs_on_a_cadence_and_after_a_failed_apply() {
     }
     assert_eq!(h.fw.verify_count(), base, "no verify within the interval");
 
-    tokio::time::sleep(Duration::from_millis(1700)).await;
+    clock.advance(Duration::from_secs(6));
     h.reconcile().await;
     assert_eq!(
         h.fw.verify_count(),
@@ -429,7 +430,7 @@ async fn verify_runs_on_a_cadence_and_after_a_failed_apply() {
     h.clear_calls();
     h.reconcile().await;
     assert!(applied(&h.fw_calls).is_empty());
-    tokio::time::sleep(Duration::from_millis(1700)).await;
+    clock.advance(Duration::from_secs(6));
     h.reconcile().await;
     assert_eq!(applied(&h.fw_calls).len(), 1, "drift re-applied when due");
 }

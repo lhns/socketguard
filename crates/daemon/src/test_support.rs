@@ -428,6 +428,27 @@ impl YggdrasilNode for MockYggdrasilNode {
     }
 }
 
+// ─── ManualClock ─────────────────────────────────────────────────────────────
+
+/// A clock that only moves when told to, for the engine's verify cadence.
+pub struct ManualClock(Mutex<std::time::Instant>);
+
+impl ManualClock {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self(Mutex::new(std::time::Instant::now())))
+    }
+
+    pub fn advance(&self, by: std::time::Duration) {
+        *self.0.lock().unwrap() += by;
+    }
+}
+
+impl crate::engine::Clock for ManualClock {
+    fn now(&self) -> std::time::Instant {
+        *self.0.lock().unwrap()
+    }
+}
+
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
 /// An IP network over an already built allocator (a mock stands in for the real one).

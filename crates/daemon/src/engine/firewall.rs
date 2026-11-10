@@ -13,7 +13,7 @@ use socketguard_core::{valid_interface_name, ActivityKind, Address, App, Network
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::Ordering;
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 use tracing::{debug, error, warn};
 
 impl Engine {
@@ -41,7 +41,7 @@ impl Engine {
     /// interface check runs every time; [`Firewall::verify`] (it can spawn a process) at most
     /// every `verify_interval`. A verify that cannot tell counts as in force.
     async fn still_in_force(&self) -> anyhow::Result<bool> {
-        let now = Instant::now();
+        let now = self.clock.now();
         let verify_due = {
             let mut last = self.last_verified.lock().unwrap();
             let due = last.is_none_or(|t| now.duration_since(t) >= self.verify_interval);
@@ -131,7 +131,7 @@ impl Engine {
                 self.metrics.retain_series(keys.values());
                 *self.counter_keys.lock().unwrap() = keys;
                 *self.last_applied.lock().unwrap() = Some(desired);
-                *self.last_verified.lock().unwrap() = Some(Instant::now());
+                *self.last_verified.lock().unwrap() = Some(self.clock.now());
                 self.apply_failed.store(false, Ordering::Relaxed);
                 // The database now owns the kernel state: it is no longer "fresh".
                 if state.db.fresh().await.unwrap_or(false) {

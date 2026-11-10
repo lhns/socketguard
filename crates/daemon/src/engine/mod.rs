@@ -44,6 +44,19 @@ const REAPPLY_EVERY: u32 = 30;
 /// Minimum time between two [`Firewall::verify`] calls, except after a failed apply.
 pub const VERIFY_INTERVAL: Duration = Duration::from_secs(5);
 
+/// The time source of the verify cadence.
+pub trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
 /// Every backend allocates single addresses.
 const ADDRESS_PREFIX_LEN: u8 = 128;
 
@@ -130,6 +143,8 @@ pub struct Engine {
     /// When the firewall state was last verified or applied, and how often to verify.
     last_verified: Mutex<Option<Instant>>,
     verify_interval: Duration,
+    /// Where the verify cadence reads the time (tests move it by hand).
+    clock: Arc<dyn Clock>,
     /// Drop events from the firewall, drained on every reconcile pass.
     drops: Arc<Mutex<Vec<DropEvent>>>,
     /// Drops aggregated per (src, dst, port, proto, minute), flushed once the minute is over.
@@ -208,6 +223,11 @@ impl Engine {
         self.verify_interval = interval;
     }
 
+    /// Replace the time source of the verify cadence — for tests only.
+    pub fn set_clock(&mut self, clock: Arc<dyn Clock>) {
+        self.clock = clock;
+    }
+
     fn assemble(
         monitor: Box<dyn SocketMonitor>,
         firewall: Arc<dyn Firewall>,
@@ -229,6 +249,7 @@ impl Engine {
             apply_failed: AtomicBool::new(false),
             last_verified: Mutex::default(),
             verify_interval: VERIFY_INTERVAL,
+            clock: Arc::new(SystemClock),
             drops: Arc::default(),
             drop_agg: Mutex::default(),
             counter_keys: Mutex::default(),
