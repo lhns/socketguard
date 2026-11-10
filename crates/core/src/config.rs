@@ -82,6 +82,22 @@ pub enum TorAuth {
     None,
 }
 
+impl BackendConfig {
+    /// The Tor network `socketguard networks add tor` makes: default control port, cookie
+    /// authentication, nothing else set.
+    pub fn default_tor() -> Self {
+        BackendConfig::Tor {
+            control: default_tor_control(),
+            auth: TorAuth::default(),
+            cookie_path: None,
+            cookie_dir: None,
+            expect_tor_uid: None,
+            cookie_owner: None,
+            allow_remote_control: false,
+        }
+    }
+}
+
 impl Default for BackendConfig {
     fn default() -> Self {
         BackendConfig::Ula {
@@ -409,15 +425,7 @@ fn parse_single_backend(
                 prefix: None,
             }),
             "dhcpv6" => Ok(BackendConfig::Dhcpv6 { interface: iface }),
-            "tor" => Ok(BackendConfig::Tor {
-                control: default_tor_control(),
-                auth: TorAuth::default(),
-                cookie_path: None,
-                cookie_dir: None,
-                expect_tor_uid: None,
-                cookie_owner: None,
-                allow_remote_control: false,
-            }),
+            "tor" => Ok(BackendConfig::default_tor()),
             other => Err(format!("invalid backend: {other}")),
         }
     } else {

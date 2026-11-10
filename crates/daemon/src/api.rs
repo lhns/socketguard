@@ -23,7 +23,7 @@ use socketguard_core::api_types::{
     MergeRequest, NewGroup, NewNetwork, NewPeer, ProtectHostRequest, ProtectHostResponse,
     ReviewRequest, SetMembers, SplitRequest, StatusResponse, UpdateLabel, UpdateSettings,
 };
-use socketguard_core::config::BackendInstanceConfig;
+use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
 use socketguard_core::{ActivityKind, ActivityQuery, NewCredential, NewGrant, PortRef};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -613,6 +613,7 @@ async fn network_create(
         .id
         .filter(|i| !i.trim().is_empty())
         .unwrap_or_else(|| req.backend.default_id());
+    check_tor_settings(&state, &req.backend).await?;
     let inst = BackendInstanceConfig {
         id,
         backend: req.backend,
@@ -622,18 +623,51 @@ async fn network_create(
     Ok((StatusCode::CREATED, Json(network)).into_response())
 }
 
+#[derive(serde::Deserialize, Default)]
+struct NetworkDeleteParams {
+    #[serde(default)]
+    force: bool,
+}
+
 async fn network_delete(
     State(state): State<Shared>,
     Path(id): Path<String>,
+    ApiQuery(q): ApiQuery<NetworkDeleteParams>,
 ) -> ApiResult<StatusCode> {
     state
         .engine
         .write()
         .await
-        .remove_network(&state, &id)
+        .remove_network(&state, &id, q.force)
         .await?;
     persist_networks(&state).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The Tor settings the API accepts: the defaults, or exactly what the config file already
+/// has for a Tor network. Every `socketguard` group member may call the API, and the Tor
+/// control endpoint decides who receives the onion keys (a Unix socket or an
+/// authentication of their choosing would hand them over), so anything else is for the
+/// administrator who edits the file. The file is read afresh: `state.config` also holds
+/// what the API added itself.
+async fn check_tor_settings(state: &AppState, backend: &BackendConfig) -> Result<(), ApiErr> {
+    if !matches!(backend, BackendConfig::Tor { .. }) || *backend == BackendConfig::default_tor() {
+        return Ok(());
+    }
+    let from_file = match &state.config_path {
+        Some(path) => tokio::fs::read_to_string(path).await.ok(),
+        None => None,
+    }
+    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    .and_then(|doc| doc.get("backends").cloned())
+    .and_then(|b| serde_json::from_value::<Vec<BackendInstanceConfig>>(b).ok())
+    .unwrap_or_default();
+    if from_file.iter().any(|b| b.backend == *backend) {
+        return Ok(());
+    }
+    Err(ApiErr::invalid(
+        "a Tor network made through the API uses the default control port and authentication;          other settings (control address, auth, cookie_path, ...) go in the config file, which          only an administrator can edit",
+    ))
 }
 
 /// Save the network list to the config file so it survives a restart. The change is

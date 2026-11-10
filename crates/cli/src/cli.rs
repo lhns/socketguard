@@ -243,7 +243,12 @@ pub enum NetworksCmd {
         password: Option<String>,
     },
     /// Remove a network; its addresses leave the interfaces
-    Rm { id: String },
+    Rm {
+        id: String,
+        /// Remove a Tor network even if Tor cannot confirm its onion services are gone
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

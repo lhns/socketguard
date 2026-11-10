@@ -772,13 +772,70 @@ impl Engine {
             .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))
     }
 
-    /// The API's remove.
-    pub async fn remove_network(&mut self, state: &AppState, id: &str) -> Result<(), EngineError> {
-        if !self.backends.contains_key(id) {
+    /// The API's remove. A network that is not an IP network (Tor) first removes every
+    /// service this daemon owns on it; once the network is gone nothing retries a removal
+    /// that failed, so that failure refuses the request (409) unless `force`.
+    pub async fn remove_network(
+        &mut self,
+        state: &AppState,
+        id: &str,
+        force: bool,
+    ) -> Result<(), EngineError> {
+        let Some(active) = self.backends.get(id) else {
             return Err(EngineError::NotFound(format!("network {id}")));
+        };
+        let mut swept = None;
+        if !active.network.capabilities().ip_locators {
+            match self
+                .remove_owned_services(state, active.network.clone())
+                .await
+            {
+                Ok(passed) => swept = Some(passed),
+                Err(e) if force => warn!(
+                    "Removing network '{id}' although its services were not removed: {e:#}"
+                ),
+                Err(e) => {
+                    return Err(EngineError::Conflict(format!(
+                        "Tor services are still being removed; retry when Tor is reachable, or                          use --force ({e:#})"
+                    )))
+                }
+            }
         }
         self.remove_backend_instance(state, id).await;
+        if let Some(passed) = swept {
+            // Deleting the addresses recorded their services again; they are gone.
+            if let Err(e) = networks::ledger::settle(&state.db, &passed, &BTreeSet::new()).await {
+                warn!("Could not update the onion service ledger: {e:#}");
+            }
+        }
         Ok(())
+    }
+
+    /// Take down every service the ledger lists as owned or to be removed, as a
+    /// [`Engine::enforce_networks`] pass with no addresses would. Returns the ledger that
+    /// was swept once Tor confirmed it (or there was nothing to remove).
+    async fn remove_owned_services(
+        &self,
+        state: &AppState,
+        net: Arc<dyn networks::Network>,
+    ) -> anyhow::Result<networks::ledger::Ledger> {
+        let _lock = state.firewall_lock.lock().await;
+        let ledger = networks::ledger::load(&state.db).await?;
+        if ledger.owned.is_empty() && ledger.tombstones.is_empty() {
+            return Ok(ledger);
+        }
+        let enforcement = networks::NetworkEnforcement {
+            addresses: Vec::new(),
+            owned: ledger.owned.union(&ledger.tombstones).cloned().collect(),
+            tombstones: ledger.tombstones.clone(),
+        };
+        let passed = networks::ledger::Ledger {
+            owned: enforcement.owned.clone(),
+            tombstones: enforcement.tombstones.clone(),
+        };
+        tokio::task::spawn_blocking(move || net.enforce(&enforcement)).await??;
+        networks::ledger::settle(&state.db, &passed, &BTreeSet::new()).await?;
+        Ok(passed)
     }
 
     /// [`Engine::add_backend_instance`] with the allocator already built (tests inject mocks).

@@ -450,8 +450,13 @@ impl Client {
         self.call(&routes::ADD_NETWORK, &[], None, json(req)).await
     }
 
-    pub async fn delete_network(&self, id: &str) -> Result<()> {
-        self.call_unit(&routes::DELETE_NETWORK, &[id], None).await
+    /// Remove a network. With `force`, a Tor network goes even if its onion services
+    /// could not be removed (the daemon otherwise answers 409 `conflict`).
+    pub async fn delete_network(&self, id: &str, force: bool) -> Result<()> {
+        let query = force.then(|| "force=true".to_string());
+        self.call_raw(&routes::DELETE_NETWORK, &[id], query, None)
+            .await
+            .map(|_| ())
     }
 
     // ─── Settings ────────────────────────────────────────────────────────────
