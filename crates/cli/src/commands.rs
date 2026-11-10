@@ -367,7 +367,7 @@ async fn apps(c: &Ctx, cmd: AppsCmd) -> Result<()> {
         AppsCmd::Split { app, network, port } => {
             let app = c.app(&app).await?;
             let port = parse::parse_port(&port)?;
-            let a = c
+            let saved = c
                 .client
                 .split_app(
                     &app.id,
@@ -378,6 +378,8 @@ async fn apps(c: &Ctx, cmd: AppsCmd) -> Result<()> {
                     },
                 )
                 .await?;
+            c.warn_pending(&saved.enforcement);
+            let a = saved.value;
             c.print(&a, || {
                 format!(
                     "{port} of {} now has its own address {}",
@@ -405,7 +407,7 @@ async fn apps(c: &Ctx, cmd: AppsCmd) -> Result<()> {
                 .iter()
                 .map(|q| Ok(resolve_id("address", &own, q)?.clone()))
                 .collect::<Result<Vec<_>>>()?;
-            let a = c
+            let saved = c
                 .client
                 .merge_app(
                     &app.id,
@@ -415,6 +417,8 @@ async fn apps(c: &Ctx, cmd: AppsCmd) -> Result<()> {
                     },
                 )
                 .await?;
+            c.warn_pending(&saved.enforcement);
+            let a = saved.value;
             c.print(&a, || {
                 format!(
                     "merged into {} ({})",
@@ -580,14 +584,16 @@ async fn groups(c: &Ctx, cmd: GroupsCmd) -> Result<()> {
         }
         GroupsCmd::Rm { group } => {
             let g = c.group(&group).await?;
-            c.client.delete_group(&g.id).await?;
-            c.done(format!("removed group {} and its grants", g.label))
+            let saved = c.client.delete_group(&g.id).await?;
+            c.done_saved(saved, format!("removed group {} and its grants", g.label))
         }
         GroupsCmd::Members { group, peers } => {
             let g = c.group(&group).await?;
             let all = c.client.list_peers().await?;
             let ids = member_ids(&all, &peers)?;
-            let r = c.client.set_group_members(&g.id, &ids).await?;
+            let saved = c.client.set_group_members(&g.id, &ids).await?;
+            c.warn_pending(&saved.enforcement);
+            let r = saved.value;
             let names = c.names().await?;
             c.print(&r, || {
                 format!("{} now has: {}", r.label, render::members(&r, &names))

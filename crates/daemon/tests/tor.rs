@@ -90,6 +90,14 @@ impl Harness {
         self.state.db.list_apps().await.unwrap().remove(0)
     }
 
+    /// The service id of the app's onion address (derived from its stored key).
+    async fn svc(&self) -> String {
+        match self.app().await.addresses.remove(0).locator {
+            Locator::Onion { hostname } => hostname.trim_end_matches(".onion").to_string(),
+            other => panic!("not an onion locator: {other:?}"),
+        }
+    }
+
     async fn peer(&self, key: &str) -> String {
         self.state
             .engine
@@ -154,15 +162,17 @@ async fn discovery_grant_and_revoke_drive_the_control_port() {
     // Discovery: an onion address with a stored key, and nothing published.
     let app = h.app().await;
     assert_eq!(app.addresses.len(), 1);
+    let svc = h.svc().await;
+    let key = h.state.db.onion_keys().await.unwrap()[&app.addresses[0].id].clone();
+    assert!(key.starts_with("ED25519-V3:"));
     assert_eq!(
-        app.addresses[0].locator,
-        Locator::Onion {
-            hostname: "mocksvc1.onion".into()
-        }
+        socketguard_daemon::networks::onion_key::service_id_of_secret(&key).unwrap(),
+        svc,
+        "the name is derived from the stored key"
     );
-    assert_eq!(
-        h.state.db.onion_keys().await.unwrap()[&app.addresses[0].id],
-        "ED25519-V3:mocksvc1"
+    assert!(
+        h.tor.commands().iter().all(|c| !c.starts_with("ADD_ONION")),
+        "creating the address does not touch Tor"
     );
     assert!(h.tor.detached().is_empty(), "closed without a grant");
     let net = h.state.engine.read().await.networks().remove(0);
@@ -177,10 +187,10 @@ async fn discovery_grant_and_revoke_drive_the_control_port() {
     // A grant to a peer with a Tor key publishes the service for that key.
     let peer = h.peer(TOR_KEY).await;
     let grant = h.grant(Subject::Peer(peer)).await;
-    assert_eq!(h.tor.detached(), ["mocksvc1"]);
+    assert_eq!(h.tor.detached(), [svc.as_str()]);
     let add = h.tor.add_commands().pop().unwrap();
     assert!(
-        add.starts_with("ADD_ONION ED25519-V3:mocksvc1 Flags=Detach,V3Auth"),
+        add.starts_with(&format!("ADD_ONION {key} Flags=Detach,V3Auth")),
         "{add}"
     );
     assert!(add.contains("Port=8080,127.0.0.1:8080"), "{add}");
@@ -190,11 +200,15 @@ async fn discovery_grant_and_revoke_drive_the_control_port() {
     // Revoked: DEL_ONION, nothing left.
     h.revoke(&grant).await;
     assert!(h.tor.detached().is_empty());
-    assert!(h.tor.commands().iter().any(|c| c == "DEL_ONION mocksvc1"));
+    assert!(h
+        .tor
+        .commands()
+        .iter()
+        .any(|c| c == &format!("DEL_ONION {svc}")));
 
     // The same name comes back (the stored key is reused) for Anyone, without client auth.
     h.grant(Subject::Anyone).await;
-    assert_eq!(h.tor.detached(), ["mocksvc1"]);
+    assert_eq!(h.tor.detached(), [svc.as_str()]);
     assert!(!h.tor.add_commands().pop().unwrap().contains("ClientAuthV3"));
 }
 
@@ -284,14 +298,15 @@ async fn deleting_the_app_removes_its_service() {
 }
 
 #[tokio::test]
-async fn an_unreachable_tor_creates_no_address_and_is_retried() {
+async fn an_unreachable_tor_still_gets_its_address_and_publishes_nothing() {
     let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
     h.tor.set_down(true);
     h.reconcile().await;
-    assert!(h.app().await.addresses.is_empty());
+    assert_eq!(h.app().await.addresses.len(), 1, "the key is local");
     h.tor.set_down(false);
     h.reconcile().await;
     assert_eq!(h.app().await.addresses.len(), 1);
+    assert!(h.tor.detached().is_empty());
 }
 
 // ─── Revocation must not fail open ───────────────────────────────────────────
@@ -330,6 +345,7 @@ async fn an_app_deleted_while_tor_is_down_is_tombstoned_and_swept() {
     h.reconcile().await;
     h.grant(Subject::Anyone).await;
     let app = h.app().await;
+    let svc = h.svc().await;
 
     h.tor.set_down(true);
     h.state
@@ -340,8 +356,8 @@ async fn an_app_deleted_while_tor_is_down_is_tombstoned_and_swept() {
         .await
         .unwrap();
     assert!(h.state.db.onion_keys().await.unwrap().is_empty());
-    assert_eq!(h.tor.detached(), ["mocksvc1"], "still published");
-    assert!(ledger(&h).await.tombstones.contains("mocksvc1"));
+    assert_eq!(h.tor.detached(), [svc.as_str()], "still published");
+    assert!(ledger(&h).await.tombstones.contains(&svc));
 
     h.tor.set_down(false);
     h.state
@@ -354,7 +370,7 @@ async fn an_app_deleted_while_tor_is_down_is_tombstoned_and_swept() {
     assert!(h.tor.detached().is_empty());
     let l = ledger(&h).await;
     assert!(l.tombstones.is_empty(), "{l:?}");
-    assert!(!l.owned.contains("mocksvc1"), "{l:?}");
+    assert!(!l.owned.contains(&svc), "{l:?}");
 }
 
 #[tokio::test]
@@ -364,14 +380,15 @@ async fn a_service_of_ours_whose_address_vanished_is_swept_but_foreign_ones_stay
     h.grant(Subject::Anyone).await;
     h.tor.inject_service("someoneelse");
     let app = h.app().await;
+    let svc = h.svc().await;
     // The address disappears behind the daemon's back (deleted while it was down).
     h.state.db.delete_app(&app.id).await.unwrap();
     assert_eq!(h.tor.detached().len(), 2);
 
     h.reconcile().await;
     assert!(h.tor.detached().contains(&"someoneelse".to_string()));
-    assert!(!h.tor.detached().contains(&"mocksvc1".to_string()));
-    assert!(!ledger(&h).await.owned.contains("mocksvc1"));
+    assert!(!h.tor.detached().contains(&svc));
+    assert!(!ledger(&h).await.owned.contains(&svc));
 }
 
 // ─── The API says when enforcement is pending ────────────────────────────────
@@ -432,8 +449,10 @@ async fn mutations_answer_202_while_enforcement_is_pending() {
         .contains("tor"));
     assert!(h.state.db.list_grants().await.unwrap().is_empty());
 
-    // A create keeps its body and gains the field.
-    let (s, body) = call(&h, "POST", "/api/grants", Some(new_grant)).await;
+    // A create that changes what Tor must publish keeps its body and gains the field.
+    let peer = h.peer(TOR_KEY).await;
+    let keyed = serde_json::json!({"app_id": app.id, "subject": {"kind": "peer", "id": peer}});
+    let (s, body) = call(&h, "POST", "/api/grants", Some(keyed)).await;
     assert_eq!(s, StatusCode::ACCEPTED, "{body}");
     assert!(body["id"].is_string());
     assert_eq!(body["enforcement"]["status"], "pending");
@@ -446,4 +465,56 @@ async fn mutations_answer_202_while_enforcement_is_pending() {
     let id = h.state.db.list_grants().await.unwrap().remove(0).id;
     let (s, body) = call(&h, "DELETE", &format!("/api/grants/{id}"), None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+}
+
+#[tokio::test]
+async fn tor_down_with_nothing_to_do_does_not_make_mutations_202() {
+    use axum::http::StatusCode;
+    let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
+    h.reconcile().await;
+    let peer = h.peer(TOR_KEY).await;
+    h.tor.set_down(true);
+    h.reconcile().await;
+    assert!(matches!(
+        h.state.engine.read().await.networks().remove(0).status,
+        NetworkStatus::Down { .. }
+    ));
+
+    let cred = serde_json::json!({"kind": "tor_client_key", "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"});
+    let uri = format!("/api/peers/{peer}/credentials");
+    let (s, body) = call(&h, "POST", &uri, Some(cred)).await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert!(body.get("enforcement").is_none());
+    let (s, body) = call(&h, "DELETE", &format!("/api/peers/{peer}"), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+}
+
+#[tokio::test]
+async fn services_from_before_the_ledger_are_adopted_and_swept() {
+    let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
+    h.reconcile().await;
+    let svc = h.svc().await;
+    // As before the ledger existed: the service runs, nothing recorded it.
+    h.tor.inject_service(&svc);
+    h.state
+        .db
+        .set_setting("tor_owned_services", "[]")
+        .await
+        .unwrap();
+    assert!(ledger(&h).await.owned.is_empty());
+
+    socketguard_daemon::networks::ledger::adopt_stored_keys(&h.state.db)
+        .await
+        .unwrap();
+    socketguard_daemon::networks::ledger::adopt_stored_keys(&h.state.db)
+        .await
+        .unwrap();
+    assert_eq!(ledger(&h).await.owned.len(), 1);
+    assert!(ledger(&h).await.owned.contains(&svc));
+
+    // Its address goes away behind the daemon's back: the service is swept.
+    let app = h.app().await;
+    h.state.db.delete_app(&app.id).await.unwrap();
+    h.reconcile().await;
+    assert!(h.tor.detached().is_empty());
 }

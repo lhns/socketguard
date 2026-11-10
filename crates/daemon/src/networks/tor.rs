@@ -7,12 +7,13 @@
 //! Services are `Detach`ed, so they survive control-connection drops and a daemon exit
 //! (ADR 0026). The service key is stored with the address, so the `.onion` name is stable.
 
-use super::tor_control::{base32, AuthOptions, Control, Endpoint, ServiceSpec};
+use super::onion_key;
+use super::tor_control::{AuthOptions, Control, Endpoint, ServiceSpec};
 use super::{
     Capabilities, EnforcedAddress, EnforcedSubject, LocatorRequest, Network, NetworkEnforcement,
     NewLocator,
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use socketguard_core::{
     Address, CredentialKind, Locator, NetworkKind, NetworkStatus, PortRef, Protocol,
 };
@@ -159,6 +160,11 @@ struct State {
     /// When Tor was last asked what it is running.
     checked: Option<Instant>,
     status: NetworkStatus,
+    /// What the last enforcement wanted published, and the services it still had to remove
+    /// (tombstones, ones whose address is gone) when it ended. They differ from `applied`
+    /// or are non-empty exactly while a change is pending ([`Network::pending`]).
+    desired: BTreeMap<String, ServiceSpec>,
+    unremoved: BTreeSet<String>,
 }
 
 const NOT_CONNECTED: &str = "not connected to Tor yet";
@@ -198,6 +204,8 @@ impl TorNetwork {
                 status: NetworkStatus::Down {
                     reason: NOT_CONNECTED.to_string(),
                 },
+                desired: BTreeMap::new(),
+                unremoved: BTreeSet::new(),
             }),
             io: Mutex::new(()),
         }
@@ -237,32 +245,15 @@ impl Network for TorNetwork {
         (self.state.lock().unwrap().status.clone(), None)
     }
 
-    /// Reserve a service key and name. The service is created with a client key nobody
-    /// holds and removed again at once, so the name never serves anyone before a grant.
+    /// Generate the service key and name here. Nothing reaches Tor until the first grant
+    /// publishes the service.
     fn ensure_locator(&self, _req: &LocatorRequest) -> Result<NewLocator> {
-        let _io = self.io.lock().unwrap();
-        let mut c = self.connect()?;
-        let nobody: [u8; 32] = rand::random();
-        let added = c
-            .add_onion(&ServiceSpec {
-                key: None,
-                ports: vec![(1, "127.0.0.1:1".to_string())],
-                clients: vec![base32(&nobody)],
-            })
-            .context("could not create an onion service key")?;
-        if let Err(e) = c.del_onion(&added.service_id) {
-            // Unreachable without the key; enforcement removes it once the address exists.
-            warn!("Could not remove the placeholder onion service: {e}");
-        }
-        set_status(&mut self.state.lock().unwrap().status, NetworkStatus::Up);
-        let secret = added
-            .private_key
-            .context("Tor returned no private key for the new onion service")?;
+        let key = onion_key::generate();
         Ok(NewLocator {
             locator: Locator::Onion {
-                hostname: format!("{}.onion", added.service_id),
+                hostname: format!("{}.onion", key.service_id),
             },
-            secret: Some(secret),
+            secret: Some(key.secret),
         })
     }
 
@@ -305,7 +296,9 @@ impl Network for TorNetwork {
 
         let _io = self.io.lock().unwrap();
         let (applied, due) = {
-            let st = self.state.lock().unwrap();
+            let mut st = self.state.lock().unwrap();
+            st.desired = desired.clone();
+            st.unremoved = stale.clone();
             let due = st.checked.is_none_or(|t| t.elapsed() >= self.check_every)
                 || !matches!(st.status, NetworkStatus::Up);
             (st.applied.clone(), due)
@@ -322,6 +315,7 @@ impl Network for TorNetwork {
         let live: BTreeSet<String> = c.detached()?.into_iter().collect();
         let mut now_applied = applied.clone();
         let mut errors: Vec<String> = Vec::new();
+        let mut removed: BTreeSet<String> = BTreeSet::new();
 
         // Closed first: anything of ours that should not be published goes.
         for id in ours.iter().chain(applied.keys()).chain(&stale) {
@@ -331,6 +325,7 @@ impl Network for TorNetwork {
             match c.del_onion(id) {
                 Ok(()) => {
                     now_applied.remove(id);
+                    removed.insert(id.clone());
                     info!("Onion service {id} unpublished");
                 }
                 Err(e) => errors.push(format!("{e:#}")),
@@ -385,6 +380,9 @@ impl Network for TorNetwork {
 
         let mut st = self.state.lock().unwrap();
         st.applied = now_applied;
+        // Stale services that are not live are gone already.
+        st.unremoved
+            .retain(|id| live.contains(id) && !removed.contains(id));
         st.checked = Some(Instant::now());
         set_status(&mut st.status, NetworkStatus::Up);
         if errors.is_empty() {
@@ -392,6 +390,16 @@ impl Network for TorNetwork {
         } else {
             Err(anyhow!(errors.join("; ")))
         }
+    }
+
+    fn pending(&self) -> bool {
+        let st = self.state.lock().unwrap();
+        let synced = st.desired.len() == st.applied.len()
+            && st
+                .desired
+                .iter()
+                .all(|(id, spec)| st.applied.get(id) == Some(spec));
+        !synced || !st.unremoved.is_empty()
     }
 
     fn disable(&self, addresses: &[Address]) -> Result<()> {
@@ -595,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn new_locator_reserves_a_closed_name() {
+    fn new_locator_is_generated_locally_without_touching_tor() {
         let mock = MockTorControl::start();
         let n = net(&mock, CHECK_INTERVAL);
         let req = LocatorRequest {
@@ -604,20 +612,81 @@ mod tests {
             ports: socketguard_core::PortSet::All,
         };
         let loc = n.ensure_locator(&req).unwrap();
-        assert!(
-            matches!(&loc.locator, Locator::Onion { hostname } if hostname.ends_with(".onion"))
+        let Locator::Onion { hostname } = &loc.locator else {
+            panic!("not an onion locator");
+        };
+        let secret = loc.secret.unwrap();
+        assert_eq!(
+            hostname,
+            &format!(
+                "{}.onion",
+                onion_key::service_id_of_secret(&secret).unwrap()
+            )
         );
-        assert!(loc.secret.unwrap().starts_with("ED25519-V3:"));
-        // The placeholder is created with a client key and is gone again.
-        let cmds = mock.commands();
-        let add = cmds
-            .iter()
-            .find(|c| c.starts_with("ADD_ONION NEW:ED25519-V3"))
+        assert!(mock.commands().is_empty(), "no control-port call");
+        // It works with Tor down too.
+        mock.set_down(true);
+        n.ensure_locator(&req).unwrap();
+    }
+
+    #[test]
+    fn the_stored_key_publishes_under_the_local_name() {
+        let mock = MockTorControl::start();
+        let n = net(&mock, CHECK_INTERVAL);
+        let req = LocatorRequest {
+            app_id: "app".into(),
+            address_id: "a".into(),
+            ports: socketguard_core::PortSet::All,
+        };
+        let loc = n.ensure_locator(&req).unwrap();
+        let mut addr = address(&[8080], vec![grant(None, EnforcedSubject::Anyone)]);
+        addr.locator = loc.locator.clone();
+        addr.secret = loc.secret;
+        n.enforce(&enforcement(vec![addr])).unwrap();
+        assert_eq!(mock.detached(), [service_id(&loc.locator).unwrap()]);
+    }
+
+    #[test]
+    fn pending_only_while_something_is_unconfirmed() {
+        let mock = MockTorControl::start();
+        let n = net(&mock, Duration::ZERO);
+        assert!(!n.pending());
+
+        // Down with nothing to do: not pending.
+        mock.set_down(true);
+        assert!(n
+            .enforce(&enforcement(vec![address(&[8080], vec![])]))
+            .is_err());
+        assert!(!n.pending());
+
+        // Down with a service to publish: pending until Tor confirms.
+        let open = enforcement(vec![address(
+            &[8080],
+            vec![grant(None, EnforcedSubject::Anyone)],
+        )]);
+        assert!(n.enforce(&open).is_err());
+        assert!(n.pending());
+        mock.set_down(false);
+        n.enforce(&open).unwrap();
+        assert!(!n.pending());
+
+        // A removal Tor has not confirmed, and a tombstone.
+        mock.set_down(true);
+        assert!(n
+            .enforce(&enforcement(vec![address(&[8080], vec![])]))
+            .is_err());
+        assert!(n.pending());
+        mock.set_down(false);
+        n.enforce(&enforcement(vec![address(&[8080], vec![])]))
             .unwrap();
-        assert!(add.contains("ClientAuthV3="), "{add}");
-        assert!(cmds.iter().any(|c| c.starts_with("DEL_ONION ")));
-        assert!(mock.detached().is_empty());
-        assert_eq!(n.status().0, NetworkStatus::Up);
+        assert!(!n.pending());
+        mock.inject_service("gone1");
+        mock.set_down(true);
+        assert!(n.enforce(&stale(&[], &["gone1"], vec![])).is_err());
+        assert!(n.pending());
+        mock.set_down(false);
+        n.enforce(&stale(&[], &["gone1"], vec![])).unwrap();
+        assert!(!n.pending());
     }
 
     #[test]

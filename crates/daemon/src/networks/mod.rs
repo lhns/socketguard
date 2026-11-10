@@ -8,6 +8,7 @@
 //! plain sockets. The engine calls it from `spawn_blocking`.
 
 pub mod ledger;
+pub mod onion_key;
 pub mod tor;
 pub mod tor_control;
 
@@ -113,6 +114,12 @@ pub trait Network: Send + Sync {
     fn enforce(&self, enforcement: &NetworkEnforcement) -> Result<()>;
     /// Take everything of ours off the network (the `disable` latch).
     fn disable(&self, addresses: &[Address]) -> Result<()>;
+    /// Whether a saved change is still waiting to take effect here (a service to publish,
+    /// change or remove that the network has not confirmed). Mutations answer 202 only
+    /// then, not merely because the network is down.
+    fn pending(&self) -> bool {
+        false
+    }
 }
 
 /// An IP network: allocation through an [`Ipv6Backend`].
