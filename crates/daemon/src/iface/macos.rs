@@ -115,7 +115,7 @@ impl InterfaceManager for MacosInterfaces {
     }
 }
 
-/// Subnets from "	inet 192.168.1.5 netmask 0xffffff00 broadcast ..." lines.
+/// Subnets from "<tab>inet 192.168.1.5 netmask 0xffffff00 broadcast ..." lines.
 fn parse_ifconfig_inet(out: &str) -> Vec<Ipv4Net> {
     out.lines()
         .filter_map(|l| {
