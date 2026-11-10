@@ -1,12 +1,12 @@
-use crate::backend::yggdrasil::{NodeInfo, YggdrasilNode};
-use crate::backend::{with_prefix64, Ipv6Backend, Prefix};
 use crate::firewall::{Counter, DesiredRuleset, DropEvent, DropSink, Firewall, Revocation};
 use crate::iface::InterfaceManager;
 use crate::monitor::SocketMonitor;
+use crate::networks::ip::yggdrasil::{NodeInfo, YggdrasilNode};
+use crate::networks::ip::{with_prefix64, AllocatedAddress, Ipv6Backend, Prefix};
 use crate::AppState;
 use anyhow::Result;
 use socketguard_core::config::DaemonConfig;
-use socketguard_core::{AllocatedAddress, BackendType, ListeningSocket};
+use socketguard_core::{BackendType, ListeningSocket};
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -363,10 +363,6 @@ impl Ipv6Backend for MockIpv6Backend {
             backend: BackendType::Ula,
         })
     }
-
-    fn release_address(&self, _addr: &Ipv6Addr) -> Result<()> {
-        Ok(())
-    }
 }
 
 // ─── MockYggdrasilNode ───────────────────────────────────────────────────────
@@ -456,7 +452,7 @@ pub fn ip_backend(
     config: socketguard_core::config::BackendInstanceConfig,
     backend: Box<dyn Ipv6Backend>,
 ) -> crate::engine::ActiveBackend {
-    let network = Arc::new(crate::networks::IpNetwork::for_config(
+    let network = Arc::new(crate::networks::ip::IpNetwork::for_config(
         &config.backend,
         backend,
     ));
@@ -470,7 +466,7 @@ pub async fn add_ip_network(
     inst: &socketguard_core::config::BackendInstanceConfig,
     backend: Box<dyn Ipv6Backend>,
 ) {
-    let network = Arc::new(crate::networks::IpNetwork::for_config(
+    let network = Arc::new(crate::networks::ip::IpNetwork::for_config(
         &inst.backend,
         backend,
     ));

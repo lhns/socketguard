@@ -1,7 +1,7 @@
-use super::{with_prefix64, Ipv6Backend, Prefix};
+use super::{with_prefix64, AllocatedAddress, Ipv6Backend, Prefix};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use socketguard_core::{AllocatedAddress, BackendType};
+use socketguard_core::BackendType;
 use std::net::Ipv6Addr;
 use std::process::Command;
 use std::sync::Mutex;
@@ -144,16 +144,12 @@ impl Ipv6Backend for YggdrasilBackend {
             backend: BackendType::Yggdrasil,
         })
     }
-
-    fn release_address(&self, _addr: &Ipv6Addr) -> Result<()> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{iid_of, same_prefix64};
+    use crate::networks::ip::{iid_of, same_prefix64};
     use crate::test_support::MockYggdrasilNode;
 
     const SAMPLE: &str = r#"{"build_name":"yggdrasil","build_version":"0.5.15","key":"ba83a2e554a8a087cebdb3f053468cd3ff915b5dd94bf11b7a5fc2e36f13158b","address":"200:8af8:ba35:56ae:bef0:6284:981f:5972","routing_entries":3,"subnet":"300:8af8:ba35:56ae::/64"}"#;

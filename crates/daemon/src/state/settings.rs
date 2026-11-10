@@ -50,7 +50,7 @@ impl Database {
             }
             warn!("Invalid stored ULA global ID {stored:?}, generating a new one");
         }
-        let id = crate::backend::ula::UlaBackend::random_global_id();
+        let id = crate::networks::ip::ula::UlaBackend::random_global_id();
         let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
         self.set_setting(ULA_GLOBAL_ID_KEY, &hex).await?;
         Ok(id)

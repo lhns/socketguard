@@ -1,14 +1,25 @@
+//! IP networks (Local, LAN, Yggdrasil, DHCPv6): an [`IpNetwork`] allocates addresses through
+//! an [`Ipv6Backend`], one per kind of address source.
+
 pub mod dhcpv6;
+mod network;
 pub mod slaac;
 pub mod ula;
 pub mod yggdrasil;
 
-use crate::iface::InterfaceManager;
+pub use network::IpNetwork;
+
 use anyhow::Result;
-use socketguard_core::config::BackendConfig;
-use socketguard_core::AllocatedAddress;
+use socketguard_core::BackendType;
 use std::net::Ipv6Addr;
-use std::sync::Arc;
+
+/// Result of allocating a new IPv6 address
+#[derive(Debug, Clone)]
+pub struct AllocatedAddress {
+    pub address: Ipv6Addr,
+    pub prefix_len: u8,
+    pub backend: BackendType,
+}
 
 /// An IPv6 prefix (network address plus length).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,32 +57,9 @@ pub trait Ipv6Backend: Send + Sync {
     /// Allocate an address: the current prefix plus `iid` (or a random one).
     /// Backends without a prefix ignore `iid`.
     fn allocate(&self, iid: Option<u64>) -> Result<AllocatedAddress>;
-    /// Release an address (cleanup)
-    fn release_address(&self, addr: &Ipv6Addr) -> Result<()>;
-}
-
-/// Create the appropriate backend from config.
-/// `ula_global_id` is the installation's persisted ULA global ID.
-/// Fails only on invalid configuration; anything about the system is checked lazily.
-pub fn create_backend(
-    config: &BackendConfig,
-    ula_global_id: [u8; 5],
-    net: Arc<dyn InterfaceManager>,
-) -> Result<Box<dyn Ipv6Backend>> {
-    match config {
-        BackendConfig::Ula { .. } => Ok(Box::new(ula::UlaBackend::new(ula_global_id))),
-        BackendConfig::Yggdrasil { admin_endpoint, .. } => {
-            Ok(Box::new(yggdrasil::YggdrasilBackend::new(Box::new(
-                yggdrasil::YggdrasilctlNode::new(admin_endpoint.clone()),
-            ))))
-        }
-        BackendConfig::Slaac { interface, prefix } => Ok(Box::new(slaac::SlaacBackend::new(
-            interface,
-            prefix.as_deref(),
-            net,
-        )?)),
-        BackendConfig::Dhcpv6 { interface } => Ok(Box::new(dhcpv6::Dhcpv6Backend::new(interface))),
-        BackendConfig::Tor { .. } => anyhow::bail!("Tor is not an IPv6 backend"),
+    /// Release an address (cleanup). Most backends hold no state per address.
+    fn release_address(&self, _addr: &Ipv6Addr) -> Result<()> {
+        Ok(())
     }
 }
 

@@ -3,9 +3,9 @@
 
 use super::*;
 use crate::api::DaemonEvent;
-use crate::backend::{iid_of, same_prefix64, with_prefix64};
 use crate::firewall::{Firewall, ScopeMatch};
 use crate::iface::InterfaceManager;
+use crate::networks::ip::{iid_of, same_prefix64, with_prefix64};
 use crate::networks::{LocatorRequest, NewLocator};
 use crate::state::{Database, OwnedAddress};
 use crate::AppState;

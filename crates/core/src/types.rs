@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::IpAddr;
 
 /// Network protocol
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -99,14 +99,6 @@ impl std::str::FromStr for BackendType {
             _ => Err(format!("invalid backend: {s}")),
         }
     }
-}
-
-/// Result of allocating a new IPv6 address
-#[derive(Debug, Clone)]
-pub struct AllocatedAddress {
-    pub address: Ipv6Addr,
-    pub prefix_len: u8,
-    pub backend: BackendType,
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
-use super::{Ipv6Backend, Prefix};
+use super::{AllocatedAddress, Ipv6Backend, Prefix};
 use anyhow::{bail, Context, Result};
 use rand::Rng;
-use socketguard_core::{AllocatedAddress, BackendType};
+use socketguard_core::BackendType;
 use std::collections::HashMap;
 use std::net::{Ipv6Addr, SocketAddrV6, UdpSocket};
 use std::sync::Mutex;

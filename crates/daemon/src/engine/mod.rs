@@ -217,7 +217,7 @@ impl Engine {
             firewall,
             ifaces,
             backends,
-            crate::backend::ula::UlaBackend::random_global_id(),
+            crate::networks::ip::ula::UlaBackend::random_global_id(),
         );
         // Tests drive passes back to back: verify on every one unless they say otherwise.
         engine.verify_interval = Duration::ZERO;

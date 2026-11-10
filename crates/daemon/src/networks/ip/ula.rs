@@ -1,7 +1,8 @@
+use super::AllocatedAddress;
 use super::{Ipv6Backend, Prefix};
 use anyhow::Result;
 use rand::Rng;
-use socketguard_core::{AllocatedAddress, BackendType};
+use socketguard_core::BackendType;
 use std::net::Ipv6Addr;
 
 /// ULA (Unique Local Address) backend
@@ -53,11 +54,6 @@ impl Ipv6Backend for UlaBackend {
             prefix_len: 128,
             backend: BackendType::Ula,
         })
-    }
-
-    fn release_address(&self, _addr: &Ipv6Addr) -> Result<()> {
-        // ULA addresses are stateless, nothing to clean up
-        Ok(())
     }
 }
 

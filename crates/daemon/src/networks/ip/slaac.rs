@@ -1,8 +1,9 @@
-use super::{Ipv6Backend, Prefix};
+use super::{with_prefix64, AllocatedAddress, Ipv6Backend, Prefix};
 use crate::iface::InterfaceManager;
 use anyhow::{bail, Context, Result};
+use ipnet::Ipv6Net;
 use rand::Rng;
-use socketguard_core::{AllocatedAddress, BackendType};
+use socketguard_core::BackendType;
 use std::net::Ipv6Addr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,10 +22,10 @@ pub struct SlaacBackend {
     interface: String,
     net: Arc<dyn InterfaceManager>,
     /// A configured prefix; never rediscovered.
-    fixed: Option<[u8; 8]>,
+    fixed: Option<Ipv6Addr>,
     cache_for: Duration,
     /// The last discovery: when, and the prefix it found.
-    cache: Mutex<Option<(Instant, [u8; 8])>>,
+    cache: Mutex<Option<(Instant, Ipv6Addr)>>,
 }
 
 impl SlaacBackend {
@@ -59,7 +60,7 @@ impl SlaacBackend {
 
     /// The /64 to allocate from: the configured one, or the one discovered on the
     /// interface (cached for `cache_for`).
-    fn prefix(&self) -> Result<[u8; 8]> {
+    fn prefix(&self) -> Result<Ipv6Addr> {
         if let Some(p) = self.fixed {
             return Ok(p);
         }
@@ -80,28 +81,18 @@ impl SlaacBackend {
             );
         };
         if cache.is_none_or(|(_, old)| old != found) {
-            info!(
-                "SLAAC prefix of {}: {}",
-                self.interface,
-                prefix_addr(&found)
-            );
+            info!("SLAAC prefix of {}: {found}", self.interface);
         }
         *cache = Some((Instant::now(), found));
         Ok(found)
     }
 }
 
-fn prefix_addr(prefix: &[u8; 8]) -> Ipv6Addr {
-    let mut bytes = [0u8; 16];
-    bytes[..8].copy_from_slice(prefix);
-    Ipv6Addr::from(bytes)
-}
-
 /// Choose the /64 to allocate from among the addresses of an interface. Global unicast
 /// (2000::/3) beats unique-local (fc00::/7); link-local, loopback, multicast and
 /// Yggdrasil (200::/7) never count. Within a class the prefix shared by the most
 /// addresses wins, then the lowest.
-pub fn pick_prefix(addrs: &[Ipv6Addr]) -> Option<[u8; 8]> {
+fn pick_prefix(addrs: &[Ipv6Addr]) -> Option<Ipv6Addr> {
     let rank = |a: &Ipv6Addr| -> Option<u8> {
         let first = a.octets()[0];
         if first & 0xe0 == 0x20 {
@@ -112,12 +103,10 @@ pub fn pick_prefix(addrs: &[Ipv6Addr]) -> Option<[u8; 8]> {
             None
         }
     };
-    let mut counts: std::collections::BTreeMap<(u8, [u8; 8]), usize> = Default::default();
+    let mut counts: std::collections::BTreeMap<(u8, Ipv6Addr), usize> = Default::default();
     for a in addrs {
         if let Some(r) = rank(a) {
-            let mut p = [0u8; 8];
-            p.copy_from_slice(&a.octets()[..8]);
-            *counts.entry((r, p)).or_default() += 1;
+            *counts.entry((r, with_prefix64(*a, 0))).or_default() += 1;
         }
     }
     counts
@@ -131,28 +120,22 @@ pub fn pick_prefix(addrs: &[Ipv6Addr]) -> Option<[u8; 8]> {
 
 impl Ipv6Backend for SlaacBackend {
     fn current_prefix(&self) -> Result<Option<Prefix>> {
-        Ok(Some(Prefix::new(prefix_addr(&self.prefix()?), 64)))
+        Ok(Some(Prefix::new(self.prefix()?, 64)))
     }
 
     fn allocate(&self, iid: Option<u64>) -> Result<AllocatedAddress> {
         let prefix = self.prefix()?;
-        let with_iid = |iid: u64| {
-            let mut bytes = [0u8; 16];
-            bytes[..8].copy_from_slice(&prefix);
-            bytes[8..16].copy_from_slice(&iid.to_be_bytes());
-            Ipv6Addr::from(bytes)
-        };
         if let Some(iid) = iid {
             // A stable interface ID is ours already; no collision check.
             return Ok(AllocatedAddress {
-                address: with_iid(iid),
+                address: with_prefix64(prefix, iid),
                 prefix_len: 128,
                 backend: BackendType::Slaac,
             });
         }
         let mut rng = rand::thread_rng();
         for attempt in 0..MAX_COLLISION_RETRIES {
-            let address = with_iid(rng.gen());
+            let address = with_prefix64(prefix, rng.gen());
             // Check for collision with existing addresses on the interface
             if !self.net.list_addresses(&self.interface)?.contains(&address) {
                 debug!("SLAAC allocated {} (attempt {})", address, attempt + 1);
@@ -173,37 +156,17 @@ impl Ipv6Backend for SlaacBackend {
             MAX_COLLISION_RETRIES
         )
     }
-
-    fn release_address(&self, _addr: &Ipv6Addr) -> Result<()> {
-        // Address removal is handled by the engine's network layer
-        Ok(())
-    }
 }
 
-/// Parse a prefix string like "2001:db8:1:2::/64" into the first 8 bytes
-fn parse_prefix(prefix_str: &str) -> Result<[u8; 8]> {
-    // Strip optional /64 suffix
-    let addr_part = prefix_str
-        .split('/')
-        .next()
-        .unwrap_or(prefix_str)
-        .trim_end_matches(':');
-
-    // Pad with :: if needed to make a full address for parsing
-    let full_addr = if addr_part.contains("::") {
-        format!("{}1", prefix_str.split('/').next().unwrap_or(prefix_str))
-    } else {
-        format!("{addr_part}::1")
+/// Parse a configured prefix, "2001:db8:1:2::/64" or just "2001:db8:1:2::", to its /64.
+fn parse_prefix(prefix: &str) -> Result<Ipv6Addr> {
+    let addr = match prefix.parse::<Ipv6Net>() {
+        Ok(net) => net.network(),
+        Err(_) => prefix
+            .parse::<Ipv6Addr>()
+            .with_context(|| format!("invalid prefix: {prefix}"))?,
     };
-
-    let addr: Ipv6Addr = full_addr
-        .parse()
-        .with_context(|| format!("invalid prefix: {prefix_str}"))?;
-
-    let octets = addr.octets();
-    let mut prefix = [0u8; 8];
-    prefix.copy_from_slice(&octets[..8]);
-    Ok(prefix)
+    Ok(with_prefix64(addr, 0))
 }
 
 #[cfg(test)]
@@ -214,13 +177,13 @@ mod tests {
     #[test]
     fn parse_prefix_with_slash() {
         let prefix = parse_prefix("2001:db8:1:2::/64").unwrap();
-        assert_eq!(prefix, [0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x02]);
+        assert_eq!(prefix, "2001:db8:1:2::".parse::<Ipv6Addr>().unwrap());
     }
 
     #[test]
     fn parse_prefix_without_slash() {
         let prefix = parse_prefix("2001:db8:abcd:ef01::").unwrap();
-        assert_eq!(prefix, [0x20, 0x01, 0x0d, 0xb8, 0xab, 0xcd, 0xef, 0x01]);
+        assert_eq!(prefix, "2001:db8:abcd:ef01::".parse::<Ipv6Addr>().unwrap());
     }
 
     #[test]
@@ -233,7 +196,7 @@ mod tests {
     }
 
     fn pick(list: &[&str]) -> Option<String> {
-        pick_prefix(&ips(list)).map(|p| prefix_addr(&p).to_string())
+        pick_prefix(&ips(list)).map(|p| p.to_string())
     }
 
     #[test]
@@ -295,7 +258,7 @@ mod tests {
         let p = b.current_prefix().unwrap().unwrap();
         assert_eq!(p.addr, "fd3e:1eec:520:582e::".parse::<Ipv6Addr>().unwrap());
         let a = b.allocate(None).unwrap();
-        assert!(crate::backend::same_prefix64(a.address, p.addr));
+        assert!(crate::networks::ip::same_prefix64(a.address, p.addr));
 
         // A global prefix appears and wins; allocation follows.
         add(&m, "2001:db8:9:9::1");

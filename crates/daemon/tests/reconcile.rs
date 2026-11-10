@@ -13,6 +13,7 @@ use socketguard_daemon::api::DaemonEvent;
 use socketguard_daemon::engine::{Engine, EngineError, GrantFilter, ProtectHostError};
 use socketguard_daemon::firewall::{DropEvent, ScopeMatch, Sources};
 use socketguard_daemon::iface::InterfaceManager as _;
+use socketguard_daemon::networks::ip::{ula::UlaBackend, Ipv6Backend as _};
 use socketguard_daemon::test_support::*;
 use socketguard_daemon::AppState;
 use std::collections::HashMap;
@@ -779,8 +780,8 @@ async fn an_ip_suffix_peer_follows_a_prefix_change() {
     assert_ne!(new, old);
     assert!(new.to_string().starts_with("2001:db8:9:9:"));
     assert_eq!(
-        socketguard_daemon::backend::iid_of(new),
-        socketguard_daemon::backend::iid_of(old),
+        socketguard_daemon::networks::ip::iid_of(new),
+        socketguard_daemon::networks::ip::iid_of(old),
         "same interface ID, new prefix"
     );
     assert!(h.net.addresses("eth0").contains(&new));
@@ -1375,22 +1376,13 @@ async fn adding_and_removing_a_network() {
 async fn ula_global_id_survives_restart() {
     let path = std::env::temp_dir().join(format!("sg-ula-{}.db", uuid::Uuid::new_v4()));
     let path_str = path.to_str().unwrap();
-    let ula = BackendConfig::Ula {
-        interface: "lo".to_string(),
-    };
-
     let first = {
         let db = socketguard_daemon::state::Database::new(path_str)
             .await
             .unwrap();
         db.migrate().await.unwrap();
         let id = db.ula_global_id().await.unwrap();
-        let b = socketguard_daemon::backend::create_backend(
-            &ula,
-            id,
-            std::sync::Arc::new(MockInterfaceManager::new(Default::default())),
-        )
-        .unwrap();
+        let b = UlaBackend::new(id);
         (id, b.allocate(None).unwrap().address.octets())
     };
 
@@ -1401,12 +1393,7 @@ async fn ula_global_id_survives_restart() {
     db.migrate().await.unwrap();
     let id = db.ula_global_id().await.unwrap();
     assert_eq!(id, first.0);
-    let b = socketguard_daemon::backend::create_backend(
-        &ula,
-        id,
-        std::sync::Arc::new(MockInterfaceManager::new(Default::default())),
-    )
-    .unwrap();
+    let b = UlaBackend::new(id);
     assert_eq!(
         b.allocate(None).unwrap().address.octets()[..6],
         first.1[..6]
@@ -1812,7 +1799,7 @@ async fn a_network_that_cannot_initialise_is_down_not_fatal() {
     assert_eq!(status().await, NetworkStatus::Up);
     let apps = state.db.list_apps().await.unwrap();
     let addr = Harness::addr_on(&apps[0], "lan");
-    assert!(socketguard_daemon::backend::same_prefix64(
+    assert!(socketguard_daemon::networks::ip::same_prefix64(
         addr,
         "fd3e:1eec:520:582e::".parse().unwrap()
     ));
