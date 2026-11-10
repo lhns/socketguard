@@ -22,7 +22,6 @@ On fresh clone: run `cd ui && npm install` once first.
 - ui/             — Tauri v2 desktop app (React frontend + Rust backend);
                     ui/src/generated is produced by `cargo test -p socketguard-core --features ts export_bindings`
 - deploy/e2e/     — Docker end-to-end tests (Yggdrasil, Tor); deploy/otel/ — telemetry stack
-- cargo.sh        — Legacy cargo wrapper (superseded by build.sh)
 
 ## Testing
 

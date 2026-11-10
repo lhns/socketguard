@@ -12,7 +12,7 @@ for arg in "$@"; do
     esac
 done
 
-# Fix MSVC linker PATH on Windows (same as cargo.sh)
+# On Windows the Bash /usr/bin/link.exe shadows the MSVC linker: put the MSVC bin dir first on PATH.
 if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
     MSVC_BIN="/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64"
     if [[ -d "$MSVC_BIN" ]]; then
