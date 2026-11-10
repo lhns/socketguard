@@ -401,6 +401,45 @@ async fn a_vanished_firewall_state_is_reapplied_on_the_next_pass() {
 }
 
 #[tokio::test]
+async fn verify_runs_on_a_cadence_and_after_a_failed_apply() {
+    let h = Harness::new(
+        vec![local(), ygg()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.state
+        .engine
+        .write()
+        .await
+        .set_verify_interval(Duration::from_millis(300));
+    h.reconcile().await; // applies; counts as verified
+    let base = h.fw.verify_count();
+    for _ in 0..5 {
+        h.reconcile().await;
+    }
+    assert_eq!(h.fw.verify_count(), base, "no verify within the interval");
+
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    h.reconcile().await;
+    assert_eq!(
+        h.fw.verify_count(),
+        base + 1,
+        "verify once the interval passed"
+    );
+    h.reconcile().await;
+    assert_eq!(h.fw.verify_count(), base + 1);
+
+    // Drift is only noticed on a verify pass.
+    h.fw.simulate_drift();
+    h.clear_calls();
+    h.reconcile().await;
+    assert!(applied(&h.fw_calls).is_empty());
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    h.reconcile().await;
+    assert_eq!(applied(&h.fw_calls).len(), 1, "drift re-applied when due");
+}
+
+#[tokio::test]
 async fn a_revoked_grant_cuts_its_established_connections() {
     let h = Harness::new(
         vec![lan(), ygg()],

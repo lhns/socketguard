@@ -3,7 +3,7 @@
 
 use crate::cli::*;
 use crate::parse::{self, SubjectSpec};
-use crate::prompt;
+use crate::prompt::{self, Prompter};
 use crate::render::{self, Names};
 use crate::resolve::{resolve, resolve_id, short};
 use anyhow::{anyhow, bail, Context, Result};
@@ -67,9 +67,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::ProtectHost(cmd) => protect_host(&c, cmd).await,
         Command::Activity(a) => activity(&c, a).await,
         Command::Watch => watch(&c).await,
-        Command::Pending => pending(&c).await,
+        Command::Pending => pending(&c, &mut prompt::Stdin).await,
         Command::Share(a) => share(&c, a).await,
-        Command::Init => init(&c).await,
+        Command::Init => init(&c, &mut prompt::Stdin).await,
         Command::Export(a) => export(&c, a).await,
         Command::Apply(a) => apply(&c, a).await,
         Command::Disable(a) => disable(&c, a).await,
@@ -624,7 +624,7 @@ async fn grant(c: &Ctx, a: GrantArgs) -> Result<()> {
                     a.target
                 );
             }
-            if !prompt::confirm(&format!("Open {} to anyone who can reach it?", a.target))? {
+            if !prompt::Stdin.confirm(&format!("Open {} to anyone who can reach it?", a.target)) {
                 eprintln!("not confirmed; nothing changed");
                 return Err(Reported.into());
             }
@@ -875,7 +875,7 @@ async fn apply(c: &Ctx, a: ApplyArgs) -> Result<()> {
                 diff.changes.len()
             );
         }
-        if !prompt::confirm("Apply these changes?")? {
+        if !prompt::Stdin.confirm("Apply these changes?") {
             eprintln!("not confirmed; nothing changed");
             return Err(Reported.into());
         }
@@ -899,7 +899,7 @@ async fn disable(c: &Ctx, a: DisableArgs) -> Result<()> {
         if !prompt::interactive() {
             bail!("disable removes every firewall rule and address; repeat with --yes to confirm");
         }
-        if !prompt::confirm("Remove all SocketGuard rules and addresses, opening the host?")? {
+        if !prompt::Stdin.confirm("Remove all SocketGuard rules and addresses, opening the host?") {
             eprintln!("not confirmed; nothing changed");
             return Err(Reported.into());
         }
@@ -916,21 +916,23 @@ async fn enable(c: &Ctx) -> Result<()> {
 // ─── Pending and init ────────────────────────────────────────────────────────
 
 /// Pick a peer or group from a list, or create a peer by pasting a key.
-async fn pick_subject(c: &Ctx) -> Result<Option<Subject>> {
+async fn pick_subject(c: &Ctx, p: &mut dyn Prompter) -> Result<Option<Subject>> {
     let peers = c.client.list_peers().await?;
     let groups = c.client.list_groups().await?;
     let mut options: Vec<String> = peers.iter().map(|p| format!("peer {}", p.label)).collect();
     options.extend(groups.iter().map(|g| format!("group {}", g.label)));
     options.push("a new peer (paste a Yggdrasil key or an address)".to_string());
     options.push("cancel".to_string());
-    let n = prompt::choose("Grant to:", &options)?;
+    let Some(n) = p.choose("Grant to:", &options) else {
+        return Ok(None);
+    };
     if n < peers.len() {
         Ok(Some(Subject::Peer(peers[n].id.clone())))
     } else if n < peers.len() + groups.len() {
         Ok(Some(Subject::Group(groups[n - peers.len()].id.clone())))
     } else if n == peers.len() + groups.len() {
-        let label = prompt::read_line("Label for the new peer:")?;
-        let value = prompt::read_line("Key, address or CIDR:")?;
+        let label = p.ask("Label for the new peer:");
+        let value = p.ask("Key, address or CIDR:");
         let peer = c
             .client
             .create_peer(&NewPeer {
@@ -947,6 +949,7 @@ async fn pick_subject(c: &Ctx) -> Result<Option<Subject>> {
 
 async fn grant_all_ports(
     c: &Ctx,
+    p: &mut dyn Prompter,
     app: &App,
     port: Option<PortRef>,
     subject: Subject,
@@ -959,7 +962,7 @@ async fn grant_all_ports(
         confirm_open: false,
     };
     if req.subject == Subject::Anyone {
-        if !prompt::confirm(&format!("Open {} to anyone who can reach it?", app.name))? {
+        if !p.confirm(&format!("Open {} to anyone who can reach it?", app.name)) {
             println!("skipped");
             return Ok(());
         }
@@ -972,9 +975,9 @@ async fn grant_all_ports(
     Ok(())
 }
 
-async fn pending(c: &Ctx) -> Result<()> {
+async fn pending(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
     let apps = c.client.list_apps(true).await?;
-    if c.json || !prompt::interactive() {
+    if c.json || !p.interactive() {
         return c.print(&apps, || render::apps(&apps));
     }
     if apps.is_empty() {
@@ -989,17 +992,21 @@ async fn pending(c: &Ctx) -> Result<()> {
             "open to anyone".to_string(),
             "skip".to_string(),
         ];
-        match prompt::choose(&format!("{} is listening and closed:", app.name), &options)? {
+        let Some(choice) = p.choose(&format!("{} is listening and closed:", app.name), &options)
+        else {
+            break;
+        };
+        match choice {
             0 => {
                 c.client.review_app(&app.id, true).await?;
                 println!("kept closed");
             }
             1 => {
-                if let Some(s) = pick_subject(c).await? {
-                    grant_all_ports(c, app, None, s).await?;
+                if let Some(s) = pick_subject(c, p).await? {
+                    grant_all_ports(c, p, app, None, s).await?;
                 }
             }
-            2 => grant_all_ports(c, app, None, Subject::Anyone).await?,
+            2 => grant_all_ports(c, p, app, None, Subject::Anyone).await?,
             _ => println!("skipped"),
         }
     }
@@ -1021,11 +1028,11 @@ fn yggdrasil_node() -> Option<String> {
 
 const ADMIN_PORTS: [u16; 2] = [22, 3389];
 
-async fn init(c: &Ctx) -> Result<()> {
+async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
     if c.json {
         bail!("init is interactive and has no --json mode");
     }
-    let interactive = prompt::interactive();
+    let interactive = p.interactive();
     let status = c.client.status().await?;
     println!("{}\n", render::networks(&status.networks));
 
@@ -1037,9 +1044,9 @@ async fn init(c: &Ctx) -> Result<()> {
     {
         if let Some(addr) = yggdrasil_node() {
             println!("A Yggdrasil node is running (address {addr}) but has no network here.");
-            if interactive && prompt::confirm("Add a Yggdrasil network?")? {
+            if interactive && p.confirm("Add a Yggdrasil network?") {
                 let default = if cfg!(windows) { "Yggdrasil" } else { "ygg0" };
-                let answer = prompt::read_line(&format!("Yggdrasil tun interface [{default}]:"))?;
+                let answer = p.ask(&format!("Yggdrasil tun interface [{default}]:"));
                 let interface = if answer.is_empty() {
                     default.to_string()
                 } else {
@@ -1116,9 +1123,9 @@ async fn init(c: &Ctx) -> Result<()> {
             "grant to a peer or group".to_string(),
             "keep it closed".to_string(),
         ];
-        if prompt::choose(&format!("What should happen to {}?", app.name), &options)? == 0 {
-            if let Some(s) = pick_subject(c).await? {
-                grant_all_ports(c, &app, Some(port), s).await?;
+        if p.choose(&format!("What should happen to {}?", app.name), &options) == Some(0) {
+            if let Some(s) = pick_subject(c, p).await? {
+                grant_all_ports(c, p, &app, Some(port), s).await?;
             }
         }
     }
@@ -1128,7 +1135,7 @@ async fn init(c: &Ctx) -> Result<()> {
         println!(
             "\nWhole-host protection also closes listeners that SocketGuard has no address for."
         );
-        if interactive && prompt::confirm("Turn on protect-host?")? {
+        if interactive && p.confirm("Turn on protect-host?") {
             let lan: Vec<String> = status
                 .networks
                 .iter()
@@ -1136,7 +1143,7 @@ async fn init(c: &Ctx) -> Result<()> {
                 .filter_map(|n| n.interface.clone())
                 .collect();
             let default = lan.join(",");
-            let answer = prompt::read_line(&format!("Interfaces (comma separated) [{default}]:"))?;
+            let answer = p.ask(&format!("Interfaces (comma separated) [{default}]:"));
             let list = if answer.is_empty() { default } else { answer };
             let interfaces: Vec<String> = list
                 .split(',')
@@ -1149,7 +1156,7 @@ async fn init(c: &Ctx) -> Result<()> {
                 .await?
                 .is_none()
             {
-                if prompt::confirm("Turn it on anyway (--force)?")? {
+                if p.confirm("Turn it on anyway (--force)?") {
                     set_protect_host(c, interfaces, true).await?;
                     println!("protect-host is on");
                 }
@@ -1162,4 +1169,28 @@ async fn init(c: &Ctx) -> Result<()> {
     }
     println!("\nDone. `socketguard status` shows the result.");
     Ok(())
+}
+
+/// The `pending` flow against `client` with the given prompter (not `--json`).
+pub async fn pending_flow(client: Client, p: &mut dyn Prompter) -> Result<()> {
+    pending(
+        &Ctx {
+            client,
+            json: false,
+        },
+        p,
+    )
+    .await
+}
+
+/// The `init` flow against `client` with the given prompter.
+pub async fn init_flow(client: Client, p: &mut dyn Prompter) -> Result<()> {
+    init(
+        &Ctx {
+            client,
+            json: false,
+        },
+        p,
+    )
+    .await
 }

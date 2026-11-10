@@ -47,9 +47,13 @@ struct Env {
 
 impl Env {
     async fn start() -> Self {
+        Self::start_with(vec![listener("nginx", 80)]).await
+    }
+
+    async fn start_with(sockets: Vec<ListeningSocket>) -> Self {
         let dir = std::env::temp_dir().join(format!("sg-cli-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
-        let daemon = standard_daemon(vec![listener("nginx", 80)], Some(dir.join("sg.json"))).await;
+        let daemon = standard_daemon(sockets, Some(dir.join("sg.json"))).await;
         reconcile(&daemon).await;
 
         #[cfg(unix)]
@@ -80,6 +84,10 @@ impl Env {
             stop: Some(stop),
             done,
         }
+    }
+
+    fn client(&self) -> socketguard_client::Client {
+        socketguard_client::Client::new(&self.endpoint)
     }
 
     /// Run `socketguard args...` with the daemon's endpoint, off the async runtime.
@@ -476,5 +484,197 @@ async fn export_apply_and_disable() {
         false
     );
 
+    env.stop().await;
+}
+
+// ─── Interactive flows (scripted prompter, in-process client) ─────────────────
+
+use socketguard_cli::commands::{init_flow, pending_flow};
+use socketguard_cli::prompt::Prompter;
+use socketguard_core::api_types::NewPeer;
+use socketguard_core::{GrantView, Subject};
+use std::collections::VecDeque;
+
+/// What the user types, in order.
+enum A {
+    Say(&'static str),
+    Yes,
+    No,
+    Pick(usize),
+}
+
+struct Script {
+    answers: VecDeque<A>,
+    asked: Vec<String>,
+}
+
+impl Script {
+    fn new(answers: Vec<A>) -> Self {
+        Self {
+            answers: answers.into(),
+            asked: Vec::new(),
+        }
+    }
+
+    fn next(&mut self, question: &str) -> A {
+        self.asked.push(question.to_string());
+        self.answers
+            .pop_front()
+            .unwrap_or_else(|| panic!("unexpected question {question:?}"))
+    }
+
+    fn finished(&self) {
+        assert!(
+            self.answers.is_empty(),
+            "unused answers; asked {:?}",
+            self.asked
+        );
+    }
+}
+
+impl Prompter for Script {
+    fn interactive(&self) -> bool {
+        true
+    }
+    fn ask(&mut self, q: &str) -> String {
+        match self.next(q) {
+            A::Say(s) => s.to_string(),
+            _ => panic!("{q:?} wants text"),
+        }
+    }
+    fn confirm(&mut self, q: &str) -> bool {
+        match self.next(q) {
+            A::Yes => true,
+            A::No => false,
+            _ => panic!("{q:?} wants yes or no"),
+        }
+    }
+    fn choose(&mut self, q: &str, options: &[String]) -> Option<usize> {
+        match self.next(q) {
+            A::Pick(n) => {
+                assert!(n < options.len(), "{q:?}: option {n} of {options:?}");
+                Some(n)
+            }
+            _ => panic!("{q:?} wants a choice"),
+        }
+    }
+}
+
+async fn ip_peer(env: &Env, label: &str, ip: &str) -> socketguard_core::Peer {
+    env.client()
+        .create_peer(&NewPeer {
+            label: label.into(),
+            credentials: vec![socketguard_cli::parse::guess_credential(ip).unwrap()],
+        })
+        .await
+        .unwrap()
+}
+
+/// Whether the only app is reviewed, and its grants.
+async fn the_app(env: &Env) -> (bool, Vec<GrantView>) {
+    let c = env.client();
+    let id = c.list_apps(false).await.unwrap()[0].id.clone();
+    let d = c.get_app(&id).await.unwrap();
+    (d.app.reviewed, d.grants)
+}
+
+/// Run `pending` with `answers` on a daemon with one pending app (nginx) and a peer.
+async fn run_pending(answers: Vec<A>) -> (Env, Script) {
+    let env = Env::start().await;
+    ip_peer(&env, "friend", "2001:db8::7").await;
+    let mut script = Script::new(answers);
+    pending_flow(env.client(), &mut script).await.unwrap();
+    script.finished();
+    (env, script)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_keep_closed_marks_the_app_reviewed() {
+    let (env, _) = run_pending(vec![A::Pick(0)]).await;
+    let (reviewed, grants) = the_app(&env).await;
+    assert!(reviewed && grants.is_empty());
+    assert!(env.client().list_apps(true).await.unwrap().is_empty());
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_grant_to_an_existing_peer_creates_the_grant() {
+    // grant, then the first peer in the list.
+    let (env, script) = run_pending(vec![A::Pick(1), A::Pick(0)]).await;
+    assert!(script.asked.iter().any(|q| q == "Grant to:"));
+    let (reviewed, grants) = the_app(&env).await;
+    let friend = env.client().list_peers().await.unwrap()[0].id.clone();
+    assert!(reviewed);
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].grant.subject, Subject::Peer(friend));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_open_to_anyone_needs_the_confirmation() {
+    let (env, _) = run_pending(vec![A::Pick(2), A::Yes]).await;
+    let (reviewed, grants) = the_app(&env).await;
+    assert!(reviewed);
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].grant.subject, Subject::Anyone);
+    env.stop().await;
+
+    let (env, _) = run_pending(vec![A::Pick(2), A::No]).await;
+    let (reviewed, grants) = the_app(&env).await;
+    assert!(!reviewed && grants.is_empty(), "declined: nothing created");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_skip_leaves_the_app_pending() {
+    let (env, _) = run_pending(vec![A::Pick(3)]).await;
+    let (reviewed, grants) = the_app(&env).await;
+    assert!(!reviewed && grants.is_empty());
+    assert_eq!(env.client().list_apps(true).await.unwrap().len(), 1);
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn init_offers_a_grant_for_sshd_and_checks_protect_host_for_lockout() {
+    // sshd stays closed: protect-host is refused and declined.
+    let env = Env::start_with(vec![listener("sshd", 22)]).await;
+    let mut script = Script::new(vec![
+        A::Pick(1), // keep sshd closed
+        A::Yes,     // turn on protect-host
+        A::Say(""), // the default interfaces (the LAN)
+        A::No,      // not anyway
+    ]);
+    init_flow(env.client(), &mut script).await.unwrap();
+    script.finished();
+    assert!(script
+        .asked
+        .iter()
+        .any(|q| q.starts_with("What should happen to sshd")));
+    assert!(env
+        .client()
+        .status()
+        .await
+        .unwrap()
+        .protect_host_interfaces
+        .is_empty());
+    env.stop().await;
+
+    // Granting sshd to a peer first lets protect-host through.
+    let env = Env::start_with(vec![listener("sshd", 22)]).await;
+    ip_peer(&env, "admin", "2001:db8::7").await;
+    let mut script = Script::new(vec![
+        A::Pick(0), // grant to a peer or group
+        A::Pick(0), // admin
+        A::Yes,
+        A::Say("eth0"),
+    ]);
+    init_flow(env.client(), &mut script).await.unwrap();
+    script.finished();
+    let (_, grants) = the_app(&env).await;
+    assert_eq!(grants.len(), 1);
+    assert_eq!(
+        env.client().status().await.unwrap().protect_host_interfaces,
+        ["eth0"]
+    );
     env.stop().await;
 }

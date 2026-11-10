@@ -188,8 +188,8 @@ user can bind the default `127.0.0.1:9051` while Tor is down. Therefore:
   created whose address is gone are removed on the next pass. Services we did not create are
   left alone.
 
-The service keys live in the daemon's database (mode 0600 on Unix; on Windows keep it where only
-the service account and Administrators have access). See ADR 0037 and 0039. A Docker end-to-end
+The service keys live in the daemon's database (mode 0600 on Unix; on Windows the daemon gives the
+file a protected ACL: SYSTEM and Administrators only). See ADR 0037 and 0039. A Docker end-to-end
 test is in `deploy/e2e/tor-e2e.sh`.
 
 ## Testing

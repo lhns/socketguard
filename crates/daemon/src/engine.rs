@@ -29,13 +29,16 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 /// An unchanged ruleset is still re-applied every this many reconcile passes. Drift is
-/// caught sooner: [`Firewall::verify`] runs on every pass.
+/// caught sooner: [`Firewall::verify`] runs at most this often (it can spawn a process).
 const REAPPLY_EVERY: u32 = 30;
+
+/// Minimum time between two [`Firewall::verify`] calls, except after a failed apply.
+pub const VERIFY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Every backend allocates single addresses.
 const ADDRESS_PREFIX_LEN: u8 = 128;
@@ -130,6 +133,9 @@ pub struct Engine {
     /// The last apply failed. Addresses are not added to interfaces then, because
     /// nothing would deny them.
     apply_failed: AtomicBool,
+    /// When the firewall state was last verified or applied, and how often to verify.
+    last_verified: Mutex<Option<Instant>>,
+    verify_interval: Duration,
     /// Drop events from the firewall, drained on every reconcile pass.
     drops: Arc<Mutex<Vec<DropEvent>>>,
     /// Drops aggregated per (src, dst, port, proto, minute), flushed once the minute is over.
@@ -196,14 +202,22 @@ impl Engine {
         backends: HashMap<String, ActiveBackend>,
         backend_ids: Vec<String>,
     ) -> Self {
-        Self::assemble(
+        let mut engine = Self::assemble(
             monitor,
             firewall,
             network,
             backends,
             backend_ids,
             crate::backend::ula::UlaBackend::random_global_id(),
-        )
+        );
+        // Tests drive passes back to back: verify on every one unless they say otherwise.
+        engine.verify_interval = Duration::ZERO;
+        engine
+    }
+
+    /// Override [`VERIFY_INTERVAL`] — for tests only.
+    pub fn set_verify_interval(&mut self, interval: Duration) {
+        self.verify_interval = interval;
     }
 
     fn assemble(
@@ -227,6 +241,8 @@ impl Engine {
             last_applied: Mutex::default(),
             passes_since_apply: AtomicU32::new(0),
             apply_failed: AtomicBool::new(false),
+            last_verified: Mutex::default(),
+            verify_interval: VERIFY_INTERVAL,
             drops: Arc::default(),
             drop_agg: Mutex::default(),
             counter_keys: Mutex::default(),
@@ -327,12 +343,28 @@ impl Engine {
             if unchanged {
                 let passes = self.passes_since_apply.fetch_add(1, Ordering::Relaxed) + 1;
                 let fw = self.firewall.clone();
-                let in_force = tokio::task::spawn_blocking(move || match fw.verify() {
-                    Ok(true) => !fw.interfaces_changed(),
-                    Ok(false) => false,
-                    Err(e) => {
-                        debug!("Could not verify the firewall state: {e:#}");
-                        true
+                let verify_due = self
+                    .last_verified
+                    .lock()
+                    .unwrap()
+                    .is_none_or(|t| t.elapsed() >= self.verify_interval);
+                if verify_due {
+                    *self.last_verified.lock().unwrap() = Some(Instant::now());
+                }
+                let in_force = tokio::task::spawn_blocking(move || {
+                    // The interface check is cheap; `verify` may spawn a process.
+                    if fw.interfaces_changed() {
+                        return false;
+                    }
+                    if !verify_due {
+                        return true;
+                    }
+                    match fw.verify() {
+                        Ok(in_force) => in_force,
+                        Err(e) => {
+                            debug!("Could not verify the firewall state: {e:#}");
+                            true
+                        }
                     }
                 })
                 .await?;
@@ -376,6 +408,7 @@ impl Engine {
                 // The table was replaced, so the platform's counters restarted at zero.
                 self.metrics.counters_reset();
                 *self.last_applied.lock().unwrap() = Some(desired);
+                *self.last_verified.lock().unwrap() = Some(Instant::now());
                 self.apply_failed.store(false, Ordering::Relaxed);
                 Ok(())
             }
@@ -384,6 +417,8 @@ impl Engine {
                 // `last_applied` (the diff base for revocations); `apply_failed` forces
                 // the retry.
                 self.apply_failed.store(true, Ordering::Relaxed);
+                // Verify as soon as an apply works again, whatever the interval.
+                *self.last_verified.lock().unwrap() = None;
                 error!("Failed to apply firewall ruleset: {e}");
                 Err(e)
             }

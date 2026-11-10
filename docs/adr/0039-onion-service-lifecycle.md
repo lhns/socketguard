@@ -18,7 +18,7 @@ ADR 0037 puts Tor enforcement on the control port: an address with no grant is c
 - **Detached services.** Services use `Flags=Detach`, so they survive control-connection drops and a daemon exit (frozen state, ADR 0026). The daemon connects per operation. It re-adds a desired service whose spec changed or that `GETINFO onions/detached` does not list (Tor restarted), checking at most every 10 s, and on start re-adds every desired service. `disable` removes all of ours; enforcement is suspended while the latch is set.
 - **Per-service authorization.** Tor cannot gate ports separately. The published ports are the TCP ports covered by grants (UDP is not served). A client key whose grants cover fewer ports than that is left out, so a service is never wider than a grant; giving a port its own address (`split`) grants it separately. A grant to Anyone publishes openly only if it covers all published ports.
 - **Tor down is a status.** The network shows `down` with the reason; no address is created and nothing is changed until Tor is back.
-- **Keys at rest.** The DB file (and -wal/-shm) is mode 0600 on Unix. On Windows it must live where only the service account and Administrators have access; the daemon does not change ACLs.
+- **Keys at rest.** The DB file (and -wal/-shm) is mode 0600 on Unix. On Windows see the amendment below (the daemon sets a protected ACL).
 
 ## Consequences
 
@@ -37,3 +37,7 @@ The control address is where the daemon sends onion keys, and the default `127.0
 - A `Control` value only exists after one of these succeeded, so `ADD_ONION` with a stored key cannot be sent to an unauthenticated server. The e2e Tor config uses `CookieAuthentication 1`, which offers SAFECOOKIE.
 - **Revocation fails closed.** The engine persists, in the settings table (no schema change), `tor_owned_services` (every service id we created or that has an address) and `tor_tombstones` (ids whose address was deleted and that must be removed). Every enforcement pass retries both until Tor confirms (DEL_ONION, or `onions/detached` no longer lists the id), and sweeps any detached service in the owned set that no address wants. Services we did not create are never touched. A service leaves the in-memory `applied` set only after a confirmed removal.
 - **Failures are visible.** Mutations still commit, but answer HTTP 202 with `enforcement: {status: "pending", message}` while a network cannot enforce them (docs/api.md).
+
+## Amendment: Windows database ACL
+
+The daemon now protects the database on Windows itself instead of relying on where it lives. `Database::new` creates the file with a protected DACL (SDDL `D:P(A;;FA;;;SY)(A;;FA;;;BA)`: SYSTEM and Administrators full control, nobody else, inheritance blocked) before SQLite opens it, so it is never readable by others. The same DACL is applied to the -wal/-shm files when they exist and to a `.pre-v1` backup. If it cannot be set on an existing file (not owned by us), the daemon logs a warning and runs on. A process that is neither SYSTEM nor an elevated administrator (a hand-started daemon, the tests) also gets an ACE for its own account, or it would lock itself out.

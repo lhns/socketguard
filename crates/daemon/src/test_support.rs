@@ -9,7 +9,7 @@ use socketguard_core::config::DaemonConfig;
 use socketguard_core::{AllocatedAddress, BackendType, ListeningSocket};
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 // ─── MockFirewall ────────────────────────────────────────────────────────────
@@ -27,6 +27,7 @@ pub struct MockFirewall {
     fail_apply: AtomicBool,
     /// The next `verify` reports the installed state as gone.
     drifted: AtomicBool,
+    verifies: AtomicUsize,
     revoked: Mutex<Vec<Revocation>>,
     drop_sink: Mutex<Option<DropSink>>,
     counters: Mutex<Vec<Counter>>,
@@ -38,6 +39,7 @@ impl MockFirewall {
             calls,
             fail_apply: AtomicBool::new(false),
             drifted: AtomicBool::new(false),
+            verifies: AtomicUsize::new(0),
             revoked: Mutex::new(Vec::new()),
             drop_sink: Mutex::new(None),
             counters: Mutex::new(Vec::new()),
@@ -64,6 +66,11 @@ impl MockFirewall {
     /// Make the next `verify` report that the installed rules disappeared.
     pub fn simulate_drift(&self) {
         self.drifted.store(true, Ordering::Relaxed);
+    }
+
+    /// How many times the engine called `verify`.
+    pub fn verify_count(&self) -> usize {
+        self.verifies.load(Ordering::Relaxed)
     }
 
     /// Every connection revocation the engine asked for, oldest first.
@@ -103,6 +110,7 @@ impl Firewall for MockFirewall {
     }
 
     fn verify(&self) -> Result<bool> {
+        self.verifies.fetch_add(1, Ordering::Relaxed);
         Ok(!self.drifted.swap(false, Ordering::Relaxed))
     }
 
