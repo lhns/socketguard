@@ -70,7 +70,7 @@ impl DaemonEvent {
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
 /// Every route of the API. The router is built from this table, so it is also the list
-/// the coverage tests compare against the client crate (and, in Phase 7, the CLI).
+/// the coverage tests compare against the client crate and the CLI.
 pub const ROUTES: &[(Method, &str)] = &[
     (Method::GET, "/api/status"),
     (Method::GET, "/api/events"),
@@ -358,7 +358,7 @@ async fn status(State(state): State<Shared>) -> ApiResult<Json<StatusResponse>> 
         version: env!("CARGO_PKG_VERSION").to_string(),
         networks: engine.networks(),
         protect_host_interfaces: engine.settings(&state).await?.protect_host_interfaces,
-        disabled: state.db.disabled().await?,
+        disabled: state.db.disabled().await,
         unadopted: state.db.unadopted().await?,
         counts: Counts {
             apps: apps.len() as u32,
@@ -620,8 +620,11 @@ async fn network_create(
         id,
         backend: req.backend,
     };
-    let network = state.engine.write().await.add_network(&state, inst).await?;
-    persist_networks(&state).await;
+    // The write lock stays held until the file is written: two requests cannot save each
+    // other's stale list.
+    let mut engine = state.engine.write().await;
+    let network = engine.add_network(&state, inst).await?;
+    persist_networks(&state, &engine).await;
     Ok((StatusCode::CREATED, Json(network)).into_response())
 }
 
@@ -636,13 +639,9 @@ async fn network_delete(
     Path(id): Path<String>,
     ApiQuery(q): ApiQuery<NetworkDeleteParams>,
 ) -> ApiResult<StatusCode> {
-    state
-        .engine
-        .write()
-        .await
-        .remove_network(&state, &id, q.force)
-        .await?;
-    persist_networks(&state).await;
+    let mut engine = state.engine.write().await;
+    engine.remove_network(&state, &id, q.force).await?;
+    persist_networks(&state, &engine).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -668,17 +667,21 @@ async fn check_tor_settings(state: &AppState, backend: &BackendConfig) -> Result
         return Ok(());
     }
     Err(ApiErr::invalid(
-        "a Tor network made through the API uses the default control port and authentication;          other settings (control address, auth, cookie_path, ...) go in the config file, which          only an administrator can edit",
+        "a Tor network made through the API uses the default control port and authentication; \
+         other settings (control address, auth, cookie_path, ...) go in the config file, which \
+         only an administrator can edit",
     ))
 }
 
 /// Save the network list to the config file so it survives a restart. The change is
-/// already live, so a failure is logged rather than failing the request.
-async fn persist_networks(state: &AppState) {
+/// already live, so a failure is logged rather than failing the request. The caller holds
+/// the engine's write lock, so the list is current and writes do not interleave.
+async fn persist_networks(state: &AppState, engine: &Engine) {
     let Some(path) = &state.config_path else {
         return;
     };
-    let config = state.config.read().await.clone();
+    let mut config = state.config.read().await.clone();
+    config.backends = engine.backend_configs();
     let path = path.clone();
     let result =
         tokio::task::spawn_blocking(move || crate::config_file::persist_backends(&path, &config))
@@ -722,26 +725,21 @@ async fn protect_host_put(
             overridden: risks.iter().map(risk_info).collect(),
         })
         .into_response()),
-        Err(ProtectHostError::Lockout(risks)) => {
-            let infos: Vec<LockoutRiskInfo> = risks.iter().map(risk_info).collect();
-            Err(ApiErr {
-                status: StatusCode::CONFLICT,
-                body: ApiError {
-                    code: error_code::PROTECT_HOST_REFUSED.to_string(),
-                    message: format!(
-                        "whole-host protection would lock out remote administration: {}",
-                        risks
-                            .iter()
-                            .map(|r| r.to_string())
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    ),
-                    details: serde_json::to_value(infos).ok(),
-                },
-            })
-        }
-        Err(ProtectHostError::Invalid(msg)) => Err(ApiErr::invalid(msg)),
-        Err(ProtectHostError::Other(e)) => Err(e.into()),
+        Err(e) => Err(match e {
+            ProtectHostError::Lockout(ref risks) => {
+                let infos: Vec<LockoutRiskInfo> = risks.iter().map(risk_info).collect();
+                ApiErr {
+                    status: StatusCode::CONFLICT,
+                    body: ApiError {
+                        code: error_code::PROTECT_HOST_REFUSED.to_string(),
+                        message: e.to_string(),
+                        details: serde_json::to_value(infos).ok(),
+                    },
+                }
+            }
+            ProtectHostError::Invalid(msg) => ApiErr::invalid(msg),
+            ProtectHostError::Other(e) => e.into(),
+        }),
     }
 }
 

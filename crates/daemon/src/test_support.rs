@@ -428,56 +428,54 @@ impl YggdrasilNode for MockYggdrasilNode {
     }
 }
 
-// ─── FailingNetworkInterface ─────────────────────────────────────────────────
+// ─── ManualClock ─────────────────────────────────────────────────────────────
 
-/// A network interface mock that fails `add_address` for a specific interface name.
-/// Used to test error resilience when one backend's network op fails.
-pub struct FailingNetworkInterface {
-    pub calls: Arc<Mutex<Vec<NetworkCall>>>,
-    /// Interface name that should trigger failures on `add_address`.
-    pub fail_iface: String,
-}
+/// A clock that only moves when told to, for the engine's verify cadence.
+pub struct ManualClock(Mutex<std::time::Instant>);
 
-impl FailingNetworkInterface {
-    pub fn new(calls: Arc<Mutex<Vec<NetworkCall>>>, fail_iface: &str) -> Self {
-        Self {
-            calls,
-            fail_iface: fail_iface.to_string(),
-        }
+impl ManualClock {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self(Mutex::new(std::time::Instant::now())))
+    }
+
+    pub fn advance(&self, by: std::time::Duration) {
+        *self.0.lock().unwrap() += by;
     }
 }
 
-impl NetworkInterface for FailingNetworkInterface {
-    fn add_address(&self, iface: &str, addr: Ipv6Addr, prefix: u8) -> Result<()> {
-        self.calls.lock().unwrap().push(NetworkCall::AddAddress {
-            iface: iface.to_string(),
-            addr,
-            prefix,
-        });
-        if iface == self.fail_iface {
-            anyhow::bail!("simulated add_address failure on {}", iface);
-        }
-        Ok(())
-    }
-
-    fn remove_address(&self, iface: &str, addr: Ipv6Addr) -> Result<()> {
-        self.calls.lock().unwrap().push(NetworkCall::RemoveAddress {
-            iface: iface.to_string(),
-            addr,
-        });
-        Ok(())
-    }
-
-    fn list_interfaces(&self) -> Result<Vec<String>> {
-        Ok(vec!["lo".to_string()])
-    }
-
-    fn list_addresses(&self, _iface: &str) -> Result<Vec<Ipv6Addr>> {
-        Ok(Vec::new())
+impl crate::engine::Clock for ManualClock {
+    fn now(&self) -> std::time::Instant {
+        *self.0.lock().unwrap()
     }
 }
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
+
+/// An IP network over an already built allocator (a mock stands in for the real one).
+pub fn ip_backend(
+    config: socketguard_core::config::BackendInstanceConfig,
+    backend: Box<dyn Ipv6Backend>,
+) -> crate::engine::ActiveBackend {
+    let network = Arc::new(crate::networks::IpNetwork::for_config(
+        &config.backend,
+        backend,
+    ));
+    crate::engine::ActiveBackend { config, network }
+}
+
+/// Add an IP network with a mock allocator to a running engine.
+pub async fn add_ip_network(
+    engine: &mut crate::engine::Engine,
+    state: &AppState,
+    inst: &socketguard_core::config::BackendInstanceConfig,
+    backend: Box<dyn Ipv6Backend>,
+) {
+    let network = Arc::new(crate::networks::IpNetwork::for_config(
+        &inst.backend,
+        backend,
+    ));
+    engine.add_network_instance(state, inst, network).await;
+}
 
 pub async fn test_app_state(engine: crate::engine::Engine, config: DaemonConfig) -> Arc<AppState> {
     test_app_state_at(engine, config, None).await
@@ -504,11 +502,131 @@ pub async fn test_app_state_at(
     })
 }
 
-/// An in-memory daemon with three mock networks and a controllable set of sockets.
+/// A mock network: its config and the mock allocator behind it.
+pub struct Net {
+    pub id: &'static str,
+    pub config: socketguard_core::config::BackendConfig,
+    pub mock: MockIpv6Backend,
+}
+
+/// Local (ULA) network on `lo`: no prefix, grants have no effect.
+pub fn local_net() -> Net {
+    Net {
+        id: "local",
+        config: socketguard_core::config::BackendConfig::Ula {
+            interface: "lo".into(),
+        },
+        mock: MockIpv6Backend::new("fd00:1:2:3::", 128, "lo"),
+    }
+}
+
+/// LAN network on `eth0` with a /64.
+pub fn lan_net() -> Net {
+    let mock = MockIpv6Backend::new("2001:db8:1:2::", 128, "eth0");
+    mock.set_prefix("2001:db8:1:2::");
+    Net {
+        id: "lan",
+        config: socketguard_core::config::BackendConfig::Slaac {
+            interface: "eth0".into(),
+            prefix: None,
+        },
+        mock,
+    }
+}
+
+/// Yggdrasil network on `ygg0`.
+pub fn ygg_net() -> Net {
+    let mock = MockIpv6Backend::new("300:1:2:3::", 128, "ygg0");
+    mock.set_prefix("300:1:2:3::");
+    Net {
+        id: "ygg",
+        config: socketguard_core::config::BackendConfig::Yggdrasil {
+            interface: "ygg0".into(),
+            admin_endpoint: None,
+        },
+        mock,
+    }
+}
+
+/// An engine over mocks with no networks and no sockets.
+pub fn empty_engine() -> crate::engine::Engine {
+    crate::engine::Engine::new_injectable(
+        Box::new(MockSocketMonitor::new(vec![])),
+        Arc::new(MockFirewall::new(Arc::new(Mutex::new(vec![])))),
+        Arc::new(MockNetworkInterface::new(Arc::new(Mutex::new(vec![])))),
+        HashMap::new(),
+    )
+}
+
+/// An in-memory daemon over mocks, with handles to all of them.
 pub struct StandardDaemon {
     pub state: Arc<AppState>,
     pub sockets: Arc<Mutex<Vec<ListeningSocket>>>,
     pub fw: Arc<MockFirewall>,
+    /// What the engine asked the firewall to do.
+    pub fw_calls: Arc<Mutex<Vec<FirewallCall>>>,
+    pub net: MockNetworkInterface,
+    /// What the engine asked the interfaces to do.
+    pub net_calls: Arc<Mutex<Vec<NetworkCall>>>,
+    /// The allocator behind each network.
+    pub nets: HashMap<&'static str, MockIpv6Backend>,
+}
+
+/// A daemon with the given mock networks and a monitor that reports `initial` listening
+/// sockets. `config` supplies the settings (its `backends` are replaced by `nets`). Nothing
+/// is reconciled yet.
+pub async fn daemon_with(
+    nets: Vec<Net>,
+    initial: Vec<ListeningSocket>,
+    config: DaemonConfig,
+    config_path: Option<std::path::PathBuf>,
+) -> StandardDaemon {
+    use crate::engine::Engine;
+    use socketguard_core::config::BackendInstanceConfig;
+
+    let fw_calls = Arc::new(Mutex::new(Vec::new()));
+    let net_calls = Arc::new(Mutex::new(Vec::new()));
+    let fw = Arc::new(MockFirewall::new(fw_calls.clone()));
+    let net = MockNetworkInterface::new(net_calls.clone());
+    let monitor = MockSocketMonitor::new(initial);
+    let sockets = monitor.sockets.clone();
+
+    let mut backends = HashMap::new();
+    let mut configs = Vec::new();
+    let mut mocks = HashMap::new();
+    for n in nets {
+        let cfg = BackendInstanceConfig {
+            id: n.id.to_string(),
+            backend: n.config,
+        };
+        mocks.insert(n.id, n.mock.clone());
+        backends.insert(n.id.to_string(), ip_backend(cfg.clone(), Box::new(n.mock)));
+        configs.push(cfg);
+    }
+    let engine = Engine::new_injectable(
+        Box::new(monitor),
+        fw.clone(),
+        Arc::new(net.clone()),
+        backends,
+    );
+    let state = test_app_state_at(
+        engine,
+        DaemonConfig {
+            backends: configs,
+            ..config
+        },
+        config_path,
+    )
+    .await;
+    StandardDaemon {
+        state,
+        sockets,
+        fw,
+        fw_calls,
+        net,
+        net_calls,
+        nets: mocks,
+    }
 }
 
 /// Networks `local` (lo, ULA), `lan` (eth0, SLAAC) and `ygg` (ygg0, Yggdrasil), all mocks,
@@ -517,68 +635,13 @@ pub async fn standard_daemon(
     initial: Vec<ListeningSocket>,
     config_path: Option<std::path::PathBuf>,
 ) -> StandardDaemon {
-    use crate::engine::{ActiveBackend, Engine};
-    use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
-
-    let fw = Arc::new(MockFirewall::new(Arc::new(Mutex::new(Vec::new()))));
-    let net = MockNetworkInterface::new(Arc::new(Mutex::new(Vec::new())));
-    let monitor = MockSocketMonitor::new(initial);
-    let sockets = monitor.sockets.clone();
-
-    let lan = MockIpv6Backend::new("2001:db8:1:2::", 128, "eth0");
-    lan.set_prefix("2001:db8:1:2::");
-    let ygg = MockIpv6Backend::new("300:1:2:3::", 128, "ygg0");
-    ygg.set_prefix("300:1:2:3::");
-    let mut backends = HashMap::new();
-    let mut configs = Vec::new();
-    for (id, config, mock) in [
-        (
-            "local",
-            BackendConfig::Ula {
-                interface: "lo".into(),
-            },
-            MockIpv6Backend::new("fd00:1:2:3::", 128, "lo"),
-        ),
-        (
-            "lan",
-            BackendConfig::Slaac {
-                interface: "eth0".into(),
-                prefix: None,
-            },
-            lan,
-        ),
-        (
-            "ygg",
-            BackendConfig::Yggdrasil {
-                interface: "ygg0".into(),
-                admin_endpoint: None,
-            },
-            ygg,
-        ),
-    ] {
-        let cfg = BackendInstanceConfig {
-            id: id.to_string(),
-            backend: config,
-        };
-        backends.insert(
-            id.to_string(),
-            ActiveBackend::ip(cfg.clone(), Box::new(mock)),
-        );
-        configs.push(cfg);
-    }
-    let ids = configs.iter().map(|c| c.id.clone()).collect();
-    let engine =
-        Engine::new_injectable(Box::new(monitor), fw.clone(), Arc::new(net), backends, ids);
-    let state = test_app_state_at(
-        engine,
-        DaemonConfig {
-            backends: configs,
-            ..DaemonConfig::default()
-        },
+    daemon_with(
+        vec![local_net(), lan_net(), ygg_net()],
+        initial,
+        DaemonConfig::default(),
         config_path,
     )
-    .await;
-    StandardDaemon { state, sockets, fw }
+    .await
 }
 
 // ─── MockTorControl ──────────────────────────────────────────────────────────

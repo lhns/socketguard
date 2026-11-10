@@ -1,6 +1,6 @@
-//! SQLite persistence, schema v3 (ADR 0027, 0037): apps, ports, addresses, peers, credentials,
+//! SQLite persistence, schema v4 (ADR 0027, 0037, 0040): apps, ports, addresses, peers, credentials,
 //! groups, grants, settings, activity and onion service keys. Versioned with
-//! `PRAGMA user_version`; a database from before the redesign is renamed out of the way,
+//! `PRAGMA user_version`; a database from before schema v1 is renamed out of the way,
 //! never migrated.
 //!
 //! The database holds private keys (`onion_keys`), so it is protected at rest: on Unix the
@@ -8,147 +8,40 @@
 //! DACL (SYSTEM and Administrators only) before SQLite opens it, and the DACL is applied to
 //! the -wal/-shm files and any `.pre-v1` backup too.
 
+mod protect;
+mod schema;
+mod settings;
+#[cfg(windows)]
+mod winacl;
+
+pub use protect::ALLOW_UNPROTECTED_DB_ENV;
+pub use schema::SCHEMA_VERSION;
+pub use settings::parse_protect_host;
+
+use protect::{precreate_protected, protect_files};
+use schema::{archive_pre_v1, is_pre_v1};
+
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use socketguard_core::{
-    ActivityKind, ActivityQuery, ActivityRecord, Address, AddressMode, App, AppPort, Credential,
-    CredentialKind, Grant, Locator, Peer, PeerGroup, PortRef, PortSet, Protocol, Settings, Subject,
+    ActivityKind, ActivityQuery, ActivityRecord, Address, App, AppPort, Credential, CredentialKind,
+    Grant, Locator, Peer, PeerGroup, PortRef, PortSet, Protocol, Subject,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
-use sqlx::{Connection, Row, SqliteConnection};
+use sqlx::Row;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use tracing::{info, warn};
-
-pub const SCHEMA_VERSION: i64 = 3;
-
-/// Schema v1 -> v2: the service keys of onion addresses (ADR 0037).
-const MIGRATION_1_TO_2: &str = r#"
-CREATE TABLE onion_keys (
-    address_id TEXT PRIMARY KEY REFERENCES addresses(id) ON DELETE CASCADE,
-    private_key TEXT NOT NULL
-);
-"#;
-
-/// Schema v2 -> v3: why an app's identity is special (ADR 0027 amendment), and the
-/// addresses the daemon has put on interfaces, written ahead of the change so an address
-/// can never be on an interface without the ruleset knowing about it.
-///
-/// Existing app ids are not recomputed (the uid they now include was never stored): they
-/// stay as inert records and their programs reappear as new, pending apps.
-const MIGRATION_2_TO_3: &str = r#"
-ALTER TABLE apps ADD COLUMN identity_note TEXT;
-CREATE TABLE owned_addresses (
-    addr TEXT PRIMARY KEY,
-    interface TEXT NOT NULL,
-    network_id TEXT,
-    state TEXT NOT NULL,
-    since TEXT
-);
-"#;
-
-/// Settings keys.
-pub const PROTECT_HOST_KEY: &str = "protect_host_interfaces";
-pub const ADDRESS_MODE_KEY: &str = "address_mode";
-/// Set by `disable` (API or `--disable`), cleared by `enable`: while set, the daemon puts
-/// no rules and no addresses back.
-pub const DISABLED_KEY: &str = "disabled";
-/// Set when the database was created by this start (no prior schema), consumed by the
-/// first successful apply or the startup check.
-pub const FRESH_DB_KEY: &str = "fresh_db";
-/// Set when a fresh database met an existing SocketGuard ruleset: nothing is applied or
-/// added until `enable` adopts the new state (or `disable` removes the old one).
-pub const UNADOPTED_KEY: &str = "unadopted";
-const ULA_GLOBAL_ID_KEY: &str = "ula_global_id";
+use std::sync::Mutex;
+use std::time::Instant;
+use tracing::warn;
 
 /// Activity retention: whichever limit trims more.
-pub const ACTIVITY_MAX_AGE_DAYS: i64 = 30;
-pub const ACTIVITY_MAX_ROWS: i64 = 10_000;
-
-const SCHEMA: &str = r#"
-CREATE TABLE apps (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    process_name TEXT NOT NULL,
-    exe_path TEXT,
-    interpreter_arg TEXT,
-    reviewed INTEGER NOT NULL DEFAULT 0,
-    first_seen TEXT NOT NULL,
-    last_seen TEXT NOT NULL
-);
-CREATE TABLE app_ports (
-    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-    port INTEGER NOT NULL,
-    proto TEXT NOT NULL,
-    listening INTEGER NOT NULL,
-    last_seen TEXT NOT NULL,
-    PRIMARY KEY (app_id, port, proto)
-);
-CREATE TABLE addresses (
-    id TEXT PRIMARY KEY,
-    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-    network_id TEXT NOT NULL,
-    ports TEXT NOT NULL,
-    locator_kind TEXT NOT NULL,
-    locator TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE INDEX addresses_app ON addresses(app_id);
-CREATE TABLE peers (
-    id TEXT PRIMARY KEY,
-    label TEXT UNIQUE NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE peer_credentials (
-    id TEXT PRIMARY KEY,
-    peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL,
-    value TEXT NOT NULL,
-    label TEXT,
-    UNIQUE (kind, value)
-);
-CREATE TABLE peer_groups (
-    id TEXT PRIMARY KEY,
-    label TEXT UNIQUE NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE peer_group_members (
-    group_id TEXT NOT NULL REFERENCES peer_groups(id) ON DELETE CASCADE,
-    peer_id TEXT NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
-    PRIMARY KEY (group_id, peer_id)
-);
-CREATE TABLE grants (
-    id TEXT PRIMARY KEY,
-    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-    port INTEGER,
-    proto TEXT,
-    network_id TEXT,
-    subject_kind TEXT NOT NULL,
-    subject_id TEXT,
-    created_at TEXT NOT NULL
-);
-CREATE INDEX grants_app ON grants(app_id);
-CREATE TABLE settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-CREATE TABLE activity (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    at TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    app_id TEXT,
-    peer_id TEXT,
-    network_id TEXT,
-    src TEXT,
-    port INTEGER,
-    proto TEXT,
-    count INTEGER NOT NULL DEFAULT 1,
-    message TEXT NOT NULL
-);
-CREATE INDEX activity_at ON activity(at);
-"#;
+const ACTIVITY_MAX_AGE_DAYS: i64 = 30;
+const ACTIVITY_MAX_ROWS: i64 = 10_000;
+/// Pruning scans the table, so inserts do it at most this often.
+const ACTIVITY_PRUNE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// An address the daemon has put on (or is taking off) an interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,247 +57,8 @@ pub struct Database {
     pool: SqlitePool,
     /// The file, for protecting it after the schema (and -wal/-shm) exist.
     path: Option<String>,
-}
-
-/// Restrict the database file and its WAL companions to the owner (Unix). Failures are
-/// logged: a daemon that cannot chmod its own database should still run.
-#[cfg(unix)]
-fn protect_files(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    for suffix in ["", "-wal", "-shm"] {
-        let file = with_suffix(path, suffix);
-        if !file.exists() {
-            continue;
-        }
-        if let Err(e) = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)) {
-            warn!("Could not restrict {} to its owner: {e}", file.display());
-        }
-    }
-    Ok(())
-}
-
-/// Set to `1` to run on Windows with a database file whose ACL could not be restricted.
-/// For tests and development only: the database holds the onion service keys.
-pub const ALLOW_UNPROTECTED_DB_ENV: &str = "SOCKETGUARD_ALLOW_UNPROTECTED_DB";
-
-/// Restrict the database file and its WAL companions to SYSTEM and Administrators
-/// (Windows). The database holds onion keys, so a failure fails startup, unless
-/// [`ALLOW_UNPROTECTED_DB_ENV`] is `1` (then it is logged).
-#[cfg(windows)]
-fn protect_files(path: &Path) -> Result<()> {
-    for suffix in ["", "-wal", "-shm"] {
-        let file = with_suffix(path, suffix);
-        if file.exists() {
-            enforce_protected(winacl::protect(&file), &file)?;
-        }
-    }
-    Ok(())
-}
-
-/// Fail on `result` unless the override is set.
-#[cfg(windows)]
-fn enforce_protected(result: Result<()>, file: &Path) -> Result<()> {
-    let allow = std::env::var(ALLOW_UNPROTECTED_DB_ENV).as_deref() == Ok("1");
-    enforce_protected_with(result, file, allow)
-}
-
-#[cfg(windows)]
-fn enforce_protected_with(result: Result<()>, file: &Path, allow: bool) -> Result<()> {
-    let Err(e) = result else { return Ok(()) };
-    if allow {
-        warn!(
-            "Could not restrict {} to SYSTEM and Administrators: {e:#} ({ALLOW_UNPROTECTED_DB_ENV}=1, continuing)",
-            file.display()
-        );
-        return Ok(());
-    }
-    Err(e).with_context(|| {
-        format!(
-            "cannot restrict {} to SYSTEM and Administrators; it holds onion service keys \
-             (set {ALLOW_UNPROTECTED_DB_ENV}=1 to run anyway, for tests only)",
-            file.display()
-        )
-    })
-}
-
-#[cfg(not(any(unix, windows)))]
-fn protect_files(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-/// Create the database file empty, with the protected DACL from the start (an existing
-/// file gets it applied), so it is never readable by others (SQLite then opens the
-/// existing file). Elsewhere a no-op: the file is chmod'ed right after SQLite creates it,
-/// before any secret is written.
-#[cfg(windows)]
-fn precreate_protected(path: &Path) -> Result<()> {
-    enforce_protected(winacl::create_protected(path), path)
-}
-
-#[cfg(not(windows))]
-fn precreate_protected(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(windows)]
-mod winacl {
-    use std::os::windows::ffi::OsStrExt;
-    use std::path::Path;
-    use windows::core::{w, HSTRING, PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
-    use windows::Win32::Security::Authorization::{
-        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-        ConvertStringSidToSidW, SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
-    };
-    use windows::Win32::Security::{
-        CheckTokenMembership, GetSecurityDescriptorDacl, GetTokenInformation, TokenUser, ACL,
-        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-        SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
-    };
-    use windows::Win32::Storage::FileSystem::{
-        CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE,
-    };
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-
-    /// SYSTEM and Administrators full control, nobody else, inheritance blocked.
-    pub const DB_SDDL: &str = "D:P(A;;FA;;;SY)(A;;FA;;;BA)";
-
-    /// The account running the process, when neither SYSTEM nor an elevated administrator
-    /// already covers it (a daemon started by hand from a normal user, as the tests are).
-    /// Without its own ACE such a process would lock itself out of the file.
-    pub fn extra_principal() -> Option<String> {
-        // SAFETY: plain token queries on the current process; buffers are sized by the
-        // first call and the string SID is freed after use.
-        unsafe {
-            let mut token = HANDLE::default();
-            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
-            let mut admin = windows::core::BOOL::default();
-            let mut ba = PSID::default();
-            let mut sid_str = None;
-            let mut len = 0u32;
-            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
-            let mut buf = vec![0u8; len as usize];
-            if len > 0
-                && GetTokenInformation(
-                    token,
-                    TokenUser,
-                    Some(buf.as_mut_ptr().cast()),
-                    len,
-                    &mut len,
-                )
-                .is_ok()
-                && ConvertStringSidToSidW(w!("BA"), &mut ba).is_ok()
-            {
-                let user = (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid;
-                let mut out = PWSTR::null();
-                if ConvertSidToStringSidW(user, &mut out).is_ok() {
-                    let s = out.to_string().ok();
-                    let _ = LocalFree(Some(HLOCAL(out.0.cast())));
-                    let _ = CheckTokenMembership(None, ba, &mut admin);
-                    if !admin.as_bool() && s.as_deref() != Some("S-1-5-18") {
-                        sid_str = s;
-                    }
-                }
-            }
-            if !ba.is_invalid() {
-                let _ = LocalFree(Some(HLOCAL(ba.0)));
-            }
-            let _ = CloseHandle(token);
-            sid_str
-        }
-    }
-
-    pub fn sddl() -> String {
-        match extra_principal() {
-            Some(sid) => format!("{DB_SDDL}(A;;FA;;;{sid})"),
-            None => DB_SDDL.to_string(),
-        }
-    }
-
-    struct Descriptor(PSECURITY_DESCRIPTOR);
-
-    impl Descriptor {
-        fn new() -> anyhow::Result<Self> {
-            let mut sd = PSECURITY_DESCRIPTOR::default();
-            // SAFETY: `sd` receives a LocalAlloc'd descriptor that Drop frees.
-            unsafe {
-                ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                    &HSTRING::from(sddl()),
-                    SDDL_REVISION_1,
-                    &mut sd,
-                    None,
-                )?;
-            }
-            Ok(Self(sd))
-        }
-    }
-
-    impl Drop for Descriptor {
-        fn drop(&mut self) {
-            // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
-            unsafe {
-                let _ = LocalFree(Some(HLOCAL(self.0 .0)));
-            }
-        }
-    }
-
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain(Some(0)).collect()
-    }
-
-    /// Create an empty file with the descriptor; an existing file gets the descriptor
-    /// applied, so a file left by an earlier run or planted by someone else is covered too.
-    pub fn create_protected(path: &Path) -> anyhow::Result<()> {
-        if path.exists() {
-            return protect(path);
-        }
-        let sd = Descriptor::new()?;
-        let attrs = SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: sd.0 .0,
-            bInheritHandle: false.into(),
-        };
-        let name = wide(path);
-        // SAFETY: `name` is NUL-terminated; `attrs` and its descriptor outlive the call.
-        unsafe {
-            let h = CreateFileW(
-                PCWSTR(name.as_ptr()),
-                FILE_GENERIC_WRITE.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                Some(&attrs),
-                CREATE_NEW,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            )?;
-            let _ = CloseHandle(h);
-        }
-        Ok(())
-    }
-
-    /// Replace the DACL of an existing file with the protected one.
-    pub fn protect(path: &Path) -> anyhow::Result<()> {
-        let sd = Descriptor::new()?;
-        let mut present = windows::core::BOOL::default();
-        let mut defaulted = windows::core::BOOL::default();
-        let mut dacl: *mut ACL = std::ptr::null_mut();
-        let name = wide(path);
-        // SAFETY: the descriptor is valid; `dacl` points into it for the whole call.
-        unsafe {
-            GetSecurityDescriptorDacl(sd.0, &mut present, &mut dacl, &mut defaulted)?;
-            SetNamedSecurityInfoW(
-                PCWSTR(name.as_ptr()),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                None,
-                None,
-                Some(dacl),
-                None,
-            )
-            .ok()?;
-        }
-        Ok(())
-    }
+    /// When the activity table was last pruned (see [`ACTIVITY_PRUNE_EVERY`]).
+    last_prune: Mutex<Option<Instant>>,
 }
 
 fn ts(dt: DateTime<Utc>) -> String {
@@ -430,52 +84,10 @@ pub fn is_unique_violation(err: &anyhow::Error) -> bool {
     })
 }
 
-/// A database from before schema v1: `user_version` 0 with a `sockets` table.
-async fn is_pre_v1(path: &Path) -> bool {
-    let opts = SqliteConnectOptions::new().filename(path);
-    let Ok(mut conn) = SqliteConnection::connect_with(&opts).await else {
-        return false; // not a database we can open; the normal open reports it
-    };
-    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-        .fetch_one(&mut conn)
-        .await
-        .unwrap_or(-1);
-    let sockets: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sockets'",
-    )
-    .fetch_one(&mut conn)
-    .await
-    .unwrap_or(0);
-    // Close before any rename: Windows refuses to move a file with an open handle.
-    let _ = conn.close().await;
-    version == 0 && sockets > 0
-}
-
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(suffix);
     PathBuf::from(s)
-}
-
-/// Move a pre-v1 database (and its WAL files) to `<db>.pre-v1`, or the first free
-/// `<db>.pre-v1.N`. Returns the new path of the database file.
-fn archive_pre_v1(path: &Path) -> Result<PathBuf> {
-    let mut target = with_suffix(path, ".pre-v1");
-    let mut n = 1;
-    while target.exists() {
-        target = with_suffix(path, &format!(".pre-v1.{n}"));
-        n += 1;
-    }
-    std::fs::rename(path, &target)
-        .with_context(|| format!("cannot move old database {}", path.display()))?;
-    for side in ["-wal", "-shm"] {
-        let from = with_suffix(path, side);
-        if from.exists() {
-            std::fs::rename(&from, with_suffix(&target, side))
-                .with_context(|| format!("cannot move {}", from.display()))?;
-        }
-    }
-    Ok(target)
 }
 
 impl Database {
@@ -508,149 +120,7 @@ impl Database {
         Ok(Self {
             pool,
             path: (path != ":memory:").then(|| path.to_string()),
-        })
-    }
-
-    /// Create the schema on a fresh database; refuse one from a newer daemon.
-    pub async fn migrate(&self) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-            .fetch_one(&mut *tx)
-            .await?;
-        if version > SCHEMA_VERSION {
-            bail!(
-                "database schema v{version} is newer than this daemon supports (v{SCHEMA_VERSION})"
-            );
-        }
-        let mut current = version;
-        if current == 0 {
-            sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
-            sqlx::query("INSERT INTO settings (key, value) VALUES (?, 'true')")
-                .bind(FRESH_DB_KEY)
-                .execute(&mut *tx)
-                .await?;
-            current = 1;
-        }
-        if current == 1 {
-            sqlx::raw_sql(MIGRATION_1_TO_2).execute(&mut *tx).await?;
-            current = 2;
-        }
-        if current == 2 {
-            sqlx::raw_sql(MIGRATION_2_TO_3).execute(&mut *tx).await?;
-            current = 3;
-        }
-        if current != version {
-            sqlx::query(&format!("PRAGMA user_version = {current}"))
-                .execute(&mut *tx)
-                .await?;
-            if version == 0 {
-                info!("Created database schema v{current}");
-            } else {
-                info!("Migrated database schema v{version} to v{current}");
-            }
-        }
-        tx.commit().await?;
-        if let Some(path) = self.path.as_deref() {
-            protect_files(Path::new(path))?;
-        }
-        Ok(())
-    }
-
-    // ======== Settings ========
-
-    pub async fn get_setting(&self, key: &str) -> Result<Option<String>> {
-        Ok(
-            sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
-                .bind(key)
-                .fetch_optional(&self.pool)
-                .await?,
-        )
-    }
-
-    pub async fn set_setting(&self, key: &str, value: &str) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO settings (key, value) VALUES (?, ?) \
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        )
-        .bind(key)
-        .bind(value)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// The installation's ULA global ID (40 bits), generated and stored on first use so
-    /// ULA addresses stay in the same /48 across restarts.
-    pub async fn ula_global_id(&self) -> Result<[u8; 5]> {
-        if let Some(stored) = self.get_setting(ULA_GLOBAL_ID_KEY).await? {
-            if let Some(id) = parse_global_id(&stored) {
-                return Ok(id);
-            }
-            warn!("Invalid stored ULA global ID {stored:?}, generating a new one");
-        }
-        let id = crate::backend::ula::UlaBackend::random_global_id();
-        let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
-        self.set_setting(ULA_GLOBAL_ID_KEY, &hex).await?;
-        Ok(id)
-    }
-
-    /// Interfaces under whole-host protection; absent or invalid means off.
-    pub async fn protect_host(&self) -> Result<Vec<String>> {
-        Ok(parse_protect_host(
-            self.get_setting(PROTECT_HOST_KEY).await?.as_deref(),
-        ))
-    }
-
-    pub async fn set_protect_host(&self, interfaces: &[String]) -> Result<()> {
-        self.set_setting(PROTECT_HOST_KEY, &serde_json::to_string(interfaces)?)
-            .await
-    }
-
-    /// Whether enforcement is switched off (see [`DISABLED_KEY`]).
-    pub async fn disabled(&self) -> Result<bool> {
-        Ok(self.get_setting(DISABLED_KEY).await?.as_deref() == Some("true"))
-    }
-
-    pub async fn set_disabled(&self, disabled: bool) -> Result<()> {
-        self.set_setting(DISABLED_KEY, if disabled { "true" } else { "false" })
-            .await
-    }
-
-    /// Whether this database was created by the current start and nothing has adopted it.
-    pub async fn fresh(&self) -> Result<bool> {
-        Ok(self.get_setting(FRESH_DB_KEY).await?.as_deref() == Some("true"))
-    }
-
-    pub async fn clear_fresh(&self) -> Result<()> {
-        self.set_setting(FRESH_DB_KEY, "false").await
-    }
-
-    /// Whether an existing ruleset was found with an empty database (see [`UNADOPTED_KEY`]).
-    pub async fn unadopted(&self) -> Result<bool> {
-        Ok(self.get_setting(UNADOPTED_KEY).await?.as_deref() == Some("true"))
-    }
-
-    pub async fn set_unadopted(&self, unadopted: bool) -> Result<()> {
-        self.set_setting(UNADOPTED_KEY, if unadopted { "true" } else { "false" })
-            .await
-    }
-
-    pub async fn address_mode(&self) -> Result<AddressMode> {
-        Ok(self
-            .get_setting(ADDRESS_MODE_KEY)
-            .await?
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_default())
-    }
-
-    pub async fn set_address_mode(&self, mode: AddressMode) -> Result<()> {
-        self.set_setting(ADDRESS_MODE_KEY, mode.as_str()).await
-    }
-
-    pub async fn settings(&self) -> Result<Settings> {
-        Ok(Settings {
-            address_mode: self.address_mode().await?,
-            protect_host_interfaces: self.protect_host().await?,
+            last_prune: Mutex::new(None),
         })
     }
 
@@ -842,24 +312,7 @@ impl Database {
     // ======== Addresses ========
 
     pub async fn insert_address(&self, a: &Address) -> Result<()> {
-        let (kind, locator) = match &a.locator {
-            Locator::Ipv6 { addr } => ("ipv6", addr.to_string()),
-            Locator::Onion { hostname } => ("onion", hostname.clone()),
-        };
-        sqlx::query(
-            "INSERT INTO addresses (id, app_id, network_id, ports, locator_kind, locator, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&a.id)
-        .bind(&a.app_id)
-        .bind(&a.network_id)
-        .bind(encode_ports(&a.ports)?)
-        .bind(kind)
-        .bind(locator)
-        .bind(ts(a.created_at))
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        self.insert_address_with_secret(a, None).await
     }
 
     /// Insert an address together with its locator secret (the onion service key) in one
@@ -869,32 +322,29 @@ impl Database {
         a: &Address,
         secret: Option<&str>,
     ) -> Result<()> {
-        let Some(secret) = secret else {
-            return self.insert_address(a).await;
-        };
         let mut tx = self.pool.begin().await?;
-        let (kind, locator) = match &a.locator {
-            Locator::Ipv6 { addr } => ("ipv6", addr.to_string()),
-            Locator::Onion { hostname } => ("onion", hostname.clone()),
-        };
-        sqlx::query(
-            "INSERT INTO addresses (id, app_id, network_id, ports, locator_kind, locator, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&a.id)
-        .bind(&a.app_id)
-        .bind(&a.network_id)
-        .bind(encode_ports(&a.ports)?)
-        .bind(kind)
-        .bind(locator)
-        .bind(ts(a.created_at))
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query("INSERT INTO onion_keys (address_id, private_key) VALUES (?, ?)")
-            .bind(&a.id)
-            .bind(secret)
-            .execute(&mut *tx)
-            .await?;
+        insert_address_in(&mut tx, a, secret).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Insert a new address and shrink the `Only` set of the address its port came from,
+    /// in one transaction: a crash between the two would leave the port on both.
+    pub async fn split_address(
+        &self,
+        new: &Address,
+        secret: Option<&str>,
+        shrink: Option<(&str, &PortSet)>,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        insert_address_in(&mut tx, new, secret).await?;
+        if let Some((id, ports)) = shrink {
+            sqlx::query("UPDATE addresses SET ports = ? WHERE id = ?")
+                .bind(encode_ports(ports)?)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -910,8 +360,9 @@ impl Database {
         )
     }
 
+    #[cfg(test)]
     pub async fn get_address(&self, id: &str) -> Result<Option<Address>> {
-        let rows = sqlx::query(ADDRESS_SELECT_ONE)
+        let rows = sqlx::query(&format!("{ADDRESS_SELECT} WHERE id = ?"))
             .bind(id)
             .fetch_all(&self.pool)
             .await?;
@@ -919,19 +370,18 @@ impl Database {
     }
 
     pub async fn list_addresses(&self) -> Result<Vec<Address>> {
-        Ok(self
-            .load_addresses(None)
+        sqlx::query(&format!("{ADDRESS_SELECT} ORDER BY created_at, id"))
+            .fetch_all(&self.pool)
             .await?
-            .into_values()
-            .flatten()
-            .collect())
+            .into_iter()
+            .map(address_from_row)
+            .collect()
     }
 
     async fn load_addresses(&self, only: Option<&str>) -> Result<HashMap<String, Vec<Address>>> {
-        let rows = sqlx::query(
-            "SELECT id, app_id, network_id, ports, locator_kind, locator, created_at \
-             FROM addresses WHERE (?1 IS NULL OR app_id = ?1) ORDER BY created_at, id",
-        )
+        let rows = sqlx::query(&format!(
+            "{ADDRESS_SELECT} WHERE (?1 IS NULL OR app_id = ?1) ORDER BY created_at, id"
+        ))
         .bind(only)
         .fetch_all(&self.pool)
         .await?;
@@ -973,13 +423,10 @@ impl Database {
     /// interface).
     pub async fn delete_addresses_by_network(&self, network_id: &str) -> Result<Vec<Address>> {
         let mut tx = self.pool.begin().await?;
-        let rows = sqlx::query(
-            "SELECT id, app_id, network_id, ports, locator_kind, locator, created_at \
-             FROM addresses WHERE network_id = ?",
-        )
-        .bind(network_id)
-        .fetch_all(&mut *tx)
-        .await?;
+        let rows = sqlx::query(&format!("{ADDRESS_SELECT} WHERE network_id = ?"))
+            .bind(network_id)
+            .fetch_all(&mut *tx)
+            .await?;
         let addrs = rows
             .into_iter()
             .map(address_from_row)
@@ -1378,7 +825,8 @@ impl Database {
 
     // ======== Activity ========
 
-    /// Append records, then prune by the retention limits.
+    /// Append records, then prune by the retention limits (at most once per
+    /// [`ACTIVITY_PRUNE_EVERY`]: blocked connections arrive in many small batches).
     pub async fn insert_activity(&self, records: &[NewActivity]) -> Result<()> {
         if records.is_empty() {
             return Ok(());
@@ -1403,9 +851,22 @@ impl Database {
             .await?;
         }
         tx.commit().await?;
-        self.prune_activity(Duration::days(ACTIVITY_MAX_AGE_DAYS), ACTIVITY_MAX_ROWS)
-            .await?;
+        if self.prune_due() {
+            self.prune_activity(Duration::days(ACTIVITY_MAX_AGE_DAYS), ACTIVITY_MAX_ROWS)
+                .await?;
+        }
         Ok(())
+    }
+
+    /// Whether the activity table has not been pruned for [`ACTIVITY_PRUNE_EVERY`]; if so,
+    /// the caller prunes now.
+    fn prune_due(&self) -> bool {
+        let mut last = self.last_prune.lock().unwrap();
+        let due = last.is_none_or(|t| t.elapsed() >= ACTIVITY_PRUNE_EVERY);
+        if due {
+            *last = Some(Instant::now());
+        }
+        due
     }
 
     /// Delete activity older than `max_age`, then everything but the newest `max_rows`.
@@ -1487,11 +948,43 @@ impl NewActivity {
     }
 }
 
-const ADDRESS_SELECT_ONE: &str = "SELECT id, app_id, network_id, ports, locator_kind, locator, \
-     created_at FROM addresses WHERE id = ?";
+const ADDRESS_SELECT: &str = "SELECT id, app_id, network_id, ports, locator_kind, locator, \
+     created_at FROM addresses";
 
 const GRANT_SELECT: &str = "SELECT id, app_id, port, proto, network_id, subject_kind, subject_id, \
      created_at FROM grants";
+
+async fn insert_address_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    a: &Address,
+    secret: Option<&str>,
+) -> Result<()> {
+    let (kind, locator) = match &a.locator {
+        Locator::Ipv6 { addr } => ("ipv6", addr.to_string()),
+        Locator::Onion { hostname } => ("onion", hostname.clone()),
+    };
+    sqlx::query(
+        "INSERT INTO addresses (id, app_id, network_id, ports, locator_kind, locator, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&a.id)
+    .bind(&a.app_id)
+    .bind(&a.network_id)
+    .bind(encode_ports(&a.ports)?)
+    .bind(kind)
+    .bind(locator)
+    .bind(ts(a.created_at))
+    .execute(&mut **tx)
+    .await?;
+    if let Some(secret) = secret {
+        sqlx::query("INSERT INTO onion_keys (address_id, private_key) VALUES (?, ?)")
+            .bind(&a.id)
+            .bind(secret)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
 
 async fn insert_credential(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -1596,44 +1089,22 @@ fn activity_from_row(r: sqlx::sqlite::SqliteRow) -> Result<ActivityRecord> {
     })
 }
 
-/// Parse the stored `protect_host_interfaces` value; absent or invalid means off.
-pub fn parse_protect_host(value: Option<&str>) -> Vec<String> {
-    let mut v: Vec<String> = value
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
-    v.retain(|s| !s.trim().is_empty());
-    v.sort();
-    v.dedup();
-    v
-}
-
-fn parse_global_id(hex: &str) -> Option<[u8; 5]> {
-    if hex.len() != 10 || !hex.is_ascii() {
-        return None;
-    }
-    let mut id = [0u8; 5];
-    for (i, b) in id.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(id)
-}
-
 #[cfg(test)]
-mod tests {
+mod test_util {
     use super::*;
     use socketguard_core::new_id;
 
-    async fn db() -> Database {
+    pub(super) async fn db() -> Database {
         let db = Database::new(":memory:").await.unwrap();
         db.migrate().await.unwrap();
         db
     }
 
-    fn now() -> DateTime<Utc> {
+    pub(super) fn now() -> DateTime<Utc> {
         Utc::now()
     }
 
-    fn app(id: &str) -> App {
+    pub(super) fn app(id: &str) -> App {
         App {
             id: id.into(),
             name: format!("app-{id}"),
@@ -1649,7 +1120,7 @@ mod tests {
         }
     }
 
-    fn address(app_id: &str, net: &str, a: &str) -> Address {
+    pub(super) fn address(app_id: &str, net: &str, a: &str) -> Address {
         Address {
             id: new_id(),
             app_id: app_id.into(),
@@ -1662,7 +1133,7 @@ mod tests {
         }
     }
 
-    fn peer(label: &str, creds: &[(CredentialKind, &str)]) -> Peer {
+    pub(super) fn peer(label: &str, creds: &[(CredentialKind, &str)]) -> Peer {
         Peer {
             id: new_id(),
             label: label.into(),
@@ -1680,7 +1151,7 @@ mod tests {
         }
     }
 
-    fn grant(app_id: &str, subject: Subject) -> Grant {
+    pub(super) fn grant(app_id: &str, subject: Subject) -> Grant {
         Grant {
             id: new_id(),
             app_id: app_id.into(),
@@ -1694,57 +1165,23 @@ mod tests {
         }
     }
 
-    async fn count(db: &Database, table: &str) -> i64 {
+    pub(super) async fn count(db: &Database, table: &str) -> i64 {
         sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
             .fetch_one(&db.pool)
             .await
             .unwrap()
     }
 
-    #[tokio::test]
-    async fn schema_v1_is_created_once() {
-        let db = db().await;
-        let v: i64 = sqlx::query_scalar("PRAGMA user_version")
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-        assert_eq!(v, SCHEMA_VERSION);
-        let mut tables: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-        )
-        .fetch_all(&db.pool)
-        .await
-        .unwrap();
-        tables.sort();
-        assert_eq!(
-            tables,
-            [
-                "activity",
-                "addresses",
-                "app_ports",
-                "apps",
-                "grants",
-                "onion_keys",
-                "owned_addresses",
-                "peer_credentials",
-                "peer_group_members",
-                "peer_groups",
-                "peers",
-                "settings"
-            ]
-        );
-        db.migrate().await.expect("migrate is idempotent");
+    pub(super) fn temp_db_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("sg-state-{tag}-{}.db", new_id()))
     }
+}
 
-    #[tokio::test]
-    async fn newer_schema_is_refused() {
-        let db = db().await;
-        sqlx::query("PRAGMA user_version = 99")
-            .execute(&db.pool)
-            .await
-            .unwrap();
-        assert!(db.migrate().await.is_err());
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::test_util::*;
+    use socketguard_core::new_id;
 
     #[tokio::test]
     async fn foreign_keys_are_on_for_every_connection() {
@@ -1765,197 +1202,6 @@ mod tests {
             .insert_address(&address("nope", "n", "fd00::1"))
             .await
             .is_err());
-    }
-
-    fn temp_db_path(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("sg-state-{tag}-{}.db", new_id()))
-    }
-
-    async fn make_old_db(path: &Path) {
-        let opts = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true);
-        let mut conn = SqliteConnection::connect_with(&opts).await.unwrap();
-        sqlx::query("CREATE TABLE sockets (id TEXT PRIMARY KEY)")
-            .execute(&mut conn)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO sockets VALUES ('old')")
-            .execute(&mut conn)
-            .await
-            .unwrap();
-        conn.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn pre_v1_database_is_renamed_not_migrated() {
-        let path = temp_db_path("prev1");
-        make_old_db(&path).await;
-        let archived = with_suffix(&path, ".pre-v1");
-        // A leftover WAL file moves along with it.
-        std::fs::write(with_suffix(&path, "-wal"), b"").unwrap();
-
-        let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
-        assert!(archived.exists(), "old database kept as .pre-v1");
-        assert!(with_suffix(&archived, "-wal").exists());
-        assert!(!with_suffix(&path, "-wal").exists());
-        // The fresh database is v1 and has none of the old data.
-        let old_table: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name = 'sockets'")
-                .fetch_one(&db.pool)
-                .await
-                .unwrap();
-        assert_eq!(old_table, 0);
-        assert_eq!(count(&db, "apps").await, 0);
-        let kept = SqliteConnectOptions::new().filename(&archived);
-        let mut c = SqliteConnection::connect_with(&kept).await.unwrap();
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sockets")
-            .fetch_one(&mut c)
-            .await
-            .unwrap();
-        assert_eq!(n, 1);
-        c.close().await.unwrap();
-        db.pool.close().await;
-
-        // Reopening a v1 database leaves it alone.
-        let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
-        db.pool.close().await;
-
-        // A second old database does not overwrite the first archive.
-        let _ = std::fs::remove_file(&path);
-        make_old_db(&path).await;
-        let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
-        assert!(with_suffix(&path, ".pre-v1.1").exists());
-        db.pool.close().await;
-        for suffix in ["", ".pre-v1", ".pre-v1.1", "-wal", "-shm", ".pre-v1-wal"] {
-            let _ = std::fs::remove_file(with_suffix(&path, suffix));
-        }
-    }
-
-    #[tokio::test]
-    async fn an_empty_or_v1_file_is_not_archived() {
-        let path = temp_db_path("v1");
-        let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
-        db.insert_app(&app("a1")).await.unwrap();
-        drop(db);
-        let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
-        assert!(db.get_app("a1").await.unwrap().is_some());
-        assert!(!with_suffix(&path, ".pre-v1").exists());
-        db.pool.close().await;
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(with_suffix(&path, suffix));
-        }
-    }
-
-    /// The DACL of `path` as SDDL.
-    #[cfg(windows)]
-    fn dacl_sddl(path: &Path) -> String {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::core::{PCWSTR, PWSTR};
-        use windows::Win32::Foundation::{LocalFree, HLOCAL};
-        use windows::Win32::Security::Authorization::{
-            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
-            SDDL_REVISION_1, SE_FILE_OBJECT,
-        };
-        use windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
-        let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        let mut sd = PSECURITY_DESCRIPTOR::default();
-        let mut out = PWSTR::null();
-        // SAFETY: out-pointers are valid; the buffers are freed after use.
-        unsafe {
-            GetNamedSecurityInfoW(
-                PCWSTR(name.as_ptr()),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                None,
-                None,
-                None,
-                None,
-                &mut sd,
-            )
-            .ok()
-            .unwrap();
-            ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                sd,
-                SDDL_REVISION_1,
-                DACL_SECURITY_INFORMATION,
-                &mut out,
-                None,
-            )
-            .unwrap();
-            let s = out.to_string().unwrap();
-            let _ = LocalFree(Some(HLOCAL(out.0.cast())));
-            let _ = LocalFree(Some(HLOCAL(sd.0)));
-            s
-        }
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn windows_database_files_have_a_protected_dacl() {
-        let path = temp_db_path("acl");
-        let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
-        db.insert_app(&app("a1")).await.unwrap();
-        for suffix in ["", "-wal", "-shm"] {
-            let file = with_suffix(&path, suffix);
-            if !file.exists() {
-                continue;
-            }
-            let sddl = dacl_sddl(&file);
-            assert!(sddl.starts_with("D:P"), "{suffix}: not protected: {sddl}");
-            // SYSTEM and Administrators, plus the running account when it is neither
-            // (a test run from a normal user; a service is covered by the first two).
-            let extra = super::winacl::extra_principal();
-            assert_eq!(
-                sddl.matches("(A;").count(),
-                2 + usize::from(extra.is_some()),
-                "{suffix}: unexpected ACEs: {sddl}"
-            );
-            if let Some(sid) = extra {
-                assert!(sddl.contains(&format!(";;;{sid})")), "{sddl}");
-            }
-            assert!(sddl.contains(";;;SY)") && sddl.contains(";;;BA)"), "{sddl}");
-        }
-        db.pool.close().await;
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(with_suffix(&path, suffix));
-        }
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn windows_existing_database_files_get_the_protected_dacl() {
-        let path = temp_db_path("acl-existing");
-        // A file from before, with the inherited (user-readable) ACL.
-        std::fs::write(&path, b"").unwrap();
-        assert!(!dacl_sddl(&path).starts_with("D:P"));
-        let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
-        assert!(dacl_sddl(&path).starts_with("D:P"), "{}", dacl_sddl(&path));
-        db.pool.close().await;
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(with_suffix(&path, suffix));
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_unprotectable_database_fails_startup_unless_overridden() {
-        let file = Path::new("db.sqlite");
-        let err = || Err(anyhow::anyhow!("access denied"));
-        let e = super::enforce_protected_with(err(), file, false).unwrap_err();
-        let msg = format!("{e:#}");
-        assert!(
-            msg.contains("onion service keys") && msg.contains(super::ALLOW_UNPROTECTED_DB_ENV)
-        );
-        assert!(super::enforce_protected_with(err(), file, true).is_ok());
-        assert!(super::enforce_protected_with(Ok(()), file, false).is_ok());
     }
 
     #[tokio::test]
@@ -2004,6 +1250,65 @@ mod tests {
         assert_eq!(got.ports, PortSet::All);
         assert_eq!(got.locator.ipv6(), Some("300:9::5".parse().unwrap()));
         assert_eq!(db.get_app("a1").await.unwrap().unwrap().addresses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_addresses_is_ordered_by_creation() {
+        let db = db().await;
+        for app_id in ["a1", "a2", "a3"] {
+            db.insert_app(&app(app_id)).await.unwrap();
+        }
+        let mut ids = Vec::new();
+        for i in 0..9 {
+            let mut a = address(
+                ["a1", "a2", "a3"][i as usize % 3],
+                "n",
+                &format!("fd00::{}", i + 1),
+            );
+            a.created_at = now() + Duration::seconds(i);
+            ids.push(a.id.clone());
+            db.insert_address(&a).await.unwrap();
+        }
+        let listed: Vec<_> = db
+            .list_addresses()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(listed, ids);
+    }
+
+    #[tokio::test]
+    async fn split_address_is_all_or_nothing() {
+        let db = db().await;
+        db.insert_app(&app("a1")).await.unwrap();
+        let p = |port| PortRef {
+            port,
+            proto: Protocol::Tcp,
+        };
+        let mut old = address("a1", "n", "fd00::1");
+        old.ports = PortSet::Only(vec![p(80), p(81)]);
+        db.insert_address(&old).await.unwrap();
+
+        // The new address cannot be stored (unknown app): the old one keeps both ports.
+        let mut bad = address("nope", "n", "fd00::2");
+        bad.ports = PortSet::Only(vec![p(81)]);
+        let rest = PortSet::Only(vec![p(80)]);
+        assert!(db
+            .split_address(&bad, None, Some((&old.id, &rest)))
+            .await
+            .is_err());
+        let kept = db.get_address(&old.id).await.unwrap().unwrap();
+        assert_eq!(kept.ports, PortSet::Only(vec![p(80), p(81)]));
+
+        let mut good = address("a1", "n", "fd00::2");
+        good.ports = PortSet::Only(vec![p(81)]);
+        db.split_address(&good, None, Some((&old.id, &rest)))
+            .await
+            .unwrap();
+        assert_eq!(db.get_address(&old.id).await.unwrap().unwrap().ports, rest);
+        assert!(db.get_address(&good.id).await.unwrap().is_some());
     }
 
     #[tokio::test]
@@ -2087,38 +1392,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v1_database_migrates_to_v2() {
-        let path = temp_db_path("v1-to-v2");
-        {
-            let opts = SqliteConnectOptions::new()
-                .filename(&path)
-                .create_if_missing(true);
-            let mut c = SqliteConnection::connect_with(&opts).await.unwrap();
-            sqlx::raw_sql(SCHEMA).execute(&mut c).await.unwrap();
-            sqlx::query("PRAGMA user_version = 1")
-                .execute(&mut c)
-                .await
-                .unwrap();
-            sqlx::query("INSERT INTO settings (key, value) VALUES ('k', 'kept')")
-                .execute(&mut c)
-                .await
-                .unwrap();
-        }
-        let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
-        let v: i64 = sqlx::query_scalar("PRAGMA user_version")
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-        assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(count(&db, "onion_keys").await, 0);
-        assert_eq!(db.get_setting("k").await.unwrap().as_deref(), Some("kept"));
-        db.migrate().await.expect("idempotent");
-        drop(db);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[tokio::test]
     async fn owned_addresses_are_claimed_retired_and_forgotten() {
         let db = db().await;
         let a: Ipv6Addr = "300:1::1".parse().unwrap();
@@ -2139,40 +1412,6 @@ mod tests {
         db.forget_address(a).await.unwrap();
         db.forget_address(b).await.unwrap();
         assert!(db.list_owned_addresses().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn v2_database_migrates_to_v3() {
-        let path = temp_db_path("v2-to-v3");
-        {
-            let opts = SqliteConnectOptions::new()
-                .filename(&path)
-                .create_if_missing(true);
-            let mut c = SqliteConnection::connect_with(&opts).await.unwrap();
-            sqlx::raw_sql(SCHEMA).execute(&mut c).await.unwrap();
-            sqlx::raw_sql(MIGRATION_1_TO_2)
-                .execute(&mut c)
-                .await
-                .unwrap();
-            sqlx::query("PRAGMA user_version = 2")
-                .execute(&mut c)
-                .await
-                .unwrap();
-            sqlx::query(
-                "INSERT INTO apps (id, name, process_name, reviewed, first_seen, last_seen) \
-                 VALUES ('old', 'n', 'p', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
-            )
-            .execute(&mut c)
-            .await
-            .unwrap();
-        }
-        let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
-        let app = db.get_app("old").await.unwrap().unwrap();
-        assert_eq!(app.identity_note, None);
-        assert_eq!(db.list_owned_addresses().await.unwrap().len(), 0);
-        drop(db);
-        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
@@ -2209,27 +1448,6 @@ mod tests {
             .unwrap();
         db.delete_app("a1").await.unwrap();
         assert_eq!(count(&db, "onion_keys").await, 0);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn database_files_are_owner_only() {
-        use std::os::unix::fs::PermissionsExt;
-        let path = temp_db_path("perms");
-        let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
-        db.set_setting("k", "v").await.unwrap();
-        db.migrate().await.unwrap();
-        for suffix in ["", "-wal", "-shm"] {
-            let f = with_suffix(&path, suffix);
-            if let Ok(m) = std::fs::metadata(&f) {
-                assert_eq!(m.permissions().mode() & 0o777, 0o600, "{}", f.display());
-            }
-        }
-        drop(db);
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(with_suffix(&path, suffix));
-        }
     }
 
     #[tokio::test]
@@ -2321,6 +1539,13 @@ mod tests {
         .unwrap();
         // Insert prunes: the 31-day-old row is gone.
         assert_eq!(count(&db, "activity").await, 1);
+        // Not again within the minute; an explicit prune does it.
+        db.insert_activity(&[act(ActivityKind::PeerAdded, now() - Duration::days(31))])
+            .await
+            .unwrap();
+        assert_eq!(count(&db, "activity").await, 2);
+        db.prune_activity(Duration::days(30), 100).await.unwrap();
+        assert_eq!(count(&db, "activity").await, 1);
 
         let batch: Vec<_> = (0..30).map(|_| act(ActivityKind::Blocked, now())).collect();
         db.insert_activity(&batch).await.unwrap();
@@ -2407,28 +1632,6 @@ mod tests {
             .await
             .unwrap();
         assert!(future.is_empty());
-    }
-
-    #[tokio::test]
-    async fn settings_and_ula_global_id() {
-        let db = db().await;
-        assert_eq!(
-            db.settings().await.unwrap(),
-            Settings {
-                address_mode: AddressMode::PerApp,
-                protect_host_interfaces: vec![]
-            }
-        );
-        db.set_address_mode(AddressMode::PerPort).await.unwrap();
-        db.set_protect_host(&["eth0".into()]).await.unwrap();
-        let s = db.settings().await.unwrap();
-        assert_eq!(s.address_mode, AddressMode::PerPort);
-        assert_eq!(s.protect_host_interfaces, ["eth0"]);
-        let id = db.ula_global_id().await.unwrap();
-        assert_eq!(db.ula_global_id().await.unwrap(), id);
-        assert!(parse_global_id("zz").is_none());
-        assert_eq!(parse_protect_host(Some(r#"["b","a","a",""]"#)), ["a", "b"]);
-        assert!(parse_protect_host(Some("not json")).is_empty());
     }
 
     #[tokio::test]

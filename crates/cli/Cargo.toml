@@ -26,7 +26,7 @@ chrono = { workspace = true }
 futures-util = "0.3"
 
 [dev-dependencies]
-socketguard-daemon = { path = "../daemon" }
+socketguard-daemon = { path = "../daemon", features = ["test-support"] }
 assert_cmd = "2"
 insta = { workspace = true }
 uuid = { workspace = true }

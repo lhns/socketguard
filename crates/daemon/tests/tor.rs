@@ -80,7 +80,6 @@ impl Harness {
             fw.clone(),
             Arc::new(MockNetworkInterface::new(Arc::new(Mutex::new(vec![])))),
             backends,
-            vec!["tor".into()],
         );
         let state = test_app_state_at(
             engine,

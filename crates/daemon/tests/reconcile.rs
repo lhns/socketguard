@@ -10,9 +10,7 @@ use socketguard_core::{
     NewGrant, PortRef, PortSet, Protocol, Reach, Subject,
 };
 use socketguard_daemon::api::DaemonEvent;
-use socketguard_daemon::engine::{
-    ActiveBackend, Engine, EngineError, GrantFilter, ProtectHostError,
-};
+use socketguard_daemon::engine::{Engine, EngineError, GrantFilter, ProtectHostError};
 use socketguard_daemon::firewall::{DropEvent, ScopeMatch, Sources};
 use socketguard_daemon::network::NetworkInterface as _;
 use socketguard_daemon::test_support::*;
@@ -28,52 +26,6 @@ const KEY: &str = "ba83a2e554a8a087cebdb3f053468cd3ff915b5dd94bf11b7a5fc2e36f131
 const KEY_ADDR: &str = "200:8af8:ba35:56ae:bef0:6284:981f:5972/128";
 
 // ─── Harness ─────────────────────────────────────────────────────────────────
-
-/// A network of the harness: its config and the mock that allocates for it.
-struct Net {
-    id: &'static str,
-    config: BackendConfig,
-    mock: MockIpv6Backend,
-}
-
-/// Local (ULA) network on `lo`: no prefix, grants have no effect.
-fn local() -> Net {
-    Net {
-        id: "local",
-        config: BackendConfig::Ula {
-            interface: "lo".into(),
-        },
-        mock: MockIpv6Backend::new("fd00:1:2:3::", 128, "lo"),
-    }
-}
-
-/// LAN network on `eth0` with a /64.
-fn lan() -> Net {
-    let mock = MockIpv6Backend::new("2001:db8:1:2::", 128, "eth0");
-    mock.set_prefix("2001:db8:1:2::");
-    Net {
-        id: "lan",
-        config: BackendConfig::Slaac {
-            interface: "eth0".into(),
-            prefix: None,
-        },
-        mock,
-    }
-}
-
-/// Yggdrasil network on `ygg0`.
-fn ygg() -> Net {
-    let mock = MockIpv6Backend::new("300:1:2:3::", 128, "ygg0");
-    mock.set_prefix("300:1:2:3::");
-    Net {
-        id: "ygg",
-        config: BackendConfig::Yggdrasil {
-            interface: "ygg0".into(),
-            admin_endpoint: None,
-        },
-        mock,
-    }
-}
 
 struct Harness {
     state: Arc<AppState>,
@@ -95,53 +47,24 @@ impl Harness {
         sockets: Vec<ListeningSocket>,
         process_filter: ProcessFilter,
     ) -> Self {
-        let fw_calls = Arc::new(Mutex::new(Vec::new()));
-        let net_calls = Arc::new(Mutex::new(Vec::new()));
-        let fw = Arc::new(MockFirewall::new(fw_calls.clone()));
-        let net = MockNetworkInterface::new(net_calls.clone());
-        let monitor = MockSocketMonitor::new(sockets);
-        let socket_handle = monitor.sockets.clone();
-
-        let mut backends = HashMap::new();
-        let mut configs = Vec::new();
-        let mut mocks = HashMap::new();
-        for n in nets {
-            let cfg = BackendInstanceConfig {
-                id: n.id.to_string(),
-                backend: n.config,
-            };
-            mocks.insert(n.id, n.mock.clone());
-            backends.insert(
-                n.id.to_string(),
-                ActiveBackend::ip(cfg.clone(), Box::new(n.mock)),
-            );
-            configs.push(cfg);
-        }
-        let ids = configs.iter().map(|c| c.id.clone()).collect();
-        let engine = Engine::new_injectable(
-            Box::new(monitor),
-            fw.clone(),
-            Arc::new(net.clone()),
-            backends,
-            ids,
-        );
-        let state = test_app_state(
-            engine,
+        let d = daemon_with(
+            nets,
+            sockets,
             DaemonConfig {
-                backends: configs,
                 process_filter,
                 ..DaemonConfig::default()
             },
+            None,
         )
         .await;
         Self {
-            state,
-            fw,
-            fw_calls,
-            net,
-            net_calls,
-            sockets: socket_handle,
-            nets: mocks,
+            state: d.state,
+            fw: d.fw,
+            fw_calls: d.fw_calls,
+            net: d.net,
+            net_calls: d.net_calls,
+            sockets: d.sockets,
+            nets: d.nets,
         }
     }
 
@@ -312,7 +235,7 @@ fn net_adds(h: &Harness) -> Vec<(String, Ipv6Addr)> {
 #[tokio::test]
 async fn discovery_creates_a_pending_app_with_an_address_on_every_network() {
     let h = Harness::new(
-        vec![local(), lan(), ygg()],
+        vec![local_net(), lan_net(), ygg_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
@@ -369,7 +292,7 @@ async fn discovery_creates_a_pending_app_with_an_address_on_every_network() {
 #[tokio::test]
 async fn reconcile_is_idempotent() {
     let h = Harness::new(
-        vec![local(), ygg()],
+        vec![local_net(), ygg_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
@@ -388,7 +311,7 @@ async fn reconcile_is_idempotent() {
 #[tokio::test]
 async fn a_vanished_firewall_state_is_reapplied_on_the_next_pass() {
     let h = Harness::new(
-        vec![local(), ygg()],
+        vec![local_net(), ygg_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
@@ -405,15 +328,16 @@ async fn a_vanished_firewall_state_is_reapplied_on_the_next_pass() {
 #[tokio::test]
 async fn verify_runs_on_a_cadence_and_after_a_failed_apply() {
     let h = Harness::new(
-        vec![local(), ygg()],
+        vec![local_net(), ygg_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
-    h.state
-        .engine
-        .write()
-        .await
-        .set_verify_interval(Duration::from_millis(1500));
+    let clock = ManualClock::new();
+    {
+        let mut engine = h.state.engine.write().await;
+        engine.set_verify_interval(Duration::from_secs(5));
+        engine.set_clock(clock.clone());
+    }
     h.reconcile().await; // applies; counts as verified
     let base = h.fw.verify_count();
     for _ in 0..5 {
@@ -421,7 +345,7 @@ async fn verify_runs_on_a_cadence_and_after_a_failed_apply() {
     }
     assert_eq!(h.fw.verify_count(), base, "no verify within the interval");
 
-    tokio::time::sleep(Duration::from_millis(1700)).await;
+    clock.advance(Duration::from_secs(6));
     h.reconcile().await;
     assert_eq!(
         h.fw.verify_count(),
@@ -436,7 +360,7 @@ async fn verify_runs_on_a_cadence_and_after_a_failed_apply() {
     h.clear_calls();
     h.reconcile().await;
     assert!(applied(&h.fw_calls).is_empty());
-    tokio::time::sleep(Duration::from_millis(1700)).await;
+    clock.advance(Duration::from_secs(6));
     h.reconcile().await;
     assert_eq!(applied(&h.fw_calls).len(), 1, "drift re-applied when due");
 }
@@ -444,7 +368,7 @@ async fn verify_runs_on_a_cadence_and_after_a_failed_apply() {
 #[tokio::test]
 async fn a_revoked_grant_cuts_its_established_connections() {
     let h = Harness::new(
-        vec![lan(), ygg()],
+        vec![lan_net(), ygg_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
@@ -469,7 +393,7 @@ async fn a_revoked_grant_cuts_its_established_connections() {
 #[tokio::test]
 async fn interpreter_apps_are_split_by_script() {
     let h = Harness::new(
-        vec![local()],
+        vec![local_net()],
         vec![
             script("python3", "/srv/a/server.py", 8000),
             script("python3", "/srv/b/worker.py", 8001),
@@ -502,7 +426,7 @@ async fn interpreter_apps_are_split_by_script() {
 #[tokio::test]
 async fn process_filter_ignores_non_matching() {
     let h = Harness::with_filter(
-        vec![local()],
+        vec![local_net()],
         vec![
             listener("nginx", 80, Protocol::Tcp),
             listener("svchost", 135, Protocol::Tcp),
@@ -519,7 +443,11 @@ async fn process_filter_ignores_non_matching() {
 
 #[tokio::test]
 async fn a_returning_app_keeps_its_identity_across_pids_and_restarts() {
-    let h = Harness::new(vec![local()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(
+        vec![local_net()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
     h.reconcile().await;
     let first = h.app().await;
 
@@ -543,7 +471,11 @@ async fn a_returning_app_keeps_its_identity_across_pids_and_restarts() {
 
 #[tokio::test]
 async fn an_upgraded_binary_is_still_the_same_app() {
-    let h = Harness::new(vec![local()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(
+        vec![local_net()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
     h.reconcile().await;
     let mut upgraded = listener("nginx", 80, Protocol::Tcp);
     // The monitor strips " (deleted)" before the engine sees the path.
@@ -558,7 +490,7 @@ async fn an_upgraded_binary_is_still_the_same_app() {
 #[tokio::test]
 async fn per_port_mode_gives_each_port_its_own_address() {
     let h = Harness::new(
-        vec![ygg()],
+        vec![ygg_net()],
         vec![
             listener("nginx", 80, Protocol::Tcp),
             listener("nginx", 443, Protocol::Tcp),
@@ -612,7 +544,7 @@ async fn per_port_mode_gives_each_port_its_own_address() {
 
 #[tokio::test]
 async fn per_app_mode_keeps_one_address_when_ports_appear() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
     h.set_sockets(vec![
         listener("nginx", 80, Protocol::Tcp),
@@ -627,7 +559,7 @@ async fn per_app_mode_keeps_one_address_when_ports_appear() {
 #[tokio::test]
 async fn split_and_merge() {
     let h = Harness::new(
-        vec![ygg()],
+        vec![ygg_net()],
         vec![
             listener("nginx", 80, Protocol::Tcp),
             listener("nginx", 443, Protocol::Tcp),
@@ -722,9 +654,9 @@ async fn split_and_merge() {
 
 #[tokio::test]
 async fn allocation_is_retried_until_it_succeeds() {
-    let ygg = ygg();
+    let ygg = ygg_net();
     let h = Harness::new(
-        vec![local(), ygg],
+        vec![local_net(), ygg],
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
@@ -752,7 +684,7 @@ async fn allocation_is_retried_until_it_succeeds() {
 #[tokio::test]
 async fn a_grant_to_a_yggdrasil_key_peer_gives_a_rule_with_iif() {
     let h = Harness::new(
-        vec![local(), lan(), ygg()],
+        vec![local_net(), lan_net(), ygg_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
@@ -816,7 +748,7 @@ async fn a_grant_to_a_yggdrasil_key_peer_gives_a_rule_with_iif() {
 #[tokio::test]
 async fn an_ip_suffix_peer_follows_a_prefix_change() {
     let h = Harness::new(
-        vec![local(), lan()],
+        vec![local_net(), lan_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
@@ -864,7 +796,7 @@ async fn an_ip_suffix_peer_follows_a_prefix_change() {
 
 #[tokio::test]
 async fn a_key_peer_with_no_yggdrasil_network_is_not_reachable() {
-    let h = Harness::new(vec![lan()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![lan_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
     let app = h.app().await;
     let peer = h.peer("b", CredentialKind::YggKey, KEY).await;
@@ -878,7 +810,7 @@ async fn a_key_peer_with_no_yggdrasil_network_is_not_reachable() {
 #[tokio::test]
 async fn a_grant_to_anyone_needs_confirmation_and_local_grants_are_rejected() {
     let h = Harness::new(
-        vec![local(), lan(), ygg()],
+        vec![local_net(), lan_net(), ygg_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
@@ -955,7 +887,7 @@ async fn a_grant_to_anyone_needs_confirmation_and_local_grants_are_rejected() {
 #[tokio::test]
 async fn deleting_a_peer_removes_its_rules() {
     let h = Harness::new(
-        vec![lan(), ygg()],
+        vec![lan_net(), ygg_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
@@ -982,7 +914,7 @@ async fn deleting_a_peer_removes_its_rules() {
 
 #[tokio::test]
 async fn groups_grant_to_all_members_and_deleting_one_removes_the_rules() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
     let app = h.app().await;
     let a = h.peer("a", CredentialKind::YggKey, KEY).await;
@@ -1039,7 +971,7 @@ async fn groups_grant_to_all_members_and_deleting_one_removes_the_rules() {
 
 #[tokio::test]
 async fn peers_validate_and_stay_unique() {
-    let h = Harness::new(vec![ygg()], vec![]).await;
+    let h = Harness::new(vec![ygg_net()], vec![]).await;
     let engine = h.engine().await;
     let cred = |kind, value: &str| NewCredential {
         kind,
@@ -1123,7 +1055,7 @@ async fn peers_validate_and_stay_unique() {
 #[tokio::test]
 async fn review_and_delete_app() {
     let h = Harness::new(
-        vec![lan(), ygg()],
+        vec![lan_net(), ygg_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
@@ -1183,7 +1115,7 @@ async fn review_and_delete_app() {
 
 #[tokio::test]
 async fn a_drop_event_produces_blocked_activity() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.engine().await.startup_reconcile(&h.state).await;
     h.reconcile().await;
     let app = h.app().await;
@@ -1224,27 +1156,9 @@ async fn a_drop_event_produces_blocked_activity() {
 // ─── Lifecycle: freeze, disable, restore ─────────────────────────────────────
 
 #[tokio::test]
-async fn shutdown_removes_nothing() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
-    h.reconcile().await;
-    let app = h.app().await;
-    h.clear_calls();
-    h.engine().await.shutdown().await;
-    assert!(
-        h.fw_calls.lock().unwrap().is_empty(),
-        "no Disable, no flush"
-    );
-    assert!(h.net_calls.lock().unwrap().is_empty());
-    assert!(h
-        .net
-        .addresses("ygg0")
-        .contains(&Harness::addr_on(&app, "ygg")));
-}
-
-#[tokio::test]
 async fn disable_removes_rules_and_addresses() {
     let h = Harness::new(
-        vec![local(), ygg()],
+        vec![local_net(), ygg_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
@@ -1266,10 +1180,10 @@ async fn disable_removes_rules_and_addresses() {
 
 #[tokio::test]
 async fn disabled_stays_off_across_reconciles_and_startup_until_enabled() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
     h.engine().await.disable(&h.state).await.unwrap();
-    assert!(h.state.db.disabled().await.unwrap());
+    assert!(h.state.db.disabled().await);
     h.clear_calls();
 
     // New apps are still tracked, but nothing is applied or added.
@@ -1285,14 +1199,14 @@ async fn disabled_stays_off_across_reconciles_and_startup_until_enabled() {
     assert!(net_adds(&h).is_empty());
 
     h.engine().await.enable(&h.state).await.unwrap();
-    assert!(!h.state.db.disabled().await.unwrap());
+    assert!(!h.state.db.disabled().await);
     assert_eq!(applied(&h.fw_calls).len(), 1);
     assert_eq!(net_adds(&h).len(), 2);
 }
 
 #[tokio::test]
 async fn startup_reapplies_the_ruleset_and_restores_missing_addresses() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
     let app = h.app().await;
     h.grant(&app.id, Subject::Anyone).await;
@@ -1310,7 +1224,7 @@ async fn startup_reapplies_the_ruleset_and_restores_missing_addresses() {
 
 #[tokio::test]
 async fn failed_apply_keeps_addresses_off_interfaces() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.fw.set_failing(true);
     h.reconcile().await;
     assert!(net_adds(&h).is_empty(), "nothing would deny the address");
@@ -1323,7 +1237,7 @@ async fn failed_apply_keeps_addresses_off_interfaces() {
 
 #[tokio::test]
 async fn missing_address_is_re_added() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
     let a = Harness::addr_on(&h.app().await, "ygg");
     h.net.drop_address("ygg0", a);
@@ -1336,7 +1250,7 @@ async fn missing_address_is_re_added() {
 
 #[tokio::test]
 async fn missing_interface_is_skipped_then_recovers() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
     let a = Harness::addr_on(&h.app().await, "ygg");
 
@@ -1352,7 +1266,7 @@ async fn missing_interface_is_skipped_then_recovers() {
 
 #[tokio::test]
 async fn prefix_change_rehomes_keeping_the_interface_id() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
     let app = h.app().await;
     h.grant(&app.id, Subject::Anyone).await;
@@ -1380,7 +1294,7 @@ async fn prefix_change_rehomes_keeping_the_interface_id() {
 
 #[tokio::test]
 async fn networks_report_kind_status_and_prefix() {
-    let h = Harness::new(vec![local(), lan(), ygg()], vec![]).await;
+    let h = Harness::new(vec![local_net(), lan_net(), ygg_net()], vec![]).await;
     let nets = h.engine().await.networks();
     let by_id: HashMap<_, _> = nets.iter().map(|n| (n.id.as_str(), n)).collect();
     assert_eq!(by_id["local"].kind, socketguard_core::NetworkKind::Local);
@@ -1394,7 +1308,11 @@ async fn networks_report_kind_status_and_prefix() {
 
 #[tokio::test]
 async fn adding_and_removing_a_network() {
-    let h = Harness::new(vec![local()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(
+        vec![local_net()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
     h.reconcile().await;
     let app = h.app().await;
     assert_eq!(app.addresses.len(), 1);
@@ -1409,10 +1327,8 @@ async fn adding_and_removing_a_network() {
     // The new network brings its own allocator (a mock stands in for yggdrasilctl).
     {
         let mut engine = h.state.engine.write().await;
-        let mock = ygg().mock;
-        engine
-            .add_backend_instance_with(&h.state, &inst, Box::new(mock))
-            .await;
+        let mock = ygg_net().mock;
+        add_ip_network(&mut engine, &h.state, &inst, Box::new(mock)).await;
     }
     let app = h.app().await;
     assert_eq!(app.addresses.len(), 2);
@@ -1504,7 +1420,7 @@ async fn ula_global_id_survives_restart() {
 
 #[tokio::test]
 async fn protect_host_is_refused_when_it_would_lock_out_sshd() {
-    let h = Harness::new(vec![lan()], vec![listener("sshd", 22, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![lan_net()], vec![listener("sshd", 22, Protocol::Tcp)]).await;
     h.reconcile().await;
     h.clear_calls();
 
@@ -1565,7 +1481,7 @@ async fn protect_host_is_refused_when_it_would_lock_out_sshd() {
 
 #[tokio::test]
 async fn protect_host_is_allowed_once_sshd_is_granted() {
-    let h = Harness::new(vec![lan()], vec![listener("sshd", 22, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![lan_net()], vec![listener("sshd", 22, Protocol::Tcp)]).await;
     h.reconcile().await;
     let app = h.app().await;
 
@@ -1593,7 +1509,7 @@ async fn protect_host_is_allowed_once_sshd_is_granted() {
 
 #[tokio::test]
 async fn protect_host_is_allowed_by_a_grant_to_anyone() {
-    let h = Harness::new(vec![lan()], vec![listener("sshd", 22, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![lan_net()], vec![listener("sshd", 22, Protocol::Tcp)]).await;
     h.reconcile().await;
     let app = h.app().await;
     h.grant(&app.id, Subject::Anyone).await;
@@ -1661,7 +1577,7 @@ async fn local_on_a_non_loopback_interface_takes_grants_like_a_lan() {
 #[tokio::test]
 async fn remote_admin_inside_a_protected_scope_is_reported_once() {
     let h = Harness::new(
-        vec![lan(), ygg()],
+        vec![lan_net(), ygg_net()],
         vec![listener("sshd", 22, Protocol::Tcp)],
     )
     .await;
@@ -1717,7 +1633,7 @@ async fn remote_admin_inside_a_protected_scope_is_reported_once() {
 #[tokio::test]
 async fn ordinary_apps_in_a_protected_scope_are_not_remote_admin() {
     let h = Harness::new(
-        vec![lan(), ygg()],
+        vec![lan_net(), ygg_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
@@ -1742,7 +1658,7 @@ async fn metrics_export_gauges_and_firewall_counters_without_source_addresses() 
         .build();
 
     let h = Harness::new(
-        vec![local(), ygg()],
+        vec![local_net(), ygg_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
     )
     .await;
@@ -1914,7 +1830,7 @@ fn denied(h: &Harness, addr: Ipv6Addr) -> bool {
 
 #[tokio::test]
 async fn failed_removal_keeps_the_address_denied_and_is_retried() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
     let app = h.app().await;
     let a = Harness::addr_on(&app, "ygg");
@@ -1954,7 +1870,7 @@ async fn failed_removal_keeps_the_address_denied_and_is_retried() {
 
 #[tokio::test]
 async fn crash_leftover_retiring_address_is_removed_at_startup() {
-    let h = Harness::new(vec![ygg()], vec![]).await;
+    let h = Harness::new(vec![ygg_net()], vec![]).await;
     // The previous run marked the address retiring and died before removing it.
     let ghost: Ipv6Addr = "300:1:2:3::dead".parse().unwrap();
     h.net.plant_address("ygg0", ghost);
@@ -1980,7 +1896,7 @@ async fn crash_leftover_retiring_address_is_removed_at_startup() {
 
 #[tokio::test]
 async fn orphaned_owned_address_is_swept() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
     // An address we own that no app has any more (e.g. a crash between the DB update and
     // the removal).
@@ -2007,7 +1923,7 @@ async fn orphaned_owned_address_is_swept() {
 
 #[tokio::test]
 async fn address_outside_the_applied_ruleset_is_never_added() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
     let first = Harness::addr_on(&h.app().await, "ygg");
 
@@ -2036,7 +1952,7 @@ async fn address_outside_the_applied_ruleset_is_never_added() {
 
 #[tokio::test]
 async fn disable_removes_owned_addresses_and_keeps_rows_until_confirmed() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
     let a = Harness::addr_on(&h.app().await, "ygg");
 
@@ -2049,7 +1965,7 @@ async fn disable_removes_owned_addresses_and_keeps_rows_until_confirmed() {
     assert_eq!(owned.len(), 1);
     assert!(owned[0].retiring);
     // The address is still on its interface, so it stays denied: the rules stay.
-    assert!(h.state.db.disabled().await.unwrap(), "the latch stays set");
+    assert!(h.state.db.disabled().await, "the latch stays set");
     assert!(
         !h.fw_calls.lock().unwrap().contains(&FirewallCall::Disable),
         "rules must stay while an address does"
@@ -2075,7 +1991,7 @@ async fn disable_removes_owned_addresses_and_keeps_rows_until_confirmed() {
 
 #[tokio::test]
 async fn fresh_database_does_not_replace_an_existing_ruleset_until_enabled() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.fw.set_installed(true); // a ruleset from before the database was lost
     h.engine().await.startup_reconcile(&h.state).await;
     assert!(h.state.db.unadopted().await.unwrap());
@@ -2101,7 +2017,7 @@ async fn fresh_database_does_not_replace_an_existing_ruleset_until_enabled() {
 
 #[tokio::test]
 async fn fresh_database_without_a_ruleset_applies_normally() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.engine().await.startup_reconcile(&h.state).await;
     assert!(!h.state.db.unadopted().await.unwrap());
     assert_eq!(applied(&h.fw_calls).len(), 1);
@@ -2109,7 +2025,7 @@ async fn fresh_database_without_a_ruleset_applies_normally() {
 
 #[tokio::test]
 async fn existing_database_keeps_the_ruleset_flow_after_restart() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await; // the first apply consumes the fresh-database mark
     h.engine().await.startup_reconcile(&h.state).await;
     assert!(!h.state.db.unadopted().await.unwrap());
@@ -2117,7 +2033,7 @@ async fn existing_database_keeps_the_ruleset_flow_after_restart() {
 
 #[tokio::test]
 async fn disable_removes_an_unadopted_ruleset() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.fw.set_installed(true);
     h.engine().await.startup_reconcile(&h.state).await;
     assert!(h.state.db.unadopted().await.unwrap());
@@ -2143,7 +2059,7 @@ async fn identity_is_per_user_and_never_shared_with_forgeries() {
             .to_vec(),
     );
     let h = Harness::new(
-        vec![local()],
+        vec![local_net()],
         vec![
             listener("nginx", 80, Protocol::Tcp),
             other_user,
@@ -2170,4 +2086,103 @@ async fn identity_is_per_user_and_never_shared_with_forgeries() {
         .find(|a| a.interpreter_arg.as_deref() == Some("/srv/trusted/app.js"))
         .unwrap();
     assert_eq!(trusted.ports.len(), 1, "the inline process did not join it");
+}
+
+#[tokio::test]
+async fn identical_requests_racing_create_one_grant_peer_and_group() {
+    let h = Harness::new(
+        vec![local_net(), ygg_net()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let e = h.engine().await;
+    let s = &h.state;
+
+    let (a, b) = tokio::join!(
+        e.create_peer(s, "laptop", &[]),
+        e.create_peer(s, "laptop", &[])
+    );
+    assert_eq!([a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(), 1);
+    let loser = a.err().or(b.err()).unwrap();
+    assert!(matches!(loser, EngineError::Conflict(_)), "{loser:?}");
+
+    let (a, b) = tokio::join!(
+        e.create_group(s, "family", &[]),
+        e.create_group(s, "family", &[])
+    );
+    assert_eq!([a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(), 1);
+    let loser = a.err().or(b.err()).unwrap();
+    assert!(matches!(loser, EngineError::Conflict(_)), "{loser:?}");
+
+    let req = NewGrant {
+        app_id: app.id.clone(),
+        port: None,
+        network_id: None,
+        subject: Subject::Anyone,
+        confirm_open: true,
+    };
+    let (a, b) = tokio::join!(e.create_grant(s, &req), e.create_grant(s, &req));
+    assert_eq!([a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(), 1);
+    let loser = a.err().or(b.err()).unwrap();
+    assert!(matches!(loser, EngineError::Conflict(_)), "{loser:?}");
+    assert_eq!(s.db.list_grants().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_failed_apply_still_records_the_change_and_announces_it() {
+    let h = Harness::new(
+        vec![local_net(), ygg_net()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let e = h.engine().await;
+    let s = &h.state;
+    let mut events = s.events.subscribe();
+    h.fw.set_failing(true);
+
+    let err = e
+        .create_grant(
+            s,
+            &NewGrant {
+                app_id: app.id.clone(),
+                port: None,
+                network_id: None,
+                subject: Subject::Anyone,
+                confirm_open: true,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::Internal(_)), "{err:?}");
+    assert_eq!(h.activity(ActivityKind::GrantAdded).await.len(), 1);
+    let mut seen = Vec::new();
+    while let Ok(ev) = events.try_recv() {
+        seen.push(ev);
+    }
+    assert!(seen.contains(&DaemonEvent::GrantsChanged), "{seen:?}");
+    assert!(seen.contains(&DaemonEvent::Activity), "{seen:?}");
+}
+
+#[tokio::test]
+async fn groups_are_recorded_in_the_activity_log() {
+    let h = Harness::new(vec![local_net()], vec![]).await;
+    let e = h.engine().await;
+    let s = &h.state;
+    let peer = e.create_peer(s, "laptop", &[]).await.unwrap();
+    let group = e.create_group(s, "family", &[]).await.unwrap();
+    e.rename_group(s, &group.id, "household").await.unwrap();
+    e.set_group_members(s, &group.id, std::slice::from_ref(&peer.id))
+        .await
+        .unwrap();
+    e.delete_group(s, &group.id).await.unwrap();
+
+    assert_eq!(h.activity(ActivityKind::GroupAdded).await.len(), 1);
+    assert_eq!(h.activity(ActivityKind::GroupChanged).await.len(), 2);
+    let removed = h.activity(ActivityKind::GroupRemoved).await;
+    assert_eq!(removed.len(), 1);
+    assert!(removed[0].message.contains("household"), "{removed:?}");
 }

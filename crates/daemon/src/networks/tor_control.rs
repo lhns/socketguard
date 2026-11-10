@@ -449,6 +449,7 @@ pub(crate) mod winacl {
     }
 
     /// The SID string of the account running this process.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     pub(crate) fn current_user_sid() -> Result<String> {
         // SAFETY: plain token query on the current process; the buffer is sized by the
         // first call.

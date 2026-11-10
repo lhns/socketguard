@@ -100,11 +100,9 @@ async fn main() -> Result<()> {
     // Wait for reconciliation loop to finish
     let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), recon_handle).await;
 
-    // Rules and addresses stay in place (ADR 0026); `--disable` removes them.
-    {
-        let engine = state.engine.read().await;
-        engine.shutdown().await;
-    }
+    // Stopping removes nothing: the ruleset and the addresses stay, so the host keeps its
+    // protection while the daemon is down (ADR 0026). `--disable` removes them.
+    info!("Firewall rules and addresses stay in place");
 
     info!("SocketGuard daemon stopped");
     // Flush pending OTel data; the exporters block, so keep them off the runtime threads.
@@ -126,13 +124,6 @@ async fn disable(config: &DaemonConfig) -> Result<()> {
         .iter()
         .filter_map(|b| Some((b.id.clone(), b.backend.interface()?.to_string())))
         .collect();
-    engine::disable_all(
-        &db,
-        &interfaces,
-        Arc::from(firewall::create_firewall()),
-        Arc::from(network::create_network_interface()),
-    )
-    .await?;
     let mut nets = Vec::new();
     for b in &config.backends {
         // Networks without an interface (Tor) hold services outside the firewall.
@@ -147,7 +138,14 @@ async fn disable(config: &DaemonConfig) -> Result<()> {
             ));
         }
     }
-    engine::disable_networks(&db, nets).await;
+    engine::disable_everything(
+        &db,
+        &interfaces,
+        nets,
+        Arc::from(firewall::create_firewall()),
+        Arc::from(network::create_network_interface()),
+    )
+    .await?;
     eprintln!("[socketguard] Firewall rules, addresses and onion services removed");
     Ok(())
 }

@@ -14,7 +14,7 @@ use socketguard_core::api_types::{
     ExportDocument, ExportGrant, ExportGroup, ExportPeer, ExportSubject, EXPORT_VERSION,
 };
 use socketguard_core::{
-    normalize_credential, AddressMode, NewCredential, NewGrant, PortRef, Subject,
+    normalize_credential, AddressMode, NewCredential, NewGrant, Peer, PeerGroup, PortRef, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -25,10 +25,6 @@ pub async fn export(engine: &Engine, state: &AppState) -> Result<ExportDocument,
     let peer_label: HashMap<&str, &str> = peers
         .iter()
         .map(|p| (p.id.as_str(), p.label.as_str()))
-        .collect();
-    let group_label: HashMap<&str, &str> = groups
-        .iter()
-        .map(|g| (g.id.as_str(), g.label.as_str()))
         .collect();
 
     let mut out_peers: Vec<ExportPeer> = peers
@@ -84,16 +80,8 @@ pub async fn export(engine: &Engine, state: &AppState) -> Result<ExportDocument,
         let Some(name) = apps.get(&g.app_id) else {
             continue;
         };
-        let subject = match &g.subject {
-            Subject::Anyone => ExportSubject::Anyone,
-            Subject::Peer(id) => match peer_label.get(id.as_str()) {
-                Some(l) => ExportSubject::Peer(l.to_string()),
-                None => continue,
-            },
-            Subject::Group(id) => match group_label.get(id.as_str()) {
-                Some(l) => ExportSubject::Group(l.to_string()),
-                None => continue,
-            },
+        let Some(subject) = export_subject(&g.subject, &peers, &groups) else {
+            continue;
         };
         out_grants.push(ExportGrant {
             app: ExportAppRef {
@@ -117,6 +105,18 @@ pub async fn export(engine: &Engine, state: &AppState) -> Result<ExportDocument,
 }
 
 type GrantKey = (String, Option<PortRef>, Option<String>, (u8, String));
+
+/// A grant's subject as the document names it (by label); None when its peer or group is
+/// gone.
+fn export_subject(s: &Subject, peers: &[Peer], groups: &[PeerGroup]) -> Option<ExportSubject> {
+    Some(match s {
+        Subject::Anyone => ExportSubject::Anyone,
+        Subject::Peer(id) => ExportSubject::Peer(peers.iter().find(|p| p.id == *id)?.label.clone()),
+        Subject::Group(id) => {
+            ExportSubject::Group(groups.iter().find(|g| g.id == *id)?.label.clone())
+        }
+    })
+}
 
 fn subject_key(s: &ExportSubject) -> (u8, String) {
     match s {
@@ -167,10 +167,7 @@ async fn validate(
     let mut peer_labels = BTreeSet::new();
     let mut seen_creds = BTreeSet::new();
     for p in &mut doc.peers {
-        p.label = p.label.trim().to_string();
-        if p.label.is_empty() {
-            return invalid("peer label must not be empty");
-        }
+        p.label = Engine::clean_label(&p.label, "peer")?;
         if !peer_labels.insert(p.label.clone()) {
             return invalid(format!("peer {} is listed twice", p.label));
         }
@@ -186,10 +183,7 @@ async fn validate(
     }
     let mut group_labels = BTreeSet::new();
     for g in &mut doc.groups {
-        g.label = g.label.trim().to_string();
-        if g.label.is_empty() {
-            return invalid("group label must not be empty");
-        }
+        g.label = Engine::clean_label(&g.label, "group")?;
         if !group_labels.insert(g.label.clone()) {
             return invalid(format!("group {} is listed twice", g.label));
         }
@@ -216,11 +210,7 @@ async fn validate(
             ));
         };
         if let Some(p) = g.port {
-            if !app
-                .ports
-                .iter()
-                .any(|x| x.port == p.port && x.proto == p.proto)
-            {
+            if !app.has_port(p) {
                 return invalid(format!("{} has no port {p}", app.name));
             }
         }
@@ -506,22 +496,17 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
     let current_grants = engine.list_grants(state, GrantFilter::default()).await?;
     let peers = engine.list_peers(state).await?;
     let groups = engine.list_groups(state).await?;
-    let peer_label = |id: &str| peers.iter().find(|x| x.id == id).map(|x| x.label.clone());
-    let group_label = |id: &str| groups.iter().find(|x| x.id == id).map(|x| x.label.clone());
     for g in &p.delete_grants {
         let key = grant_key(g);
         let found = current_grants.iter().find(|v| {
-            let subject = match &v.grant.subject {
-                Subject::Anyone => (0, String::new()),
-                Subject::Peer(id) => (1, peer_label(id).unwrap_or_default()),
-                Subject::Group(id) => (2, group_label(id).unwrap_or_default()),
-            };
-            (
-                v.grant.app_id.clone(),
-                v.grant.port,
-                v.grant.network_id.clone(),
-                subject,
-            ) == key
+            export_subject(&v.grant.subject, &peers, &groups).is_some_and(|subject| {
+                (
+                    v.grant.app_id.clone(),
+                    v.grant.port,
+                    v.grant.network_id.clone(),
+                    subject_key(&subject),
+                ) == key
+            })
         });
         if let Some(v) = found {
             engine.delete_grant(state, &v.grant.id).await?;
@@ -630,10 +615,9 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
             .await
         {
             Ok(_) => {}
-            Err(ProtectHostError::Lockout(risks)) => {
+            Err(e @ ProtectHostError::Lockout(_)) => {
                 return Err(EngineError::Conflict(format!(
-                    "applied everything except whole-host protection, which would lock out remote administration: {}",
-                    risks.iter().map(|r| r.to_string()).collect::<Vec<_>>().join("; ")
+                    "applied everything except whole-host protection: {e}"
                 )));
             }
             Err(ProtectHostError::Invalid(msg)) => return Err(EngineError::Invalid(msg)),

@@ -3,6 +3,11 @@ name = "socketguard-daemon"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Mocks for the firewall, interfaces, monitor and networks, and a ready-made daemon. Enabled
+# for the daemon's own tests (below) and by other crates' tests; not part of the product.
+test-support = []
+
 [dependencies]
 socketguard-core = { workspace = true }
 tokio = { workspace = true }
@@ -38,6 +43,7 @@ sha3 = "0.10"
 base64 = "0.22"
 
 [dev-dependencies]
+socketguard-daemon = { path = ".", features = ["test-support"] }
 insta = { workspace = true }
 socketguard-client = { path = "../client" }
 tower = { version = "0.5", features = ["util"] }
