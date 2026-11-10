@@ -8,8 +8,8 @@
 use crate::firewall::{DesiredRuleset, Families, Rule, Scope, ScopeKind, ScopeMatch, Sources};
 use ipnet::IpNet;
 use socketguard_core::{
-    app_identity, credential_source, valid_interface_name, App, Credential, Grant, ListeningSocket,
-    Network, NetworkKind, Peer, PeerGroup, PortRef, PortSet, Protocol, Subject,
+    app_identity, credential_source, valid_interface_name, App, AppPort, Credential, Grant,
+    ListeningSocket, Network, NetworkKind, Peer, PeerGroup, PortRef, PortSet, Protocol, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
@@ -53,10 +53,7 @@ pub(crate) fn served_ports(app: &App, address: &socketguard_core::Address) -> BT
                 .collect();
             app.ports
                 .iter()
-                .map(|p| PortRef {
-                    port: p.port,
-                    proto: p.proto,
-                })
+                .map(AppPort::port_ref)
                 .filter(|p| !claimed.contains(p))
                 .collect()
         }

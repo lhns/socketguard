@@ -28,7 +28,7 @@ use crate::ruleset::LockoutRisk;
 use crate::state::{Database, NewActivity};
 use crate::AppState;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
-use socketguard_core::{App, AppId, CredentialError, Network, PortRef, Protocol};
+use socketguard_core::{AppId, CredentialError, Network, PortRef, Protocol};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, AtomicU32};
@@ -355,7 +355,7 @@ impl Engine {
         if !db.fresh().await.unwrap_or(false) {
             return;
         }
-        if !db.disabled().await.unwrap_or(false) {
+        if !db.disabled().await {
             let fw = self.firewall.clone();
             match tokio::task::spawn_blocking(move || fw.verify()).await {
                 Ok(Ok(true)) => match db.set_unadopted(true).await {
@@ -460,22 +460,6 @@ impl Engine {
             self.emit(state, DaemonEvent::AppsChanged);
         }
         Ok(())
-    }
-}
-
-trait AppPortsExt {
-    fn ports_refs(&self) -> Vec<PortRef>;
-}
-
-impl AppPortsExt for App {
-    fn ports_refs(&self) -> Vec<PortRef> {
-        self.ports
-            .iter()
-            .map(|p| PortRef {
-                port: p.port,
-                proto: p.proto,
-            })
-            .collect()
     }
 }
 

@@ -1244,7 +1244,7 @@ async fn disabled_stays_off_across_reconciles_and_startup_until_enabled() {
     let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
     h.engine().await.disable(&h.state).await.unwrap();
-    assert!(h.state.db.disabled().await.unwrap());
+    assert!(h.state.db.disabled().await);
     h.clear_calls();
 
     // New apps are still tracked, but nothing is applied or added.
@@ -1260,7 +1260,7 @@ async fn disabled_stays_off_across_reconciles_and_startup_until_enabled() {
     assert!(net_adds(&h).is_empty());
 
     h.engine().await.enable(&h.state).await.unwrap();
-    assert!(!h.state.db.disabled().await.unwrap());
+    assert!(!h.state.db.disabled().await);
     assert_eq!(applied(&h.fw_calls).len(), 1);
     assert_eq!(net_adds(&h).len(), 2);
 }
@@ -2022,7 +2022,7 @@ async fn disable_removes_owned_addresses_and_keeps_rows_until_confirmed() {
     assert_eq!(owned.len(), 1);
     assert!(owned[0].retiring);
     // The address is still on its interface, so it stays denied: the rules stay.
-    assert!(h.state.db.disabled().await.unwrap(), "the latch stays set");
+    assert!(h.state.db.disabled().await, "the latch stays set");
     assert!(
         !h.fw_calls.lock().unwrap().contains(&FirewallCall::Disable),
         "rules must stay while an address does"

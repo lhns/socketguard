@@ -7,7 +7,7 @@ use crate::state::NewActivity;
 use crate::AppState;
 use chrono::Utc;
 use socketguard_core::config::ProcessFilter;
-use socketguard_core::{app_identity, ActivityKind, App, AppId, AppIdentity, PortRef};
+use socketguard_core::{app_identity, ActivityKind, App, AppId, AppIdentity, AppPort, PortRef};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
 use tracing::info;
@@ -118,10 +118,7 @@ impl Engine {
                     a.ports
                         .iter()
                         .filter(|p| p.listening)
-                        .map(|p| PortRef {
-                            port: p.port,
-                            proto: p.proto,
-                        })
+                        .map(AppPort::port_ref)
                         .collect()
                 })
                 .unwrap_or_default();

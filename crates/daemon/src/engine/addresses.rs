@@ -11,7 +11,7 @@ use crate::state::{Database, OwnedAddress};
 use crate::AppState;
 use chrono::Utc;
 use socketguard_core::{
-    new_id, Address, AddressId, AddressMode, Locator, PortRef, PortSet, Protocol,
+    new_id, Address, AddressId, AddressMode, AppPort, Locator, PortRef, PortSet, Protocol,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
@@ -54,7 +54,7 @@ impl Engine {
         };
         let referenced: HashSet<Ipv6Addr> =
             addresses.iter().filter_map(|a| a.locator.ipv6()).collect();
-        let disabled = db.disabled().await.unwrap_or(false);
+        let disabled = db.disabled().await;
         let due: Vec<OwnedAddress> = owned
             .into_iter()
             .filter(|o| !referenced.contains(&o.addr) || (disabled && o.retiring))
@@ -156,7 +156,7 @@ impl Engine {
                     .iter()
                     .filter(|a| a.network_id == *nid)
                     .collect();
-                let mut app_ports = app.ports_refs();
+                let mut app_ports: Vec<PortRef> = app.ports.iter().map(AppPort::port_ref).collect();
                 if !active.network.capabilities().udp {
                     app_ports.retain(|p| p.proto == Protocol::Tcp);
                     if app_ports.is_empty() {
@@ -279,7 +279,7 @@ impl Engine {
         // one the ensure-present pass adds them after the next successful apply. Disabled:
         // the apply was a no-op, and nothing may put addresses back.
         let _ = self.apply_firewall(state).await;
-        if !state.db.disabled().await.unwrap_or(false) {
+        if !state.db.disabled().await {
             for (iface, network_id, new) in moves {
                 self.add_to_interface(state, &iface, &network_id, new).await;
             }
@@ -294,7 +294,7 @@ impl Engine {
     /// last applied successfully denies it: otherwise it would be exposed.
     pub(super) async fn ensure_addresses_present(&self, state: &AppState) {
         self.sweep_owned(state).await;
-        if state.db.disabled().await.unwrap_or(false) {
+        if state.db.disabled().await {
             return;
         }
         let mut expected: HashMap<String, Vec<(Ipv6Addr, String)>> = HashMap::new();
@@ -389,11 +389,7 @@ impl Engine {
             .backends
             .get(network_id)
             .ok_or_else(|| EngineError::NotFound(format!("network {network_id}")))?;
-        if !app
-            .ports
-            .iter()
-            .any(|p| p.port == port.port && p.proto == port.proto)
-        {
+        if !app.has_port(port) {
             return Err(EngineError::Invalid(format!(
                 "{} has no port {port}",
                 app.name
@@ -654,6 +650,7 @@ fn locator_text(l: &Locator) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use socketguard_core::App;
 
     fn p(port: u16) -> PortRef {
         PortRef {

@@ -216,11 +216,7 @@ async fn validate(
             ));
         };
         if let Some(p) = g.port {
-            if !app
-                .ports
-                .iter()
-                .any(|x| x.port == p.port && x.proto == p.proto)
-            {
+            if !app.has_port(p) {
                 return invalid(format!("{} has no port {p}", app.name));
             }
         }

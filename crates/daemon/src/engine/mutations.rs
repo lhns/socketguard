@@ -386,11 +386,7 @@ impl Engine {
             }
         }
         if let Some(p) = req.port {
-            if !app
-                .ports
-                .iter()
-                .any(|x| x.port == p.port && x.proto == p.proto)
-            {
+            if !app.has_port(p) {
                 return Err(EngineError::Invalid(format!(
                     "{} has no port {p}",
                     app.name

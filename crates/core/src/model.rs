@@ -61,6 +61,22 @@ pub struct PortRef {
     pub proto: Protocol,
 }
 
+impl AppPort {
+    pub fn port_ref(&self) -> PortRef {
+        PortRef {
+            port: self.port,
+            proto: self.proto,
+        }
+    }
+}
+
+impl App {
+    /// Whether the app has `port`, listening or not.
+    pub fn has_port(&self, port: PortRef) -> bool {
+        self.ports.iter().any(|p| p.port_ref() == port)
+    }
+}
+
 impl std::fmt::Display for PortRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.port, self.proto)

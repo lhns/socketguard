@@ -33,7 +33,7 @@ impl Engine {
         // While disabled nothing is wanted, so every owned service is removed and the
         // removal keeps being retried (e.g. Tor was down when `disable` ran). An unreadable
         // latch counts as disabled: failing closed means unpublished.
-        let disabled = state.db.disabled().await.unwrap_or(true);
+        let disabled = state.db.disabled().await;
         let prepared = async {
             let snapshot = self.gather_snapshot(state).await?;
             let secrets = state.db.onion_keys().await?;

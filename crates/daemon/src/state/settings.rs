@@ -68,33 +68,48 @@ impl Database {
             .await
     }
 
+    /// A boolean setting; absent means false.
+    async fn flag(&self, key: &str) -> Result<bool> {
+        Ok(self.get_setting(key).await?.as_deref() == Some("true"))
+    }
+
+    async fn set_flag(&self, key: &str, value: bool) -> Result<()> {
+        self.set_setting(key, if value { "true" } else { "false" })
+            .await
+    }
+
     /// Whether enforcement is switched off (see [`DISABLED_KEY`]).
-    pub async fn disabled(&self) -> Result<bool> {
-        Ok(self.get_setting(DISABLED_KEY).await?.as_deref() == Some("true"))
+    ///
+    /// This is the one place that decides what an unreadable latch means: it fails closed,
+    /// so a read error counts as disabled and the daemon adds and publishes nothing on a
+    /// guess. Callers therefore get a plain `bool`.
+    pub async fn disabled(&self) -> bool {
+        self.flag(DISABLED_KEY).await.unwrap_or_else(|e| {
+            warn!("Cannot read the disabled latch, treating it as set: {e:#}");
+            true
+        })
     }
 
     pub async fn set_disabled(&self, disabled: bool) -> Result<()> {
-        self.set_setting(DISABLED_KEY, if disabled { "true" } else { "false" })
-            .await
+        self.set_flag(DISABLED_KEY, disabled).await
     }
 
     /// Whether this database was created by the current start and nothing has adopted it.
     pub async fn fresh(&self) -> Result<bool> {
-        Ok(self.get_setting(FRESH_DB_KEY).await?.as_deref() == Some("true"))
+        self.flag(FRESH_DB_KEY).await
     }
 
     pub async fn clear_fresh(&self) -> Result<()> {
-        self.set_setting(FRESH_DB_KEY, "false").await
+        self.set_flag(FRESH_DB_KEY, false).await
     }
 
     /// Whether an existing ruleset was found with an empty database (see [`UNADOPTED_KEY`]).
     pub async fn unadopted(&self) -> Result<bool> {
-        Ok(self.get_setting(UNADOPTED_KEY).await?.as_deref() == Some("true"))
+        self.flag(UNADOPTED_KEY).await
     }
 
     pub async fn set_unadopted(&self, unadopted: bool) -> Result<()> {
-        self.set_setting(UNADOPTED_KEY, if unadopted { "true" } else { "false" })
-            .await
+        self.set_flag(UNADOPTED_KEY, unadopted).await
     }
 
     pub async fn address_mode(&self) -> Result<AddressMode> {

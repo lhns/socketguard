@@ -357,7 +357,7 @@ async fn status(State(state): State<Shared>) -> ApiResult<Json<StatusResponse>> 
         version: env!("CARGO_PKG_VERSION").to_string(),
         networks: engine.networks(),
         protect_host_interfaces: engine.settings(&state).await?.protect_host_interfaces,
-        disabled: state.db.disabled().await?,
+        disabled: state.db.disabled().await,
         unadopted: state.db.unadopted().await?,
         counts: Counts {
             apps: apps.len() as u32,

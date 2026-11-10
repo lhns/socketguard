@@ -45,7 +45,7 @@ impl Engine {
         state: &AppState,
         only_if_changed: bool,
     ) -> anyhow::Result<()> {
-        if state.db.disabled().await? || state.db.unadopted().await? {
+        if state.db.disabled().await || state.db.unadopted().await? {
             return Ok(());
         }
         let snapshot = self.gather_snapshot(state).await?;
