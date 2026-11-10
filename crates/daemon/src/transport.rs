@@ -33,8 +33,14 @@ pub fn bind(config: &DaemonConfig) -> anyhow::Result<Server> {
     }
     #[cfg(windows)]
     {
-        let sddl = platform::pipe_sddl(platform::group_sid(WINDOWS_GROUP).as_deref());
-        bind_pipe(&config.api_pipe, &sddl)
+        let group = platform::group_sid(WINDOWS_GROUP);
+        if group.is_none() {
+            warn!(
+                "Local group '{WINDOWS_GROUP}' does not exist: only SYSTEM and Administrators can \
+                 use the API pipe. Create it with: net localgroup \"{WINDOWS_GROUP}\" /add"
+            );
+        }
+        bind_pipe(&config.api_pipe, &platform::pipe_sddl(group.as_deref()))
     }
 }
 
@@ -156,12 +162,6 @@ pub fn peer_allowed(
 /// instance is created here, so clients can connect as soon as this returns.
 #[cfg(windows)]
 pub fn bind_pipe(name: &str, sddl: &str) -> anyhow::Result<Server> {
-    if platform::group_sid(WINDOWS_GROUP).is_none() {
-        warn!(
-            "Local group '{WINDOWS_GROUP}' does not exist: only SYSTEM and Administrators can \
-             use the API pipe. Create it with: net localgroup \"{WINDOWS_GROUP}\" /add"
-        );
-    }
     let listener = platform::Listener::bind(name, sddl)?;
     info!("API pipe {name}");
     Ok(Server { listener })
