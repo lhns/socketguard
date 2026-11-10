@@ -183,6 +183,17 @@ fn set_status(current: &mut NetworkStatus, new: NetworkStatus) {
     *current = new;
 }
 
+/// Whether exactly the desired services are applied.
+fn in_sync(
+    desired: &BTreeMap<String, ServiceSpec>,
+    applied: &HashMap<String, ServiceSpec>,
+) -> bool {
+    desired.len() == applied.len()
+        && desired
+            .iter()
+            .all(|(id, spec)| applied.get(id) == Some(spec))
+}
+
 pub struct TorNetwork {
     endpoint: Endpoint,
     opts: AuthOptions,
@@ -303,11 +314,7 @@ impl Network for TorNetwork {
                 || !matches!(st.status, NetworkStatus::Up);
             (st.applied.clone(), due)
         };
-        let same: bool = applied.len() == desired.len()
-            && desired
-                .iter()
-                .all(|(id, spec)| applied.get(id) == Some(spec));
-        if same && !due && stale.is_empty() {
+        if in_sync(&desired, &applied) && !due && stale.is_empty() {
             return Ok(());
         }
 
@@ -318,7 +325,8 @@ impl Network for TorNetwork {
         let mut removed: BTreeSet<String> = BTreeSet::new();
 
         // Closed first: anything of ours that should not be published goes.
-        for id in ours.iter().chain(applied.keys()).chain(&stale) {
+        let closing: BTreeSet<&String> = ours.iter().chain(applied.keys()).chain(&stale).collect();
+        for id in closing {
             if desired.contains_key(id) || !(live.contains(id) || applied.contains_key(id)) {
                 continue;
             }
@@ -394,12 +402,7 @@ impl Network for TorNetwork {
 
     fn pending(&self) -> bool {
         let st = self.state.lock().unwrap();
-        let synced = st.desired.len() == st.applied.len()
-            && st
-                .desired
-                .iter()
-                .all(|(id, spec)| st.applied.get(id) == Some(spec));
-        !synced || !st.unremoved.is_empty()
+        !in_sync(&st.desired, &st.applied) || !st.unremoved.is_empty()
     }
 
     fn disable(&self, addresses: &[Address]) -> Result<()> {
@@ -731,6 +734,25 @@ mod tests {
         n.enforce(&enforcement(vec![address(&[8080], vec![])]))
             .unwrap();
         assert!(mock.detached().is_empty());
+    }
+
+    #[test]
+    fn a_revoked_service_is_deleted_once() {
+        let mock = MockTorControl::start();
+        let n = net(&mock, CHECK_INTERVAL);
+        let keyed = address(&[8080], vec![grant(None, creds(&[KEY_A]))]);
+        n.enforce(&enforcement(vec![keyed])).unwrap();
+
+        // The id is in the address list, applied and owned: still one DEL_ONION.
+        let mut revoked = enforcement(vec![address(&[8080], vec![])]);
+        revoked.owned = ["svc1".to_string()].into();
+        n.enforce(&revoked).unwrap();
+        let dels = mock
+            .commands()
+            .iter()
+            .filter(|c| c.starts_with("DEL_ONION"))
+            .count();
+        assert_eq!(dels, 1);
     }
 
     #[test]

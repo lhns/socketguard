@@ -8,9 +8,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-/// DHCPv6 client port (reserved, but we use ephemeral port to avoid conflicts)
-#[allow(dead_code)]
-const DHCPV6_CLIENT_PORT: u16 = 546;
 /// DHCPv6 server port
 const DHCPV6_SERVER_PORT: u16 = 547;
 /// All DHCPv6 relay agents and servers multicast address
@@ -21,7 +18,6 @@ const MSG_SOLICIT: u8 = 1;
 const MSG_ADVERTISE: u8 = 2;
 const MSG_REQUEST: u8 = 3;
 const MSG_REPLY: u8 = 7;
-#[allow(dead_code)]
 const MSG_RELEASE: u8 = 8;
 
 // DHCPv6 option types
@@ -41,7 +37,6 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// DHCPv6 backend: requests addresses from a DHCPv6 server on the network.
 pub struct Dhcpv6Backend {
-    #[allow(dead_code)]
     interface: String,
     /// Resolved on first use, so a missing interface is a runtime condition.
     interface_index: Mutex<Option<u32>>,
@@ -54,7 +49,6 @@ pub struct Dhcpv6Backend {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 struct Lease {
     address: Ipv6Addr,
     server_duid: Vec<u8>,
@@ -93,7 +87,7 @@ impl Dhcpv6Backend {
     }
 
     /// Perform a full DHCPv6 Solicit -> Advertise -> Request -> Reply exchange
-    fn request_address(&self) -> Result<(Ipv6Addr, Vec<u8>)> {
+    fn request_address(&self) -> Result<Ipv6Addr> {
         let interface_index = self.interface_index()?;
         let socket = self.create_socket()?;
         let mut rng = rand::thread_rng();
@@ -121,12 +115,13 @@ impl Dhcpv6Backend {
 
             match self.recv_response(&socket, &xid, MSG_ADVERTISE) {
                 Ok(response) => {
-                    server_duid = parse_server_duid(&response)?;
-                    offered_addr = parse_ia_address(&response);
-                    if offered_addr.is_some() {
+                    if let Some((duid, addr)) = parse_advertise(&response) {
+                        server_duid = duid;
+                        offered_addr = Some(addr);
                         break;
                     }
-                    warn!("DHCPv6 Advertise contained no address");
+                    // Try again: another server may answer the next Solicit.
+                    warn!("DHCPv6 Advertise lacked a server id or an address");
                 }
                 Err(e) => {
                     debug!("No Advertise received: {e}");
@@ -158,7 +153,7 @@ impl Dhcpv6Backend {
                             iaid,
                         };
                         self.leases.lock().unwrap().insert(iaid, lease);
-                        return Ok((addr, server_duid));
+                        return Ok(addr);
                     }
                 }
                 Err(e) => {
@@ -318,7 +313,7 @@ impl Ipv6Backend for Dhcpv6Backend {
     }
 
     fn allocate(&self, _iid: Option<u64>) -> Result<AllocatedAddress> {
-        let (address, _server_duid) = self.request_address()?;
+        let address = self.request_address()?;
 
         Ok(AllocatedAddress {
             address,
@@ -369,6 +364,14 @@ fn build_ia_na(iaid: u32, addr: Option<Ipv6Addr>) -> Vec<u8> {
     }
 
     data
+}
+
+/// The server id and offered address of an Advertise; None if either is missing.
+fn parse_advertise(response: &[u8]) -> Option<(Vec<u8>, Ipv6Addr)> {
+    Some((
+        parse_server_duid(response).ok()?,
+        parse_ia_address(response)?,
+    ))
 }
 
 /// Parse Server DUID from a DHCPv6 response
@@ -558,5 +561,15 @@ mod tests {
 
         let parsed = parse_server_duid(&msg).unwrap();
         assert_eq!(parsed, server_duid);
+    }
+
+    #[test]
+    fn an_advertise_needs_both_server_id_and_address() {
+        let addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let mut msg = vec![MSG_ADVERTISE, 0, 0, 0];
+        append_option(&mut msg, OPT_IA_NA, &build_ia_na(1, Some(addr)));
+        assert_eq!(parse_advertise(&msg), None, "no server id");
+        append_option(&mut msg, OPT_SERVERID, &[0, 1, 2]);
+        assert_eq!(parse_advertise(&msg), Some((vec![0, 1, 2], addr)));
     }
 }
