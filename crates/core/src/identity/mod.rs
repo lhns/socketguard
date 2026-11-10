@@ -250,10 +250,6 @@ mod tests {
         target_of(host, &args(a))
     }
 
-    fn script(v: &str) -> Target {
-        Target::Arg("script", v.into())
-    }
-
     #[test]
     fn plain_binary_uses_the_process_name() {
         let a = ident("/usr/sbin/nginx", &["nginx", "-g", "daemon off;"]);

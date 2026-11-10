@@ -66,7 +66,7 @@ fn is_false(b: &bool) -> bool {
 
 /// How the daemon authenticates to the Tor control port.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TorAuth {
     /// SAFECOOKIE: the cookie file named by PROTOCOLINFO proves who we talk to and is
@@ -80,6 +80,18 @@ pub enum TorAuth {
     Password(String),
     /// No authentication; accepted on a Unix control socket only.
     None,
+}
+
+/// `Debug` hides the password, so a config in a log line or a panic message never leaks it.
+impl std::fmt::Debug for TorAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TorAuth::Cookie => f.write_str("Cookie"),
+            TorAuth::CookieInsecure => f.write_str("CookieInsecure"),
+            TorAuth::Password(_) => f.write_str("Password(<redacted>)"),
+            TorAuth::None => f.write_str("None"),
+        }
+    }
 }
 
 impl BackendConfig {
@@ -231,7 +243,8 @@ impl ProcessFilter {
     }
 }
 
-/// Simple case-insensitive wildcard glob matcher supporting `*`.
+/// Simple case-insensitive wildcard glob matcher: `*` matches any run of characters
+/// (also none), `?` exactly one.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     let pattern = pattern.to_lowercase();
     let text = text.to_lowercase();
@@ -266,10 +279,11 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 
 /// Daemon configuration
 ///
-/// Supports three JSON formats:
+/// Supports two JSON formats:
 /// - Multi-backend: `{ "backends": [{ "id": "ula", "type": "ula" }, ...] }`
 /// - Single backend (object): `{ "backend": { "type": "slaac", "interface": "Ethernet" }, ... }`
-/// - Legacy: `{ "backend": "ula", "interface": "lo", ... }`
+///
+/// With neither, one ULA backend on the loopback interface.
 #[derive(Debug, Clone, Serialize)]
 pub struct DaemonConfig {
     /// Unix socket of the local API (ADR 0032). Ignored on Windows.
@@ -306,21 +320,15 @@ impl Default for DaemonConfig {
                 id,
                 backend: default_backend,
             }],
-            poll_interval_secs: 2,
-            db_path: "socketguard.db".to_string(),
-            log_level: "info".to_string(),
+            poll_interval_secs: default_poll_interval(),
+            db_path: default_db_path(),
+            log_level: default_log_level(),
             process_filter: ProcessFilter::default(),
         }
     }
 }
 
 impl DaemonConfig {
-    /// Convenience: get the first (primary) backend config, if any.
-    /// Used for backwards compat in places that expected a single backend.
-    pub fn primary_backend(&self) -> Option<&BackendInstanceConfig> {
-        self.backends.first()
-    }
-
     /// Validate the backends list.
     pub fn validate_backends(backends: &[BackendInstanceConfig]) -> Result<(), String> {
         let mut ids = HashSet::new();
@@ -388,7 +396,7 @@ pub fn valid_interface_name(name: &str) -> bool {
 }
 
 /// Default Tor control port.
-pub const DEFAULT_TOR_CONTROL: &str = "127.0.0.1:9051";
+const DEFAULT_TOR_CONTROL: &str = "127.0.0.1:9051";
 
 fn default_tor_control() -> String {
     DEFAULT_TOR_CONTROL.to_string()
@@ -404,37 +412,7 @@ fn default_loopback() -> String {
     }
 }
 
-/// Helper: parse a single BackendConfig from legacy or object format
-fn parse_single_backend(
-    backend_val: serde_json::Value,
-    interface: Option<String>,
-) -> Result<BackendConfig, String> {
-    if backend_val.is_object() {
-        serde_json::from_value(backend_val).map_err(|e| e.to_string())
-    } else if backend_val.is_string() {
-        let backend_str = backend_val.as_str().unwrap();
-        let iface = interface.unwrap_or_else(default_loopback);
-        match backend_str {
-            "ula" => Ok(BackendConfig::Ula { interface: iface }),
-            "yggdrasil" => Ok(BackendConfig::Yggdrasil {
-                interface: iface,
-                admin_endpoint: None,
-            }),
-            "slaac" => Ok(BackendConfig::Slaac {
-                interface: iface,
-                prefix: None,
-            }),
-            "dhcpv6" => Ok(BackendConfig::Dhcpv6 { interface: iface }),
-            "tor" => Ok(BackendConfig::default_tor()),
-            other => Err(format!("invalid backend: {other}")),
-        }
-    } else {
-        let iface = interface.unwrap_or_else(default_loopback);
-        Ok(BackendConfig::Ula { interface: iface })
-    }
-}
-
-/// Custom deserializer that handles legacy, single-backend, and multi-backend formats
+/// Custom deserializer: the multi-backend and the single-backend format, validated.
 impl<'de> Deserialize<'de> for DaemonConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -448,13 +426,10 @@ impl<'de> Deserialize<'de> for DaemonConfig {
             api_pipe: String,
             // Multi-backend format: array of backend instances
             #[serde(default)]
-            backends: Option<Vec<serde_json::Value>>,
-            // Single-backend format: backend is an object or string
+            backends: Option<Vec<BackendInstanceConfig>>,
+            // Single-backend format
             #[serde(default)]
-            backend: serde_json::Value,
-            // Legacy format: separate interface field
-            #[serde(default)]
-            interface: Option<String>,
+            backend: Option<BackendConfig>,
             #[serde(default = "default_poll_interval")]
             poll_interval_secs: u64,
             #[serde(default = "default_db_path")]
@@ -467,21 +442,14 @@ impl<'de> Deserialize<'de> for DaemonConfig {
 
         let raw = RawConfig::deserialize(deserializer)?;
 
-        let backends = if let Some(backends_arr) = raw.backends {
-            // Multi-backend format: "backends": [{ "id": "...", "type": "...", ... }, ...]
-            let mut result = Vec::new();
-            for val in backends_arr {
-                let inst: BackendInstanceConfig =
-                    serde_json::from_value(val).map_err(serde::de::Error::custom)?;
-                result.push(inst);
+        let backends = match raw.backends {
+            Some(backends) => backends,
+            None => {
+                // One backend, or none given: the default.
+                let backend = raw.backend.unwrap_or_default();
+                let id = backend.default_id();
+                vec![BackendInstanceConfig { id, backend }]
             }
-            result
-        } else {
-            // Single backend (object or string) or empty → wrap in vec
-            let backend = parse_single_backend(raw.backend, raw.interface)
-                .map_err(serde::de::Error::custom)?;
-            let id = backend.default_id();
-            vec![BackendInstanceConfig { id, backend }]
         };
 
         DaemonConfig::validate_backends(&backends).map_err(serde::de::Error::custom)?;
@@ -600,18 +568,9 @@ mod tests {
     }
 
     #[test]
-    fn config_deserialize_legacy_format() {
+    fn the_legacy_string_backend_format_is_rejected() {
         let json = r#"{"backend": "yggdrasil", "interface": "tun0"}"#;
-        let config: DaemonConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.backends.len(), 1);
-        assert_eq!(
-            config.backends[0].backend.backend_type(),
-            BackendType::Yggdrasil
-        );
-        assert_eq!(config.backends[0].backend.interface(), Some("tun0"));
-        assert_eq!(config.backends[0].id, "yggdrasil");
-        assert_eq!(config.api_socket, DEFAULT_API_SOCKET);
-        assert_eq!(config.api_pipe, DEFAULT_API_PIPE);
+        assert!(serde_json::from_str::<DaemonConfig>(json).is_err());
     }
 
     #[test]
@@ -841,6 +800,25 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn the_tor_password_is_not_debug_printed() {
+        let auth = TorAuth::Password("hunter2".into());
+        assert!(!format!("{auth:?}").contains("hunter2"));
+        let inst = BackendInstanceConfig {
+            id: "tor".into(),
+            backend: BackendConfig::Tor {
+                control: DEFAULT_TOR_CONTROL.into(),
+                auth,
+                cookie_path: None,
+                cookie_dir: None,
+                expect_tor_uid: None,
+                cookie_owner: None,
+                allow_remote_control: false,
+            },
+        };
+        assert!(!format!("{inst:?}").contains("hunter2"));
     }
 
     #[test]

@@ -7,7 +7,7 @@ pub mod reach;
 pub mod types;
 pub mod yggdrasil;
 
-pub use config::{valid_interface_name, BackendConfig, ProcessFilter, MAX_INTERFACE_NAME};
+pub use config::{valid_interface_name, BackendConfig, ProcessFilter};
 pub use credential::*;
 pub use identity::*;
 pub use model::*;
