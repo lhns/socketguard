@@ -126,13 +126,6 @@ async fn disable(config: &DaemonConfig) -> Result<()> {
         .iter()
         .filter_map(|b| Some((b.id.clone(), b.backend.interface()?.to_string())))
         .collect();
-    engine::disable_all(
-        &db,
-        &interfaces,
-        Arc::from(firewall::create_firewall()),
-        Arc::from(network::create_network_interface()),
-    )
-    .await?;
     let mut nets = Vec::new();
     for b in &config.backends {
         // Networks without an interface (Tor) hold services outside the firewall.
@@ -147,7 +140,14 @@ async fn disable(config: &DaemonConfig) -> Result<()> {
             ));
         }
     }
-    engine::disable_networks(&db, nets).await;
+    engine::disable_everything(
+        &db,
+        &interfaces,
+        nets,
+        Arc::from(firewall::create_firewall()),
+        Arc::from(network::create_network_interface()),
+    )
+    .await?;
     eprintln!("[socketguard] Firewall rules, addresses and onion services removed");
     Ok(())
 }

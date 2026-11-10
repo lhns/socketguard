@@ -556,7 +556,7 @@ pub fn plan_addresses(mode: AddressMode, ports: &[PortRef], existing: &[&Address
 /// in the DB. Needs only the database and the network-to-interface map, so `--disable`
 /// works without an engine.
 /// Addresses of a network that is no longer configured cannot be located and are left.
-pub async fn disable_all(
+pub(super) async fn disable_all(
     db: &Database,
     interfaces: &HashMap<String, String>,
     firewall: Arc<dyn Firewall>,

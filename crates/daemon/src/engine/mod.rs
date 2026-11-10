@@ -14,8 +14,9 @@ mod firewall;
 mod mutations;
 mod queries;
 
-pub use addresses::{disable_all, plan_addresses};
-pub use enforce::disable_networks;
+use addresses::disable_all;
+pub use addresses::plan_addresses;
+use enforce::disable_networks;
 
 use crate::api::DaemonEvent;
 use crate::backend::Ipv6Backend;
@@ -25,7 +26,7 @@ use crate::monitor::{self, SocketMonitor};
 use crate::network::{self, NetworkInterface};
 use crate::networks::{self, IpNetwork};
 use crate::ruleset::LockoutRisk;
-use crate::state::NewActivity;
+use crate::state::{Database, NewActivity};
 use crate::AppState;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
 use socketguard_core::{App, AppId, CredentialError, Network, PortRef, Protocol};
@@ -383,19 +384,19 @@ impl Engine {
             .iter()
             .filter_map(|(id, b)| Some((id.clone(), b.config.backend.interface()?.to_string())))
             .collect();
-        let removed = disable_all(
-            &state.db,
-            &ifaces,
-            self.firewall.clone(),
-            self.network.clone(),
-        )
-        .await;
         let nets = self
             .backends
             .iter()
             .map(|(id, b)| (id.clone(), b.network.clone()))
             .collect();
-        disable_networks(&state.db, nets).await;
+        let removed = disable_everything(
+            &state.db,
+            &ifaces,
+            nets,
+            self.firewall.clone(),
+            self.network.clone(),
+        )
+        .await;
         self.emit(state, DaemonEvent::SettingsChanged);
         removed
     }
@@ -475,6 +476,23 @@ impl AppPortsExt for App {
     }
 }
 
+/// The teardown behind `disable`, for the engine and for `--disable` (which has no engine):
+/// set the latch and take the addresses and the firewall rules away ([`disable_all`]), then
+/// the services of the networks outside the firewall ([`disable_networks`]). The second
+/// step runs even when the first fails, so a stuck address never leaves services published;
+/// the first error is returned.
+pub async fn disable_everything(
+    db: &Database,
+    interfaces: &HashMap<String, String>,
+    networks: Vec<(String, Arc<dyn networks::Network>)>,
+    firewall: Arc<dyn Firewall>,
+    network: Arc<dyn NetworkInterface>,
+) -> anyhow::Result<()> {
+    let removed = disable_all(db, interfaces, firewall, network).await;
+    disable_networks(db, networks).await;
+    removed
+}
+
 /// Run the reconciliation loop with shutdown support.
 pub async fn run_loop(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) {
     loop {
@@ -497,5 +515,72 @@ pub async fn run_loop(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>)
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::networks::{Capabilities, LocatorRequest, NetworkEnforcement, NewLocator};
+    use crate::test_support::*;
+    use socketguard_core::{Address, NetworkKind, NetworkStatus};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A network outside the firewall that counts how often it was told to disable.
+    #[derive(Default)]
+    struct CountingNetwork(AtomicUsize);
+
+    impl networks::Network for CountingNetwork {
+        fn kind(&self) -> NetworkKind {
+            NetworkKind::Tor
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                ip_locators: false,
+                verifies: &[],
+                grants_apply: true,
+                udp: false,
+            }
+        }
+        fn status(&self) -> (NetworkStatus, Option<Ipv6Addr>) {
+            (NetworkStatus::Up, None)
+        }
+        fn ensure_locator(&self, _: &LocatorRequest) -> anyhow::Result<NewLocator> {
+            unimplemented!()
+        }
+        fn remove_locator(&self, _: &Address) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn enforce(&self, _: &NetworkEnforcement) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn disable(&self, _: &[Address]) -> anyhow::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn disable_everything_tears_down_networks_even_when_an_address_stays() {
+        let db = Database::new(":memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let addr: Ipv6Addr = "fd00::1".parse().unwrap();
+        db.claim_address(addr, "lo", Some("local")).await.unwrap();
+        let net = MockNetworkInterface::new(Arc::new(Mutex::new(vec![])));
+        net.plant_address("lo", addr);
+        net.set_remove_failing(true);
+        let tor = Arc::new(CountingNetwork::default());
+
+        let result = disable_everything(
+            &db,
+            &HashMap::from([("local".to_string(), "lo".to_string())]),
+            vec![("tor".to_string(), tor.clone())],
+            Arc::new(MockFirewall::new(Arc::new(Mutex::new(vec![])))),
+            Arc::new(net),
+        )
+        .await;
+
+        assert!(result.is_err(), "the stuck address is reported");
+        assert_eq!(tor.0.load(Ordering::SeqCst), 1, "the services still leave");
     }
 }

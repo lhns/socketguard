@@ -227,9 +227,9 @@ impl Engine {
                 .await
             {
                 Ok(passed) => swept = Some(passed),
-                Err(e) if force => warn!(
-                    "Removing network '{id}' although its services were not removed: {e:#}"
-                ),
+                Err(e) if force => {
+                    warn!("Removing network '{id}' although its services were not removed: {e:#}")
+                }
                 Err(e) => {
                     return Err(EngineError::Conflict(format!(
                         "Tor services are still being removed; retry when Tor is reachable, or \
@@ -410,7 +410,10 @@ impl Engine {
 /// Take everything of ours off the networks that are not IP networks (the onion services
 /// leave Tor), for the `disable` latch. A network that cannot be reached is logged; its
 /// services stay until it is back and the latch is still set (enforcement is suspended).
-pub async fn disable_networks(db: &Database, networks: Vec<(String, Arc<dyn networks::Network>)>) {
+pub(super) async fn disable_networks(
+    db: &Database,
+    networks: Vec<(String, Arc<dyn networks::Network>)>,
+) {
     let addresses = match db.list_addresses().await {
         Ok(a) => a,
         Err(e) => {
