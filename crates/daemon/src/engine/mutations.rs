@@ -20,7 +20,8 @@ impl Engine {
         mode: AddressMode,
     ) -> Result<(), EngineError> {
         state.db.set_address_mode(mode).await?;
-        self.emit(state, DaemonEvent::SettingsChanged);
+        self.commit(state, Ok(()), None, &[DaemonEvent::SettingsChanged])
+            .await?;
         Ok(())
     }
 
@@ -34,7 +35,8 @@ impl Engine {
         if !state.db.set_reviewed(id, reviewed).await? {
             return Err(EngineError::NotFound(format!("app {id}")));
         }
-        self.emit(state, DaemonEvent::AppsChanged);
+        self.commit(state, Ok(()), None, &[DaemonEvent::AppsChanged])
+            .await?;
         Ok(())
     }
 
@@ -51,18 +53,18 @@ impl Engine {
         state.db.delete_app(id).await?;
         let applied = self.apply_firewall(state).await;
         self.sweep_owned(state).await;
-        applied?;
-        self.record(
-            state,
-            NewActivity::new(
-                ActivityKind::AppRemoved,
-                format!("Removed app {}", app.name),
-            )
-            .app(id),
+        let activity = NewActivity::new(
+            ActivityKind::AppRemoved,
+            format!("Removed app {}", app.name),
         )
-        .await;
-        self.emit(state, DaemonEvent::AppsChanged);
-        self.emit(state, DaemonEvent::GrantsChanged);
+        .app(id);
+        self.commit(
+            state,
+            applied,
+            Some(activity),
+            &[DaemonEvent::AppsChanged, DaemonEvent::GrantsChanged],
+        )
+        .await?;
         Ok(())
     }
 
@@ -139,12 +141,10 @@ impl Engine {
             .insert_peer(&peer)
             .await
             .map_err(|e| Self::conflict_or_internal(e, &format!("peer {label}")))?;
-        self.record(
-            state,
-            NewActivity::new(ActivityKind::PeerAdded, format!("Added peer {label}")).peer(&peer.id),
-        )
-        .await;
-        self.emit(state, DaemonEvent::PeersChanged);
+        let activity =
+            NewActivity::new(ActivityKind::PeerAdded, format!("Added peer {label}")).peer(&peer.id);
+        self.commit(state, Ok(()), Some(activity), &[DaemonEvent::PeersChanged])
+            .await?;
         Ok(peer)
     }
 
@@ -163,16 +163,13 @@ impl Engine {
         {
             return Err(EngineError::NotFound(format!("peer {id}")));
         }
-        self.record(
-            state,
-            NewActivity::new(
-                ActivityKind::PeerChanged,
-                format!("Renamed peer to {label}"),
-            )
-            .peer(id),
+        let activity = NewActivity::new(
+            ActivityKind::PeerChanged,
+            format!("Renamed peer to {label}"),
         )
-        .await;
-        self.emit(state, DaemonEvent::PeersChanged);
+        .peer(id);
+        self.commit(state, Ok(()), Some(activity), &[DaemonEvent::PeersChanged])
+            .await?;
         self.get_peer(state, id).await
     }
 
@@ -180,18 +177,19 @@ impl Engine {
     pub async fn delete_peer(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
         let peer = self.get_peer(state, id).await?;
         state.db.delete_peer(id).await?;
-        self.apply_firewall(state).await?;
-        self.record(
-            state,
-            NewActivity::new(
-                ActivityKind::PeerRemoved,
-                format!("Removed peer {}", peer.label),
-            )
-            .peer(id),
+        let applied = self.apply_firewall(state).await;
+        let activity = NewActivity::new(
+            ActivityKind::PeerRemoved,
+            format!("Removed peer {}", peer.label),
         )
-        .await;
-        self.emit(state, DaemonEvent::PeersChanged);
-        self.emit(state, DaemonEvent::GrantsChanged);
+        .peer(id);
+        self.commit(
+            state,
+            applied,
+            Some(activity),
+            &[DaemonEvent::PeersChanged, DaemonEvent::GrantsChanged],
+        )
+        .await?;
         Ok(())
     }
 
@@ -208,18 +206,19 @@ impl Engine {
             .add_credential(peer_id, &c)
             .await
             .map_err(|e| Self::conflict_or_internal(e, &format!("{} {}", c.kind, c.value)))?;
-        self.apply_firewall(state).await?;
-        self.record(
-            state,
-            NewActivity::new(
-                ActivityKind::PeerChanged,
-                format!("Added {} to peer {}", c.kind, peer.label),
-            )
-            .peer(peer_id),
+        let applied = self.apply_firewall(state).await;
+        let activity = NewActivity::new(
+            ActivityKind::PeerChanged,
+            format!("Added {} to peer {}", c.kind, peer.label),
         )
-        .await;
-        self.emit(state, DaemonEvent::PeersChanged);
-        self.emit(state, DaemonEvent::GrantsChanged);
+        .peer(peer_id);
+        self.commit(
+            state,
+            applied,
+            Some(activity),
+            &[DaemonEvent::PeersChanged, DaemonEvent::GrantsChanged],
+        )
+        .await?;
         Ok(c)
     }
 
@@ -233,18 +232,19 @@ impl Engine {
         if !state.db.remove_credential(peer_id, cred_id).await? {
             return Err(EngineError::NotFound(format!("credential {cred_id}")));
         }
-        self.apply_firewall(state).await?;
-        self.record(
-            state,
-            NewActivity::new(
-                ActivityKind::PeerChanged,
-                format!("Removed a credential from peer {}", peer.label),
-            )
-            .peer(peer_id),
+        let applied = self.apply_firewall(state).await;
+        let activity = NewActivity::new(
+            ActivityKind::PeerChanged,
+            format!("Removed a credential from peer {}", peer.label),
         )
-        .await;
-        self.emit(state, DaemonEvent::PeersChanged);
-        self.emit(state, DaemonEvent::GrantsChanged);
+        .peer(peer_id);
+        self.commit(
+            state,
+            applied,
+            Some(activity),
+            &[DaemonEvent::PeersChanged, DaemonEvent::GrantsChanged],
+        )
+        .await?;
         Ok(())
     }
 
@@ -272,7 +272,9 @@ impl Engine {
             .insert_group(&group)
             .await
             .map_err(|e| Self::conflict_or_internal(e, &format!("group {label}")))?;
-        self.emit(state, DaemonEvent::PeersChanged);
+        let activity = NewActivity::new(ActivityKind::GroupAdded, format!("Added group {label}"));
+        self.commit(state, Ok(()), Some(activity), &[DaemonEvent::PeersChanged])
+            .await?;
         Ok(group)
     }
 
@@ -291,16 +293,30 @@ impl Engine {
         {
             return Err(EngineError::NotFound(format!("peer group {id}")));
         }
-        self.emit(state, DaemonEvent::PeersChanged);
+        let activity = NewActivity::new(
+            ActivityKind::GroupChanged,
+            format!("Renamed group to {label}"),
+        );
+        self.commit(state, Ok(()), Some(activity), &[DaemonEvent::PeersChanged])
+            .await?;
         self.get_group(state, id).await
     }
 
     pub async fn delete_group(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
-        self.get_group(state, id).await?;
+        let group = self.get_group(state, id).await?;
         state.db.delete_group(id).await?;
-        self.apply_firewall(state).await?;
-        self.emit(state, DaemonEvent::PeersChanged);
-        self.emit(state, DaemonEvent::GrantsChanged);
+        let applied = self.apply_firewall(state).await;
+        let activity = NewActivity::new(
+            ActivityKind::GroupRemoved,
+            format!("Removed group {}", group.label),
+        );
+        self.commit(
+            state,
+            applied,
+            Some(activity),
+            &[DaemonEvent::PeersChanged, DaemonEvent::GrantsChanged],
+        )
+        .await?;
         Ok(())
     }
 
@@ -311,12 +327,21 @@ impl Engine {
         id: &str,
         peer_ids: &[String],
     ) -> Result<PeerGroup, EngineError> {
-        self.get_group(state, id).await?;
+        let group = self.get_group(state, id).await?;
         self.check_peers_exist(state, peer_ids).await?;
         state.db.set_group_members(id, peer_ids).await?;
-        self.apply_firewall(state).await?;
-        self.emit(state, DaemonEvent::PeersChanged);
-        self.emit(state, DaemonEvent::GrantsChanged);
+        let applied = self.apply_firewall(state).await;
+        let activity = NewActivity::new(
+            ActivityKind::GroupChanged,
+            format!("Changed the members of group {}", group.label),
+        );
+        self.commit(
+            state,
+            applied,
+            Some(activity),
+            &[DaemonEvent::PeersChanged, DaemonEvent::GrantsChanged],
+        )
+        .await?;
         self.get_group(state, id).await
     }
 
@@ -405,7 +430,7 @@ impl Engine {
             .insert_grant(&grant)
             .await
             .map_err(|e| Self::conflict_or_internal(e, "this grant"))?;
-        self.apply_firewall(state).await?;
+        let applied = self.apply_firewall(state).await;
         let peer_id = match &grant.subject {
             Subject::Peer(id) => Some(id.clone()),
             _ => None,
@@ -417,8 +442,8 @@ impl Engine {
         .app(&app.id);
         act.peer_id = peer_id;
         act.network_id = grant.network_id.clone();
-        self.record(state, act).await;
-        self.emit(state, DaemonEvent::GrantsChanged);
+        self.commit(state, applied, Some(act), &[DaemonEvent::GrantsChanged])
+            .await?;
         self.get_grant(state, &grant.id).await
     }
 
@@ -429,7 +454,7 @@ impl Engine {
             .await?
             .ok_or_else(|| EngineError::NotFound(format!("grant {id}")))?;
         state.db.delete_grant(id).await?;
-        self.apply_firewall(state).await?;
+        let applied = self.apply_firewall(state).await;
         let app_name = state
             .db
             .get_app(&grant.app_id)
@@ -445,8 +470,8 @@ impl Engine {
             act.peer_id = Some(p.clone());
         }
         act.network_id = grant.network_id.clone();
-        self.record(state, act).await;
-        self.emit(state, DaemonEvent::GrantsChanged);
+        self.commit(state, applied, Some(act), &[DaemonEvent::GrantsChanged])
+            .await?;
         Ok(())
     }
 }

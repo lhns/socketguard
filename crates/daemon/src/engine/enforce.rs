@@ -319,9 +319,16 @@ impl Engine {
                 0
             }
         };
-        let _ = self.apply_and_ensure(state).await;
-        self.emit(state, DaemonEvent::NetworksChanged);
-        self.emit(state, DaemonEvent::AppsChanged);
+        // The network is live either way; a failed apply is retried by the next pass.
+        let applied = self.apply_and_ensure(state).await;
+        let _ = self
+            .commit(
+                state,
+                applied,
+                None,
+                &[DaemonEvent::NetworksChanged, DaemonEvent::AppsChanged],
+            )
+            .await;
         info!(
             "Backend '{}' initialized, allocated {created} addresses",
             inst.id
@@ -359,11 +366,20 @@ impl Engine {
             .backends
             .retain(|b| b.id != backend_id);
         self.current_backend_ids.retain(|id| id != backend_id);
-        let _ = self.apply_firewall(state).await;
+        let applied = self.apply_firewall(state).await;
         self.sweep_owned(state).await;
-        self.emit(state, DaemonEvent::NetworksChanged);
-        self.emit(state, DaemonEvent::AppsChanged);
-        self.emit(state, DaemonEvent::GrantsChanged);
+        let _ = self
+            .commit(
+                state,
+                applied,
+                None,
+                &[
+                    DaemonEvent::NetworksChanged,
+                    DaemonEvent::AppsChanged,
+                    DaemonEvent::GrantsChanged,
+                ],
+            )
+            .await;
         info!("Backend '{}' removed", backend_id);
     }
 

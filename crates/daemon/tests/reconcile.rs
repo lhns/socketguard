@@ -2213,3 +2213,60 @@ async fn identical_requests_racing_create_one_grant_peer_and_group() {
     assert!(matches!(loser, EngineError::Conflict(_)), "{loser:?}");
     assert_eq!(s.db.list_grants().await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn a_failed_apply_still_records_the_change_and_announces_it() {
+    let h = Harness::new(
+        vec![local(), ygg()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let e = h.engine().await;
+    let s = &h.state;
+    let mut events = s.events.subscribe();
+    h.fw.set_failing(true);
+
+    let err = e
+        .create_grant(
+            s,
+            &NewGrant {
+                app_id: app.id.clone(),
+                port: None,
+                network_id: None,
+                subject: Subject::Anyone,
+                confirm_open: true,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::Internal(_)), "{err:?}");
+    assert_eq!(h.activity(ActivityKind::GrantAdded).await.len(), 1);
+    let mut seen = Vec::new();
+    while let Ok(ev) = events.try_recv() {
+        seen.push(ev);
+    }
+    assert!(seen.contains(&DaemonEvent::GrantsChanged), "{seen:?}");
+    assert!(seen.contains(&DaemonEvent::Activity), "{seen:?}");
+}
+
+#[tokio::test]
+async fn groups_are_recorded_in_the_activity_log() {
+    let h = Harness::new(vec![local()], vec![]).await;
+    let e = h.engine().await;
+    let s = &h.state;
+    let peer = e.create_peer(s, "laptop", &[]).await.unwrap();
+    let group = e.create_group(s, "family", &[]).await.unwrap();
+    e.rename_group(s, &group.id, "household").await.unwrap();
+    e.set_group_members(s, &group.id, &[peer.id.clone()])
+        .await
+        .unwrap();
+    e.delete_group(s, &group.id).await.unwrap();
+
+    assert_eq!(h.activity(ActivityKind::GroupAdded).await.len(), 1);
+    assert_eq!(h.activity(ActivityKind::GroupChanged).await.len(), 2);
+    let removed = h.activity(ActivityKind::GroupRemoved).await;
+    assert_eq!(removed.len(), 1);
+    assert!(removed[0].message.contains("household"), "{removed:?}");
+}

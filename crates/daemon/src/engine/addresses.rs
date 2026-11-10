@@ -441,8 +441,9 @@ impl Engine {
                 shrink.as_ref().map(|(id, ports)| (*id, ports)),
             )
             .await?;
-        self.apply_and_ensure(state).await?;
-        self.emit(state, DaemonEvent::AppsChanged);
+        let applied = self.apply_and_ensure(state).await;
+        self.commit(state, applied, None, &[DaemonEvent::AppsChanged])
+            .await?;
         Ok(address)
     }
 
@@ -502,8 +503,9 @@ impl Engine {
         for a in &gone {
             state.db.delete_address(&a.id).await?;
         }
-        self.apply_and_ensure(state).await?;
-        self.emit(state, DaemonEvent::AppsChanged);
+        let applied = self.apply_and_ensure(state).await;
+        self.commit(state, applied, None, &[DaemonEvent::AppsChanged])
+            .await?;
         let mut out = keep.clone();
         out.ports = merged;
         Ok(out)

@@ -276,6 +276,26 @@ impl Engine {
         self.emit(state, DaemonEvent::Activity);
     }
 
+    /// Finish a mutation whose data is already saved: record its activity, announce
+    /// `events`, then report how the firewall apply went. The record and the events happen
+    /// even when the apply failed, since the change is stored and visible; the caller still
+    /// gets the apply error (HTTP 500) and the next pass retries the apply.
+    pub(super) async fn commit(
+        &self,
+        state: &AppState,
+        applied: anyhow::Result<()>,
+        activity: Option<NewActivity>,
+        events: &[DaemonEvent],
+    ) -> anyhow::Result<()> {
+        if let Some(activity) = activity {
+            self.record(state, activity).await;
+        }
+        for ev in events {
+            self.emit(state, ev.clone());
+        }
+        applied
+    }
+
     fn sorted_backend_ids(&self) -> Vec<&String> {
         let mut ids: Vec<&String> = self.backends.keys().collect();
         ids.sort();
@@ -406,8 +426,8 @@ impl Engine {
             self.network.clone(),
         )
         .await;
-        self.emit(state, DaemonEvent::SettingsChanged);
-        removed
+        self.commit(state, removed, None, &[DaemonEvent::SettingsChanged])
+            .await
     }
 
     /// Clear the `disabled` latch and put the rules and addresses back.
@@ -416,9 +436,9 @@ impl Engine {
         // Adopting: the next apply replaces whatever ruleset is installed.
         state.db.set_unadopted(false).await?;
         state.db.clear_fresh().await?;
-        self.apply_and_ensure(state).await?;
-        self.emit(state, DaemonEvent::SettingsChanged);
-        Ok(())
+        let applied = self.apply_and_ensure(state).await;
+        self.commit(state, applied, None, &[DaemonEvent::SettingsChanged])
+            .await
     }
 
     /// Reconcile: detect sockets, upsert apps and ports, give every app an address on

@@ -211,20 +211,22 @@ impl Engine {
             }
         }
         state.db.set_protect_host(&interfaces).await?;
-        self.apply_firewall(state).await?;
-        self.record(
+        let applied = self.apply_firewall(state).await;
+        let activity = NewActivity::new(
+            ActivityKind::ProtectHostChanged,
+            if interfaces.is_empty() {
+                "Whole-host protection off".to_string()
+            } else {
+                format!("Whole-host protection on for {}", interfaces.join(", "))
+            },
+        );
+        self.commit(
             state,
-            NewActivity::new(
-                ActivityKind::ProtectHostChanged,
-                if interfaces.is_empty() {
-                    "Whole-host protection off".to_string()
-                } else {
-                    format!("Whole-host protection on for {}", interfaces.join(", "))
-                },
-            ),
+            applied,
+            Some(activity),
+            &[DaemonEvent::SettingsChanged],
         )
-        .await;
-        self.emit(state, DaemonEvent::SettingsChanged);
+        .await?;
         Ok(risks)
     }
 

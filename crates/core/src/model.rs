@@ -425,13 +425,16 @@ pub enum ActivityKind {
     PeerAdded,
     PeerChanged,
     PeerRemoved,
+    GroupAdded,
+    GroupChanged,
+    GroupRemoved,
     ProtectHostChanged,
     Blocked,
     RemoteAdminExposed,
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 10] = [
+    pub const ALL: [ActivityKind; 13] = [
         ActivityKind::AppDiscovered,
         ActivityKind::AppRemoved,
         ActivityKind::GrantAdded,
@@ -439,6 +442,9 @@ impl ActivityKind {
         ActivityKind::PeerAdded,
         ActivityKind::PeerChanged,
         ActivityKind::PeerRemoved,
+        ActivityKind::GroupAdded,
+        ActivityKind::GroupChanged,
+        ActivityKind::GroupRemoved,
         ActivityKind::ProtectHostChanged,
         ActivityKind::Blocked,
         ActivityKind::RemoteAdminExposed,
@@ -453,6 +459,9 @@ impl ActivityKind {
             ActivityKind::PeerAdded => "peer_added",
             ActivityKind::PeerChanged => "peer_changed",
             ActivityKind::PeerRemoved => "peer_removed",
+            ActivityKind::GroupAdded => "group_added",
+            ActivityKind::GroupChanged => "group_changed",
+            ActivityKind::GroupRemoved => "group_removed",
             ActivityKind::ProtectHostChanged => "protect_host_changed",
             ActivityKind::Blocked => "blocked",
             ActivityKind::RemoteAdminExposed => "remote_admin_exposed",
