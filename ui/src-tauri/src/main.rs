@@ -1,7 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use futures_util::StreamExt;
-use std::path::Path;
 use std::time::Duration;
 use tauri::Emitter;
 
@@ -202,6 +201,7 @@ async fn connect_sse(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
 #[tauri::command]
 async fn start_daemon() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -209,10 +209,12 @@ async fn start_daemon() -> Result<(), String> {
     if !daemon.exists() {
         return Err("socketguard-daemon.exe not found next to UI executable".into());
     }
-    spawn_elevated(&daemon).map_err(|e| e.to_string())
+    spawn_elevated(&daemon)
 }
 
-fn spawn_elevated(path: &Path) -> anyhow::Result<()> {
+/// Launch the daemon through the UAC prompt (`runas`).
+#[cfg(windows)]
+fn spawn_elevated(path: &std::path::Path) -> Result<(), String> {
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
@@ -239,13 +241,18 @@ fn spawn_elevated(path: &Path) -> anyhow::Result<()> {
     if code > 32 {
         Ok(())
     } else {
-        anyhow::bail!("ShellExecuteW failed with code {code}")
+        Err(format!("ShellExecuteW failed with code {code}"))
     }
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+async fn start_daemon() -> Result<(), String> {
+    Err("Starting the daemon from the UI is only supported on Windows; start it with systemd or sudo.".into())
 }
 
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             status,
             list_apps,

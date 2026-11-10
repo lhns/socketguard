@@ -4,3 +4,4 @@ dist/
 *.db
 *.db-journal
 frontend.hash
+ui/src-tauri/gen/
