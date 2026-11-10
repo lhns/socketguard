@@ -265,17 +265,25 @@ pub fn create(
             cookie_path,
             cookie_dir,
             expect_tor_uid,
-        } => Ok(Arc::new(tor::TorNetwork::with_options(
-            control,
-            tor_control::AuthOptions {
+            cookie_owner,
+            allow_remote_control,
+        } => {
+            let opts = tor_control::AuthOptions {
                 auth: auth.clone(),
                 cookie_path: cookie_path.clone(),
                 cookie_dir: cookie_dir.clone(),
                 expect_tor_uid: *expect_tor_uid,
+                cookie_owner: cookie_owner.clone(),
+                allow_remote_control: *allow_remote_control,
                 allow_none_over_tcp: false,
-            },
-            tor::CHECK_INTERVAL,
-        ))),
+            };
+            tor_control::check_endpoint(&tor_control::Endpoint::parse(control), &opts)?;
+            Ok(Arc::new(tor::TorNetwork::with_options(
+                control,
+                opts,
+                tor::CHECK_INTERVAL,
+            )))
+        }
         ip => Ok(Arc::new(IpNetwork::for_config(
             ip,
             backend::create_backend(ip, ula_global_id, net)?,

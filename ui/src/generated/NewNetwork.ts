@@ -48,4 +48,14 @@ cookie_dir?: string | null,
 /**
  * On a Unix control socket: the uid Tor must run as (checked on the peer).
  */
-expect_tor_uid?: number | null, });
+expect_tor_uid?: number | null, 
+/**
+ * Windows: the SID (`S-1-5-80-...` for a service) of the account Tor runs as,
+ * besides SYSTEM and Administrators, that may own the cookie file.
+ */
+cookie_owner?: string | null, 
+/**
+ * Accept a control address that is not loopback (cookie auth only). Off by
+ * default: whoever is on that path sees the control traffic.
+ */
+allow_remote_control?: boolean, });

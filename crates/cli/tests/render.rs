@@ -386,7 +386,9 @@ fn tor_network_config_from_flags() {
             auth: TorAuth::Cookie,
             cookie_path: None,
             cookie_dir: None,
-            expect_tor_uid: None
+            expect_tor_uid: None,
+            cookie_owner: None,
+            allow_remote_control: false
         }
     );
     assert_eq!(
@@ -397,7 +399,9 @@ fn tor_network_config_from_flags() {
             auth: TorAuth::Password("pw".into()),
             cookie_path: None,
             cookie_dir: None,
-            expect_tor_uid: None
+            expect_tor_uid: None,
+            cookie_owner: None,
+            allow_remote_control: false
         }
     );
 }

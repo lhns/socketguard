@@ -7,7 +7,9 @@
 //! TCP address can be bound by any local user while Tor is down (ADR 0039). So a `Control`
 //! only exists once the server has proved itself (SAFECOOKIE) or was configured to be
 //! trusted (password, `none` on a Unix socket, explicit `cookie_insecure`), and the cookie
-//! file is checked before it is read.
+//! file is checked before it is read: on Unix its owner, on Windows its owner and DACL,
+//! against a configured `cookie_path`. A TCP control address must be loopback unless the
+//! configuration allows a remote one, and then only cookie authentication is accepted.
 
 use anyhow::{anyhow, bail, Context, Result};
 use hmac::{Hmac, Mac};
@@ -36,6 +38,41 @@ impl Endpoint {
             None => Endpoint::Tcp(s.to_string()),
         }
     }
+}
+
+/// Whether the host of `host:port` is loopback, judged from the text (no lookup).
+fn host_is_loopback(addr: &str) -> bool {
+    let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Refuse a control address and authentication that put the onion keys at risk before any
+/// connection is made: a non-loopback TCP address needs `allow_remote_control`, and then
+/// only cookie authentication (password and `none` would cross the network in the clear).
+pub fn check_endpoint(endpoint: &Endpoint, opts: &AuthOptions) -> Result<()> {
+    let Endpoint::Tcp(addr) = endpoint else {
+        return Ok(());
+    };
+    if host_is_loopback(addr) {
+        return Ok(());
+    }
+    if !opts.allow_remote_control {
+        bail!(
+            "the Tor control address {addr} is not loopback; set allow_remote_control to use it \
+             (cookie authentication only)"
+        );
+    }
+    if matches!(opts.auth, TorAuth::None | TorAuth::Password(_)) {
+        bail!(
+            "auth \"none\" and passwords are not accepted over the non-loopback Tor control \
+             address {addr}"
+        );
+    }
+    Ok(())
 }
 
 /// One control-port reply: the final status code and the text of every line, in order
@@ -252,6 +289,11 @@ pub struct AuthOptions {
     pub cookie_dir: Option<String>,
     /// On a Unix control socket: the uid the peer (Tor) must run as.
     pub expect_tor_uid: Option<u32>,
+    /// Windows: the SID of the account Tor runs as, besides SYSTEM and Administrators,
+    /// that may own the cookie file and write to it.
+    pub cookie_owner: Option<String>,
+    /// Accept a TCP control address that is not loopback (cookie auth only).
+    pub allow_remote_control: bool,
     /// Tests only (never set from the config): accept `none` over TCP.
     pub allow_none_over_tcp: bool,
 }
@@ -299,8 +341,10 @@ pub fn read_cookie_file(path: &str, opts: &AuthOptions) -> Result<Vec<u8>> {
     }
     #[cfg(unix)]
     check_cookie_owner(path, &meta, opts)?;
-    #[cfg(not(unix))]
-    let _ = opts;
+    #[cfg(windows)]
+    winacl::check_cookie_file(path, &file, opts)?;
+    #[cfg(not(any(unix, windows)))]
+    bail!("the Tor cookie file cannot be vetted on this platform ({opts:?})");
     let mut buf = Vec::new();
     file.take(COOKIE_LEN as u64 + 1).read_to_end(&mut buf)?;
     if buf.len() != COOKIE_LEN {
@@ -361,6 +405,161 @@ fn peer_uid(s: &std::os::unix::net::UnixStream) -> Result<u32> {
         return Err(std::io::Error::last_os_error()).context("SO_PEERCRED failed");
     }
     Ok(cred.uid)
+}
+
+/// The vetting of the cookie file on Windows: owned by SYSTEM, Administrators or the
+/// configured Tor account, and writable by none besides those.
+#[cfg(windows)]
+pub(crate) mod winacl {
+    use super::AuthOptions;
+    use anyhow::{bail, Context, Result};
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+    use windows::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT,
+    };
+    use windows::Win32::Security::{
+        AclSizeInformation, GetAce, GetAclInformation, GetTokenInformation, TokenUser, ACE_HEADER,
+        ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSID,
+        TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// SYSTEM and BUILTIN\Administrators.
+    const TRUSTED: [&str; 2] = ["S-1-5-18", "S-1-5-32-544"];
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    const INHERIT_ONLY_ACE: u8 = 0x08;
+    /// FILE_WRITE_DATA, FILE_APPEND_DATA, FILE_WRITE_EA, FILE_WRITE_ATTRIBUTES, DELETE,
+    /// WRITE_DAC, WRITE_OWNER, GENERIC_ALL, GENERIC_WRITE.
+    const WRITE_MASK: u32 =
+        0x2 | 0x4 | 0x10 | 0x100 | 0x1_0000 | 0x4_0000 | 0x8_0000 | 0x1000_0000 | 0x4000_0000;
+
+    fn sid_string(sid: PSID) -> Result<String> {
+        let mut out = windows::core::PWSTR::null();
+        // SAFETY: `sid` is a valid SID inside a live descriptor; the string is freed below.
+        unsafe {
+            ConvertSidToStringSidW(sid, &mut out)?;
+            let s = out.to_string();
+            let _ = LocalFree(Some(HLOCAL(out.0.cast())));
+            Ok(s?)
+        }
+    }
+
+    /// The SID string of the account running this process.
+    pub(crate) fn current_user_sid() -> Result<String> {
+        // SAFETY: plain token query on the current process; the buffer is sized by the
+        // first call.
+        unsafe {
+            let mut token = HANDLE::default();
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)?;
+            let mut len = 0u32;
+            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+            let mut buf = vec![0u8; len as usize];
+            let r = GetTokenInformation(
+                token,
+                TokenUser,
+                Some(buf.as_mut_ptr().cast()),
+                len,
+                &mut len,
+            );
+            let sid = r.map(|_| sid_string((*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid));
+            let _ = CloseHandle(token);
+            sid?
+        }
+    }
+
+    /// Check the open `file`: owner and DACL (judged on the handle, so the path cannot be
+    /// swapped in between). Requires the configured `cookie_path`: without a pinned file
+    /// any local user who binds the control port while Tor is down could name one.
+    pub(crate) fn check_cookie_file(
+        path: &str,
+        file: &std::fs::File,
+        opts: &AuthOptions,
+    ) -> Result<()> {
+        if opts.cookie_path.is_none() {
+            bail!(
+                "on Windows the Tor cookie file must be configured (cookie_path); refusing {path}"
+            );
+        }
+        let trusted =
+            |sid: &str| TRUSTED.contains(&sid) || opts.cookie_owner.as_deref() == Some(sid);
+        let mut owner = PSID::default();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut sd = windows::Win32::Security::PSECURITY_DESCRIPTOR::default();
+        // SAFETY: the handle is valid for the call; owner and dacl point into `sd`, which is
+        // freed at the end and not used afterwards.
+        let result = unsafe {
+            let handle = HANDLE(file.as_raw_handle());
+            GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                Some(&mut owner),
+                None,
+                Some(&mut dacl),
+                None,
+                Some(&mut sd),
+            )
+            .ok()
+            .context("cannot read the security descriptor of the Tor cookie file")
+            .and_then(|()| check_descriptor(path, owner, dacl, &trusted))
+        };
+        // SAFETY: allocated by GetSecurityInfo.
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
+        result
+    }
+
+    /// # Safety
+    /// `owner` and `dacl` must point into a live security descriptor.
+    unsafe fn check_descriptor(
+        path: &str,
+        owner: PSID,
+        dacl: *mut ACL,
+        trusted: &dyn Fn(&str) -> bool,
+    ) -> Result<()> {
+        let owner = sid_string(owner)?;
+        if !trusted(&owner) {
+            bail!(
+                "the Tor cookie file {path} is owned by {owner}, who is neither SYSTEM, \
+                 Administrators nor the configured cookie_owner"
+            );
+        }
+        if dacl.is_null() {
+            bail!("the Tor cookie file {path} has no DACL, so everyone can write to it");
+        }
+        let mut info = ACL_SIZE_INFORMATION::default();
+        GetAclInformation(
+            dacl,
+            (&mut info as *mut ACL_SIZE_INFORMATION).cast(),
+            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )?;
+        for i in 0..info.AceCount {
+            let mut ace = std::ptr::null_mut();
+            GetAce(dacl, i, &mut ace)?;
+            let header = *(ace as *const ACE_HEADER);
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE || header.AceFlags & INHERIT_ONLY_ACE != 0
+            {
+                continue;
+            }
+            // ACCESS_ALLOWED_ACE: header, 32-bit mask, then the SID.
+            let mask = *(ace.cast::<u8>().add(std::mem::size_of::<ACE_HEADER>()) as *const u32);
+            let sid = PSID(
+                ace.cast::<u8>()
+                    .add(std::mem::size_of::<ACE_HEADER>() + 4)
+                    .cast(),
+            );
+            if mask & WRITE_MASK != 0 {
+                let who = sid_string(sid)?;
+                if !trusted(&who) {
+                    bail!("the Tor cookie file {path} is writable by {who}");
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A control-spec quoted string.
@@ -486,12 +685,19 @@ pub struct Control {
 impl Control {
     /// Connect and authenticate.
     pub fn connect(endpoint: &Endpoint, opts: &AuthOptions) -> Result<Self> {
+        check_endpoint(endpoint, opts)?;
         let (reader, writer): (Box<dyn Read + Send>, Box<dyn Write + Send>) = match endpoint {
             Endpoint::Tcp(addr) => {
-                let sock = addr
+                let socks: Vec<_> = addr
                     .to_socket_addrs()
                     .with_context(|| format!("bad Tor control address {addr}"))?
-                    .next()
+                    .collect();
+                // A name that resolves to a routable address is as remote as one that is.
+                if !opts.allow_remote_control && socks.iter().any(|a| !a.ip().is_loopback()) {
+                    bail!("the Tor control address {addr} resolves to a non-loopback address");
+                }
+                let sock = *socks
+                    .first()
                     .with_context(|| format!("no address for {addr}"))?;
                 let s = TcpStream::connect_timeout(&sock, CONNECT_TIMEOUT)
                     .with_context(|| format!("cannot reach the Tor control port at {addr}"))?;
@@ -561,6 +767,14 @@ impl Control {
     /// SAFECOOKIE (or, only if configured, plain COOKIE) with the cookie file checked
     /// before it is read.
     fn cookie_auth(&mut self, opts: &AuthOptions) -> Result<()> {
+        // Nothing is sent before this: without a pinned file any local user who binds the
+        // control port while Tor is down chooses the cookie file.
+        if cfg!(not(unix)) && opts.cookie_path.is_none() {
+            bail!(
+                "on this platform cookie authentication needs cookie_path (the file is vetted by \
+                 its owner and ACL, and only that file is accepted)"
+            );
+        }
         let info = parse_protocolinfo(&self.command("PROTOCOLINFO 1")?.ok()?);
         let offers = |m: &str| info.methods.iter().any(|x| x == m);
         let safe = offers("SAFECOOKIE");
@@ -997,6 +1211,114 @@ mod tests {
         let err = connect(&mock, &opts).err().unwrap();
         assert!(err.to_string().contains("configured is"), "{err:#}");
         assert_eq!(mock.commands(), ["PROTOCOLINFO 1"]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_non_loopback_control_address_needs_allow_remote_control() {
+        // Refused before any connection, so the unroutable address is never contacted.
+        let addr = Endpoint::Tcp("192.0.2.1:9051".into());
+        let cookie = AuthOptions::new(TorAuth::Cookie);
+        let err = Control::connect(&addr, &cookie).err().unwrap();
+        assert!(err.to_string().contains("allow_remote_control"), "{err:#}");
+        assert!(check_endpoint(&addr, &cookie).is_err());
+        // Allowed with the flag, but only with cookie authentication.
+        let remote = |auth| AuthOptions {
+            allow_remote_control: true,
+            ..AuthOptions::new(auth)
+        };
+        assert!(check_endpoint(&addr, &remote(TorAuth::Cookie)).is_ok());
+        assert!(check_endpoint(&addr, &remote(TorAuth::CookieInsecure)).is_ok());
+        for auth in [TorAuth::None, TorAuth::Password("pw".into())] {
+            let err = check_endpoint(&addr, &remote(auth)).err().unwrap();
+            assert!(err.to_string().contains("non-loopback"), "{err:#}");
+        }
+        // Loopback in every spelling, and a Unix socket, need nothing.
+        for ok in [
+            "127.0.0.1:9051",
+            "[::1]:9051",
+            "localhost:9051",
+            "127.1.2.3:1",
+        ] {
+            assert!(
+                check_endpoint(&Endpoint::Tcp(ok.into()), &cookie).is_ok(),
+                "{ok}"
+            );
+        }
+        assert!(check_endpoint(&Endpoint::Unix("/run/tor/control".into()), &cookie).is_ok());
+        for bad in [
+            "10.0.0.1:9051",
+            "[2001:db8::1]:9051",
+            "tor.example:9051",
+            "0.0.0.0:9051",
+        ] {
+            assert!(
+                check_endpoint(&Endpoint::Tcp(bad.into()), &cookie).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn without_cookie_path_cookie_auth_sends_nothing_off_unix() {
+        let (dir, path) = cookie_file(&COOKIE);
+        let mock = safecookie_mock(&path, false);
+        let opts = AuthOptions::new(TorAuth::Cookie);
+        let err = connect(&mock, &opts).err().unwrap();
+        assert!(err.to_string().contains("cookie_path"), "{err:#}");
+        assert!(mock.commands().is_empty(), "nothing was sent");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cookie_file_must_be_trusted_owned_and_not_writable_by_others() {
+        let (dir, path) = cookie_file(&COOKIE);
+        let me = winacl::current_user_sid().unwrap();
+        let icacls = |args: &[&str]| {
+            let out = std::process::Command::new("icacls")
+                .arg(&path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        };
+        // Only the current user may touch it.
+        icacls(&["/inheritance:r", "/grant:r", &format!("*{me}:F")]);
+        let pinned = AuthOptions {
+            cookie_path: Some(path.clone()),
+            ..AuthOptions::default()
+        };
+        // Refused unless that account is configured as Tor's: either the owner is not
+        // trusted (a normal user) or, run elevated, the user's ACE is a write by someone
+        // else.
+        let err = read_cookie_file(&path, &pinned).err().unwrap();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&me) && (msg.contains("owned by") || msg.contains("writable")),
+            "{msg}"
+        );
+        let configured = AuthOptions {
+            cookie_owner: Some(me.clone()),
+            ..pinned.clone()
+        };
+        assert_eq!(read_cookie_file(&path, &configured).unwrap(), COOKIE);
+        // Anyone may read it, but not write it.
+        icacls(&["/grant", "*S-1-1-0:R"]);
+        assert_eq!(read_cookie_file(&path, &configured).unwrap(), COOKIE);
+        icacls(&["/grant", "*S-1-1-0:W"]);
+        let err = read_cookie_file(&path, &configured).err().unwrap();
+        assert!(err.to_string().contains("writable by S-1-1-0"), "{err:#}");
+        // The file is only accepted when pinned.
+        let err = read_cookie_file(&path, &AuthOptions::default())
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("cookie_path"), "{err:#}");
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -34,6 +34,7 @@ fn socket(port: u16, protocol: Protocol, bind: &str) -> ListeningSocket {
         cmdline: Some(vec!["webapp".into()]),
         uid: Some("1000".into()),
         foreign_mntns: false,
+        cwd: None,
     }
 }
 
@@ -49,6 +50,8 @@ impl Harness {
                 cookie_path: None,
                 cookie_dir: None,
                 expect_tor_uid: None,
+                cookie_owner: None,
+                allow_remote_control: false,
             },
         };
         let mut backends = HashMap::new();
@@ -480,7 +483,7 @@ async fn tor_down_with_nothing_to_do_does_not_make_mutations_202() {
         NetworkStatus::Down { .. }
     ));
 
-    let cred = serde_json::json!({"kind": "tor_client_key", "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"});
+    let cred = serde_json::json!({"kind": "tor_client_key", "value": "FDBSRGWHBKODXLW6IWZZSNGD5AXYI3X4SRXHPQ3GIGJO7OGEDMJQ"});
     let uri = format!("/api/peers/{peer}/credentials");
     let (s, body) = call(&h, "POST", &uri, Some(cred)).await;
     assert_eq!(s, StatusCode::CREATED, "{body}");
