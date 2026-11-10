@@ -15,8 +15,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
 use tracing::warn;
 
-pub use crate::state::PROTECT_HOST_KEY;
-
 /// Everything the producer needs, gathered from the DB and the active networks.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
