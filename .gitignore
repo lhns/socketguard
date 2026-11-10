@@ -5,3 +5,7 @@ dist/
 *.db-journal
 frontend.hash
 ui/src-tauri/gen/
+
+# Claude Code: local settings and agent worktrees
+.claude/settings.local.json
+.claude/worktrees/
