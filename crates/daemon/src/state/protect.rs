@@ -87,6 +87,7 @@ pub(super) fn precreate_protected(_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
     use super::*;
     #[cfg(unix)]
     use crate::state::{test_util::*, with_suffix, Database};
