@@ -1,58 +1,68 @@
-# CI for Forgejo Actions (GitHub-Actions-compatible syntax).
-# Runner availability is unverified: the `rust` and `ui` jobs need a Linux runner with the
-# `docker` label (adjust `runs-on` to your runner labels); `netns` needs a privileged one.
+# CI on Forgejo Actions. Runners on this instance: `ubuntu-latest` = Node 22 on Debian
+# bookworm, running as root. Rust is installed per job. The Tauri crate (socketguard-ui)
+# is excluded from the Rust job: it needs webkit2gtk and builds the frontend; the `ui` job
+# covers the frontend. Docker end-to-end tests (deploy/e2e) stay local.
 name: ci
 
 on:
   push:
+    branches: ['**']
   pull_request:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   rust:
-    runs-on: docker
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      # The Tauri crate (ui/src-tauri, package socketguard-ui) is excluded: it needs
-      # webkit2gtk & co. and its build script runs the frontend build. The `ui` job and
-      # ./build.sh cover it. Remove --exclude once the runner image has those deps.
+      - uses: https://github.com/Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
       - run: cargo clippy --workspace --exclude socketguard-ui --all-targets -- -D warnings
       - run: cargo test --workspace --exclude socketguard-ui
 
   ui:
-    runs-on: docker
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: ui
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
 
-  # Linux network-namespace tests. Needs CAP_NET_ADMIN (root + `ip netns`), which normal
-  # container runners do not give. Requires a self-hosted runner labelled `privileged`;
-  # until one exists this job may stay queued or fail without blocking the others.
+  # Real nftables in network namespaces. Needs CAP_NET_ADMIN/CAP_SYS_ADMIN, which a
+  # default job container lacks; the probe step runs the tests only when namespaces work
+  # and otherwise leaves a warning (enable `privileged: true` in the runner's container
+  # config to get them).
   netns:
-    runs-on: [self-hosted, privileged]
-    continue-on-error: true
-    env:
-      SOCKETGUARD_NETNS_TESTS: "1"
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p socketguard-daemon --test netns -- --nocapture
+      - name: Probe network-namespace support
+        id: probe
+        run: |
+          apt-get update -qq && apt-get install -y -qq nftables iproute2 iputils-ping netcat-openbsd python3 conntrack >/dev/null
+          if ip netns add sg-ci-probe 2>/dev/null && ip netns del sg-ci-probe && nft list tables >/dev/null 2>&1; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::netns tests skipped: this runner's job container is not privileged"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.probe.outputs.ok == 'true'
+        uses: https://github.com/dtolnay/rust-toolchain@stable
+      - if: steps.probe.outputs.ok == 'true'
+        uses: https://github.com/Swatinem/rust-cache@v2
+      - if: steps.probe.outputs.ok == 'true'
+        run: cargo test -p socketguard-daemon --test netns -- --test-threads=1
+        env:
+          SOCKETGUARD_NETNS_TESTS: '1'
