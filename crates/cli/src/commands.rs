@@ -75,7 +75,11 @@ impl Ctx {
     }
 
     /// Print `value` as JSON, or the human form.
-    pub(crate) fn print<T: Serialize>(&self, value: &T, human: impl FnOnce() -> String) -> Result<()> {
+    pub(crate) fn print<T: Serialize>(
+        &self,
+        value: &T,
+        human: impl FnOnce() -> String,
+    ) -> Result<()> {
         if self.json {
             println!("{}", serde_json::to_string_pretty(value)?);
         } else {
