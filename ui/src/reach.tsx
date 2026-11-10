@@ -83,21 +83,29 @@ const NETWORK_KIND_NAME: Record<NetworkKind, string> = {
   local: "this machine", lan: "LAN", yggdrasil: "Yggdrasil", wireguard: "WireGuard", tor: "Tor",
 };
 
-/** What the daemon's parser made of pasted text: kind and where each value works, or why not. */
-export function ParsedHint({ parsed }: { parsed: ParsedCredential[] | undefined }) {
+const isIPv4 = (v: string) => v.includes(".") && !v.includes(":");
+
+/** What the daemon's parser made of pasted text, one chip per value: its kind and where it works
+ * and how strongly, or why it was refused. */
+export function ParsedChips({ parsed }: { parsed: ParsedCredential[] | undefined }) {
   if (!parsed) return null;
   return (
-    <ul className="plain-list hint">
+    <ul className="chip-row parse-chips" aria-label="Parsed values">
       {parsed.map((p, i) => (
-        <li key={i}>
+        <li key={i} className={`parse-chip${p.error !== null ? " parse-chip-bad" : ""}`}>
           {p.error !== null ? (
-            <span>{p.input}: {p.error}</span>
-          ) : (
-            <span>
-              {p.input.length > 24 ? `${p.input.slice(0, 21)}…` : p.input} will be added as{" "}
-              {p.kind ? CREDENTIAL_INFO[p.kind].name : "a credential"}
-              {p.reach.length > 0 && ` (works on ${p.reach.map((r) => `${NETWORK_KIND_NAME[r.network_kind]}: ${REACH_INFO[r.reach].label}`).join(", ")})`}
+            <span role="alert">
+              <span className="mono">{p.input.length > 24 ? `${p.input.slice(0, 21)}…` : p.input}</span>: {p.error}
             </span>
+          ) : (
+            <>
+              <span className="mono">{p.input.length > 24 ? `${p.input.slice(0, 21)}…` : p.input}</span>{" "}
+              <strong>{p.kind ? CREDENTIAL_INFO[p.kind].name : "credential"}</strong>
+              <span className="muted">
+                {p.reach.length > 0 && ` · works on ${p.reach.map((r) => `${NETWORK_KIND_NAME[r.network_kind]} — ${REACH_INFO[r.reach].label}`).join(", ")}`}
+                {p.normalized && isIPv4(p.normalized) && " · IPv4 — whole-host only (protect-host)"}
+              </span>
+            </>
           )}
         </li>
       ))}

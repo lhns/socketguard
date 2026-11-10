@@ -1,255 +1,234 @@
-import { useMemo, useState } from "react";
-import type { App, AppDetail, GrantView, Network, Peer, PeerGroup } from "../api";
-import GrantDialog from "../components/GrantDialog";
+import { useMemo, useRef, useState } from "react";
+import type { App } from "../api";
+import { accessSummary, membershipsOf } from "../access";
+import AppDetailView from "../components/AppDetailCard";
+import GrantEditor from "../components/GrantEditor";
+import RevokeDialog from "../components/RevokeDialog";
+import TagDialog from "../components/TagDialog";
+import TagsPanel from "../components/TagsPanel";
 import { useToast } from "../components/Toast";
-import { errorText, formatBytes, portLabel, subjectLabel } from "../lib";
-import {
-  useActivity, useApp, useApps, useDeleteGrant, useGroups, useNetworks, usePeers, useReviewApp,
-} from "../queries";
-import { ReachBadge } from "../reach";
+import { errorText, portLabel } from "../lib";
+import { useApps, useChanges, useGrants, useNetworks, useTags } from "../queries";
+import type { Focus } from "../nav";
 
-interface Props {
-  initialSearch?: string;
-}
+type Dialog = "grant" | "revoke" | "tag" | null;
 
-export default function AppsPage({ initialSearch = "" }: Props) {
+export default function AppsPage({ focus = {} }: { focus?: Focus }) {
+  const toast = useToast();
   const apps = useApps();
-  const [selected, setSelected] = useState<string | null>(null);
-  const [pendingOnly, setPendingOnly] = useState(false);
-  const [search, setSearch] = useState(initialSearch);
+  const tags = useTags();
+  const grants = useGrants();
+  const networks = useNetworks();
+  const changes = useChanges();
 
-  const list = useMemo(() => {
+  const [detail, setDetail] = useState<string | null>(focus.appId ?? null);
+  const [pendingOnly, setPendingOnly] = useState(focus.pendingOnly ?? false);
+  const [search, setSearch] = useState(focus.search ?? "");
+  const [tagFilter, setTagFilter] = useState<string | null>(focus.tagId ?? null);
+  const [netFilter, setNetFilter] = useState("");
+  const [showSystem, setShowSystem] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [dialog, setDialog] = useState<Dialog>(null);
+  const anchor = useRef<string | null>(null);
+
+  const tagList = useMemo(() => tags.data ?? [], [tags.data]);
+  const grantList = grants.data ?? [];
+  const tagMembers = useMemo(
+    () => new Set(tagList.find((t) => t.id === tagFilter)?.members.map((m) => m.app_id) ?? []),
+    [tagList, tagFilter],
+  );
+
+  const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return (apps.data ?? [])
       .filter((a) => !pendingOnly || !a.reviewed)
+      .filter((a) => !tagFilter || tagMembers.has(a.id))
+      .filter((a) => !netFilter || a.addresses.some((ad) => ad.network_id === netFilter))
       .filter((a) => !q || a.name.toLowerCase().includes(q) || a.process_name.toLowerCase().includes(q))
       .sort((a, b) => Number(a.reviewed) - Number(b.reviewed) || a.name.localeCompare(b.name));
-  }, [apps.data, pendingOnly, search]);
+  }, [apps.data, pendingOnly, search, tagFilter, tagMembers, netFilter]);
+  const own = filtered.filter((a) => !a.system);
+  const system = filtered.filter((a) => a.system);
+  // A search or a filter that matches system services should not hide them.
+  const systemOpen = showSystem || search.trim() !== "" || tagFilter !== null;
+  const visible = systemOpen ? [...own, ...system] : own;
   const pendingCount = (apps.data ?? []).filter((a) => !a.reviewed).length;
 
-  return (
-    <div className="split">
-      <section aria-label="Apps">
-        <div className="toolbar">
+  const clickBox = (app: App, shift: boolean) => {
+    const next = new Set(selected);
+    if (shift && anchor.current) {
+      const a = visible.findIndex((x) => x.id === anchor.current);
+      const b = visible.findIndex((x) => x.id === app.id);
+      if (a >= 0 && b >= 0) {
+        const on = !selected.has(app.id);
+        for (const x of visible.slice(Math.min(a, b), Math.max(a, b) + 1)) {
+          if (on) next.add(x.id);
+          else next.delete(x.id);
+        }
+        setSelected(next);
+        anchor.current = app.id;
+        return;
+      }
+    }
+    if (next.has(app.id)) next.delete(app.id);
+    else next.add(app.id);
+    anchor.current = app.id;
+    setSelected(next);
+  };
+  const allChecked = visible.length > 0 && visible.every((a) => selected.has(a.id));
+  const selectedIds = [...selected];
+
+  const markReviewed = () =>
+    changes.mutate(
+      { ops: selectedIds.map((app_id) => ({ op: "review" as const, app_id, reviewed: true })), dryRun: false },
+      {
+        onSuccess: () => toast.success(`Marked ${selectedIds.length} reviewed`),
+        onError: (e) => toast.error(errorText(e)),
+      },
+    );
+
+  const renderRow = (a: App) => {
+    const sum = accessSummary(a.id, grantList, tagList);
+    const listening = a.ports.filter((p) => p.listening);
+    const myTags = membershipsOf(a.id, tagList);
+    return (
+      <tr key={a.id} className={a.id === detail ? "row-selected" : undefined}>
+        <td>
           <input
-            className="input grow"
-            type="search"
-            aria-label="Filter apps"
-            placeholder="Filter apps"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            type="checkbox"
+            aria-label={`Select ${a.name}`}
+            checked={selected.has(a.id)}
+            onChange={() => {}}
+            onClick={(e) => clickBox(a, e.shiftKey)}
           />
-          <label className="check">
-            <input type="checkbox" checked={pendingOnly} onChange={(e) => setPendingOnly(e.target.checked)} />
-            Pending only ({pendingCount})
-          </label>
-        </div>
-        {apps.isLoading && <p className="muted">Loading…</p>}
-        {apps.data && list.length === 0 && (
-          <div className="card empty">
-            <p>{apps.data.length === 0 ? "No apps detected yet." : "No apps match."}</p>
-            {apps.data.length === 0 && <p className="hint">The daemon discovers listening programs automatically.</p>}
-          </div>
-        )}
-        <ul className="app-list">
-          {list.map((a) => (
-            <AppRow key={a.id} app={a} selected={a.id === selected} onSelect={() => setSelected(a.id)} />
-          ))}
-        </ul>
-      </section>
-      <section aria-label="App details">
-        {selected ? (
-          <AppDetailView id={selected} />
-        ) : (
-          <div className="card empty"><p>Select an app to see who can reach it.</p></div>
-        )}
-      </section>
-    </div>
-  );
-}
-
-function AppRow({ app, selected, onSelect }: { app: App; selected: boolean; onSelect: () => void }) {
-  const listening = app.ports.filter((p) => p.listening);
-  return (
-    <li>
-      <button className={`app-row${selected ? " selected" : ""}`} onClick={onSelect} aria-pressed={selected}>
-        <span className="app-row-name">{app.name}</span>
-        {!app.reviewed && <span className="badge badge-pending">pending</span>}
-        <span className="muted app-row-ports">
-          {listening.length ? listening.map(portLabel).join(", ") : "not listening"}
-        </span>
-      </button>
-    </li>
-  );
-}
-
-function AppDetailView({ id }: { id: string }) {
-  const app = useApp(id);
-  const networks = useNetworks();
-  const peers = usePeers();
-  const groups = useGroups();
-
-  if (app.isLoading) return <p className="muted">Loading…</p>;
-  if (app.error || !app.data) return <div className="error-banner">{errorText(app.error)}</div>;
-  return <AppDetailCard app={app.data} networks={networks.data ?? []} peers={peers.data ?? []} groups={groups.data ?? []} />;
-}
-
-function AppDetailCard({ app, networks, peers, groups }: { app: AppDetail; networks: Network[]; peers: Peer[]; groups: PeerGroup[] }) {
-  const toast = useToast();
-  const review = useReviewApp();
-  const [granting, setGranting] = useState(false);
-  const netById = (id: string) => networks.find((n) => n.id === id);
-  const netName = (id: string) => netById(id)?.name ?? id;
-
-  const onlyLocal = app.addresses.length > 0 && app.addresses.every((a) => netById(a.network_id)?.grants_apply === false);
-
-  const keepClosed = () =>
-    review.mutate({ id: app.id, reviewed: true }, {
-      onSuccess: () => toast.success(`${app.name} stays closed`),
-      onError: (e) => toast.error(errorText(e)),
-    });
-
-  return (
-    <div className="card">
-      <div className="card-header">
-        <div>
-          <h2 className="card-title">{app.name}</h2>
-          <div className="muted">
-            {app.process_name}
-            {app.interpreter_arg ? ` · ${app.interpreter_arg}` : ""}
-            {app.exe_path ? ` · ${app.exe_path}` : ""}
-          </div>
-        </div>
-        <div>
-          {app.identity_note && (
-            <span className="badge badge-pending" title="This app is told apart from other apps by more than its program path">
-              {app.identity_note}
+        </td>
+        <td>
+          <button className="link-btn" onClick={() => setDetail(a.id)} aria-pressed={a.id === detail}>{a.name}</button>{" "}
+          {!a.reviewed && <span className="badge badge-pending">pending</span>}
+          {a.identity_note === "unidentified" && <span className="badge reach reach-warn" title="Owner of the socket unknown">unidentified</span>}
+        </td>
+        <td>
+          {myTags.map((m) => (
+            <span key={`${m.tag.id}-${m.port ? portLabel(m.port) : "*"}`} className="tag-pill tag-pill-static">
+              {m.tag.label}{m.port ? ` ${portLabel(m.port)}` : ""}
             </span>
-          )}{" "}
-          {!app.reviewed && <span className="badge badge-pending">pending</span>}
-        </div>
+          ))}
+        </td>
+        <td className="mono ports-cell">{listening.length ? listening.map(portLabel).join(", ") : <span className="muted">not listening</span>}</td>
+        <td>
+          {sum.open && <span className="badge reach reach-bad">open to anyone</span>}
+          {sum.segment && <span className="badge reach reach-warn">segment</span>}
+          {sum.direct + sum.viaTag === 0 ? (
+            <span className="muted">closed</span>
+          ) : (
+            <span className="muted">
+              {sum.direct > 0 && `${sum.direct} direct`}
+              {sum.direct > 0 && sum.viaTag > 0 && ", "}
+              {sum.viaTag > 0 && `${sum.viaTag} via tag`}
+            </span>
+          )}
+        </td>
+      </tr>
+    );
+  };
+
+  return (
+    <div>
+      <TagsPanel active={tagFilter} onFilter={setTagFilter} />
+      <div className="apps-layout">
+        <section aria-label="Apps">
+          <div className="toolbar">
+            <input
+              className="input grow"
+              type="search"
+              aria-label="Filter apps"
+              placeholder="Filter apps"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            <label className="check">
+              <input type="checkbox" checked={pendingOnly} onChange={(e) => setPendingOnly(e.target.checked)} />
+              Pending only ({pendingCount})
+            </label>
+            <label className="visually-hidden" htmlFor="net-filter">Network</label>
+            <select id="net-filter" className="input" value={netFilter} onChange={(e) => setNetFilter(e.target.value)}>
+              <option value="">Any network</option>
+              {(networks.data ?? []).map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
+            </select>
+          </div>
+
+          {selected.size > 0 && (
+            <div className="bulk-bar" role="toolbar" aria-label="Bulk actions">
+              <strong>{selected.size} selected</strong>
+              <button className="btn btn-sm btn-primary" onClick={() => setDialog("grant")}>Grant…</button>
+              <button className="btn btn-sm" onClick={() => setDialog("revoke")}>Revoke…</button>
+              <button className="btn btn-sm" onClick={() => setDialog("tag")}>Tag…</button>
+              <button className="btn btn-sm" onClick={markReviewed} disabled={changes.isPending}>Mark reviewed</button>
+              <button className="btn btn-sm" onClick={() => setSelected(new Set())}>Clear</button>
+            </div>
+          )}
+
+          {apps.isLoading && <p className="muted">Loading…</p>}
+          {apps.error && <div className="error-banner">{errorText(apps.error)}</div>}
+          {apps.data && filtered.length === 0 && (
+            <div className="card empty">
+              <p>{apps.data.length === 0 ? "No apps detected yet." : "No apps match."}</p>
+              {apps.data.length === 0 && <p className="hint">The daemon discovers listening programs automatically.</p>}
+            </div>
+          )}
+          {filtered.length > 0 && (
+            <div className="table-wrap">
+              <table className="apps-table">
+                <thead>
+                  <tr>
+                    <th>
+                      <input
+                        type="checkbox"
+                        aria-label="Select all shown apps"
+                        checked={allChecked}
+                        onChange={(e) => setSelected(e.target.checked ? new Set(visible.map((a) => a.id)) : new Set())}
+                      />
+                    </th>
+                    <th>App</th><th>Tags</th><th>Ports</th><th>Access</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {own.map(renderRow)}
+                  {system.length > 0 && (
+                    <tr className="group-row">
+                      <td colSpan={5}>
+                        <button
+                          className="link-btn"
+                          aria-expanded={systemOpen}
+                          onClick={() => setShowSystem(!showSystem)}
+                          disabled={search.trim() !== "" || tagFilter !== null}
+                        >
+                          {systemOpen ? "▾" : "▸"} System services ({system.length})
+                        </button>
+                        <span className="muted"> Windows services and system processes</span>
+                      </td>
+                    </tr>
+                  )}
+                  {systemOpen && system.map(renderRow)}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+        <section aria-label="App details">
+          {detail ? (
+            <AppDetailView key={detail} id={detail} onForgotten={() => setDetail(null)} />
+          ) : (
+            <div className="card empty"><p>Select an app to see its ports and who can reach them.</p></div>
+          )}
+        </section>
       </div>
 
-      <h3 className="section-title">Ports</h3>
-      {app.ports.length === 0 ? (
-        <p className="muted">No ports seen.</p>
-      ) : (
-        <ul className="plain-list">
-          {app.ports.map((p) => (
-            <li key={portLabel(p)}>
-              <span className="mono">{portLabel(p)}</span>{" "}
-              <span className={p.listening ? "badge reach reach-ok" : "badge reach reach-muted"}>
-                {p.listening ? "listening" : "not listening"}
-              </span>
-            </li>
-          ))}
-        </ul>
+      {dialog === "grant" && (
+        <GrantEditor targets={selectedIds.map((id) => ({ kind: "app" as const, id }))} onClose={() => setDialog(null)} />
       )}
-
-      <h3 className="section-title">Addresses</h3>
-      {app.addresses.length === 0 ? (
-        <p className="muted">No addresses assigned yet.</p>
-      ) : (
-        <ul className="plain-list">
-          {app.addresses.map((a) => (
-            <li key={a.id}>
-              <strong>{netName(a.network_id)}</strong>{" "}
-              <span className="mono">{a.locator.kind === "ipv6" ? a.locator.addr : a.locator.hostname}</span>
-              {a.ports !== "all" && <span className="muted"> ({a.ports.only.map(portLabel).join(", ")})</span>}
-              {netById(a.network_id)?.grants_apply === false && <span className="muted"> · this machine only</span>}
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <h3 className="section-title">Who can reach this</h3>
-      {onlyLocal ? (
-        <p className="muted">This machine only. Grants do not apply on the Local network.</p>
-      ) : (
-        <>
-          {app.grants.length === 0 ? (
-            <p className="muted">Nobody. The app is closed to every peer.</p>
-          ) : (
-            <ul className="chip-list">
-              {app.grants.map((g) => (
-                <GrantChip key={g.id} grant={g} peers={peers} groups={groups} networks={networks} />
-              ))}
-            </ul>
-          )}
-          <div className="actions">
-            <button className="btn btn-primary" onClick={() => setGranting(true)}>Grant access…</button>
-            {!app.reviewed && (
-              <button className="btn" onClick={keepClosed} disabled={review.isPending}>Keep closed</button>
-            )}
-          </div>
-        </>
-      )}
-
-      <Counters app={app} />
-      {granting && <GrantDialog appId={app.id} onClose={() => setGranting(false)} />}
+      {dialog === "revoke" && <RevokeDialog appIds={selectedIds} onClose={() => setDialog(null)} />}
+      {dialog === "tag" && <TagDialog members={selectedIds.map((app_id) => ({ app_id, port: null }))} onClose={() => setDialog(null)} />}
     </div>
-  );
-}
-
-function GrantChip({ grant, peers, groups, networks }: { grant: GrantView; peers: Peer[]; groups: PeerGroup[]; networks: Network[] }) {
-  const toast = useToast();
-  const del = useDeleteGrant();
-  const netName = (id: string) => networks.find((n) => n.id === id)?.name ?? id;
-  const name =
-    grant.subject.kind === "anyone" && grant.network_id
-      ? `Everyone on ${netName(grant.network_id)}`
-      : subjectLabel(grant.subject, peers, groups);
-  return (
-    <li className="chip">
-      <span className="chip-name">{name}</span>
-      {grant.port && <span className="muted">{portLabel(grant.port)}</span>}
-      {grant.network_id && <span className="muted">on {netName(grant.network_id)}</span>}
-      {grant.network_id && grant.subject.kind === "anyone" && (
-        <span
-          className="badge reach reach-warn"
-          title="Everyone the switch puts on this network can connect; nothing is verified."
-        >
-          segment
-        </span>
-      )}
-      <span className="chip-reach">
-        {grant.reach.map((r) => (
-          <ReachBadge key={r.network_id} reach={r.reach} network={netName(r.network_id)} />
-        ))}
-      </span>
-      <button
-        className="btn btn-danger btn-sm"
-        aria-label={`Revoke access for ${name}`}
-        disabled={del.isPending}
-        onClick={() =>
-          del.mutate(grant.id, {
-            onSuccess: () => toast.success("Access revoked"),
-            onError: (e) => toast.error(errorText(e)),
-          })
-        }
-      >
-        Revoke
-      </button>
-    </li>
-  );
-}
-
-function Counters({ app }: { app: AppDetail }) {
-  const blocked = useActivity({ kind: "blocked", appId: app.id });
-  const blockedCount = (blocked.data?.pages.flat() ?? []).reduce((n, r) => n + r.count, 0);
-  const allowed = app.counters ?? [];
-  if (allowed.length === 0 && blockedCount === 0) return null;
-  return (
-    <>
-      <h3 className="section-title">Traffic</h3>
-      <ul className="plain-list">
-        {allowed.map((c) => (
-          <li key={`${c.network_id}-${c.subject}`}>
-            Allowed from {c.subject}: {c.packets} packets, {formatBytes(c.bytes)}
-          </li>
-        ))}
-        {blockedCount > 0 && <li>Blocked attempts (recent): {blockedCount}</li>}
-      </ul>
-    </>
   );
 }

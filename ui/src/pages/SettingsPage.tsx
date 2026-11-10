@@ -1,96 +1,138 @@
 import { useEffect, useState } from "react";
-import { toDaemonError, type LockoutRiskInfo } from "../api";
+import { toDaemonError, type AddressMode, type LockoutRiskInfo } from "../api";
 import ConfirmDialog from "../components/ConfirmDialog";
+import ExportSection from "../components/ExportSection";
+import NetworksSection from "../components/NetworksSection";
 import { useToast } from "../components/Toast";
 import { errorText } from "../lib";
-import { useNetworks, useSetEnabled, useSetProtectHost, useSettings, useStatus } from "../queries";
+import { useNav } from "../nav";
+import { useNetworks, useSetEnabled, useSetProtectHost, useSettings, useStatus, useUpdateSettings } from "../queries";
 
-interface Props {
-  /** Open the Apps page filtered to a process. */
-  onShowApp: (search: string) => void;
-}
-
-export default function SettingsPage({ onShowApp }: Props) {
+export default function SettingsPage() {
+  const nav = useNav();
   const status = useStatus();
   const networks = useNetworks();
   const settings = useSettings();
-  const toast = useToast();
-  const setEnabled = useSetEnabled();
-  const [confirmDisable, setConfirmDisable] = useState(false);
-  const s = status.data;
 
   return (
     <div>
-      <section className="card">
-        <h2 className="card-title">Networks</h2>
-        <ul className="plain-list">
-          {networks.data?.map((n) => (
-            <li key={n.id} className="net-row">
-              <strong>{n.name}</strong>
-              <span className="muted">{n.kind}{n.interface ? ` · ${n.interface}` : ""}</span>
-              {n.status.state === "up" ? (
-                <span className="badge reach reach-ok">up</span>
-              ) : (
-                <span className="badge reach reach-bad" title={n.status.reason}>down: {n.status.reason}</span>
-              )}
-              {!n.grants_apply && <span className="muted">this machine only</span>}
-            </li>
-          ))}
-        </ul>
-        <p className="hint">Add networks with <code>socketguard networks add</code>.</p>
-      </section>
+      <NetworksSection />
 
-      <ProtectHost interfaces={networks.data?.flatMap((n) => (n.interface && n.grants_apply ? [n.interface] : [])) ?? []}
-        current={settings.data?.protect_host_interfaces ?? s?.protect_host_interfaces ?? []}
-        onShowApp={onShowApp} />
+      <ProtectHost
+        interfaces={networks.data?.flatMap((n) => (n.interface && n.grants_apply ? [n.interface] : [])) ?? []}
+        current={settings.data?.protect_host_interfaces ?? status.data?.protect_host_interfaces ?? []}
+        onShowApp={(search) => nav.go("apps", { search })}
+      />
 
-      <section className="card">
-        <h2 className="card-title">Addresses</h2>
-        <p>
-          Address mode: <strong>{settings.data ? (settings.data.address_mode === "per_app" ? "one address per app" : "one address per port") : "…"}</strong>
-        </p>
-      </section>
+      <AddressMode mode={settings.data?.address_mode} />
 
-      <section className="card">
-        <h2 className="card-title">Daemon</h2>
-        {s ? (
-          <>
-            <p>
-              Version {s.version} · {s.counts.apps} apps ({s.counts.pending_apps} pending) · {s.counts.peers} peers ·{" "}
-              {s.counts.grants} grants
-            </p>
-            <p>
-              Enforcement: <strong>{s.disabled ? "off" : s.unadopted ? "waiting (existing ruleset not adopted)" : "on"}</strong>
-            </p>
-            <div className="actions">
-              {s.disabled || s.unadopted ? (
-                <button className="btn btn-primary" disabled={setEnabled.isPending}
-                  onClick={() => setEnabled.mutate(true, { onSuccess: () => toast.success("Enforcement on"), onError: (e) => toast.error(errorText(e)) })}>
-                  {s.unadopted && !s.disabled ? "Adopt and enforce" : "Enable enforcement"}
-                </button>
-              ) : (
-                <button className="btn btn-danger" onClick={() => setConfirmDisable(true)}>Disable enforcement</button>
-              )}
-            </div>
-          </>
-        ) : (
-          <p className="muted">Daemon not reachable.</p>
-        )}
-        {confirmDisable && (
-          <ConfirmDialog
-            title="Disable enforcement?"
-            confirmLabel="Disable"
-            onCancel={() => setConfirmDisable(false)}
-            onConfirm={() => {
-              setConfirmDisable(false);
-              setEnabled.mutate(false, { onSuccess: () => toast.success("Enforcement off"), onError: (e) => toast.error(errorText(e)) });
-            }}
-          >
-            <p>All firewall rules and addresses are removed and stay off, also after a restart, until you enable enforcement again. Every service becomes reachable as the network allows.</p>
-          </ConfirmDialog>
-        )}
-      </section>
+      <ExportSection />
+
+      <DangerZone />
     </div>
+  );
+}
+
+function AddressMode({ mode }: { mode: AddressMode | undefined }) {
+  const toast = useToast();
+  const update = useUpdateSettings();
+  return (
+    <section className="card" aria-label="Addresses">
+      <h2 className="card-title">Addresses</h2>
+      <p className="hint">
+        Each app gets its own address on every network, so a firewall rule can tell apps apart. One address per port gives every
+        listening port its own address instead.
+      </p>
+      <div className="form-row">
+        <label htmlFor="address-mode">Address mode</label>
+        <select
+          id="address-mode"
+          className="input"
+          value={mode ?? ""}
+          disabled={!mode || update.isPending}
+          onChange={(e) =>
+            update.mutate({ address_mode: e.target.value as AddressMode }, {
+              onSuccess: () => toast.success("Address mode changed"),
+              onError: (err) => toast.error(errorText(err)),
+            })
+          }
+        >
+          {!mode && <option value="">…</option>}
+          <option value="per_app">One address per app</option>
+          <option value="per_port">One address per port</option>
+        </select>
+      </div>
+      <p className="hint">
+        Which programs count as apps (the process filter) is set in the daemon&apos;s config file; the API does not expose it yet.
+      </p>
+    </section>
+  );
+}
+
+function DangerZone() {
+  const status = useStatus();
+  const toast = useToast();
+  const setEnabled = useSetEnabled();
+  const [confirmOff, setConfirmOff] = useState(false);
+  const s = status.data;
+
+  return (
+    <section className="card danger-zone" aria-label="Danger zone">
+      <h2 className="card-title">Daemon</h2>
+      {s ? (
+        <>
+          <p>
+            Version {s.version} · {s.counts.apps} apps ({s.counts.pending_apps} pending) · {s.counts.peers} peers ·{" "}
+            {s.counts.grants} grants
+          </p>
+          <p>
+            SocketGuard is <strong>{s.disabled ? "off" : s.unadopted ? "waiting" : "on"}</strong>.
+          </p>
+          {s.unadopted && !s.disabled && (
+            <p>Rules from an earlier install are active, but this database doesn&apos;t know them. Adopt them?</p>
+          )}
+          <div className="actions">
+            {s.disabled || s.unadopted ? (
+              <button
+                className="btn btn-primary"
+                disabled={setEnabled.isPending}
+                onClick={() =>
+                  setEnabled.mutate(true, {
+                    onSuccess: () => toast.success("SocketGuard is on"),
+                    onError: (e) => toast.error(errorText(e)),
+                  })
+                }
+              >
+                {s.unadopted && !s.disabled ? "Adopt them and turn on" : "Turn SocketGuard on"}
+              </button>
+            ) : null}
+            {!s.disabled && <button className="btn btn-danger" onClick={() => setConfirmOff(true)}>Turn SocketGuard off</button>}
+          </div>
+        </>
+      ) : (
+        <p className="muted">Daemon not reachable.</p>
+      )}
+      {confirmOff && (
+        <ConfirmDialog
+          title="Turn SocketGuard off?"
+          confirmLabel="Turn SocketGuard off"
+          onCancel={() => setConfirmOff(false)}
+          onConfirm={() => {
+            setConfirmOff(false);
+            setEnabled.mutate(false, {
+              onSuccess: () => toast.success("SocketGuard is off"),
+              onError: (e) => toast.error(errorText(e)),
+            });
+          }}
+        >
+          <p>
+            This removes all firewall rules and addresses SocketGuard added, and keeps them off, also after a restart, until you
+            turn it on again. The host is then as open as the network allows: every service is reachable by whoever can reach the
+            machine.
+          </p>
+        </ConfirmDialog>
+      )}
+    </section>
   );
 }
 
@@ -126,9 +168,13 @@ function ProtectHost({ interfaces, current, onShowApp }: { interfaces: string[];
   }
 
   return (
-    <section className="card">
+    <section className="card" aria-label="Protect the whole host">
       <h2 className="card-title">Protect the whole host</h2>
       <p className="hint">Closes every port on the chosen interfaces unless an app has a grant, not just apps SocketGuard manages.</p>
+      <p className="hint">
+        IPv4 follows the interface: with protection on, only IPv4 peers (IP credentials) that have a grant get in over IPv4. With
+        it off, an app that listens on IPv4 is open to everyone over IPv4, whatever its grants say.
+      </p>
       <fieldset className="checks">
         <legend className="visually-hidden">Interfaces to protect</legend>
         {options.length === 0 && <p className="muted">No interfaces available.</p>}

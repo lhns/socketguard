@@ -11,10 +11,21 @@ import {
   api,
   onDaemonEvent,
   type ActivityKind,
+  type ApplyRequest,
+  type ChangeOp,
+  type MergeRequest,
   type NewCredential,
   type NewGrant,
+  type NewGroup,
+  type NewNetwork,
   type NewPeer,
+  type NewTag,
+  type PortRef,
   type ProtectHostRequest,
+  type SplitRequest,
+  type TagMember,
+  type UpdateSettings,
+  type UpdateTag,
 } from "./api";
 
 export function createQueryClient(): QueryClient {
@@ -33,8 +44,11 @@ export const useApp = (id: string | null) =>
 export const usePeers = () => useQuery({ queryKey: ["peers"], queryFn: api.listPeers });
 export const useGroups = () => useQuery({ queryKey: ["groups"], queryFn: api.listGroups });
 export const useGrants = () => useQuery({ queryKey: ["grants"], queryFn: api.listGrants });
+export const useTags = () => useQuery({ queryKey: ["tags"], queryFn: api.listTags });
 export const useNetworks = () => useQuery({ queryKey: ["networks"], queryFn: api.listNetworks });
 export const useSettings = () => useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
+export const useShare = (appId: string | null) =>
+  useQuery({ queryKey: ["share", appId], queryFn: () => api.shareApp(appId as string), enabled: appId !== null });
 
 /** Classify pasted credential text with the daemon's parser (kept while typing). */
 export const useParsedCredentials = (text: string) => {
@@ -53,6 +67,7 @@ export const ACTIVITY_PAGE = 50;
 export interface ActivityFilter {
   kind: ActivityKind | null;
   appId: string | null;
+  peerId?: string | null;
 }
 
 export function useActivity(filter: ActivityFilter) {
@@ -60,7 +75,13 @@ export function useActivity(filter: ActivityFilter) {
     queryKey: ["activity", filter],
     initialPageParam: null as number | null,
     queryFn: ({ pageParam }) =>
-      api.activity({ kind: filter.kind, app_id: filter.appId, before: pageParam, limit: ACTIVITY_PAGE }),
+      api.activity({
+        kind: filter.kind,
+        app_id: filter.appId,
+        peer_id: filter.peerId ?? null,
+        before: pageParam,
+        limit: ACTIVITY_PAGE,
+      }),
     getNextPageParam: (last) =>
       last.length < ACTIVITY_PAGE ? undefined : last[last.length - 1].id,
   });
@@ -81,6 +102,11 @@ function useInvalidating<V, R>(fn: (v: V) => Promise<R>, keys: string[][]) {
 
 const GRANT_KEYS = [["grants"], ["apps"], ["app"], ["activity"]];
 const PEER_KEYS = [["peers"], ["groups"], ["grants"], ["app"]];
+const GROUP_KEYS = [["groups"], ["peers"], ["grants"], ["app"], ["activity"]];
+const TAG_KEYS = [["tags"], ["grants"], ["apps"], ["app"], ["activity"]];
+const NETWORK_KEYS = [["networks"], ["status"], ["apps"], ["app"], ["grants"], ["settings"]];
+/** A batch can touch anything. */
+const CHANGES_KEYS = [["grants"], ["apps"], ["app"], ["peers"], ["groups"], ["tags"], ["status"], ["activity"]];
 
 export const useCreateGrant = () =>
   useInvalidating((req: NewGrant) => api.createGrant(req), GRANT_KEYS);
@@ -91,8 +117,29 @@ export const useReviewApp = () =>
     (v: { id: string; reviewed: boolean }) => api.reviewApp(v.id, v.reviewed),
     [["apps"], ["app"], ["status"], ["activity"]],
   );
+export const useDeleteApp = () =>
+  useInvalidating((id: string) => api.deleteApp(id), [...GRANT_KEYS, ["status"], ["tags"]]);
+export const useSplitApp = () =>
+  useInvalidating((v: { id: string; req: SplitRequest }) => api.splitApp(v.id, v.req), [["apps"], ["app"]]);
+export const useMergeApp = () =>
+  useInvalidating((v: { id: string; req: MergeRequest }) => api.mergeApp(v.id, v.req), [["apps"], ["app"]]);
+
+/** Many changes at once (ADR 0045). A dry run changes nothing, so it invalidates nothing. */
+export function useChanges() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { ops: ChangeOp[]; dryRun: boolean }) => api.changes({ ops: v.ops, dry_run: v.dryRun }),
+    onSuccess: (_r, v) => {
+      if (v.dryRun) return;
+      for (const queryKey of CHANGES_KEYS) void qc.invalidateQueries({ queryKey });
+    },
+  });
+}
+
 export const useCreatePeer = () =>
   useInvalidating((req: NewPeer) => api.createPeer(req), PEER_KEYS);
+export const useRenamePeer = () =>
+  useInvalidating((v: { id: string; label: string }) => api.updatePeer(v.id, v.label), PEER_KEYS);
 export const useDeletePeer = () =>
   useInvalidating((id: string) => api.deletePeer(id), PEER_KEYS);
 export const useAddCredential = () =>
@@ -102,8 +149,42 @@ export const useRemoveCredential = () =>
     (v: { peerId: string; credentialId: string }) => api.removeCredential(v.peerId, v.credentialId),
     PEER_KEYS,
   );
+export const useGenerateTorKey = () =>
+  useInvalidating((peerId: string) => api.generateTorKey(peerId), [...PEER_KEYS, ["share"]]);
+
+export const useCreateGroup = () =>
+  useInvalidating((req: NewGroup) => api.createGroup(req), GROUP_KEYS);
+export const useRenameGroup = () =>
+  useInvalidating((v: { id: string; label: string }) => api.updateGroup(v.id, v.label), GROUP_KEYS);
+export const useDeleteGroup = () =>
+  useInvalidating((id: string) => api.deleteGroup(id), GROUP_KEYS);
+export const useSetGroupMembers = () =>
+  useInvalidating((v: { id: string; peerIds: string[] }) => api.setGroupMembers(v.id, v.peerIds), GROUP_KEYS);
+
+export const useCreateTag = () =>
+  useInvalidating((req: NewTag) => api.createTag(req), TAG_KEYS);
+export const useUpdateTag = () =>
+  useInvalidating((v: { id: string; req: UpdateTag }) => api.updateTag(v.id, v.req), TAG_KEYS);
+export const useDeleteTag = () =>
+  useInvalidating((id: string) => api.deleteTag(id), TAG_KEYS);
+export const useAddTagMember = () =>
+  useInvalidating((v: { tagId: string; member: TagMember }) => api.addTagMember(v.tagId, v.member), TAG_KEYS);
+export const useRemoveTagMember = () =>
+  useInvalidating(
+    (v: { tagId: string; appId: string; port: PortRef | null }) => api.removeTagMember(v.tagId, v.appId, v.port),
+    TAG_KEYS,
+  );
+
+export const useAddNetwork = () =>
+  useInvalidating((req: NewNetwork) => api.addNetwork(req), NETWORK_KEYS);
+export const useDeleteNetwork = () =>
+  useInvalidating((v: { id: string; force: boolean }) => api.deleteNetwork(v.id, v.force), NETWORK_KEYS);
+export const useUpdateSettings = () =>
+  useInvalidating((req: UpdateSettings) => api.updateSettings(req), [["settings"], ["apps"], ["app"]]);
 export const useSetProtectHost = () =>
   useInvalidating((req: ProtectHostRequest) => api.setProtectHost(req), [["settings"], ["status"]]);
+export const useApplyState = () =>
+  useInvalidating((req: ApplyRequest) => api.applyState(req), [...CHANGES_KEYS, ["settings"], ["networks"]]);
 export const useSetEnabled = () =>
   useInvalidating((enabled: boolean) => (enabled ? api.enable() : api.disable()), [["status"], ["apps"], ["app"]]);
 
@@ -113,14 +194,14 @@ export const useSetEnabled = () =>
 export const EVENT_INVALIDATIONS: Record<string, string[][]> = {
   apps_changed: [["apps"], ["app"], ["status"]],
   app_discovered: [["apps"], ["app"], ["status"]],
-  peers_changed: [["peers"], ["groups"], ["grants"], ["app"]],
-  grants_changed: [["grants"], ["apps"], ["app"]],
+  peers_changed: [["peers"], ["groups"], ["grants"], ["app"], ["share"]],
+  grants_changed: [["grants"], ["apps"], ["app"], ["share"]],
   tags_changed: [["tags"], ["grants"], ["app"]],
   networks_changed: [["networks"], ["status"], ["app"]],
   settings_changed: [["settings"], ["status"]],
   activity: [["activity"]],
   daemon_disconnected: [["status"]],
-  daemon_connected: [["status"], ["apps"], ["app"], ["peers"], ["groups"], ["grants"], ["networks"], ["settings"], ["activity"]],
+  daemon_connected: [["status"], ["apps"], ["app"], ["peers"], ["groups"], ["grants"], ["tags"], ["networks"], ["settings"], ["activity"]],
 };
 
 let subscribed = false;
