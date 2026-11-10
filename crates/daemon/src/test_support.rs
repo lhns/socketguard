@@ -428,56 +428,33 @@ impl YggdrasilNode for MockYggdrasilNode {
     }
 }
 
-// ─── FailingNetworkInterface ─────────────────────────────────────────────────
-
-/// A network interface mock that fails `add_address` for a specific interface name.
-/// Used to test error resilience when one backend's network op fails.
-pub struct FailingNetworkInterface {
-    pub calls: Arc<Mutex<Vec<NetworkCall>>>,
-    /// Interface name that should trigger failures on `add_address`.
-    pub fail_iface: String,
-}
-
-impl FailingNetworkInterface {
-    pub fn new(calls: Arc<Mutex<Vec<NetworkCall>>>, fail_iface: &str) -> Self {
-        Self {
-            calls,
-            fail_iface: fail_iface.to_string(),
-        }
-    }
-}
-
-impl NetworkInterface for FailingNetworkInterface {
-    fn add_address(&self, iface: &str, addr: Ipv6Addr, prefix: u8) -> Result<()> {
-        self.calls.lock().unwrap().push(NetworkCall::AddAddress {
-            iface: iface.to_string(),
-            addr,
-            prefix,
-        });
-        if iface == self.fail_iface {
-            anyhow::bail!("simulated add_address failure on {}", iface);
-        }
-        Ok(())
-    }
-
-    fn remove_address(&self, iface: &str, addr: Ipv6Addr) -> Result<()> {
-        self.calls.lock().unwrap().push(NetworkCall::RemoveAddress {
-            iface: iface.to_string(),
-            addr,
-        });
-        Ok(())
-    }
-
-    fn list_interfaces(&self) -> Result<Vec<String>> {
-        Ok(vec!["lo".to_string()])
-    }
-
-    fn list_addresses(&self, _iface: &str) -> Result<Vec<Ipv6Addr>> {
-        Ok(Vec::new())
-    }
-}
-
 // ─── Test helpers ────────────────────────────────────────────────────────────
+
+/// An IP network over an already built allocator (a mock stands in for the real one).
+pub fn ip_backend(
+    config: socketguard_core::config::BackendInstanceConfig,
+    backend: Box<dyn Ipv6Backend>,
+) -> crate::engine::ActiveBackend {
+    let network = Arc::new(crate::networks::IpNetwork::for_config(
+        &config.backend,
+        backend,
+    ));
+    crate::engine::ActiveBackend { config, network }
+}
+
+/// Add an IP network with a mock allocator to a running engine.
+pub async fn add_ip_network(
+    engine: &mut crate::engine::Engine,
+    state: &AppState,
+    inst: &socketguard_core::config::BackendInstanceConfig,
+    backend: Box<dyn Ipv6Backend>,
+) {
+    let network = Arc::new(crate::networks::IpNetwork::for_config(
+        &inst.backend,
+        backend,
+    ));
+    engine.add_network_instance(state, inst, network).await;
+}
 
 pub async fn test_app_state(engine: crate::engine::Engine, config: DaemonConfig) -> Arc<AppState> {
     test_app_state_at(engine, config, None).await
@@ -517,7 +494,7 @@ pub async fn standard_daemon(
     initial: Vec<ListeningSocket>,
     config_path: Option<std::path::PathBuf>,
 ) -> StandardDaemon {
-    use crate::engine::{ActiveBackend, Engine};
+    use crate::engine::Engine;
     use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
 
     let fw = Arc::new(MockFirewall::new(Arc::new(Mutex::new(Vec::new()))));
@@ -560,15 +537,10 @@ pub async fn standard_daemon(
             id: id.to_string(),
             backend: config,
         };
-        backends.insert(
-            id.to_string(),
-            ActiveBackend::ip(cfg.clone(), Box::new(mock)),
-        );
+        backends.insert(id.to_string(), ip_backend(cfg.clone(), Box::new(mock)));
         configs.push(cfg);
     }
-    let ids = configs.iter().map(|c| c.id.clone()).collect();
-    let engine =
-        Engine::new_injectable(Box::new(monitor), fw.clone(), Arc::new(net), backends, ids);
+    let engine = Engine::new_injectable(Box::new(monitor), fw.clone(), Arc::new(net), backends);
     let state = test_app_state_at(
         engine,
         DaemonConfig {

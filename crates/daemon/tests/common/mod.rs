@@ -22,7 +22,6 @@ pub fn empty_engine() -> Engine {
         Arc::new(MockFirewall::new(Arc::new(Mutex::new(vec![])))),
         Arc::new(MockNetworkInterface::new(Arc::new(Mutex::new(vec![])))),
         HashMap::new(),
-        vec![],
     )
 }
 

@@ -10,9 +10,7 @@ use socketguard_core::{
     NewGrant, PortRef, PortSet, Protocol, Reach, Subject,
 };
 use socketguard_daemon::api::DaemonEvent;
-use socketguard_daemon::engine::{
-    ActiveBackend, Engine, EngineError, GrantFilter, ProtectHostError,
-};
+use socketguard_daemon::engine::{Engine, EngineError, GrantFilter, ProtectHostError};
 use socketguard_daemon::firewall::{DropEvent, ScopeMatch, Sources};
 use socketguard_daemon::network::NetworkInterface as _;
 use socketguard_daemon::test_support::*;
@@ -111,19 +109,14 @@ impl Harness {
                 backend: n.config,
             };
             mocks.insert(n.id, n.mock.clone());
-            backends.insert(
-                n.id.to_string(),
-                ActiveBackend::ip(cfg.clone(), Box::new(n.mock)),
-            );
+            backends.insert(n.id.to_string(), ip_backend(cfg.clone(), Box::new(n.mock)));
             configs.push(cfg);
         }
-        let ids = configs.iter().map(|c| c.id.clone()).collect();
         let engine = Engine::new_injectable(
             Box::new(monitor),
             fw.clone(),
             Arc::new(net.clone()),
             backends,
-            ids,
         );
         let state = test_app_state(
             engine,
@@ -1224,24 +1217,6 @@ async fn a_drop_event_produces_blocked_activity() {
 // ─── Lifecycle: freeze, disable, restore ─────────────────────────────────────
 
 #[tokio::test]
-async fn shutdown_removes_nothing() {
-    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
-    h.reconcile().await;
-    let app = h.app().await;
-    h.clear_calls();
-    h.engine().await.shutdown().await;
-    assert!(
-        h.fw_calls.lock().unwrap().is_empty(),
-        "no Disable, no flush"
-    );
-    assert!(h.net_calls.lock().unwrap().is_empty());
-    assert!(h
-        .net
-        .addresses("ygg0")
-        .contains(&Harness::addr_on(&app, "ygg")));
-}
-
-#[tokio::test]
 async fn disable_removes_rules_and_addresses() {
     let h = Harness::new(
         vec![local(), ygg()],
@@ -1410,9 +1385,7 @@ async fn adding_and_removing_a_network() {
     {
         let mut engine = h.state.engine.write().await;
         let mock = ygg().mock;
-        engine
-            .add_backend_instance_with(&h.state, &inst, Box::new(mock))
-            .await;
+        add_ip_network(&mut engine, &h.state, &inst, Box::new(mock)).await;
     }
     let app = h.app().await;
     assert_eq!(app.addresses.len(), 2);
@@ -2259,7 +2232,7 @@ async fn groups_are_recorded_in_the_activity_log() {
     let peer = e.create_peer(s, "laptop", &[]).await.unwrap();
     let group = e.create_group(s, "family", &[]).await.unwrap();
     e.rename_group(s, &group.id, "household").await.unwrap();
-    e.set_group_members(s, &group.id, &[peer.id.clone()])
+    e.set_group_members(s, &group.id, std::slice::from_ref(&peer.id))
         .await
         .unwrap();
     e.delete_group(s, &group.id).await.unwrap();

@@ -6,7 +6,7 @@ use crate::networks::{self};
 use crate::state::NewActivity;
 use crate::AppState;
 use chrono::Utc;
-use socketguard_core::config::DaemonConfig;
+use socketguard_core::config::ProcessFilter;
 use socketguard_core::{app_identity, ActivityKind, App, AppId, AppIdentity, PortRef};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
@@ -18,7 +18,7 @@ impl Engine {
     pub(super) async fn upsert_apps(
         &self,
         state: &AppState,
-        config: &DaemonConfig,
+        process_filter: &ProcessFilter,
         sockets: &[socketguard_core::ListeningSocket],
     ) -> anyhow::Result<bool> {
         struct Live {
@@ -32,7 +32,7 @@ impl Engine {
         let mut live: BTreeMap<AppId, Live> = BTreeMap::new();
         let mut binds: HashMap<(AppId, PortRef), IpAddr> = HashMap::new();
         for ls in sockets {
-            if !config.process_filter.matches(&ls.process_name) {
+            if !process_filter.matches(&ls.process_name) {
                 continue;
             }
             let AppIdentity {

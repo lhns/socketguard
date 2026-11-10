@@ -19,12 +19,11 @@ pub use addresses::plan_addresses;
 use enforce::disable_networks;
 
 use crate::api::DaemonEvent;
-use crate::backend::Ipv6Backend;
 use crate::firewall::{DesiredRuleset, DropEvent, Firewall};
 use crate::metrics::{CounterKey, Metrics};
 use crate::monitor::{self, SocketMonitor};
 use crate::network::{self, NetworkInterface};
-use crate::networks::{self, IpNetwork};
+use crate::networks;
 use crate::ruleset::LockoutRisk;
 use crate::state::{Database, NewActivity};
 use crate::AppState;
@@ -58,14 +57,6 @@ const MAX_DROP_KEYS: usize = 5_000;
 pub struct ActiveBackend {
     pub config: BackendInstanceConfig,
     pub network: Arc<dyn networks::Network>,
-}
-
-impl ActiveBackend {
-    /// An IP network over an already built allocator (tests inject mocks).
-    pub fn ip(config: BackendInstanceConfig, backend: Box<dyn Ipv6Backend>) -> Self {
-        let network = Arc::new(IpNetwork::for_config(&config.backend, backend));
-        Self { config, network }
-    }
 }
 
 /// Why `set_protect_host` did not change anything.
@@ -121,8 +112,6 @@ pub struct Engine {
     pub(crate) backends: HashMap<String, ActiveBackend>,
     firewall: Arc<dyn Firewall>,
     network: Arc<dyn NetworkInterface>,
-    /// Track which backend configs the engine was built with (by ID)
-    current_backend_ids: Vec<String>,
     /// Persisted ULA global ID handed to ULA backends.
     ula_global_id: [u8; 5],
     /// Interfaces already reported as unavailable (avoids a warning every poll).
@@ -186,15 +175,11 @@ impl Engine {
                 },
             );
         }
-        let current_backend_ids: Vec<String> =
-            config.backends.iter().map(|b| b.id.clone()).collect();
-
         Ok(Self::assemble(
             monitor,
             firewall,
             network,
             backends,
-            current_backend_ids,
             ula_global_id,
         ))
     }
@@ -205,14 +190,12 @@ impl Engine {
         firewall: Arc<dyn Firewall>,
         network: Arc<dyn NetworkInterface>,
         backends: HashMap<String, ActiveBackend>,
-        backend_ids: Vec<String>,
     ) -> Self {
         let mut engine = Self::assemble(
             monitor,
             firewall,
             network,
             backends,
-            backend_ids,
             crate::backend::ula::UlaBackend::random_global_id(),
         );
         // Tests drive passes back to back: verify on every one unless they say otherwise.
@@ -230,7 +213,6 @@ impl Engine {
         firewall: Arc<dyn Firewall>,
         network: Arc<dyn NetworkInterface>,
         backends: HashMap<String, ActiveBackend>,
-        current_backend_ids: Vec<String>,
         ula_global_id: [u8; 5],
     ) -> Self {
         Self {
@@ -238,7 +220,6 @@ impl Engine {
             backends,
             firewall,
             network,
-            current_backend_ids,
             ula_global_id,
             unavailable_ifaces: Mutex::default(),
             alloc_failing: Mutex::default(),
@@ -395,12 +376,6 @@ impl Engine {
         let _ = db.clear_fresh().await;
     }
 
-    /// Graceful shutdown removes nothing: the ruleset and the addresses stay, so the host
-    /// keeps its protection while the daemon is down (ADR 0026).
-    pub async fn shutdown(&self) {
-        info!("Shutting down; firewall rules and addresses stay in place");
-    }
-
     /// Remove the firewall rules and every SocketGuard address (`--disable`, uninstall).
     /// Sets the `disabled` latch first, so no pass puts them back; [`Engine::enable`]
     /// clears it.
@@ -444,9 +419,8 @@ impl Engine {
     /// Reconcile: detect sockets, upsert apps and ports, give every app an address on
     /// every network, apply the ruleset, put the addresses on the interfaces.
     pub async fn reconcile(&mut self, state: &AppState) -> anyhow::Result<()> {
-        let config_snapshot = state.config.read().await.clone();
+        let process_filter = state.config.read().await.process_filter.clone();
 
-        self.check_config_change(&config_snapshot, state).await;
         self.rehome_prefix_changes(state).await;
 
         let current_sockets = match self.monitor.list_listening_sockets() {
@@ -462,7 +436,7 @@ impl Engine {
         );
 
         let changed = self
-            .upsert_apps(state, &config_snapshot, &current_sockets)
+            .upsert_apps(state, &process_filter, &current_sockets)
             .await?;
         let created = match self.ensure_addresses(state).await {
             Ok(n) => n,

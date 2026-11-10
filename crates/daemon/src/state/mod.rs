@@ -353,6 +353,7 @@ impl Database {
         )
     }
 
+    #[cfg(test)]
     pub async fn get_address(&self, id: &str) -> Result<Option<Address>> {
         let rows = sqlx::query(&format!("{ADDRESS_SELECT} WHERE id = ?"))
             .bind(id)

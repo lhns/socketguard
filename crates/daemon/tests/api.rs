@@ -540,10 +540,10 @@ async fn networks_list_add_and_remove() {
     assert_eq!(net["kind"], "lan");
     assert!(d
         .state
-        .config
+        .engine
         .read()
         .await
-        .backends
+        .backend_configs()
         .iter()
         .any(|b| b.id == "lan2"));
     let (s, body) = d
@@ -551,7 +551,7 @@ async fn networks_list_add_and_remove() {
         .await;
     assert_eq!((s, code(&body)), (StatusCode::CONFLICT, "conflict"));
 
-    // The next reconcile must not mistake the new network for a config change.
+    // A reconcile pass leaves the new network alone.
     d.reconcile().await;
     assert_eq!(d.get("/api/networks").await.1.as_array().unwrap().len(), 4);
 
@@ -561,10 +561,10 @@ async fn networks_list_add_and_remove() {
     );
     assert!(!d
         .state
-        .config
+        .engine
         .read()
         .await
-        .backends
+        .backend_configs()
         .iter()
         .any(|b| b.id == "lan2"));
     assert_eq!(d.get("/api/networks").await.1.as_array().unwrap().len(), 3);

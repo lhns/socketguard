@@ -2,13 +2,12 @@
 
 use super::*;
 use crate::api::DaemonEvent;
-use crate::backend::Ipv6Backend;
-use crate::networks::{self, IpNetwork};
+use crate::networks;
 use crate::state::Database;
 use crate::AppState;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
 use socketguard_core::{Address, Network};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -135,47 +134,6 @@ impl Engine {
         })
     }
 
-    /// Check if backends config has changed and apply additions/removals.
-    /// Returns true if changes were detected.
-    pub(super) async fn check_config_change(
-        &mut self,
-        config: &DaemonConfig,
-        state: &AppState,
-    ) -> bool {
-        let new_ids: Vec<String> = config.backends.iter().map(|b| b.id.clone()).collect();
-        if new_ids == self.current_backend_ids {
-            return false;
-        }
-
-        let old_ids: HashSet<String> = self.current_backend_ids.iter().cloned().collect();
-        let new_id_set: HashSet<String> = new_ids.iter().cloned().collect();
-
-        let removed: Vec<String> = old_ids.difference(&new_id_set).cloned().collect();
-        for old_id in &removed {
-            info!("Backend '{}' removed from config", old_id);
-            self.remove_backend_instance(state, old_id).await;
-        }
-
-        let added: Vec<String> = new_id_set.difference(&old_ids).cloned().collect();
-        for new_id in &added {
-            if let Some(inst) = config.backends.iter().find(|b| b.id == *new_id) {
-                info!("Backend '{}' added to config", new_id);
-                self.add_backend_instance(state, inst).await;
-            }
-        }
-
-        self.current_backend_ids = new_ids;
-        true
-    }
-
-    /// Add a network and give every app an address on it.
-    pub async fn add_backend_instance(&mut self, state: &AppState, inst: &BackendInstanceConfig) {
-        match networks::create(&inst.backend, self.ula_global_id, self.network.clone()) {
-            Ok(n) => self.add_network_instance(state, inst, n).await,
-            Err(e) => error!("Failed to create backend '{}': {e}", inst.id),
-        }
-    }
-
     /// The API's add: validate against the current networks, create the backend, add it
     /// and return the network as it now stands.
     pub async fn add_network(
@@ -274,17 +232,6 @@ impl Engine {
         Ok(passed)
     }
 
-    /// [`Engine::add_backend_instance`] with the allocator already built (tests inject mocks).
-    pub async fn add_backend_instance_with(
-        &mut self,
-        state: &AppState,
-        inst: &BackendInstanceConfig,
-        b: Box<dyn Ipv6Backend>,
-    ) {
-        let network = Arc::new(IpNetwork::for_config(&inst.backend, b));
-        self.add_network_instance(state, inst, network).await;
-    }
-
     /// Add a network that is already built.
     pub async fn add_network_instance(
         &mut self,
@@ -301,17 +248,6 @@ impl Engine {
                 network,
             },
         );
-        // Keep the config (and the change detector) in step, so the next reconcile does
-        // not see this network as new.
-        {
-            let mut config = state.config.write().await;
-            if !config.backends.iter().any(|b| b.id == inst.id) {
-                config.backends.push(inst.clone());
-            }
-        }
-        if !self.current_backend_ids.contains(&inst.id) {
-            self.current_backend_ids.push(inst.id.clone());
-        }
         let created = match self.ensure_addresses(state).await {
             Ok(n) => n,
             Err(e) => {
@@ -359,13 +295,6 @@ impl Engine {
         };
         self.remove_locators(state, backend_id, &deleted).await;
         self.backends.remove(backend_id);
-        state
-            .config
-            .write()
-            .await
-            .backends
-            .retain(|b| b.id != backend_id);
-        self.current_backend_ids.retain(|id| id != backend_id);
         let applied = self.apply_firewall(state).await;
         self.sweep_owned(state).await;
         let _ = self

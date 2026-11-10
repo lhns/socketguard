@@ -49,7 +49,6 @@ fn the_router_serves_every_route() {
                     Default::default(),
                 )),
                 Default::default(),
-                vec![],
             ),
             Default::default(),
         )
