@@ -115,6 +115,21 @@ describe("Apps list", () => {
     expect(await inList().findByRole("button", { name: "sshd" })).toBeInTheDocument();
   });
 
+  it("keeps ticked apps that a filter hides, and picking a tag starts a new selection", async () => {
+    setup();
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("checkbox", { name: "Select nginx" }));
+    await user.type(screen.getByRole("searchbox", { name: "Filter apps" }), "redis");
+    await user.click(inList().getByRole("checkbox", { name: "Select redis-server" }));
+    await user.clear(screen.getByRole("searchbox", { name: "Filter apps" }));
+    expect(await screen.findByRole("heading", { name: "2 apps selected" })).toBeInTheDocument();
+    expect(inList().getByRole("checkbox", { name: "Select nginx" })).toBeChecked();
+    await user.click(inList().getByRole("checkbox", { name: "Select web" }));
+    expect(await screen.findByRole("heading", { name: "web" })).toBeInTheDocument();
+    expect(inList().getByRole("checkbox", { name: "Select nginx" })).not.toBeChecked();
+  });
+
   it("shift extends a range of checkboxes; select all takes every shown app", async () => {
     setup();
     const user = userEvent.setup();
@@ -388,6 +403,34 @@ describe("Tags", () => {
     await user.type(screen.getByLabelText(/Auto-match patterns/), "stg*");
     await user.click(screen.getByRole("button", { name: "Create tag" }));
     await waitFor(() => expect(applied(d)).toEqual([[{ op: "create_tag", label: "staging", patterns: ["stg*"] }]]));
+  });
+});
+
+describe("Inspector: several tags", () => {
+  it("shows the access they share or only some have, adds access for all, and deletes them after asking once", async () => {
+    const toData = grantView({ id: "g-data", target: { kind: "tag", id: "t2" }, subject: { kind: "peer", id: "p2" } });
+    const d = setup({ delete_tag: () => saved(null) }, [web, data], [gTag, toData]);
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("checkbox", { name: "Select web" }));
+    await user.click(inList().getByRole("checkbox", { name: "Select data" }));
+    const panel = within(await screen.findByRole("region", { name: "Details" }));
+    expect(await panel.findByRole("heading", { name: "2 tags selected" })).toBeInTheDocument();
+    expect(panel.getByText("all 2 tags")).toBeInTheDocument();
+
+    await user.click(panel.getByRole("button", { name: "Add access…" }));
+    const form = screen.getByRole("form", { name: "Add access" });
+    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
+    await user.click(screen.getByRole("checkbox", { name: "alice" }));
+    await user.keyboard("{Escape}");
+    await user.click(within(form).getByRole("button", { name: "Add access" }));
+    await waitFor(() => expect(applied(d)).toHaveLength(1));
+    expect(applied(d)[0].map((o) => (o as { target: { id: string } }).target.id)).toEqual(["t1", "t2"]);
+
+    await user.click(panel.getByRole("button", { name: "Delete 2 tags" }));
+    expect(d.count("delete_tag")).toBe(0);
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete tags" }));
+    await waitFor(() => expect(d.count("delete_tag")).toBe(2));
   });
 });
 

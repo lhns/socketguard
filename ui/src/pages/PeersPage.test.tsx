@@ -270,6 +270,25 @@ describe("Inspector: a group", () => {
   });
 });
 
+describe("Inspector: several groups", () => {
+  it("lists what they can reach and deletes them after asking once", async () => {
+    const toOps = grantView({ id: "g-ops", target: { kind: "app", id: "a1" }, subject: { kind: "group", id: "g2" } });
+    const d = setup({ delete_group: () => saved(null) }, [gTeam, toOps]);
+    const user = userEvent.setup();
+    renderWithProviders(<PeersPage />);
+    await user.click(await inList().findByRole("checkbox", { name: "Select team" }));
+    await user.click(inList().getByRole("checkbox", { name: "Select ops" }));
+    const p = within(await screen.findByRole("region", { name: "Peer details" }));
+    expect(await p.findByRole("heading", { name: "2 groups selected" })).toBeInTheDocument();
+    // Each is the access of one of the two groups.
+    expect(p.getAllByText("1 of 2 groups")).toHaveLength(2);
+    await user.click(p.getByRole("button", { name: "Delete 2 groups" }));
+    expect(d.count("delete_group")).toBe(0);
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete groups" }));
+    await waitFor(() => expect(d.count("delete_group")).toBe(2));
+  });
+});
+
 describe("Inspector: several peers", () => {
   async function selectAll(user: ReturnType<typeof userEvent.setup>) {
     for (const n of ["alice", "bob"]) await user.click(await inList().findByRole("checkbox", { name: `Select ${n}` }));

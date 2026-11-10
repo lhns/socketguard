@@ -73,7 +73,8 @@ export default function EntityList<R extends ListRow>({
     if (all.current) all.current.indeterminate = chosen > 0 && chosen < everyKind.length;
   }, [chosen, everyKind.length]);
 
-  const kindOfKey = (key: string) => visible.find((r) => r.key === key)?.kind;
+  // A key starts with its row's kind ("app:", "tag:", "peer:"), also for rows a filter hides.
+  const kindOfKey = (key: string) => key.split(":")[0];
 
   const clickBox = (row: R, shift: boolean) => {
     // A selection holds one kind; picking another kind starts over.
