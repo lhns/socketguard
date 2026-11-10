@@ -192,7 +192,7 @@ and `deploy/e2e/tor-e2e.sh` for the Docker end-to-end test.
 ## Testing
 
 - `cargo test --workspace --exclude socketguard-ui` and `cd ui && npm test` — unit, golden,
-  engine and API tests (CI: `.forgejo/workflows/ci.yml`).
+  engine and API tests (CI: `.github/workflows/ci.yml` on GitHub, `.forgejo/workflows/ci.yml` on Forgejo; GitHub also runs the netns tests as root and `deploy/ci/macos-smoke.sh` on macOS).
 - `SOCKETGUARD_NETNS_TESTS=1 cargo test -p socketguard-daemon --test netns` — real nftables in
   network namespaces (Linux, root).
 - `deploy/e2e/ygg-e2e.sh`, `deploy/e2e/tor-e2e.sh` — Docker end-to-end tests against real

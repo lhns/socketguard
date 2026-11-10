@@ -32,6 +32,7 @@ On fresh clone: run `cd ui && npm install` once first.
     cd ui && npm run lint && npm run typecheck && npm test
     SOCKETGUARD_NETNS_TESTS=1 cargo test -p socketguard-daemon --test netns   # Linux, root
     deploy/e2e/ygg-e2e.sh; deploy/e2e/tor-e2e.sh                              # Docker
+    deploy/ci/macos-smoke.sh  # macOS, sudo; run by GitHub CI
 
 ## ADRs
 
