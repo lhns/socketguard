@@ -762,7 +762,7 @@ async fn protect_host_is_refused_with_the_risks_unless_forced() {
 #[tokio::test]
 async fn activity_is_filterable() {
     let d = Daemon::new().await;
-    d.ygg_peer("alice").await;
+    let alice = d.ygg_peer("alice").await;
     let (s, all) = d.get("/api/activity").await;
     assert_eq!(s, StatusCode::OK);
     let kinds: Vec<&str> = all
@@ -794,6 +794,13 @@ async fn activity_is_filterable() {
         d.get("/api/activity?since=2999-01-01T00:00:00Z").await.1,
         json!([])
     );
+    // The query string is `ActivityQuery`: `peer_id` and `app_id` select by id.
+    let (_, mine) = d.get(&format!("/api/activity?peer_id={alice}")).await;
+    let mine = mine.as_array().unwrap();
+    assert!(!mine.is_empty() && mine.iter().all(|r| r["peer_id"] == alice.as_str()));
+    assert!(mine.len() < all.as_array().unwrap().len());
+    assert_eq!(d.get("/api/activity?peer_id=nobody").await.1, json!([]));
+    assert_eq!(d.get("/api/activity?app_id=nobody").await.1, json!([]));
     let (s, body) = d.get("/api/activity?kind=nonsense").await;
     assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
 }

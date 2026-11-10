@@ -19,12 +19,13 @@ use futures_util::stream::Stream;
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use socketguard_core::api_types::{
-    error_code, ApiError, ApplyRequest, Counts, DisableRequest, EnforcementNotice, LockoutRiskInfo,
-    MergeRequest, NewGroup, NewNetwork, NewPeer, ProtectHostRequest, ProtectHostResponse,
-    ReviewRequest, SetMembers, SplitRequest, StatusResponse, UpdateLabel, UpdateSettings,
+    error_code, event_name, ApiError, ApplyRequest, Counts, DisableRequest, EnforcementNotice,
+    LockoutRiskInfo, MergeRequest, NewGroup, NewNetwork, NewPeer, ProtectHostRequest,
+    ProtectHostResponse, ReviewRequest, SetMembers, SplitRequest, StatusResponse, UpdateLabel,
+    UpdateSettings,
 };
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
-use socketguard_core::{ActivityKind, ActivityQuery, NewCredential, NewGrant, PortRef};
+use socketguard_core::{ActivityQuery, NewCredential, NewGrant, PortRef};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
@@ -47,13 +48,13 @@ pub enum DaemonEvent {
 impl DaemonEvent {
     pub fn name(&self) -> &'static str {
         match self {
-            DaemonEvent::AppsChanged => "apps_changed",
-            DaemonEvent::AppDiscovered(_) => "app_discovered",
-            DaemonEvent::PeersChanged => "peers_changed",
-            DaemonEvent::GrantsChanged => "grants_changed",
-            DaemonEvent::NetworksChanged => "networks_changed",
-            DaemonEvent::SettingsChanged => "settings_changed",
-            DaemonEvent::Activity => "activity",
+            DaemonEvent::AppsChanged => event_name::APPS_CHANGED,
+            DaemonEvent::AppDiscovered(_) => event_name::APP_DISCOVERED,
+            DaemonEvent::PeersChanged => event_name::PEERS_CHANGED,
+            DaemonEvent::GrantsChanged => event_name::GRANTS_CHANGED,
+            DaemonEvent::NetworksChanged => event_name::NETWORKS_CHANGED,
+            DaemonEvent::SettingsChanged => event_name::SETTINGS_CHANGED,
+            DaemonEvent::Activity => event_name::ACTIVITY,
         }
     }
 
@@ -746,34 +747,12 @@ async fn protect_host_put(
 
 // ─── Activity, export, maintenance ───────────────────────────────────────────
 
-#[derive(serde::Deserialize, Default)]
-struct ActivityParams {
-    since: Option<chrono::DateTime<chrono::Utc>>,
-    kind: Option<ActivityKind>,
-    app: Option<String>,
-    peer: Option<String>,
-    limit: Option<u32>,
-    before: Option<i64>,
-}
-
 async fn activity_list(
     State(state): State<Shared>,
-    ApiQuery(q): ApiQuery<ActivityParams>,
+    ApiQuery(q): ApiQuery<ActivityQuery>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    let records = engine
-        .activity(
-            &state,
-            &ActivityQuery {
-                since: q.since,
-                kind: q.kind,
-                app_id: q.app,
-                peer_id: q.peer,
-                before: q.before,
-                limit: q.limit,
-            },
-        )
-        .await?;
+    let records = engine.activity(&state, &q).await?;
     Ok(Json(records).into_response())
 }
 

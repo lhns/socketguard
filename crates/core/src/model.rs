@@ -116,6 +116,7 @@ pub enum NetworkKind {
     Local,
     Lan,
     Yggdrasil,
+    /// Reserved for the planned WireGuard network (ADR 0036); no backend produces it yet.
     #[serde(rename = "wireguard")]
     WireGuard,
     Tor,
@@ -341,6 +342,7 @@ pub enum AddressMode {
 }
 
 impl AddressMode {
+    /// The serialized (stored) spelling.
     pub fn as_str(self) -> &'static str {
         match self {
             AddressMode::PerApp => "per_app",
@@ -349,10 +351,21 @@ impl AddressMode {
     }
 }
 
+/// The spelling for people, `per-app` and `per-port`.
+impl std::fmt::Display for AddressMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AddressMode::PerApp => "per-app",
+            AddressMode::PerPort => "per-port",
+        })
+    }
+}
+
+/// Accepts both spellings, `per_app` and `per-app`.
 impl std::str::FromStr for AddressMode {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match s.replace('-', "_").as_str() {
             "per_app" => Ok(AddressMode::PerApp),
             "per_port" => Ok(AddressMode::PerPort),
             _ => Err(format!("invalid address mode: {s}")),
@@ -442,17 +455,24 @@ pub struct ActivityRecord {
     pub message: String,
 }
 
-/// Filter for listing activity, newest first.
+/// Filter for listing activity, newest first. Also the query string of
+/// `GET /api/activity`, with the same field names.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<ActivityKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub app_id: Option<AppId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub peer_id: Option<PeerId>,
     /// Only records with an id below this one (paging).
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub before: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
 
@@ -506,10 +526,12 @@ mod tests {
                 format!("\"{}\"", k.as_str())
             );
         }
-        assert_eq!(
-            "per_port".parse::<AddressMode>().unwrap(),
-            AddressMode::PerPort
-        );
+        for mode in [AddressMode::PerApp, AddressMode::PerPort] {
+            assert_eq!(mode.as_str().parse::<AddressMode>().unwrap(), mode);
+            assert_eq!(mode.to_string().parse::<AddressMode>().unwrap(), mode);
+        }
+        assert_eq!(AddressMode::PerPort.to_string(), "per-port");
+        assert!("sometimes".parse::<AddressMode>().is_err());
     }
 
     #[test]
