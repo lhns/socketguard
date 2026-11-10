@@ -702,7 +702,14 @@ fn resolve_against(cwd: &str, path: &str, platform: Platform) -> String {
     } else {
         '/'
     };
-    let full = format!("{cwd}{sep}{path}");
+    // `\dir\x` on Windows: rooted on the drive of the working directory.
+    let drive = cwd.get(..2).filter(|d| d.as_bytes()[1] == b':');
+    let full = match drive {
+        Some(d) if platform == Platform::Windows && path.starts_with(['\\', '/']) => {
+            format!("{d}{path}")
+        }
+        _ => format!("{cwd}{sep}{path}"),
+    };
     let mut parts: Vec<&str> = Vec::new();
     for c in full.split(['/', '\\']) {
         match c {
@@ -1155,6 +1162,20 @@ mod tests {
         );
         assert_eq!(w(r"C:\Srv", "run.py").id, w(r"D:\x", r"C:\Srv\run.py").id);
         assert_ne!(w(r"C:\Srv", "run.py").id, w(r"C:\Other", "run.py").id);
+        // `\dir\run.py` is rooted on the drive of the working directory ...
+        assert_eq!(
+            w(r"C:\x", r"\Srv\run.py").id,
+            w(r"C:\y", r"C:\Srv\run.py").id
+        );
+        assert_ne!(w(r"C:\x", r"\Srv\run.py").id, w(r"D:\x", r"\Srv\run.py").id);
+        // ... and without a working directory it is as unknown as any relative path.
+        let unknown = at(
+            None,
+            Platform::Windows,
+            r"C:\P\python.exe",
+            &["python.exe", r"\Srv\run.py"],
+        );
+        assert!(unknown.note.unwrap().contains("unknown"));
     }
 
     #[test]

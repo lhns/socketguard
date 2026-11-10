@@ -65,6 +65,8 @@ impl Env {
         };
         #[cfg(windows)]
         let (server, endpoint) = {
+            // The test daemon is not SYSTEM, which the client would otherwise insist on.
+            std::env::set_var("SOCKETGUARD_TRUST_PIPE_SERVER", "1");
             let name = format!(
                 r"\\.\pipe\socketguard-cli-test-{}",
                 uuid::Uuid::new_v4().simple()

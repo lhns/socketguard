@@ -35,3 +35,11 @@ The API listened on `127.0.0.1:9476` with permissive CORS, so any web page in a 
 - Access is managed with standard OS tools (`usermod -aG socketguard`, Windows groups).
 - `curl --unix-socket` still works for debugging; plain `curl localhost` does not.
 - Remote management requires SSH to the host and the CLI there.
+
+## Amendment (second security review): the client authenticates the pipe server (Windows)
+
+While the daemon is down, any local process can create the pipe name, and clients would send it their requests (including credentials in request bodies). After opening the pipe the client reads the owner of the pipe object and refuses unless it is SYSTEM or BUILTIN\Administrators ("pipe server is not the SocketGuard service"), before sending anything. A normal user cannot create an object owned by those accounts (CreateNamedPipe with such an owner fails for them, which a test checks). The owner is taken from the server's token, so this is equivalent to requiring the server to run as LocalSystem or elevated.
+
+The design first called for `GetNamedPipeServerProcessId` plus the process token (LocalSystem or elevated). Measured on a non-elevated account, `OpenProcess` is denied (error 5) even with PROCESS_QUERY_LIMITED_INFORMATION on SYSTEM service processes, so an ordinary `SocketGuard Users` member could never connect. The owner check needs only READ_CONTROL on the handle the client already has.
+
+`SOCKETGUARD_TRUST_PIPE_SERVER=1` skips the check, for tests and development against a daemon started from a normal account; the test harnesses set it. Unix sockets are unchanged (the socket path is root-owned).

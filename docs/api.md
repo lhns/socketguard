@@ -40,7 +40,11 @@ exists at daemon start and is a group (otherwise the daemon logs a warning and l
 out). The first server instance is created exclusively, so the daemon does not start if
 something else already owns the name, and clients open the pipe with identification-level
 impersonation only. Remote clients are rejected, and a new server instance is always
-waiting, so many clients can connect at once.
+waiting, so many clients can connect at once. The client in turn checks the server: after
+opening the pipe it reads the pipe's owner and refuses unless that is `SYSTEM` or
+`Administrators` ("pipe server is not the SocketGuard service"), so a process that took the
+name while the daemon was down gets no requests. For tests and a daemon started by hand
+from a normal account, set `SOCKETGUARD_TRUST_PIPE_SERVER=1` for the client.
 
 Let a user in:
 
@@ -92,7 +96,7 @@ does not cause a 202. Every error has the [error body](#errors).
 | DELETE | `/api/grants/{id}` | | 204 | |
 | GET | `/api/networks` | | `Network[]` | |
 | POST | `/api/networks` | `NewNetwork` | `Network` (201) | a backend instance: `{"id"?, "type": "slaac", "interface": "eth0", ...}`; also written to the `backends` key of the config file (`SOCKETGUARD_CONFIG` or the default; created if missing), so it survives a restart |
-| DELETE | `/api/networks/{id}` | | 204 | its addresses leave the interfaces first; removed from the config file as well |
+| DELETE | `/api/networks/{id}` | | 204 | its addresses leave the interfaces first; removed from the config file as well. Query `force=true`; a Tor network whose services cannot be removed is 409 `conflict` without it |
 | GET | `/api/settings` | | `Settings` | |
 | PUT | `/api/settings` | `UpdateSettings` | `Settings` | absent fields stay as they are |
 | PUT | `/api/settings/protect-host` | `ProtectHostRequest` | `ProtectHostResponse` | an empty list turns it off; refused with 409 `protect_host_refused` unless `force` |
@@ -126,7 +130,7 @@ A network is a backend instance (`POST /api/networks`, `{"id"?, "type": ..., ...
 | `ula` | `interface` (default loopback) | Local; singleton |
 | `slaac`, `dhcpv6` | `interface`, `prefix?` | LAN |
 | `yggdrasil` | `interface`, `admin_endpoint?` | singleton |
-| `tor` | `control` (`host:port` or `unix:/path`, default `127.0.0.1:9051`), `auth` | singleton; no interface. `auth` is `"cookie"` (default; the cookie file named by PROTOCOLINFO), `"none"` or `{"password": "..."}` |
+| `tor` | `control` (`host:port` or `unix:/path`, default `127.0.0.1:9051`), `auth` | singleton; no interface. `auth` is `"cookie"` (default; SAFECOOKIE with the cookie file named by PROTOCOLINFO), `"cookie_insecure"`, `"none"` (Unix socket only) or `{"password": "..."}`. Through the API only the defaults are accepted (below); other settings are edited in the config file |
 
 On a Tor network each address is one onion service, and its locator is
 `{"kind": "onion", "hostname": "<id>.onion"}`. The service key is created with the address and
@@ -137,6 +141,10 @@ published ports are the TCP ports covered by grants, and a key granted fewer of 
 left out until the port gets its own address (`split`). UDP is not served over Tor. A Tor control
 port that cannot be reached shows as the network's `status` `down`; nothing is published or
 removed until it is back.
+
+The control endpoint receives the onion keys, so `POST /api/networks` accepts a Tor network only with the default settings or settings identical to a Tor entry already in the config file; anything else is `400 invalid`. The remaining settings, for the config file only: `cookie_path` (the file PROTOCOLINFO must name), `cookie_dir`, `expect_tor_uid` (Linux, Unix socket), `cookie_owner` (Windows: the SID of Tor's account, besides SYSTEM and Administrators, that may own the cookie file), and `allow_remote_control` (accept a control address that is not loopback; cookie auth only). On Windows cookie auth requires `cookie_path`, and the file must be owned by SYSTEM, Administrators or `cookie_owner` and writable by no one else.
+
+`DELETE /api/networks/{id}?force=true` (`networks rm --force`): removing a Tor network first removes every onion service the daemon owns on it. If Tor cannot confirm that, the answer is `409 conflict` ("Tor services are still being removed; retry when Tor is reachable, or use --force") and nothing changes; with `force` the network is removed anyway and the unconfirmed services are left running.
 
 ### Pending enforcement
 

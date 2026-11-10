@@ -181,6 +181,8 @@ mod windows {
     use super::*;
 
     fn pipe_name() -> String {
+        // The test daemon is not SYSTEM, which the client would otherwise insist on.
+        std::env::set_var("SOCKETGUARD_TRUST_PIPE_SERVER", "1");
         format!(
             r"\\.\pipe\socketguard-test-{}",
             uuid::Uuid::new_v4().simple()

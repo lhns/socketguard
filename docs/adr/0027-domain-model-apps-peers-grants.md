@@ -45,7 +45,7 @@ Six nouns replace the old model:
 
 A review showed that an unprivileged process could pick an identity it should not have (and so inherit the grants of a trusted app, getting its port served on that app's address). Everything the process controls is now treated as hostile. Identity is still upgrade-stable: it is derived from the path of the executable, never from its inode or content, and an upgrade that replaces the binary keeps the id.
 
-The id is the first 16 hex characters of SHA-256 over: the normalized executable path, what the interpreter runs, the owning user, and markers. Markers are folded into the hash, so a process that triggers one can never produce the id of a process that does not.
+The id is the first 32 hex characters (128 bits; see the second review below) of SHA-256 over: the normalized executable path, what the interpreter runs, the owning user, and markers. Markers are folded into the hash, so a process that triggers one can never produce the id of a process that does not.
 
 - **Owning user.** The effective uid on Linux (`/proc/<pid>/status`) and macOS, the owner SID on Windows. The same binary under another user is another app.
 - **Interpreter arguments.** Per-interpreter option tables (python, node, bun, deno, ruby, perl, php, java, dotnet) know which options take a value, so an option value is never mistaken for the script. `--opt=value` and attached short forms (`-Wignore`, `-e'code'`) are understood.
@@ -59,3 +59,9 @@ The id is the first 16 hex characters of SHA-256 over: the normalized executable
 `App.identity_note` carries the reason (`inline code`, `unrecognized arguments`, `no executable path`, `foreign mount namespace`) for the CLI and UI. Schema v3 stores it.
 
 **Consequence for existing installs:** the uid and the new hash layout re-key every app. Apps from a v2 database stay as inert records; their programs reappear as new, pending apps and need their grants again. The migration cannot recompute ids because the uid was never stored.
+
+## Amendment (second security review): wider ids, relative paths resolved
+
+- **128-bit ids.** The id is now 32 hex characters (the hash input is prefixed `v4`). 64 bits made a chosen-prefix collision between a hostile program's identity and a trusted app's feasible for an attacker with a few GPU-days. This re-keys every app again: they reappear as new, pending apps and need their grants again. Accepted before release.
+- **Relative script paths are resolved against the process's working directory.** `ListeningSocket.cwd` carries it (`/proc/<pid>/cwd` on Linux, sysinfo `cwd()` on Windows and macOS). A relative script, jar or dll path (`node server.js`) is joined to it and `.` / `..` components are folded lexically, so the same relative name in two directories is two apps and `node server.js` in `/srv/a` is the same app as `node /srv/a/server.js`. The display name and `interpreter_arg` stay as given. Windows treats only `X:\...` and UNC paths as absolute; `\dir` is relative to the current drive.
+- **Unknown working directory.** If the cwd cannot be read (or is not absolute) for a relative path, the marker `ambiguous-cwd` is folded into the hash (identity note "relative path, working directory unknown"), so it never merges with the absolute form. The marker is named `ambiguous-cwd`, not `ambiguous`, to stay apart from the `ambiguous` argument-vector tag above.
