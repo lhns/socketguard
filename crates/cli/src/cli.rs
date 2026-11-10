@@ -218,7 +218,13 @@ pub enum TagsCmd {
     /// Rename a tag
     Rename { tag: String, new_label: String },
     /// Replace the patterns of a tag (none: clear them)
-    Patterns { tag: String, patterns: Vec<String> },
+    Patterns {
+        tag: String,
+        patterns: Vec<String>,
+        /// Confirm without asking when apps would join a tag that is open to anyone
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Remove a tag and the grants on it
     Rm { tag: String },
     /// Add or remove members
@@ -233,6 +239,9 @@ pub enum TagMembersCmd {
         tag: String,
         #[arg(required = true)]
         members: Vec<String>,
+        /// Confirm without asking when the tag is open to anyone
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Remove members; an app a pattern matches stays out afterwards
     Rm {

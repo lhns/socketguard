@@ -8,4 +8,9 @@ export type ChangesResponse = { dry_run: boolean,
 /**
  * Each `ref` of the request and the id it stands for.
  */
-refs: { [key in string]?: string }, changes: Array<BatchChange>, };
+refs: { [key in string]?: string }, changes: Array<BatchChange>, 
+/**
+ * The batch gives someone access to something they could not reach before (a new
+ * grant, or a new member of a tag that has grants). Removals never set it.
+ */
+changes_reach: boolean, };

@@ -21,11 +21,12 @@ use serde::de::DeserializeOwned;
 use socketguard_core::api_types::{
     error_code, event_name, ApiError, ApplyRequest, ChangesRequest, Counts, DisableRequest,
     EnforcementNotice, LockoutRiskInfo, MemberQuery, MergeRequest, NewGroup, NewNetwork, NewPeer,
-    NewTag, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse, ReviewRequest,
-    SetMembers, SplitRequest, StatusResponse, UpdateLabel, UpdateSettings, UpdateTag,
+    NewTag, NewTagMember, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse,
+    ReviewRequest, SetMembers, SplitRequest, StatusResponse, UpdateLabel, UpdateSettings,
+    UpdateTag,
 };
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
-use socketguard_core::{ActivityQuery, NewCredential, NewGrant, PortRef, TagMember};
+use socketguard_core::{ActivityQuery, NewCredential, NewGrant, PortRef};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
@@ -691,7 +692,13 @@ async fn tag_update(
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
     let tag = engine
-        .update_tag(&state, &id, req.label.as_deref(), req.patterns.as_deref())
+        .update_tag(
+            &state,
+            &id,
+            req.label.as_deref(),
+            req.patterns.as_deref(),
+            req.confirm_open,
+        )
         .await?;
     Ok(saved(&engine, StatusCode::OK, Some(tag)))
 }
@@ -705,11 +712,11 @@ async fn tag_delete(State(state): State<Shared>, Path(id): Path<String>) -> ApiR
 async fn tag_member_add(
     State(state): State<Shared>,
     Path(id): Path<String>,
-    ApiJson(req): ApiJson<TagMember>,
+    ApiJson(req): ApiJson<NewTagMember>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
     let tag = engine
-        .add_tag_member(&state, &id, &req.app_id, req.port)
+        .add_tag_member(&state, &id, &req.app_id, req.port, req.confirm_open)
         .await?;
     Ok(saved(&engine, StatusCode::OK, Some(tag)))
 }

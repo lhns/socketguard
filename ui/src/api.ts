@@ -152,8 +152,8 @@ export const api = {
   createTag: (req: NewTag) => callSaved<Tag>("create_tag", { req }),
   updateTag: (id: string, req: UpdateTag) => callSaved<Tag>("update_tag", { id, req }),
   deleteTag: (id: string) => callSaved<null>("delete_tag", { id }),
-  addTagMember: (tagId: string, member: TagMember) =>
-    callSaved<Tag>("add_tag_member", { tagId, member }),
+  addTagMember: (tagId: string, member: TagMember, confirmOpen = false) =>
+    callSaved<Tag>("add_tag_member", { tagId, member, confirmOpen }),
   removeTagMember: (tagId: string, appId: string, port: PortRef | null) =>
     callSaved<Tag>("remove_tag_member", { tagId, appId, port }),
   listNetworks: () => call<Network[]>("list_networks"),

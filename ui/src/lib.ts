@@ -1,5 +1,5 @@
 import {
-  toDaemonError, type App, type CredentialKind, type Network, type NewCredential, type ParsedCredential,
+  toDaemonError, type App, type CredentialKind, type NewCredential, type ParsedCredential,
   type Peer, type PeerGroup, type PortRef, type Subject, type Tag, type Target,
 } from "./api";
 import { CREDENTIAL_EXAMPLES } from "./generated/credentialExamples";
@@ -65,9 +65,6 @@ export function targetLabel(t: Target, apps: App[] = [], tags: Tag[] = []): stri
   if (t.kind === "app") return apps.find((a) => a.id === t.id)?.name ?? `app ${t.id.slice(0, 8)}`;
   return `tag ${tags.find((x) => x.id === t.id)?.label ?? t.id.slice(0, 8)}`;
 }
-
-export const networkName = (networks: Network[], id: string | null | undefined) =>
-  id ? (networks.find((n) => n.id === id)?.name ?? id) : "all networks";
 
 /** Wording of an open grant: "Anyone", or everyone on one network (a segment). */
 export function openWording(networkNames: string[]): string {

@@ -19,6 +19,14 @@ pub(super) fn clean_patterns(patterns: &[String]) -> Vec<String> {
     out
 }
 
+/// Does a grant to Anyone (on any network) target this tag? Joining such a tag opens the app.
+pub(super) fn tag_is_open(grants: &[socketguard_core::Grant], tag_id: &str) -> bool {
+    grants.iter().any(|g| {
+        g.subject == socketguard_core::Subject::Anyone
+            && matches!(&g.target, socketguard_core::Target::Tag(t) if t == tag_id)
+    })
+}
+
 impl Engine {
     pub async fn list_tags(&self, state: &AppState) -> Result<Vec<Tag>, EngineError> {
         Ok(state.db.list_tags().await?)
@@ -107,10 +115,22 @@ impl Engine {
         id: &str,
         label: Option<&str>,
         patterns: Option<&[String]>,
+        confirm_open: bool,
     ) -> Result<Tag, EngineError> {
         let mut tag = self.get_tag(state, id).await?;
         let label = label.map(|l| Self::clean_label(l, "tag")).transpose()?;
         let patterns = patterns.map(clean_patterns);
+        if let (Some(p), false) = (&patterns, confirm_open) {
+            // Apps that would join through the new patterns are opened by a grant to Anyone.
+            let mut probe = tag.clone();
+            probe.patterns = p.clone();
+            let apps = state.db.list_apps().await?;
+            if !probe.pattern_candidates(&apps).is_empty()
+                && tag_is_open(&state.db.list_grants().await?, id)
+            {
+                return Err(EngineError::ConfirmationRequired);
+            }
+        }
         if !state
             .db
             .update_tag(id, label.as_deref(), patterns.as_deref())
@@ -174,6 +194,7 @@ impl Engine {
         tag_id: &str,
         app_id: &str,
         port: Option<PortRef>,
+        confirm_open: bool,
     ) -> Result<Tag, EngineError> {
         let tag = self.get_tag(state, tag_id).await?;
         let app = state
@@ -188,6 +209,16 @@ impl Engine {
                     app.name
                 )));
             }
+        }
+        let member = TagMember {
+            app_id: app_id.to_string(),
+            port,
+        };
+        if !confirm_open
+            && !tag.members.contains(&member)
+            && tag_is_open(&state.db.list_grants().await?, tag_id)
+        {
+            return Err(EngineError::ConfirmationRequired);
         }
         state
             .db

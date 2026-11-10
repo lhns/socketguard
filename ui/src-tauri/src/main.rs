@@ -268,8 +268,11 @@ async fn delete_tag(id: String) -> DoneResult<()> {
 }
 
 #[tauri::command]
-async fn add_tag_member(tag_id: String, member: TagMember) -> DoneResult<Tag> {
-    Ok(client().add_tag_member(&tag_id, &member).await?.into())
+async fn add_tag_member(tag_id: String, member: TagMember, confirm_open: bool) -> DoneResult<Tag> {
+    Ok(client()
+        .add_tag_member(&tag_id, &member, confirm_open)
+        .await?
+        .into())
 }
 
 #[tauri::command]

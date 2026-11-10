@@ -366,6 +366,24 @@ pub struct UpdateTag {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub patterns: Option<Vec<String>>,
+    /// Needed when new patterns add existing apps to a tag that has a grant to Anyone
+    /// (ADR 0043); without it the daemon answers `confirmation_required`.
+    #[serde(default)]
+    pub confirm_open: bool,
+}
+
+/// Body of `POST /api/tags/{id}/members`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewTagMember {
+    pub app_id: AppId,
+    /// None = every port of the app.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub port: Option<PortRef>,
+    /// Needed when the tag has a grant to Anyone, which would open the app.
+    #[serde(default)]
+    pub confirm_open: bool,
 }
 
 /// Query of `DELETE /api/tags/{id}/members/{app_id}`: without `port` the whole-app
@@ -428,6 +446,9 @@ pub enum ChangeOp {
         #[serde(default)]
         #[cfg_attr(feature = "ts", ts(optional))]
         port: Option<PortRef>,
+        /// Needed when the tag has a grant to Anyone, which would open the app.
+        #[serde(default)]
+        confirm_open: bool,
     },
     RemoveTagMember {
         tag_id: TagId,
@@ -475,6 +496,10 @@ pub struct ChangesResponse {
     /// Each `ref` of the request and the id it stands for.
     pub refs: std::collections::BTreeMap<String, String>,
     pub changes: Vec<BatchChange>,
+    /// The batch gives someone access to something they could not reach before (a new
+    /// grant, or a new member of a tag that has grants). Removals never set it.
+    #[serde(default)]
+    pub changes_reach: bool,
 }
 
 // ─── Tor client keys and sharing ─────────────────────────────────────────────

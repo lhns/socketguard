@@ -15,7 +15,8 @@ use socketguard_core::api_types::{
     BatchChange, Change, ChangeItem, ChangeKind, ChangeOp, ChangesRequest, ChangesResponse,
 };
 use socketguard_core::{
-    new_id, ActivityKind, Credential, Grant, GrantReach, NewGrant, Peer, Subject, TagMember, Target,
+    new_id, ActivityKind, Credential, Grant, GrantReach, NewGrant, Peer, Reach, Subject, TagMember,
+    Target,
 };
 use std::collections::BTreeMap;
 
@@ -29,6 +30,8 @@ struct Plan {
     events: Vec<DaemonEvent>,
     networks: Vec<socketguard_core::Network>,
     protected: Vec<String>,
+    /// Some operation gives someone access they did not have.
+    changes_reach: bool,
 }
 
 impl Plan {
@@ -84,6 +87,11 @@ impl Plan {
     }
 }
 
+/// Does any network let the subject in? ("not reachable" everywhere opens nothing.)
+fn lets_in(reach: &[GrantReach]) -> bool {
+    reach.iter().any(|r| r.reach != Reach::NotReachable)
+}
+
 impl Engine {
     /// Apply (or, with `dry_run`, only check) a batch of changes. All or nothing: the first
     /// operation that fails refuses the whole batch and nothing is saved.
@@ -113,6 +121,7 @@ impl Engine {
             events: Vec::new(),
             networks: self.networks(),
             protected: self.protected_interfaces(state).await?,
+            changes_reach: false,
         };
         for (i, op) in req.ops.iter().enumerate() {
             self.plan_op(state, &mut plan, op)
@@ -124,6 +133,7 @@ impl Engine {
             dry_run: req.dry_run,
             refs: plan.refs.clone(),
             changes: plan.changes.clone(),
+            changes_reach: plan.changes_reach,
         };
         if req.dry_run {
             // The real constraints decide, but nothing stays.
@@ -276,6 +286,8 @@ impl Engine {
                 };
                 plan.activities
                     .push(Self::grant_added_activity(&grant, &info));
+                let reach = plan.grant_reach(&grant);
+                plan.changes_reach |= lets_in(&reach);
                 plan.changes.push(BatchChange {
                     change: Change {
                         kind: ChangeKind::Create,
@@ -290,7 +302,7 @@ impl Engine {
                         opens_to_anyone: grant.subject == Subject::Anyone,
                     },
                     id: Some(grant.id.clone()),
-                    reach: plan.grant_reach(&grant),
+                    reach,
                 });
                 plan.cat.grants.push(grant.clone());
                 plan.writes.push(Write::InsertGrant(grant));
@@ -326,6 +338,7 @@ impl Engine {
                 tag_id,
                 app_id,
                 port,
+                confirm_open,
             } => {
                 let tag_id = plan.resolve(tag_id)?;
                 let app = plan
@@ -341,20 +354,57 @@ impl Engine {
                         )));
                     }
                 }
+                let member = TagMember {
+                    app_id: app.id.clone(),
+                    port: *port,
+                };
+                let tag = plan
+                    .cat
+                    .tags
+                    .iter()
+                    .find(|t| t.id == tag_id)
+                    .ok_or_else(|| EngineError::NotFound(format!("tag {tag_id}")))?;
+                let is_new = !tag.members.contains(&member);
+                let tag_label = tag.label.clone();
+                // What the tag's grants let in on this app.
+                let grants: Vec<Grant> = plan
+                    .cat
+                    .grants
+                    .iter()
+                    .filter(|g| matches!(&g.target, Target::Tag(t) if *t == tag_id))
+                    .cloned()
+                    .collect();
+                let opens = grants.iter().any(|g| g.subject == Subject::Anyone);
+                if is_new && opens && !confirm_open {
+                    return Err(EngineError::ConfirmationRequired);
+                }
                 let tag = plan
                     .cat
                     .tags
                     .iter_mut()
                     .find(|t| t.id == tag_id)
                     .ok_or_else(|| EngineError::NotFound(format!("tag {tag_id}")))?;
-                let member = TagMember {
-                    app_id: app.id.clone(),
-                    port: *port,
-                };
                 tag.excluded.retain(|a| *a != app.id);
-                let tag_label = tag.label.clone();
-                if !tag.members.contains(&member) {
+                if is_new {
                     tag.members.push(member);
+                    // The reach depends on the covered ports, so it is read once the
+                    // member is in the catalog.
+                    let reach: Vec<GrantReach> =
+                        grants.iter().flat_map(|g| plan.grant_reach(g)).collect();
+                    let who: Vec<String> = grants
+                        .iter()
+                        .map(|g| match &g.subject {
+                            Subject::Anyone => "Anyone".to_string(),
+                            Subject::Peer(id) => plan
+                                .cat
+                                .peer(id)
+                                .map_or_else(|| id.clone(), |p| p.label.clone()),
+                            Subject::Group(id) => plan
+                                .cat
+                                .group(id)
+                                .map_or_else(|| id.clone(), |g| format!("group {}", g.label)),
+                        })
+                        .collect();
                     plan.activities.push(
                         NewActivity::new(
                             ActivityKind::TagChanged,
@@ -362,12 +412,19 @@ impl Engine {
                         )
                         .app(&app.id),
                     );
-                    plan.change(
-                        ChangeKind::Create,
-                        ChangeItem::TagMember,
-                        format!("{} in tag {tag_label}", app.name),
-                        None,
-                    );
+                    plan.changes_reach |= lets_in(&reach);
+                    plan.changes.push(BatchChange {
+                        change: Change {
+                            kind: ChangeKind::Create,
+                            item: ChangeItem::TagMember,
+                            name: format!("{} in tag {tag_label}", app.name),
+                            detail: (!who.is_empty())
+                                .then(|| format!("reachable by {}", who.join(", "))),
+                            opens_to_anyone: opens,
+                        },
+                        id: None,
+                        reach,
+                    });
                 }
                 plan.writes.push(Write::AddTagMember {
                     tag_id,

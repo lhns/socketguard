@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import {
   keepPreviousData,
   QueryClient,
@@ -15,15 +15,11 @@ import {
   type ChangeOp,
   type MergeRequest,
   type NewCredential,
-  type NewGrant,
   type NewGroup,
   type NewNetwork,
   type NewPeer,
-  type NewTag,
-  type PortRef,
   type ProtectHostRequest,
   type SplitRequest,
-  type TagMember,
   type UpdateSettings,
   type UpdateTag,
 } from "./api";
@@ -49,6 +45,13 @@ export const useNetworks = () => useQuery({ queryKey: ["networks"], queryFn: api
 export const useSettings = () => useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
 export const useShare = (appId: string | null) =>
   useQuery({ queryKey: ["share", appId], queryFn: () => api.shareApp(appId as string), enabled: appId !== null });
+
+/** A list query's data, an empty list while it loads (the same one each render, so it can be a
+ * dependency). */
+export function useList<T>(query: { data: T[] | undefined }): T[] {
+  const data = query.data;
+  return useMemo(() => data ?? [], [data]);
+}
 
 /** Classify pasted credential text with the daemon's parser (kept while typing). */
 export const useParsedCredentials = (text: string) => {
@@ -108,15 +111,6 @@ const NETWORK_KEYS = [["networks"], ["status"], ["apps"], ["app"], ["grants"], [
 /** A batch can touch anything. */
 const CHANGES_KEYS = [["grants"], ["apps"], ["app"], ["peers"], ["groups"], ["tags"], ["status"], ["activity"]];
 
-export const useCreateGrant = () =>
-  useInvalidating((req: NewGrant) => api.createGrant(req), GRANT_KEYS);
-export const useDeleteGrant = () =>
-  useInvalidating((id: string) => api.deleteGrant(id), GRANT_KEYS);
-export const useReviewApp = () =>
-  useInvalidating(
-    (v: { id: string; reviewed: boolean }) => api.reviewApp(v.id, v.reviewed),
-    [["apps"], ["app"], ["status"], ["activity"]],
-  );
 export const useDeleteApp = () =>
   useInvalidating((id: string) => api.deleteApp(id), [...GRANT_KEYS, ["status"], ["tags"]]);
 export const useSplitApp = () =>
@@ -161,19 +155,10 @@ export const useDeleteGroup = () =>
 export const useSetGroupMembers = () =>
   useInvalidating((v: { id: string; peerIds: string[] }) => api.setGroupMembers(v.id, v.peerIds), GROUP_KEYS);
 
-export const useCreateTag = () =>
-  useInvalidating((req: NewTag) => api.createTag(req), TAG_KEYS);
 export const useUpdateTag = () =>
   useInvalidating((v: { id: string; req: UpdateTag }) => api.updateTag(v.id, v.req), TAG_KEYS);
 export const useDeleteTag = () =>
   useInvalidating((id: string) => api.deleteTag(id), TAG_KEYS);
-export const useAddTagMember = () =>
-  useInvalidating((v: { tagId: string; member: TagMember }) => api.addTagMember(v.tagId, v.member), TAG_KEYS);
-export const useRemoveTagMember = () =>
-  useInvalidating(
-    (v: { tagId: string; appId: string; port: PortRef | null }) => api.removeTagMember(v.tagId, v.appId, v.port),
-    TAG_KEYS,
-  );
 
 export const useAddNetwork = () =>
   useInvalidating((req: NewNetwork) => api.addNetwork(req), NETWORK_KEYS);

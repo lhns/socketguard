@@ -709,6 +709,17 @@ async fn tag_members(c: &Ctx, texts: &[String]) -> Result<Vec<TagMember>> {
     Ok(out)
 }
 
+/// Ask before apps join a tag that has a grant to anyone, which opens them.
+fn confirm_tag_open(label: &str) -> Result<()> {
+    prompt::Stdin.confirm_or_yes(
+        false,
+        &format!("Tag {label} is open to anyone: the apps that join it will be too. Continue?"),
+        &format!(
+            "tag {label} is open to anyone, so this opens the apps; repeat with --yes to confirm"
+        ),
+    )
+}
+
 async fn tags(c: &Ctx, cmd: TagsCmd) -> Result<()> {
     match cmd {
         TagsCmd::List => {
@@ -762,6 +773,7 @@ async fn tags(c: &Ctx, cmd: TagsCmd) -> Result<()> {
                     &UpdateTag {
                         label: Some(new_label),
                         patterns: None,
+                        confirm_open: false,
                     },
                 )
                 .await?;
@@ -769,18 +781,21 @@ async fn tags(c: &Ctx, cmd: TagsCmd) -> Result<()> {
             let r = saved.value;
             c.print(&r, || format!("renamed {} to {}", tag.label, r.label))
         }
-        TagsCmd::Patterns { tag, patterns } => {
+        TagsCmd::Patterns { tag, patterns, yes } => {
             let tag = c.tag(&tag).await?;
-            let saved = c
-                .client
-                .update_tag(
-                    &tag.id,
-                    &UpdateTag {
-                        label: None,
-                        patterns: Some(patterns),
-                    },
-                )
-                .await?;
+            let mut req = UpdateTag {
+                label: None,
+                patterns: Some(patterns),
+                confirm_open: yes,
+            };
+            let saved = match c.client.update_tag(&tag.id, &req).await {
+                Err(e) if e.is_confirmation_required() => {
+                    confirm_tag_open(&tag.label)?;
+                    req.confirm_open = true;
+                    c.client.update_tag(&tag.id, &req).await?
+                }
+                other => other?,
+            };
             c.warn_pending(&saved.enforcement);
             let r = saved.value;
             let names = c.names().await?;
@@ -791,11 +806,19 @@ async fn tags(c: &Ctx, cmd: TagsCmd) -> Result<()> {
             let saved = c.client.delete_tag(&tag.id).await?;
             c.done_saved(saved, format!("removed tag {} and its grants", tag.label))
         }
-        TagsCmd::Members(TagMembersCmd::Add { tag, members }) => {
+        TagsCmd::Members(TagMembersCmd::Add { tag, members, yes }) => {
             let tag = c.tag(&tag).await?;
             let mut last = tag.clone();
+            let mut confirmed = yes;
             for m in tag_members(c, &members).await? {
-                let saved = c.client.add_tag_member(&tag.id, &m).await?;
+                let saved = match c.client.add_tag_member(&tag.id, &m, confirmed).await {
+                    Err(e) if e.is_confirmation_required() => {
+                        confirm_tag_open(&tag.label)?;
+                        confirmed = true;
+                        c.client.add_tag_member(&tag.id, &m, true).await?
+                    }
+                    other => other?,
+                };
                 c.warn_pending(&saved.enforcement);
                 last = saved.value;
             }

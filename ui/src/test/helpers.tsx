@@ -6,7 +6,8 @@ import { ToastProvider } from "../components/Toast";
 import { createQueryClient } from "../queries";
 import { NavContext, type Focus, type Page } from "../nav";
 import type {
-  AppDetail, App, Enforcement, GrantView, Network, ParsedCredential, Peer, PeerGroup, Settings, StatusResponse, Tag,
+  AppDetail, App, ChangesResponse, Enforcement, GrantView, Network, ParsedCredential, Peer, PeerGroup, Settings,
+  StatusResponse, Tag,
 } from "../api";
 
 export const networks: Network[] = [
@@ -46,6 +47,44 @@ export const grantView = (over: Partial<GrantView> = {}): GrantView => ({
   id: "g1", target: { kind: "app", id: "a1" }, port: null, network_id: null, subject: { kind: "peer", id: "p1" },
   created_at: "2026-01-01T00:00:00Z", reach: [{ network_id: "n-ygg", reach: "verified" }], ...over,
 });
+
+const T0 = "2026-01-01T00:00:00Z";
+
+/** An app with the given ports (listening, dual stack) and one address on Yggdrasil. */
+export const mkApp = (id: string, name: string, ports: number[] = [8080], over: Partial<App> = {}): App => ({
+  id, name, process_name: name, exe_path: `/usr/bin/${name}`, interpreter_arg: null, identity_note: null, reviewed: true,
+  system: false, first_seen: T0, last_seen: T0,
+  ports: ports.map((port) => ({ port, proto: "tcp" as const, listening: true, last_seen: T0, family: "dual" as const })),
+  addresses: [{ id: `${id}-y`, app_id: id, network_id: "n-ygg", ports: "all", locator: { kind: "ipv6", addr: `302::${id.length}` }, created_at: T0 }],
+  ...over,
+});
+
+export const mkTag = (id: string, label: string, appIds: string[] = [], patterns: string[] = []): Tag => ({
+  id, label, patterns, excluded: [], created_at: T0, members: appIds.map((app_id) => ({ app_id, port: null })),
+});
+
+export const mkPeer = (id: string, label: string, over: Partial<Peer> = {}): Peer => ({
+  id, label, groups: [], created_at: T0, credentials: [{ id: `c-${id}`, kind: "ygg_key", value: id.repeat(64).slice(0, 64), label: null }], ...over,
+});
+
+export const mkGroup = (id: string, label: string, members: string[] = []): PeerGroup => ({ id, label, members, created_at: T0 });
+
+export const detail = (app: App, over: Partial<AppDetail> = {}): AppDetail => ({ ...app, grants: [], access: [], tags: [], counters: [], ...over });
+
+/** A working Storage: some Node versions shadow jsdom's with a broken experimental one. */
+export function memoryStorage() {
+  const m = new Map<string, string>();
+  return {
+    getItem: (k: string) => m.get(k) ?? null,
+    setItem: (k: string, v: string) => void m.set(k, String(v)),
+    removeItem: (k: string) => void m.delete(k),
+    clear: () => m.clear(),
+  };
+}
+
+/** What `changes` answers: the diff and whether it lets somebody in. */
+export const batch = (req: { dry_run: boolean }, changes_reach = false, changes: ChangesResponse["changes"] = []) =>
+  saved<ChangesResponse>({ dry_run: req.dry_run, refs: {}, changes, changes_reach });
 
 /** Stand-in for the daemon's parser: 64 hex characters are a key, anything with a colon or dot
  * an IP, the rest an error. The real classification is tested in the core crate. */

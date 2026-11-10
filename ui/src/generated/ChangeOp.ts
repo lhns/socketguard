@@ -16,4 +16,8 @@ ref?: string, label: string, credentials: Array<NewCredential>, } | { "op": "cre
 /**
  * Needed when the subject is Anyone; without it the whole batch is refused.
  */
-confirm_open: boolean, } | { "op": "remove_grant", grant_id: string, } | { "op": "add_tag_member", tag_id: string, app_id: string, port?: PortRef, } | { "op": "remove_tag_member", tag_id: string, app_id: string, port?: PortRef, } | { "op": "review", app_id: string, reviewed: boolean, };
+confirm_open: boolean, } | { "op": "remove_grant", grant_id: string, } | { "op": "add_tag_member", tag_id: string, app_id: string, port?: PortRef, 
+/**
+ * Needed when the tag has a grant to Anyone, which would open the app.
+ */
+confirm_open: boolean, } | { "op": "remove_tag_member", tag_id: string, app_id: string, port?: PortRef, } | { "op": "review", app_id: string, reviewed: boolean, };

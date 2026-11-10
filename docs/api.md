@@ -103,9 +103,9 @@ does not cause a 202. Every error has the [error body](#errors).
 | GET | `/api/tags` | | `Tag[]` | [tags](#tags) |
 | POST | `/api/tags` | `NewTag` | `Tag` (201) | apps already matching the patterns join |
 | GET | `/api/tags/{id}` | | `Tag` | |
-| PATCH | `/api/tags/{id}` | `UpdateTag` | `Tag` | rename and/or replace the patterns; apps matching a new pattern join, none leaves |
+| PATCH | `/api/tags/{id}` | `UpdateTag` | `Tag` | rename and/or replace the patterns; apps matching a new pattern join, none leaves. If any would join a tag that has a grant to Anyone, it needs `"confirm_open": true` (409 `confirmation_required` otherwise) |
 | DELETE | `/api/tags/{id}` | | 204 | also deletes the grants on the tag |
-| POST | `/api/tags/{id}/members` | `TagMember` | `Tag` | an app, or one of its ports (`port`); a manual addition clears an exclusion |
+| POST | `/api/tags/{id}/members` | `NewTagMember` | `Tag` | an app, or one of its ports (`port`); a manual addition clears an exclusion. On a tag that has a grant to Anyone it opens the app, so it needs `"confirm_open": true` |
 | DELETE | `/api/tags/{id}/members/{app_id}` | query `port`, `proto` (optional) | `Tag` | without `port` the whole-app membership goes. Removing a whole app that a pattern matches records an exclusion (`excluded`) |
 | GET | `/api/networks` | | `Network[]` | |
 | POST | `/api/networks` | `NewNetwork` | `Network` (201) | a backend instance: `{"id"?, "type": "slaac", "interface": "eth0", ...}`; also written to the `backends` key of the config file (`SOCKETGUARD_CONFIG` or the default; created if missing), so it survives a restart |
@@ -184,7 +184,7 @@ Every non-2xx response is JSON, `ApiError`:
 | 400 | `local_network` | a grant on the Local network. Message: `Local is this machine only` |
 | 404 | `not_found` | unknown app, peer, group, grant, network, credential, route |
 | 409 | `conflict` | duplicate label, credential or grant; a second ULA or Yggdrasil network; a port that already has its own address |
-| 409 | `confirmation_required` | a grant to Anyone without `confirm_open`; `disable` without `confirm` |
+| 409 | `confirmation_required` | a grant to Anyone without `confirm_open`, or a new member of a tag that has a grant to Anyone without it; `disable` without `confirm` |
 | 409 | `protect_host_refused` | whole-host protection would cut off remote administration. `details`: `LockoutRiskInfo[]` (process, port, protocol, bind address, message). Repeat with `"force": true` to override |
 | 500 | `internal` | a bug or a failing system call; details are in the daemon log |
 
@@ -225,10 +225,11 @@ A tag (ADR 0043) is a label with members (an app, or one port of an app) and opt
 | `create_tag` | `label`, `patterns`, `ref?` |
 | `add_grant` | `target`, `port?`, `network_id?`, `subject`, `confirm_open` |
 | `remove_grant` | `grant_id` |
-| `add_tag_member`, `remove_tag_member` | `tag_id`, `app_id`, `port?` |
+| `add_tag_member` | `tag_id`, `app_id`, `port?`, `confirm_open` (needed when the tag has a grant to Anyone) |
+| `remove_tag_member` | `tag_id`, `app_id`, `port?` |
 | `review` | `app_id`, `reviewed` |
 
-A `ref` is a client-chosen name starting with `$` (`$new0`). Wherever an id goes in a later operation (a tag target, a subject, `tag_id`, `grant_id`), the ref stands for it; the response's `refs` maps each ref to the id it got. An `add_grant` to Anyone without `confirm_open` refuses the whole batch with 409 `confirmation_required`. The answer lists the `changes` (a diff: `kind`, `item`, `name`, `id`, and for grants the `reach` per network, for removed grants the reach that is lost). With `dry_run` nothing is saved or applied; the operations still run against the database's constraints, so a conflict shows.
+A `ref` is a client-chosen name starting with `$` (`$new0`). Wherever an id goes in a later operation (a tag target, a subject, `tag_id`, `grant_id`), the ref stands for it; the response's `refs` maps each ref to the id it got. An `add_grant` to Anyone without `confirm_open` refuses the whole batch with 409 `confirmation_required`; so does an `add_tag_member` that adds a new member to a tag with a grant to Anyone (such a change has `opens_to_anyone`). The answer lists the `changes` (a diff: `kind`, `item`, `name`, `id`, and for grants the `reach` per network, for removed grants the reach that is lost). `changes_reach` is true when the batch gives someone access to something they could not reach before (a new grant, or a new member of a tag that has grants, with some network that lets the subject in); removals never set it. A new member's change lists the reach of the tag's grants and who they name. With `dry_run` nothing is saved or applied; the operations still run against the database's constraints, so a conflict shows.
 
 ## Export and apply
 

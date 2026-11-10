@@ -1,8 +1,8 @@
-// The logic of the access matrix, free of React: what each cell shows, and the batch that a set
-// of staged edits turns into. Rows are tags, apps and app ports; columns are groups, peers,
-// Anyone and "Everyone on <network>".
+// The logic of the access overview, free of React: what each cell shows. Rows are tags, apps
+// and app ports; columns are groups, peers, Anyone and "Everyone on <network>". Nothing is
+// edited here; edits are made in the inspector.
 import type {
-  App, ChangeOp, GrantView, Network, Peer, PeerGroup, PortRef, Subject, Tag, Target,
+  App, GrantView, Network, Peer, PeerGroup, PortRef, Subject, Tag, Target,
 } from "./api";
 import { covers, sameSubject } from "./access";
 import { portLabel, samePort } from "./lib";
@@ -163,42 +163,4 @@ function inheritedFrom(row: Row, col: Col, ctx: Ctx): Cell["origin"] | undefined
     }
   }
   return undefined;
-}
-
-export type Staged = Map<string, "add" | "remove">;
-export const cellKey = (row: Row, col: Col) => `${row.key}|${col.key}`;
-
-/** The state a cell shows once staged edits are applied. */
-export const isOn = (cell: Cell, staged: "add" | "remove" | undefined) =>
-  staged === "add" ? true : staged === "remove" ? false : cell.state === "granted" || cell.state === "partial";
-
-/** The batch for the staged edits. Removing in a network scope from a grant that spans all
- * networks swaps it for grants on the other networks. */
-export function opsFromStaged(rows: Row[], cols: Col[], staged: Staged, ctx: Ctx): ChangeOp[] {
-  const ops: ChangeOp[] = [];
-  const others = ctx.networks.filter((n) => n.grants_apply && n.id !== ctx.scope);
-  for (const row of rows) {
-    for (const col of cols) {
-      const action = staged.get(cellKey(row, col));
-      if (!action) continue;
-      const base = cellOf(row, col, ctx);
-      const addOp = (network_id: string | null): ChangeOp => ({
-        op: "add_grant",
-        target: row.target,
-        ...(row.port ? { port: row.port } : {}),
-        ...(network_id ? { network_id } : {}),
-        subject: col.subject,
-        confirm_open: col.subject.kind === "anyone",
-      });
-      if (action === "add") {
-        ops.push(addOp(col.kind === "segment" ? col.networkId : ctx.scope));
-      } else {
-        for (const g of base.grants) {
-          ops.push({ op: "remove_grant", grant_id: g.id });
-          if (ctx.scope !== null && g.network_id === null) for (const n of others) ops.push(addOp(n.id));
-        }
-      }
-    }
-  }
-  return ops;
 }
