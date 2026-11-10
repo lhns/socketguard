@@ -4,6 +4,9 @@
 
 Accepted (extended by ADR 0035)
 
+Since renamed: `NetworkInterface` is `InterfaceManager` in `iface/` (`create_network_interface()`
+is `iface::create()`), and `MockNetworkInterface` is `MockInterfaceManager`.
+
 ## Context
 
 SocketGuard had ~43 unit tests covering database operations, firewall sync
@@ -12,7 +15,7 @@ loop that ties everything together: socket detection, IPv6 allocation, firewall
 enforcement, and ACL policy resolution.
 
 The `Engine` struct hardcoded platform dependencies (`create_firewall()`,
-`iface::create()`, `create_monitor()`) in 11 `spawn_blocking`
+`create_network_interface()`, `create_monitor()`) in 11 `spawn_blocking`
 closures, making it impossible to inject mocks and test the reconciliation
 pipeline without real OS resources.
 
@@ -27,7 +30,7 @@ tests in `tests/` can import daemon internals via `socketguard_daemon::*`.
 ### 2. Make Engine injectable
 
 Changed `Engine` fields from `Box<dyn Firewall>` to `Arc<dyn Firewall>` (and
-added `Arc<dyn InterfaceManager>`), enabling cloning into `spawn_blocking`
+added `Arc<dyn NetworkInterface>`), enabling cloning into `spawn_blocking`
 closures instead of creating new platform instances each time.
 
 Added two constructors:
@@ -39,7 +42,7 @@ Replaced all 11 inline `create_*()` calls with `self.firewall.clone()` /
 
 ### 3. Mock infrastructure (`test_support` module)
 
-Created `MockFirewall`, `MockInterfaceManager`, `MockSocketMonitor`, and
+Created `MockFirewall`, `MockNetworkInterface`, `MockSocketMonitor`, and
 `MockIpv6Backend` — all using `Arc<Mutex<Vec<_>>>` for call recording. A
 `test_app_state()` helper creates an in-memory SQLite `AppState`.
 
@@ -67,9 +70,9 @@ Created `MockFirewall`, `MockInterfaceManager`, `MockSocketMonitor`, and
 15. PID change — same process/port with stable socket identity across reconciles
 16. Event emission — `SocketsChanged` fires on new/stale sockets, not on no-op reconciles
 
-### 5. `FailingInterfaceManager` mock
+### 5. `FailingNetworkInterface` mock
 
-Added `FailingInterfaceManager` to `test_support` — a network mock that returns
+Added `FailingNetworkInterface` to `test_support` — a network mock that returns
 `Err` for `add_address` on a configurable interface name. Used by test 11 to
 verify that the engine handles partial backend failures gracefully.
 

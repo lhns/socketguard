@@ -51,6 +51,8 @@ desktop UI (Tauri) ┘  (Unix socket /    ├─▶ networks: Local, LAN, Yggdra
 | `socketguard-cli` | The `socketguard` command line, the primary frontend |
 | `socketguard-ui` | Tauri v2 desktop app (Apps, Peers, Activity, Settings) |
 
+Daemon modules: `monitor/` (listening sockets), `iface/` (addresses on the OS interfaces), `networks/` (`ip/` for Local, LAN, Yggdrasil and DHCPv6; `tor`), `firewall/` (nftables, pf, `wfp/`), `engine/` (reconcile loop), `api`.
+
 ## Building
 
 Prerequisites: Rust (via [rustup](https://rustup.rs)) and Node.js; on Windows the Visual

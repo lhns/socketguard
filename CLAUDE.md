@@ -16,9 +16,10 @@ On fresh clone: run `cd ui && npm install` once first.
 
 - crates/core/    — Domain model (apps, peers, grants, reach), config, API types
 - crates/daemon/  — Daemon: engine/ (reconcile, addresses, enforcement, mutations),
-                    state/ (SQLite schema, settings, file protection), monitor, networks/
-                    (Local, LAN, Yggdrasil, Tor), ruleset producer, firewall/ (nftables,
-                    pf, WFP), local API, telemetry
+                    state/ (SQLite schema, settings, file protection), monitor, iface/
+                    (addresses on the OS interfaces), networks/ (ip/: Local, LAN,
+                    Yggdrasil, DHCPv6; tor), ruleset producer, firewall/ (nftables, pf,
+                    wfp/: plan + Windows FFI), local API, telemetry
 - crates/client/  — Typed client for the local API (shared by CLI and UI)
 - crates/cli/     — `socketguard` CLI, the primary frontend
 - ui/             — Tauri v2 desktop app (React frontend + Rust backend);
