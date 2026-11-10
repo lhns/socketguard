@@ -198,6 +198,9 @@ pub fn status(s: &StatusResponse) -> String {
     };
     let enforcement = if s.disabled {
         "DISABLED (no rules, no addresses; `socketguard enable` to restore)"
+    } else if s.unadopted {
+        "UNADOPTED (an existing ruleset was found with an empty database and is left alone; \
+         `socketguard enable` adopts the new state and replaces it, `socketguard disable` removes it)"
     } else {
         "on"
     };

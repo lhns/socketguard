@@ -91,6 +91,10 @@ pub struct StatusResponse {
     pub protect_host_interfaces: Vec<String>,
     /// Enforcement is switched off (`disable`): no rules, no addresses, until `enable`.
     pub disabled: bool,
+    /// A SocketGuard ruleset was found with an empty database and left in place: nothing is
+    /// applied or added until `enable` (adopt) or `disable` (remove).
+    #[serde(default)]
+    pub unadopted: bool,
     pub counts: Counts,
 }
 

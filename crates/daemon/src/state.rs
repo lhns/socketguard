@@ -55,6 +55,12 @@ pub const ADDRESS_MODE_KEY: &str = "address_mode";
 /// Set by `disable` (API or `--disable`), cleared by `enable`: while set, the daemon puts
 /// no rules and no addresses back.
 pub const DISABLED_KEY: &str = "disabled";
+/// Set when the database was created by this start (no prior schema), consumed by the
+/// first successful apply or the startup check.
+pub const FRESH_DB_KEY: &str = "fresh_db";
+/// Set when a fresh database met an existing SocketGuard ruleset: nothing is applied or
+/// added until `enable` adopts the new state (or `disable` removes the old one).
+pub const UNADOPTED_KEY: &str = "unadopted";
 const ULA_GLOBAL_ID_KEY: &str = "ula_global_id";
 
 /// Activity retention: whichever limit trims more.
@@ -491,6 +497,10 @@ impl Database {
         let mut current = version;
         if current == 0 {
             sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO settings (key, value) VALUES (?, 'true')")
+                .bind(FRESH_DB_KEY)
+                .execute(&mut *tx)
+                .await?;
             current = 1;
         }
         if current == 1 {
@@ -575,6 +585,25 @@ impl Database {
 
     pub async fn set_disabled(&self, disabled: bool) -> Result<()> {
         self.set_setting(DISABLED_KEY, if disabled { "true" } else { "false" })
+            .await
+    }
+
+    /// Whether this database was created by the current start and nothing has adopted it.
+    pub async fn fresh(&self) -> Result<bool> {
+        Ok(self.get_setting(FRESH_DB_KEY).await?.as_deref() == Some("true"))
+    }
+
+    pub async fn clear_fresh(&self) -> Result<()> {
+        self.set_setting(FRESH_DB_KEY, "false").await
+    }
+
+    /// Whether an existing ruleset was found with an empty database (see [`UNADOPTED_KEY`]).
+    pub async fn unadopted(&self) -> Result<bool> {
+        Ok(self.get_setting(UNADOPTED_KEY).await?.as_deref() == Some("true"))
+    }
+
+    pub async fn set_unadopted(&self, unadopted: bool) -> Result<()> {
+        self.set_setting(UNADOPTED_KEY, if unadopted { "true" } else { "false" })
             .await
     }
 

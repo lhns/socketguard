@@ -33,7 +33,7 @@ export const alice: Peer = {
 export const groups: PeerGroup[] = [];
 export const settings: Settings = { address_mode: "per_app", protect_host_interfaces: [] };
 export const status: StatusResponse = {
-  version: "0.1.0", networks, protect_host_interfaces: [], disabled: false,
+  version: "0.1.0", networks, protect_host_interfaces: [], disabled: false, unadopted: false,
   counts: { apps: 1, pending_apps: 1, addresses: 1, peers: 1, groups: 0, grants: 0 },
 };
 

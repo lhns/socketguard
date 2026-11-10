@@ -66,7 +66,7 @@ does not cause a 202. Every error has the [error body](#errors).
 
 | Method | Path | Request | Response | Notes |
 |---|---|---|---|---|
-| GET | `/api/status` | | `StatusResponse` | version, networks, protect-host interfaces, `disabled`, counts |
+| GET | `/api/status` | | `StatusResponse` | version, networks, protect-host interfaces, `disabled`, `unadopted` (an existing ruleset was found with an empty database and is left alone until `enable` or `disable`), counts |
 | GET | `/api/events` | | SSE stream | [events](#events) |
 | GET | `/api/apps` | query `pending=true` (optional) | `App[]` | `pending=true`: only apps without a decision |
 | GET | `/api/apps/{id}` | | `AppDetail` | app with addresses, ports, grants (with reach) and counters |

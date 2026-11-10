@@ -9,6 +9,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 # Docker Desktop on Windows needs a Windows-style host path for bind mounts.
 HOST_ROOT="$(cd "$ROOT" && pwd -W 2>/dev/null || pwd)"
 
+TARGET_VOL=${TARGET_VOL:-sg-target}   # docker volume holding the Linux build
 IMAGE=sg-e2e-node
 NET=sg-e2e-net
 NODE_A=sg-e2e-a
@@ -57,7 +58,7 @@ pass "build node image"
 
 # Debug build in the container: binaries stay in the sg-target volume, mounted into the nodes.
 docker run --rm -v "$HOST_ROOT":/work -w /work \
-  -v sg-cargo-registry:/usr/local/cargo/registry -v sg-target:/work/target \
+  -v sg-cargo-registry:/usr/local/cargo/registry -v ${TARGET_VOL}:/work/target \
   -e CARGO_PROFILE_DEV_DEBUG=0 -e CARGO_PROFILE_TEST_DEBUG=0 \
   rust:1-bookworm cargo build -p socketguard-daemon -p socketguard-cli \
   || { fail "build daemon and CLI"; exit 1; }
@@ -69,7 +70,7 @@ SG=/target/debug/socketguard
 docker network create "$NET" >/dev/null || { fail "create network"; exit 1; }
 for n in "$NODE_A" "$NODE_B"; do
   docker run -d --name "$n" --network "$NET" --cap-add NET_ADMIN --device /dev/net/tun \
-    -v sg-target:/target:ro "$IMAGE" sleep infinity >/dev/null || { fail "start $n"; exit 1; }
+    -v ${TARGET_VOL}:/target:ro "$IMAGE" sleep infinity >/dev/null || { fail "start $n"; exit 1; }
 done
 
 # Generate a Yggdrasil config once per node (the key must survive restarts).

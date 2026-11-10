@@ -22,7 +22,8 @@ table inet socketguard {
 	chain input {
 		type filter hook input priority 0; policy accept;
 		# always allowed
-		ct state established,related accept
+		ct state established ct direction reply accept
+		ct state related accept
 		iif lo accept
 		icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } ip6 hoplimit 255 accept
 		icmpv6 type { packet-too-big, destination-unreachable, time-exceeded, parameter-problem } accept
@@ -30,7 +31,7 @@ table inet socketguard {
 		icmpv6 type echo-request limit rate 5/second accept
 		icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
 		icmp type echo-request limit rate 5/second accept
-		iifname != { "ygg0" } ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
+		iifname != { "ygg0" } ip6 saddr fe80::/10 ip6 daddr fe80::/10 udp sport 547 udp dport 546 accept
 		iifname != { "ygg0" } meta nfproto ipv4 udp sport 67 udp dport 68 accept
 		# rules
 		iifname "eth0" ip6 daddr fd00::9 udp dport 53 counter name "c9df8651d2d5bf950" accept

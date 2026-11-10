@@ -132,7 +132,11 @@ pub fn render(rs: &DesiredRuleset) -> String {
         )
     };
     let always = [
-        "ct state established,related accept".to_string(),
+        // Only the reply direction of established flows is accepted blindly. Original-
+        // direction packets of an inbound flow go through the rules below on every packet,
+        // so a revoked grant or a spoofed interface cuts the flow at once, without conntrack.
+        "ct state established ct direction reply accept".to_string(),
+        "ct state related accept".to_string(),
         "iif lo accept".to_string(),
         // Neighbour discovery is only valid with hop limit 255 (never forwarded). Redirects
         // and MLD reports are not accepted: a host needs neither.
@@ -142,7 +146,7 @@ pub fn render(rs: &DesiredRuleset) -> String {
         "icmpv6 type echo-request limit rate 5/second accept".to_string(),
         "icmp type { destination-unreachable, time-exceeded, parameter-problem } accept".to_string(),
         "icmp type echo-request limit rate 5/second accept".to_string(),
-        format!("{not_overlay}ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept"),
+        format!("{not_overlay}ip6 saddr fe80::/10 ip6 daddr fe80::/10 udp sport 547 udp dport 546 accept"),
         format!("{not_overlay}meta nfproto ipv4 udp sport 67 udp dport 68 accept"),
     ];
     for l in always {
@@ -390,7 +394,9 @@ mod tests {
     #[test]
     fn empty_ruleset_still_has_always_allowed() {
         let out = render(&DesiredRuleset::default());
-        assert!(out.contains("ct state established,related accept"));
+        assert!(out.contains("ct state established ct direction reply accept"));
+        assert!(out.contains("ct state related accept"));
+        assert!(!out.contains("established,related"));
         assert!(!out.contains("drop"));
     }
 
@@ -493,7 +499,7 @@ mod tests {
     fn dhcp_and_echo_are_narrow_and_skip_overlays() {
         let out = render(&golden_ruleset());
         assert!(out.contains(
-            "iifname != { \"ygg0\" } ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept"
+            "iifname != { \"ygg0\" } ip6 saddr fe80::/10 ip6 daddr fe80::/10 udp sport 547 udp dport 546 accept"
         ));
         assert!(out.contains(
             "iifname != { \"ygg0\" } meta nfproto ipv4 udp sport 67 udp dport 68 accept"
@@ -505,7 +511,9 @@ mod tests {
         assert!(out.contains("mld-listener-query ip6 saddr fe80::/10 accept"));
         // Without an overlay there is no exclusion.
         let plain = render(&DesiredRuleset::default());
-        assert!(plain.contains("\t\tip6 saddr fe80::/10 udp sport 547 udp dport 546 accept"));
+        assert!(plain.contains(
+            "\t\tip6 saddr fe80::/10 ip6 daddr fe80::/10 udp sport 547 udp dport 546 accept"
+        ));
     }
 
     #[test]

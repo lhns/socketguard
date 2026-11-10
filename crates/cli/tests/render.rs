@@ -221,6 +221,7 @@ fn status() {
         networks: networks(),
         protect_host_interfaces: vec!["eth0".into()],
         disabled: false,
+        unadopted: false,
         counts: Counts {
             apps: 2,
             pending_apps: 1,
@@ -235,6 +236,9 @@ fn status() {
     s.protect_host_interfaces.clear();
     s.networks.clear();
     insta::assert_snapshot!("status_disabled", render::status(&s));
+    s.disabled = false;
+    s.unadopted = true;
+    insta::assert_snapshot!("status_unadopted", render::status(&s));
 }
 
 #[test]

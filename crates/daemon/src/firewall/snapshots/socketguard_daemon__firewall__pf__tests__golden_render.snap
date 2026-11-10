@@ -11,7 +11,7 @@ pass in quick inet6 proto icmp6 icmp6-type { 1, 2, 3, 4, 134, 135, 136 }
 pass in quick inet6 proto icmp6 from fe80::/10 icmp6-type 130
 pass in quick inet6 proto icmp6 icmp6-type 128
 pass in quick inet proto icmp icmp-type { 3, 11, 12, 8 }
-pass in quick inet6 proto udp from fe80::/10 port 547 to any port 546
+pass in quick inet6 proto udp from fe80::/10 port 547 to fe80::/10 port 546
 pass in quick inet proto udp from any port 67 to any port 68
 # rules
 pass in quick on eth0 inet6 proto udp from any to fd00::9 port 53 keep state

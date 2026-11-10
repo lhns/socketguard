@@ -23,3 +23,8 @@ Accepted. Refines ADR 0026 and ADR 0032.
 - The database is the source of truth for the latch, not the config file, so `--disable` works with the daemon stopped.
 - The config file is rewritten with JSON formatting, so comments and key order are not kept (the file is JSON; it has no comments).
 - A failed config write does not fail the API call: the network works until the next restart, and the log says why.
+
+## Amendment: second security review
+
+- **Fresh database next to an existing ruleset.** A database created by this start (schema v0 on migrate; the `fresh_db` setting, cleared by the startup check or the first successful apply) used to apply an empty ruleset on startup, deleting the kernel table while old addresses stayed on their interfaces. Now `startup_reconcile` asks `Firewall::verify`; if a SocketGuard table or filters exist, it sets the persisted `unadopted` setting and logs an error. While set, nothing is applied or added (same gates as `disabled`). `enable` clears it and applies the new state, replacing the old ruleset; `disable` removes the old ruleset and clears it. `GET /api/status` reports `unadopted`; the CLI `status` and the UI banner show it. No schema change.
+- **`disable` keeps the rules while an address remains.** `disable_all` removes the firewall rules only after every owned address is confirmed removed. Otherwise it returns an error listing the addresses, keeps the rules (the addresses stay denied) and leaves the latch set; the disabled daemon's sweep retries and removes the rules once the last address is gone.

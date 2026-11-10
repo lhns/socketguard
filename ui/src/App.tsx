@@ -91,6 +91,12 @@ export default function App() {
             Enforcement is off: no firewall rules are applied. Turn it on in Settings.
           </div>
         )}
+        {status.data?.unadopted && (
+          <div className="error-banner banner" role="status">
+            An existing SocketGuard ruleset was found with an empty database and is left in place.
+            Nothing is applied until you turn enforcement on in Settings (this replaces the ruleset).
+          </div>
+        )}
         {page === "apps" && <AppsPage key={appsSearch} initialSearch={appsSearch} />}
         {page === "peers" && <PeersPage />}
         {page === "activity" && <ActivityPage />}

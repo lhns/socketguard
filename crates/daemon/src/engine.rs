@@ -332,7 +332,7 @@ impl Engine {
     /// caller holds the firewall lock. With `only_if_changed`, an unchanged ruleset is
     /// not re-sent (except every `REAPPLY_EVERY` passes).
     async fn apply_locked(&self, state: &AppState, only_if_changed: bool) -> anyhow::Result<()> {
-        if state.db.disabled().await? {
+        if state.db.disabled().await? || state.db.unadopted().await? {
             return Ok(());
         }
         let snapshot = self.gather_snapshot(state).await?;
@@ -410,6 +410,10 @@ impl Engine {
                 *self.last_applied.lock().unwrap() = Some(desired);
                 *self.last_verified.lock().unwrap() = Some(Instant::now());
                 self.apply_failed.store(false, Ordering::Relaxed);
+                // The database now owns the kernel state: it is no longer "fresh".
+                if state.db.fresh().await.unwrap_or(false) {
+                    let _ = state.db.clear_fresh().await;
+                }
                 Ok(())
             }
             Err(e) => {
@@ -447,6 +451,9 @@ impl Engine {
     /// [`Engine::enforcement_pending`] (so API mutations answer 202); the next pass
     /// retries, including removals recorded in the ledger (`networks::ledger`).
     async fn enforce_networks(&self, state: &AppState) {
+        if state.db.unadopted().await.unwrap_or(false) {
+            return; // an unadopted ruleset: nothing is added or removed until `enable`
+        }
         let nets: Vec<(String, Arc<dyn networks::Network>)> = self
             .sorted_backend_ids()
             .into_iter()
@@ -638,8 +645,10 @@ impl Engine {
         if let Err(e) = networks::ledger::adopt_stored_keys(&state.db).await {
             warn!("Could not adopt existing onion services: {e:#}");
         }
-        if let Err(e) = self.apply_firewall(state).await {
-            error!("Startup: could not apply the firewall ruleset: {e}");
+        self.detect_unadopted(state).await;
+        match self.apply_firewall(state).await {
+            Ok(()) => self.purge_states(),
+            Err(e) => error!("Startup: could not apply the firewall ruleset: {e}"),
         }
         self.ensure_addresses_present(state).await;
         let pending = self.drops.clone();
@@ -656,6 +665,45 @@ impl Engine {
             warn!("Drop logging unavailable: {e}");
         }
         info!("Startup reconciliation complete");
+    }
+
+    /// A database created by this start that meets an existing SocketGuard ruleset (the
+    /// database was lost or deleted) must not wipe it: the old addresses are still on their
+    /// interfaces and the old ruleset is what denies them. Latch `unadopted` instead.
+    async fn detect_unadopted(&self, state: &AppState) {
+        let db = &state.db;
+        if !db.fresh().await.unwrap_or(false) {
+            return;
+        }
+        if !db.disabled().await.unwrap_or(false) {
+            let fw = self.firewall.clone();
+            match tokio::task::spawn_blocking(move || fw.verify()).await {
+                Ok(Ok(true)) => match db.set_unadopted(true).await {
+                    Ok(()) => error!(
+                        "An existing SocketGuard ruleset was found, but the database is new and empty. \
+                         The ruleset is left in place and nothing is applied or added. \
+                         Run `socketguard enable` to adopt the new state (this replaces the existing \
+                         ruleset) or `socketguard disable` to remove it."
+                    ),
+                    Err(e) => error!("Could not record the unadopted ruleset: {e}"),
+                },
+                Ok(Ok(false)) => {}
+                Ok(Err(e)) => warn!("Could not check for an existing ruleset: {e:#}"),
+                Err(e) => warn!("Ruleset check failed: {e}"),
+            }
+        }
+        // Decided: the next start is not the first of this database.
+        let _ = db.clear_fresh().await;
+    }
+
+    /// After the first apply of a daemon run: let the firewall drop states that outlive a
+    /// ruleset swap (pf; no-op on nftables and WFP).
+    fn purge_states(&self) {
+        let applied = self.last_applied.lock().unwrap().clone();
+        let Some(applied) = applied else { return };
+        if let Err(e) = self.firewall.purge_states(&applied) {
+            warn!("Could not drop old firewall states: {e:#}");
+        }
     }
 
     /// Graceful shutdown removes nothing: the ruleset and the addresses stay, so the host
@@ -676,13 +724,13 @@ impl Engine {
             .iter()
             .filter_map(|(id, b)| Some((id.clone(), b.config.backend.interface()?.to_string())))
             .collect();
-        disable_all(
+        let removed = disable_all(
             &state.db,
             &ifaces,
             self.firewall.clone(),
             self.network.clone(),
         )
-        .await?;
+        .await;
         let nets = self
             .backends
             .iter()
@@ -690,12 +738,15 @@ impl Engine {
             .collect();
         disable_networks(&state.db, nets).await;
         self.emit(state, DaemonEvent::SettingsChanged);
-        Ok(())
+        removed
     }
 
     /// Clear the `disabled` latch and put the rules and addresses back.
     pub async fn enable(&self, state: &AppState) -> anyhow::Result<()> {
         state.db.set_disabled(false).await?;
+        // Adopting: the next apply replaces whatever ruleset is installed.
+        state.db.set_unadopted(false).await?;
+        state.db.clear_fresh().await?;
         self.apply_and_ensure(state).await?;
         self.emit(state, DaemonEvent::SettingsChanged);
         Ok(())
@@ -969,6 +1020,29 @@ impl Engine {
         if failures.len() < due_count {
             // Gone for good: the ruleset can stop naming them.
             let _ = self.apply_firewall_if_changed(state).await;
+        }
+        // A `disable` that left the rules because some address would not go: the last one
+        // is gone now, so finish the job.
+        if disabled
+            && failures.is_empty()
+            && db.list_owned_addresses().await.is_ok_and(|o| o.is_empty())
+        {
+            let fw = self.firewall.clone();
+            let removed = tokio::task::spawn_blocking(move || {
+                // Only if rules are still installed (a finished `disable` left none).
+                if fw.verify()? {
+                    fw.disable()?;
+                    return anyhow::Ok(true);
+                }
+                Ok(false)
+            })
+            .await;
+            match removed {
+                Ok(Ok(true)) => info!("All addresses are gone; the firewall rules were removed"),
+                Ok(Ok(false)) => {}
+                Ok(Err(e)) => warn!("Could not remove the firewall rules: {e:#}"),
+                Err(e) => warn!("Rule removal task failed: {e}"),
+            }
         }
     }
 
@@ -2461,6 +2535,8 @@ pub async fn disable_all(
     network: Arc<dyn NetworkInterface>,
 ) -> anyhow::Result<()> {
     db.set_disabled(true).await?;
+    // Removing the rules answers the unadopted question too.
+    db.set_unadopted(false).await?;
     for a in db.list_addresses().await? {
         let Some(ip) = a.locator.ipv6() else {
             continue;
@@ -2479,10 +2555,21 @@ pub async fn disable_all(
         }
     }
     // Addresses first: removing the rules first would briefly expose them. A row stays
-    // until its address is confirmed gone.
+    // until its address is confirmed gone, and the rules stay while any address does: it
+    // remains denied, and the disabled daemon's sweep removes the rules once the last one
+    // is gone.
     let owned = db.list_owned_addresses().await?;
-    for (o, e) in release_owned(db, &network, owned).await {
-        warn!("Failed to remove {} from {}: {e}", o.addr, o.interface);
+    let failures = release_owned(db, &network, owned).await;
+    if !failures.is_empty() {
+        let list: Vec<String> = failures
+            .iter()
+            .map(|(o, e)| format!("{} on {} ({e})", o.addr, o.interface))
+            .collect();
+        anyhow::bail!(
+            "could not remove {} address(es): {}; the firewall rules stay so they remain denied, and the removal is retried",
+            failures.len(),
+            list.join("; ")
+        );
     }
     tokio::task::spawn_blocking(move || firewall.disable()).await?
 }

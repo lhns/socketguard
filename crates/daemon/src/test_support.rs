@@ -25,6 +25,8 @@ pub enum FirewallCall {
 pub struct MockFirewall {
     pub calls: Arc<Mutex<Vec<FirewallCall>>>,
     fail_apply: AtomicBool,
+    /// SocketGuard's ruleset is installed (applied, or planted by a test).
+    installed: AtomicBool,
     /// The next `verify` reports the installed state as gone.
     drifted: AtomicBool,
     verifies: AtomicUsize,
@@ -38,6 +40,7 @@ impl MockFirewall {
         Self {
             calls,
             fail_apply: AtomicBool::new(false),
+            installed: AtomicBool::new(false),
             drifted: AtomicBool::new(false),
             verifies: AtomicUsize::new(0),
             revoked: Mutex::new(Vec::new()),
@@ -78,6 +81,12 @@ impl MockFirewall {
         self.revoked.lock().unwrap().clone()
     }
 
+    /// Pretend a SocketGuard ruleset is (or is not) already installed, as after a restart
+    /// or with a lost database.
+    pub fn set_installed(&self, installed: bool) {
+        self.installed.store(installed, Ordering::Relaxed);
+    }
+
     /// Make `apply` fail (the call is still recorded).
     pub fn set_failing(&self, failing: bool) {
         self.fail_apply.store(failing, Ordering::Relaxed);
@@ -106,12 +115,14 @@ impl Firewall for MockFirewall {
         if self.fail_apply.load(Ordering::Relaxed) {
             anyhow::bail!("simulated apply failure");
         }
+        self.installed.store(true, Ordering::Relaxed);
         Ok(())
     }
 
     fn verify(&self) -> Result<bool> {
         self.verifies.fetch_add(1, Ordering::Relaxed);
-        Ok(!self.drifted.swap(false, Ordering::Relaxed))
+        let drifted = self.drifted.swap(false, Ordering::Relaxed);
+        Ok(self.installed.load(Ordering::Relaxed) && !drifted)
     }
 
     fn revoke(&self, revoked: &[Revocation]) -> Result<()> {
@@ -121,6 +132,7 @@ impl Firewall for MockFirewall {
 
     fn disable(&self) -> Result<()> {
         self.calls.lock().unwrap().push(FirewallCall::Disable);
+        self.installed.store(false, Ordering::Relaxed);
         Ok(())
     }
 

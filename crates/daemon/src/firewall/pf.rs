@@ -93,7 +93,7 @@ pub fn render(rs: &DesiredRuleset) -> String {
     o.push_str("pass in quick inet6 proto icmp6 from fe80::/10 icmp6-type 130\n");
     o.push_str("pass in quick inet6 proto icmp6 icmp6-type 128\n");
     o.push_str("pass in quick inet proto icmp icmp-type { 3, 11, 12, 8 }\n");
-    o.push_str("pass in quick inet6 proto udp from fe80::/10 port 547 to any port 546\n");
+    o.push_str("pass in quick inet6 proto udp from fe80::/10 port 547 to fe80::/10 port 546\n");
     o.push_str("pass in quick inet proto udp from any port 67 to any port 68\n");
     o.push_str("# rules\n");
     for r in &rs.rules {
@@ -125,6 +125,39 @@ fn kill_commands(revoked: &[Revocation]) -> Vec<Vec<String>> {
     out.sort();
     out.dedup();
     out
+}
+
+/// `pfctl -k` commands for the daemon's first apply: every destination the ruleset scopes
+/// (rule destinations and managed addresses), from any source.
+fn startup_kill_commands(rs: &DesiredRuleset) -> Vec<Vec<String>> {
+    let mut dsts: Vec<IpAddr> = rs.rules.iter().map(|r| r.dst).collect();
+    for sc in &rs.scopes {
+        if let ScopeMatch::Destinations(d) = &sc.matcher {
+            dsts.extend(d.iter().copied());
+        }
+    }
+    dsts.sort();
+    dsts.dedup();
+    let revoked: Vec<Revocation> = dsts
+        .into_iter()
+        .map(|dst| Revocation {
+            dst,
+            port: 0,
+            proto: socketguard_core::Protocol::Tcp,
+            src: None,
+        })
+        .collect();
+    kill_commands(&revoked)
+}
+
+fn run_kills(cmds: Vec<Vec<String>>) {
+    for cmd in cmds {
+        let args: Vec<&str> = cmd.iter().map(String::as_str).collect();
+        // Killing states finds nothing to do when no state exists: not an error.
+        if let Err(e) = pfctl(&args, None) {
+            tracing::warn!("pfctl state kill failed: {e}");
+        }
+    }
 }
 
 fn pfctl(args: &[&str], stdin: Option<&str>) -> Result<std::process::Output> {
@@ -185,14 +218,19 @@ impl Firewall for PfFirewall {
         Ok(())
     }
 
+    fn verify(&self) -> Result<bool> {
+        // `render` always emits rules (loopback), so an empty anchor means nothing of ours.
+        let out = pfctl(&["-a", ANCHOR, "-s", "rules"], None)?;
+        Ok(out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+    }
+
     fn revoke(&self, revoked: &[Revocation]) -> Result<()> {
-        for cmd in kill_commands(revoked) {
-            let args: Vec<&str> = cmd.iter().map(String::as_str).collect();
-            // Killing states finds nothing to do when no state exists: not an error.
-            if let Err(e) = pfctl(&args, None) {
-                tracing::warn!("pfctl state kill failed: {e}");
-            }
-        }
+        run_kills(kill_commands(revoked));
+        Ok(())
+    }
+
+    fn purge_states(&self, applied: &DesiredRuleset) -> Result<()> {
+        run_kills(startup_kill_commands(applied));
         Ok(())
     }
 
@@ -245,11 +283,28 @@ mod tests {
     }
 
     #[test]
+    fn startup_kills_every_scoped_destination() {
+        let cmds: Vec<String> = startup_kill_commands(&golden_ruleset())
+            .iter()
+            .map(|c| c.join(" "))
+            .collect();
+        assert_eq!(
+            cmds,
+            vec![
+                "-k 0.0.0.0/0 -k 192.0.2.9",
+                "-k ::/0 -k 301::1",
+                "-k ::/0 -k fd00::1",
+                "-k ::/0 -k fd00::9",
+            ]
+        );
+    }
+
+    #[test]
     fn overlays_get_no_echo_or_dhcp() {
         let out = render(&golden_ruleset());
         assert!(out.contains("block drop in quick on ygg0 inet6 proto icmp6 icmp6-type 128"));
         assert!(!out.contains("137"));
-        assert!(out.contains("from fe80::/10 port 547"));
+        assert!(out.contains("from fe80::/10 port 547 to fe80::/10 port 546"));
     }
 
     #[test]

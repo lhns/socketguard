@@ -13,4 +13,9 @@ protect_host_interfaces: Array<string>,
 /**
  * Enforcement is switched off (`disable`): no rules, no addresses, until `enable`.
  */
-disabled: boolean, counts: Counts, };
+disabled: boolean,
+/**
+ * A SocketGuard ruleset was found with an empty database and left in place: nothing is
+ * applied or added until `enable` (adopt) or `disable` (remove).
+ */
+unadopted: boolean, counts: Counts, };

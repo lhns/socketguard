@@ -2039,17 +2039,89 @@ async fn disable_removes_owned_addresses_and_keeps_rows_until_confirmed() {
     let a = Harness::addr_on(&h.app().await, "ygg");
 
     h.net.set_remove_failing(true);
-    h.engine().await.disable(&h.state).await.unwrap();
+    h.clear_calls();
+    let err = h.engine().await.disable(&h.state).await.unwrap_err();
+    assert!(err.to_string().contains(&a.to_string()), "{err}");
     assert!(h.net.addresses("ygg0").contains(&a));
     let owned = h.state.db.list_owned_addresses().await.unwrap();
     assert_eq!(owned.len(), 1);
     assert!(owned[0].retiring);
+    // The address is still on its interface, so it stays denied: the rules stay.
+    assert!(h.state.db.disabled().await.unwrap(), "the latch stays set");
+    assert!(
+        !h.fw_calls.lock().unwrap().contains(&FirewallCall::Disable),
+        "rules must stay while an address does"
+    );
 
-    // The disabled daemon keeps retrying the removal.
+    // The disabled daemon keeps retrying the removal, then removes the rules.
     h.net.set_remove_failing(false);
     h.reconcile().await;
     assert!(!h.net.addresses("ygg0").contains(&a));
     assert!(h.state.db.list_owned_addresses().await.unwrap().is_empty());
+    assert_eq!(
+        h.fw_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| **c == FirewallCall::Disable)
+            .count(),
+        1
+    );
+}
+
+// ─── A fresh database next to an existing ruleset (second security review) ───
+
+#[tokio::test]
+async fn fresh_database_does_not_replace_an_existing_ruleset_until_enabled() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.fw.set_installed(true); // a ruleset from before the database was lost
+    h.engine().await.startup_reconcile(&h.state).await;
+    assert!(h.state.db.unadopted().await.unwrap());
+
+    // Reconciles track apps but apply nothing and add no address.
+    h.reconcile().await;
+    h.engine().await.startup_reconcile(&h.state).await;
+    assert!(
+        h.fw_calls.lock().unwrap().is_empty(),
+        "no Apply, no Disable"
+    );
+    assert!(net_adds(&h).is_empty());
+    assert_eq!(h.apps().await.len(), 1);
+
+    // `enable` adopts the new state: the ruleset is replaced and the latch cleared.
+    h.engine().await.enable(&h.state).await.unwrap();
+    assert!(!h.state.db.unadopted().await.unwrap());
+    assert_eq!(applied(&h.fw_calls).len(), 1);
+    assert_eq!(net_adds(&h).len(), 1);
+    h.reconcile().await;
+    assert_eq!(applied(&h.fw_calls).len(), 1, "and it stays adopted");
+}
+
+#[tokio::test]
+async fn fresh_database_without_a_ruleset_applies_normally() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.engine().await.startup_reconcile(&h.state).await;
+    assert!(!h.state.db.unadopted().await.unwrap());
+    assert_eq!(applied(&h.fw_calls).len(), 1);
+}
+
+#[tokio::test]
+async fn existing_database_keeps_the_ruleset_flow_after_restart() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await; // the first apply consumes the fresh-database mark
+    h.engine().await.startup_reconcile(&h.state).await;
+    assert!(!h.state.db.unadopted().await.unwrap());
+}
+
+#[tokio::test]
+async fn disable_removes_an_unadopted_ruleset() {
+    let h = Harness::new(vec![ygg()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.fw.set_installed(true);
+    h.engine().await.startup_reconcile(&h.state).await;
+    assert!(h.state.db.unadopted().await.unwrap());
+    h.engine().await.disable(&h.state).await.unwrap();
+    assert!(!h.state.db.unadopted().await.unwrap());
+    assert!(h.fw_calls.lock().unwrap().contains(&FirewallCall::Disable));
 }
 
 // ─── App identity (ADR 0027 amendment) ───────────────────────────────────────

@@ -4,8 +4,7 @@
 //! `NftablesFirewall` inside namespace A (the test thread enters it with `setns`), and
 //! probes a wildcard TCP listener there from namespace B.
 //!
-//! Needs root/CAP_NET_ADMIN, `ip` (iproute2), `nft` and `python3` (and `conntrack` for the
-//! revocation test, which skips without it); opt in with `SOCKETGUARD_NETNS_TESTS=1`.
+//! Needs root/CAP_NET_ADMIN, `ip` (iproute2), `nft` and `python3`; opt in with `SOCKETGUARD_NETNS_TESTS=1`.
 //! Compiles to nothing on other platforms.
 #![cfg(target_os = "linux")]
 
@@ -554,19 +553,8 @@ fn forged_lan_source_is_refused_on_another_interface() {
     );
 }
 
-#[test]
-fn revoked_grant_cuts_an_established_connection() {
-    if !enabled() {
-        return;
-    }
-    if Command::new("conntrack").arg("--version").output().is_err() {
-        eprintln!("skipping: conntrack is not installed");
-        return;
-    }
-    let fx = Fixture::new("revoke");
-    let granted = fx.apply(&snapshot(&[(CredentialKind::Ip, "fd00:5a::2/128")]));
-    assert!(eventually(|| fx.reachable(MANAGED, None)));
-
+/// Starts the HOLD client in B (source `fd00:5a::2`) and waits until it is connected.
+fn hold_connection(fx: &Fixture) -> Child {
     let mut client = Command::new("ip")
         .args([
             "netns",
@@ -585,21 +573,87 @@ fn revoked_grant_cuts_an_established_connection() {
     let mut first = String::new();
     std::io::BufRead::read_line(&mut lines, &mut first).unwrap();
     assert_eq!(first.trim(), "up");
+    client
+}
 
-    // Revoke: the new ruleset has no grant. The established flow survives the swap ...
-    let revoked_rs = fx.apply(&snapshot(&[]));
-    std::thread::sleep(Duration::from_secs(2));
+#[test]
+fn revoked_grant_cuts_an_established_connection_without_conntrack() {
+    if !enabled() {
+        return;
+    }
+    // Revocation is the rules' job: original-direction packets of an established flow are
+    // matched on every packet, so the `conntrack` tool is never involved. This test never
+    // calls `Firewall::revoke`, and the tool is hidden from PATH for good measure.
+    let fx = Fixture::new("revoke"); // holds the serial lock, so PATH can change safely
+    let tools = std::env::temp_dir().join(format!("sg-no-conntrack-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tools);
+    std::fs::create_dir_all(&tools).unwrap();
+    for tool in ["nft", "ip", "python3"] {
+        let found = Command::new("sh")
+            .args(["-c", &format!("command -v {tool}")])
+            .output()
+            .unwrap();
+        let found = String::from_utf8_lossy(&found.stdout).trim().to_string();
+        std::os::unix::fs::symlink(&found, tools.join(tool)).unwrap();
+    }
+    struct PathGuard(std::ffi::OsString, std::path::PathBuf);
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            std::env::set_var("PATH", &self.0);
+            let _ = std::fs::remove_dir_all(&self.1);
+        }
+    }
+    let _path = PathGuard(std::env::var_os("PATH").unwrap_or_default(), tools.clone());
+    std::env::set_var("PATH", &tools);
     assert!(
-        client.try_wait().unwrap().is_none(),
-        "established flows outlive the rule that allowed them"
+        Command::new("conntrack").arg("--version").output().is_err(),
+        "conntrack must be hidden"
     );
-    // ... until the revocation is flushed from conntrack.
-    let revoked = socketguard_daemon::firewall::revocations(&granted, &revoked_rs);
-    assert_eq!(revoked.len(), 1);
-    fx.fw.revoke(&revoked).unwrap();
+
+    fx.apply(&snapshot(&[(CredentialKind::Ip, "fd00:5a::2/128")]));
+    assert!(eventually(|| fx.reachable(MANAGED, None)));
+    let mut client = hold_connection(&fx);
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(client.try_wait().unwrap().is_none(), "the flow is alive");
+
+    // Revoke: the new ruleset has no grant. The next packet of the flow is dropped.
+    fx.apply(&snapshot(&[]));
     let cut = eventually(|| client.try_wait().unwrap().is_some());
     let _ = client.kill();
     assert!(cut, "the revoked connection must be cut");
+}
+
+#[test]
+fn established_flow_is_bound_to_its_interface() {
+    if !enabled() {
+        return;
+    }
+    let fx = Fixture::new("estif");
+    fx.apply(&snapshot(&[(CredentialKind::Ip, "fd00:5a::2/128")]));
+    assert!(eventually(|| fx.reachable(MANAGED, None)));
+    let mut client = hold_connection(&fx);
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(client.try_wait().unwrap().is_none(), "the flow is alive");
+
+    // B now sends the packets of the same established flow (same addresses and ports) over
+    // the other veth, as a forger would. They are original-direction packets arriving on
+    // ygg0, which the grant (bound to sgv-a) does not cover, so they are dropped.
+    ip(&[
+        "-n",
+        &fx.ns.b,
+        "-6",
+        "route",
+        "replace",
+        &format!("{MANAGED}/128"),
+        "dev",
+        "ygg0",
+    ]);
+    let cut = eventually(|| client.try_wait().unwrap().is_some());
+    let _ = client.kill();
+    assert!(
+        cut,
+        "an established flow's packets arriving on another interface must be dropped"
+    );
 }
 
 #[test]

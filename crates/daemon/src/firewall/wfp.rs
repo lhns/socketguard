@@ -111,6 +111,8 @@ pub(crate) enum Cond {
     Proto(u8),
     /// A host (full prefix) matches by address, anything else by address+mask.
     Remote(IpNet),
+    /// The same for the local (destination) address.
+    LocalNet(IpNet),
     /// Arrival interface alias; resolved to a LUID when applying.
     ArrivalIf(String),
     /// Any arrival interface but this one (no condition when the alias does not exist).
@@ -137,6 +139,32 @@ fn proto_number(p: Protocol) -> u8 {
 
 fn host_net(ip: IpAddr) -> IpNet {
     IpNet::new(ip, if ip.is_ipv4() { 32 } else { 128 }).expect("full prefix is valid")
+}
+
+/// Drop the specs that name an interface alias that does not resolve (`luids` holds the
+/// ones that do). An absent adapter receives no traffic, so skipping its block scope
+/// leaves nothing open: managed addresses stay covered by the destination blocks, and the
+/// engine re-applies when `interfaces_changed` reports the adapter back. Failing the whole
+/// apply instead (the earlier choice) left revoked grants in force while an adapter was
+/// missing. A `NotArrivalIf` for an absent adapter excludes nothing and is just dropped.
+pub(crate) fn drop_unresolved(
+    specs: Vec<FilterSpec>,
+    luids: &HashMap<String, u64>,
+) -> Vec<FilterSpec> {
+    let missing = |n: &String| !luids.contains_key(n);
+    specs
+        .into_iter()
+        .filter(|s| {
+            !s.conds
+                .iter()
+                .any(|c| matches!(c, Cond::ArrivalIf(n) if missing(n)))
+        })
+        .map(|mut s| {
+            s.conds
+                .retain(|c| !matches!(c, Cond::NotArrivalIf(n) if missing(n)));
+            s
+        })
+        .collect()
 }
 
 /// Translate the desired state into filter specs. See the module docs for the layout.
@@ -175,7 +203,10 @@ pub(crate) fn plan(desired: &DesiredRuleset) -> Vec<FilterSpec> {
                 Cond::RemotePort(remote),
             ];
             if layer == Layer::V6 {
-                conds.push(Cond::Remote("fe80::/10".parse().expect("valid net")));
+                // Replies come from a link-local server to our link-local address.
+                let link_local: IpNet = "fe80::/10".parse().expect("valid net");
+                conds.push(Cond::Remote(link_local));
+                conds.push(Cond::LocalNet(link_local));
             }
             conds.extend(overlay.clone().map(Cond::NotArrivalIf));
             out.push(FilterSpec {
@@ -395,8 +426,12 @@ fn raw_cond(
             r.conditionValue.r#type = FWP_UINT8;
             r.conditionValue.Anonymous.uint8 = *p;
         }
-        Cond::Remote(net) => {
-            r.fieldKey = FWPM_CONDITION_IP_REMOTE_ADDRESS;
+        Cond::Remote(net) | Cond::LocalNet(net) => {
+            r.fieldKey = if matches!(c, Cond::LocalNet(_)) {
+                FWPM_CONDITION_IP_LOCAL_ADDRESS
+            } else {
+                FWPM_CONDITION_IP_REMOTE_ADDRESS
+            };
             match net {
                 IpNet::V6(n) if n.prefix_len() == 128 => {
                     let mut b = Box::new(FWP_BYTE_ARRAY16 {
@@ -697,22 +732,10 @@ impl Firewall for WfpFirewall {
             .iter()
             .filter_map(|(n, l)| l.map(|l| (n.clone(), l)))
             .collect();
-        let is_missing = |n: &String| !luids.contains_key(n);
-        // Fail safe: a block scope on an interface that does not exist (yet) would be
-        // dropped silently. Refuse the apply instead; the previous filters stay and the
-        // engine retries on its next pass.
-        for s in specs.iter().filter(|s| s.action == Action::Block) {
-            if let Some(Cond::ArrivalIf(n)) = s
-                .conds
-                .iter()
-                .find(|c| matches!(c, Cond::ArrivalIf(n) if is_missing(n)))
-            {
-                bail!("interface {n:?} of a block scope does not resolve; keeping the previous filters");
-            }
-        }
         for n in resolved.iter().filter(|(_, l)| l.is_none()).map(|(n, _)| n) {
-            tracing::warn!(interface = %n, "interface not found; permits for it skipped");
+            tracing::warn!(interface = %n, "interface not found; filters for it skipped until it returns");
         }
+        let specs = drop_unresolved(specs, &luids);
 
         let e = Engine::open()?;
         {
@@ -720,23 +743,6 @@ impl Firewall for WfpFirewall {
             self.ensure_provider_and_sublayer(&e)?;
             self.delete_our_filters(&e)?;
             for s in &specs {
-                if s.conds
-                    .iter()
-                    .any(|c| matches!(c, Cond::ArrivalIf(n) if is_missing(n)))
-                {
-                    continue; // a permit for an interface that does not exist
-                }
-                if s.conds
-                    .iter()
-                    .any(|c| matches!(c, Cond::NotArrivalIf(n) if is_missing(n)))
-                {
-                    // Nothing to exclude: drop the condition.
-                    let mut s = s.clone();
-                    s.conds
-                        .retain(|c| !matches!(c, Cond::NotArrivalIf(n) if is_missing(n)));
-                    self.add_filter(&e, &s, &luids)?;
-                    continue;
-                }
                 self.add_filter(&e, s, &luids)?;
             }
             txn.commit()?; // any early return above aborts via Txn::drop
@@ -746,6 +752,20 @@ impl Firewall for WfpFirewall {
             tracing::warn!("could not refresh drop attribution map: {err:#}");
         }
         Ok(())
+    }
+
+    fn verify(&self) -> Result<bool> {
+        // `apply` always creates the provider and `disable` removes it, so its presence is
+        // the sign that SocketGuard's state is installed (an empty ruleset has no filters).
+        let e = Engine::open()?;
+        let mut pr: *mut FWPM_PROVIDER0 = std::ptr::null_mut();
+        let rc = unsafe { FwpmProviderGetByKey0(e.0, &self.keys.provider, &mut pr) };
+        if rc == 0 {
+            unsafe { FwpmFreeMemory0(&mut pr as *mut _ as *mut *mut c_void) };
+            return Ok(true);
+        }
+        check_or("FwpmProviderGetByKey0", rc, &[FWP_E_PROVIDER_NOT_FOUND])?;
+        Ok(false)
     }
 
     fn interfaces_changed(&self) -> bool {
@@ -996,6 +1016,87 @@ mod tests {
         assert!(dhcp
             .iter()
             .all(|s| s.conds.contains(&Cond::NotArrivalIf("ygg0".into()))));
+    }
+
+    #[test]
+    fn dhcpv6_reply_is_link_local_to_link_local() {
+        let d = DesiredRuleset {
+            scopes: vec![scope(
+                "managed",
+                ScopeMatch::Destinations(vec![ip("fd00::1")]),
+            )],
+            rules: vec![],
+        };
+        let p = plan(&d);
+        let v6 = p
+            .iter()
+            .find(|s| s.name.ends_with("dhcpv6 reply"))
+            .expect("dhcpv6 permit");
+        assert!(v6.conds.contains(&Cond::Remote(net("fe80::/10"))));
+        assert!(v6.conds.contains(&Cond::LocalNet(net("fe80::/10"))));
+    }
+
+    #[test]
+    fn unresolved_interface_scope_is_skipped_not_fatal() {
+        let d = DesiredRuleset {
+            scopes: vec![
+                scope(
+                    "managed",
+                    ScopeMatch::Destinations(vec![ip("fd00::1"), ip("301::1")]),
+                ),
+                Scope {
+                    id: "overlay:ygg0".into(),
+                    kind: ScopeKind::Overlay,
+                    matcher: ScopeMatch::Interface {
+                        name: "ygg0".into(),
+                        families: Families::Both,
+                    },
+                },
+                scope(
+                    "host:Ethernet",
+                    ScopeMatch::Interface {
+                        name: "Ethernet".into(),
+                        families: Families::V6,
+                    },
+                ),
+            ],
+            rules: vec![rule(
+                "r",
+                "fd00::1",
+                Some("Ethernet"),
+                Sources::Nets(vec![net("fd00::2/128")]),
+            )],
+        };
+        let all = plan(&d);
+        let only_ethernet = HashMap::from([("Ethernet".to_string(), 7u64)]);
+        let kept = drop_unresolved(all.clone(), &only_ethernet);
+        // The absent adapter's block (V6 and V4) is gone, everything else stays: the
+        // managed-address blocks, the Ethernet block and the Ethernet permit.
+        assert_eq!(all.len() - kept.len(), 2);
+        assert!(kept
+            .iter()
+            .all(|s| !s.conds.contains(&Cond::ArrivalIf("ygg0".into()))));
+        assert_eq!(
+            kept.iter()
+                .filter(|s| s.action == Action::Block && s.scope_id.as_deref() == Some("managed"))
+                .count(),
+            2
+        );
+        assert!(kept
+            .iter()
+            .any(|s| s.conds.contains(&Cond::ArrivalIf("Ethernet".into()))
+                && s.action == Action::Permit));
+        // The overlay exclusion of the DHCP permits disappears with the adapter.
+        assert!(all
+            .iter()
+            .any(|s| s.conds.contains(&Cond::NotArrivalIf("ygg0".into()))));
+        assert!(kept
+            .iter()
+            .filter(|s| s.name.contains("dhcp"))
+            .all(|s| !s.conds.iter().any(|c| matches!(c, Cond::NotArrivalIf(_)))));
+        // With every interface present nothing is dropped.
+        let both = HashMap::from([("Ethernet".to_string(), 7u64), ("ygg0".to_string(), 8u64)]);
+        assert_eq!(drop_unresolved(all.clone(), &both), all);
     }
 
     #[test]

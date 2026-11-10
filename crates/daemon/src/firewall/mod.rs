@@ -41,6 +41,15 @@ pub trait Firewall: Send + Sync {
         Ok(())
     }
 
+    /// Called once at daemon start, after the first successful apply. Backends whose
+    /// states outlive a ruleset swap and are not bound to an interface (pf) drop the states
+    /// of every scoped destination, so grants revoked while the daemon was down, or flows
+    /// spoofed onto another interface, cannot ride on old states. nftables needs nothing:
+    /// it checks original-direction packets against the rules on every packet.
+    fn purge_states(&self, _applied: &DesiredRuleset) -> Result<()> {
+        Ok(())
+    }
+
     /// Remove everything SocketGuard installed. Only for explicit `disable` / uninstall.
     fn disable(&self) -> Result<()>;
 

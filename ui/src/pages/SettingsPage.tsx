@@ -60,13 +60,13 @@ export default function SettingsPage({ onShowApp }: Props) {
               {s.counts.grants} grants
             </p>
             <p>
-              Enforcement: <strong>{s.disabled ? "off" : "on"}</strong>
+              Enforcement: <strong>{s.disabled ? "off" : s.unadopted ? "waiting (existing ruleset not adopted)" : "on"}</strong>
             </p>
             <div className="actions">
-              {s.disabled ? (
+              {s.disabled || s.unadopted ? (
                 <button className="btn btn-primary" disabled={setEnabled.isPending}
                   onClick={() => setEnabled.mutate(true, { onSuccess: () => toast.success("Enforcement on"), onError: (e) => toast.error(errorText(e)) })}>
-                  Enable enforcement
+                  {s.unadopted && !s.disabled ? "Adopt and enforce" : "Enable enforcement"}
                 </button>
               ) : (
                 <button className="btn btn-danger" onClick={() => setConfirmDisable(true)}>Disable enforcement</button>

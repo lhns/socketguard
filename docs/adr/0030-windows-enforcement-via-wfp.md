@@ -34,3 +34,9 @@ ADR 0008 used `netsh advfirewall`. In Windows Firewall a block rule wins over an
 - **Always-allowed permits** (weight 15): the DHCPv6 reply permit has a remote `fe80::/10` condition, and both DHCP permits exclude the overlay interface (`NOT_EQUAL` arrival interface; same-field conditions are ORed, so one overlay can be excluded, and SocketGuard allows a single Yggdrasil network).
 - **Grant permits are hard permits** (`FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT`), so a grant overrides explicit Windows Firewall block rules for that address and port. This is intended: it is the only way to beat Windows Firewall's default block for an inbound flow.
 - **Revocation does not cut established flows.** ALE recv-accept only sees new flows, so a flow admitted by a grant lives until it closes after the grant is revoked. `Firewall::revoke` does nothing on Windows.
+
+## Amendment: second security review
+
+- **Unresolvable interfaces are skipped, not fatal (reverses the "fail safe" bullet above).** A block scope whose interface alias does not resolve is skipped, like permits for it (`drop_unresolved`), and everything else is applied. An absent adapter receives no traffic, so nothing is exposed, and the managed-address destination blocks still cover the managed addresses. The earlier choice (fail the whole apply) kept every other change out while an adapter such as wintun was missing: a revoked LAN grant stayed permitted while the Yggdrasil adapter was absent, and the API reported an error after the DB had changed. The engine re-applies when `interfaces_changed` reports the adapter back (its alias resolved to `None` at apply time, so the LUID differs).
+- **DHCPv6 reply permit** also has a local address condition `fe80::/10`.
+- `Firewall::verify` reports whether SocketGuard's provider exists (used to detect an existing ruleset next to a fresh database, ADR 0038).
