@@ -2,6 +2,7 @@
 name = "socketguard-daemon"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [features]
 # Mocks for the firewall, interfaces, monitor and networks, and a ready-made daemon. Enabled

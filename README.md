@@ -209,8 +209,8 @@ and `deploy/e2e/tor-e2e.sh` for the Docker end-to-end test.
 ## Architecture decisions
 
 Architecture decisions are recorded as ADRs in [`docs/adr/`](docs/adr/); the current design is
-ADR 0026–0040.
+ADR 0026–0041.
 
 ## License
 
-MIT
+Apache License 2.0, see [LICENSE](LICENSE).
