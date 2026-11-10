@@ -9,7 +9,7 @@
 use opentelemetry::metrics::Meter;
 use opentelemetry::KeyValue;
 use socketguard_core::AppCounter;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// What a firewall counter measures.
@@ -81,7 +81,7 @@ impl Metrics {
     /// value counts in full.
     pub fn record(&self, readings: impl IntoIterator<Item = (String, CounterKey, u64, u64)>) {
         let mut d = self.data.lock().unwrap();
-        let mut seen = Vec::new();
+        let mut seen = HashSet::new();
         for (id, key, packets, bytes) in readings {
             let (lp, lb) = d.last.get(&id).copied().unwrap_or((0, 0));
             let delta = |now: u64, last: u64| if now >= last { now - last } else { now };
@@ -90,10 +90,21 @@ impl Metrics {
             t.0 += dp;
             t.1 += db;
             d.last.insert(id.clone(), (packets, bytes));
-            seen.push(id);
+            seen.insert(id);
         }
         // Counters that no longer exist start from zero if they come back.
         d.last.retain(|id, _| seen.contains(id));
+    }
+
+    /// Forget the series of rules and scopes that are not in `live` (the keys of the ruleset
+    /// that was just applied), so removed apps and grants do not accumulate forever.
+    pub fn retain_series<'a>(&self, live: impl IntoIterator<Item = &'a CounterKey>) {
+        let live: HashSet<&CounterKey> = live.into_iter().collect();
+        self.data
+            .lock()
+            .unwrap()
+            .totals
+            .retain(|k, _| live.contains(k));
     }
 
     /// The firewall's counters start over: call after a ruleset was applied, so the next
@@ -217,6 +228,19 @@ mod tests {
         let c = &m.app_counters("a")[0];
         assert_eq!((c.packets, c.bytes), (17, 170));
         assert!(m.app_counters("b").is_empty());
+    }
+
+    #[test]
+    fn series_of_removed_rules_are_forgotten() {
+        let m = Metrics::default();
+        m.record([
+            ("r1".into(), rule("a"), 1, 10),
+            ("r2".into(), rule("b"), 2, 20),
+        ]);
+        m.retain_series([&rule("a")]);
+        assert_eq!(m.app_counters("a")[0].packets, 1);
+        assert!(m.app_counters("b").is_empty());
+        assert_eq!(m.observations().len(), 1);
     }
 
     #[test]

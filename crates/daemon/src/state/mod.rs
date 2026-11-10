@@ -33,11 +33,15 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Mutex;
+use std::time::Instant;
 use tracing::warn;
 
 /// Activity retention: whichever limit trims more.
 const ACTIVITY_MAX_AGE_DAYS: i64 = 30;
 const ACTIVITY_MAX_ROWS: i64 = 10_000;
+/// Pruning scans the table, so inserts do it at most this often.
+const ACTIVITY_PRUNE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// An address the daemon has put on (or is taking off) an interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +57,8 @@ pub struct Database {
     pool: SqlitePool,
     /// The file, for protecting it after the schema (and -wal/-shm) exist.
     path: Option<String>,
+    /// When the activity table was last pruned (see [`ACTIVITY_PRUNE_EVERY`]).
+    last_prune: Mutex<Option<Instant>>,
 }
 
 fn ts(dt: DateTime<Utc>) -> String {
@@ -114,6 +120,7 @@ impl Database {
         Ok(Self {
             pool,
             path: (path != ":memory:").then(|| path.to_string()),
+            last_prune: Mutex::new(None),
         })
     }
 
@@ -818,7 +825,8 @@ impl Database {
 
     // ======== Activity ========
 
-    /// Append records, then prune by the retention limits.
+    /// Append records, then prune by the retention limits (at most once per
+    /// [`ACTIVITY_PRUNE_EVERY`]: blocked connections arrive in many small batches).
     pub async fn insert_activity(&self, records: &[NewActivity]) -> Result<()> {
         if records.is_empty() {
             return Ok(());
@@ -843,9 +851,22 @@ impl Database {
             .await?;
         }
         tx.commit().await?;
-        self.prune_activity(Duration::days(ACTIVITY_MAX_AGE_DAYS), ACTIVITY_MAX_ROWS)
-            .await?;
+        if self.prune_due() {
+            self.prune_activity(Duration::days(ACTIVITY_MAX_AGE_DAYS), ACTIVITY_MAX_ROWS)
+                .await?;
+        }
         Ok(())
+    }
+
+    /// Whether the activity table has not been pruned for [`ACTIVITY_PRUNE_EVERY`]; if so,
+    /// the caller prunes now.
+    fn prune_due(&self) -> bool {
+        let mut last = self.last_prune.lock().unwrap();
+        let due = last.is_none_or(|t| t.elapsed() >= ACTIVITY_PRUNE_EVERY);
+        if due {
+            *last = Some(Instant::now());
+        }
+        due
     }
 
     /// Delete activity older than `max_age`, then everything but the newest `max_rows`.
@@ -1517,6 +1538,13 @@ mod tests {
         .await
         .unwrap();
         // Insert prunes: the 31-day-old row is gone.
+        assert_eq!(count(&db, "activity").await, 1);
+        // Not again within the minute; an explicit prune does it.
+        db.insert_activity(&[act(ActivityKind::PeerAdded, now() - Duration::days(31))])
+            .await
+            .unwrap();
+        assert_eq!(count(&db, "activity").await, 2);
+        db.prune_activity(Duration::days(30), 100).await.unwrap();
         assert_eq!(count(&db, "activity").await, 1);
 
         let batch: Vec<_> = (0..30).map(|_| act(ActivityKind::Blocked, now())).collect();

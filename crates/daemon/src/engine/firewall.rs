@@ -124,9 +124,12 @@ impl Engine {
                     desired.scopes.len(),
                     desired.rules.len()
                 );
-                *self.counter_keys.lock().unwrap() = counter_keys(&snapshot, &desired);
-                // The table was replaced, so the platform's counters restarted at zero.
+                let keys = counter_keys(&snapshot, &desired);
+                // The table was replaced, so the platform's counters restarted at zero;
+                // series of rules and scopes that are gone are dropped.
                 self.metrics.counters_reset();
+                self.metrics.retain_series(keys.values());
+                *self.counter_keys.lock().unwrap() = keys;
                 *self.last_applied.lock().unwrap() = Some(desired);
                 *self.last_verified.lock().unwrap() = Some(Instant::now());
                 self.apply_failed.store(false, Ordering::Relaxed);
