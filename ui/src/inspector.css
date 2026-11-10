@@ -72,14 +72,14 @@
 .picker-empty { padding: 8px; }
 
 /* Access list, commit review */
-.access-item { padding: 8px 10px; border-bottom: 1px solid var(--border); }
-.access-item:last-child { border-bottom: none; }
+.access-list .access-item { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.access-list .access-item:last-child { border-bottom: none; }
 .access-main { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
 .access-name { font-weight: 600; }
 .access-port { background: var(--bg-input); color: var(--text); }
 .access-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; margin-top: 4px; }
 .access-revoke { margin-left: auto; }
-.access-highlight { background: var(--bg-selected); border-radius: var(--radius-sm); outline: 1px solid var(--accent); }
+.access-list .access-highlight { background: var(--bg-selected); border-radius: var(--radius-sm); outline: 1px solid var(--accent); padding: 8px; margin: 0 -8px; }
 .commit-preview { border: 1px solid var(--accent); border-radius: var(--radius); padding: 10px 12px; margin: 10px 0; background: var(--bg-input); }
 .commit-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--accent); margin-bottom: 6px; }
 .commit-preview .actions { margin-bottom: 0; }
