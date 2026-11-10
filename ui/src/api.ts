@@ -5,34 +5,67 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ActivityKind } from "./generated/ActivityKind";
 import type { ActivityQuery } from "./generated/ActivityQuery";
 import type { ActivityRecord } from "./generated/ActivityRecord";
+import type { Address } from "./generated/Address";
 import type { App } from "./generated/App";
 import type { AppDetail } from "./generated/AppDetail";
+import type { ApplyRequest } from "./generated/ApplyRequest";
+import type { ApplyResponse } from "./generated/ApplyResponse";
+import type { ChangeOp } from "./generated/ChangeOp";
+import type { ChangesRequest } from "./generated/ChangesRequest";
+import type { ChangesResponse } from "./generated/ChangesResponse";
 import type { Credential } from "./generated/Credential";
+import type { Enforcement } from "./generated/Enforcement";
+import type { ExportDocument } from "./generated/ExportDocument";
 import type { GrantView } from "./generated/GrantView";
 import type { LockoutRiskInfo } from "./generated/LockoutRiskInfo";
+import type { MergeRequest } from "./generated/MergeRequest";
 import type { Network } from "./generated/Network";
 import type { NewCredential } from "./generated/NewCredential";
 import type { NewGrant } from "./generated/NewGrant";
+import type { NewGroup } from "./generated/NewGroup";
+import type { NewNetwork } from "./generated/NewNetwork";
 import type { NewPeer } from "./generated/NewPeer";
+import type { NewTag } from "./generated/NewTag";
 import type { ParsedCredential } from "./generated/ParsedCredential";
 import type { Peer } from "./generated/Peer";
 import type { PeerGroup } from "./generated/PeerGroup";
+import type { PortRef } from "./generated/PortRef";
 import type { ProtectHostRequest } from "./generated/ProtectHostRequest";
 import type { ProtectHostResponse } from "./generated/ProtectHostResponse";
 import type { Settings } from "./generated/Settings";
+import type { ShareResponse } from "./generated/ShareResponse";
+import type { SplitRequest } from "./generated/SplitRequest";
 import type { StatusResponse } from "./generated/StatusResponse";
+import type { Tag } from "./generated/Tag";
+import type { TagMember } from "./generated/TagMember";
+import type { Target } from "./generated/Target";
+import type { TorKeyResponse } from "./generated/TorKeyResponse";
+import type { UpdateSettings } from "./generated/UpdateSettings";
+import type { UpdateTag } from "./generated/UpdateTag";
 
 export type {
-  ActivityKind, ActivityQuery, ActivityRecord, App, AppDetail, Credential, GrantView,
-  LockoutRiskInfo, Network, NewCredential, NewGrant, NewPeer, ParsedCredential, Peer, PeerGroup,
-  ProtectHostRequest, ProtectHostResponse, Settings, StatusResponse,
+  ActivityKind, ActivityQuery, ActivityRecord, Address, App, AppDetail, ApplyRequest, ApplyResponse,
+  ChangeOp, ChangesRequest, ChangesResponse, Credential, Enforcement, ExportDocument, GrantView,
+  LockoutRiskInfo, MergeRequest, Network, NewCredential, NewGrant, NewGroup, NewNetwork, NewPeer,
+  NewTag, ParsedCredential, Peer, PeerGroup, PortRef, ProtectHostRequest, ProtectHostResponse,
+  Settings, ShareResponse, SplitRequest, StatusResponse, Tag, TagMember, Target, TorKeyResponse,
+  UpdateSettings, UpdateTag,
 };
+export type { AccessOrigin } from "./generated/AccessOrigin";
+export type { AddrFamily } from "./generated/AddrFamily";
+export type { AddressMode } from "./generated/AddressMode";
+export type { AppPort } from "./generated/AppPort";
+export type { BatchChange } from "./generated/BatchChange";
+export type { Change } from "./generated/Change";
+export type { EffectiveAccess } from "./generated/EffectiveAccess";
+export type { Protocol } from "./generated/Protocol";
 export type { Reach } from "./generated/Reach";
 export type { CredentialKind } from "./generated/CredentialKind";
 export type { Subject } from "./generated/Subject";
 export type { GrantReach } from "./generated/GrantReach";
 export type { NetworkReach } from "./generated/NetworkReach";
 export type { NetworkKind } from "./generated/NetworkKind";
+export type { TorShare } from "./generated/TorShare";
 
 /** Error from a command: the daemon's `{code, message, details}` or a `connection` error. */
 export class DaemonError extends Error {
@@ -62,31 +95,80 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
   }
 }
 
+/** A change's answer: its value, plus the daemon's "saved, not yet enforced" notice after an
+ * HTTP 202 (ADR 0042). */
+interface Done<T> {
+  value: T;
+  enforcement: Enforcement | null;
+}
+
+const noticeListeners = new Set<(n: Enforcement) => void>();
+
+/** Be told whenever the daemon answers a change with `enforcement: pending`. */
+export function onEnforcementNotice(cb: (n: Enforcement) => void): () => void {
+  noticeListeners.add(cb);
+  return () => {
+    noticeListeners.delete(cb);
+  };
+}
+
+async function callSaved<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const done = await call<Done<T>>(cmd, args);
+  if (done.enforcement) for (const cb of noticeListeners) cb(done.enforcement);
+  return done.value;
+}
+
 export const api = {
   status: () => call<StatusResponse>("status"),
   listApps: () => call<App[]>("list_apps"),
   getApp: (id: string) => call<AppDetail>("get_app", { id }),
+  deleteApp: (id: string) => callSaved<null>("delete_app", { id }),
   reviewApp: (id: string, reviewed: boolean) => call<AppDetail>("review_app", { id, reviewed }),
+  splitApp: (id: string, req: SplitRequest) => callSaved<Address>("split_app", { id, req }),
+  mergeApp: (id: string, req: MergeRequest) => callSaved<Address>("merge_app", { id, req }),
+  shareApp: (id: string) => call<ShareResponse>("share_app", { id }),
   listPeers: () => call<Peer[]>("list_peers"),
   createPeer: (req: NewPeer) => call<Peer>("create_peer", { req }),
+  getPeer: (id: string) => call<Peer>("get_peer", { id }),
+  updatePeer: (id: string, label: string) => call<Peer>("update_peer", { id, label }),
+  deletePeer: (id: string) => callSaved<null>("delete_peer", { id }),
   parseCredentials: (text: string) => call<ParsedCredential[]>("parse_credentials", { text }),
   addCredential: (peerId: string, req: NewCredential) =>
-    call<Credential>("add_credential", { peerId, req }),
+    callSaved<Credential>("add_credential", { peerId, req }),
   removeCredential: (peerId: string, credentialId: string) =>
-    call<void>("remove_credential", { peerId, credentialId }),
-  deletePeer: (id: string) => call<void>("delete_peer", { id }),
+    callSaved<null>("remove_credential", { peerId, credentialId }),
+  generateTorKey: (peerId: string) => callSaved<TorKeyResponse>("generate_tor_key", { peerId }),
   listGroups: () => call<PeerGroup[]>("list_groups"),
+  createGroup: (req: NewGroup) => call<PeerGroup>("create_group", { req }),
+  updateGroup: (id: string, label: string) => call<PeerGroup>("update_group", { id, label }),
+  deleteGroup: (id: string) => callSaved<null>("delete_group", { id }),
+  setGroupMembers: (id: string, peerIds: string[]) =>
+    callSaved<PeerGroup>("set_group_members", { id, peerIds }),
   listGrants: () => call<GrantView[]>("list_grants"),
-  createGrant: (req: NewGrant) => call<GrantView>("create_grant", { req }),
-  deleteGrant: (id: string) => call<void>("delete_grant", { id }),
+  createGrant: (req: NewGrant) => callSaved<GrantView>("create_grant", { req }),
+  deleteGrant: (id: string) => callSaved<null>("delete_grant", { id }),
+  changes: (req: ChangesRequest) => callSaved<ChangesResponse>("changes", { req }),
+  listTags: () => call<Tag[]>("list_tags"),
+  createTag: (req: NewTag) => callSaved<Tag>("create_tag", { req }),
+  updateTag: (id: string, req: UpdateTag) => callSaved<Tag>("update_tag", { id, req }),
+  deleteTag: (id: string) => callSaved<null>("delete_tag", { id }),
+  addTagMember: (tagId: string, member: TagMember) =>
+    callSaved<Tag>("add_tag_member", { tagId, member }),
+  removeTagMember: (tagId: string, appId: string, port: PortRef | null) =>
+    callSaved<Tag>("remove_tag_member", { tagId, appId, port }),
   listNetworks: () => call<Network[]>("list_networks"),
+  addNetwork: (req: NewNetwork) => call<Network>("add_network", { req }),
+  deleteNetwork: (id: string, force: boolean) => call<void>("delete_network", { id, force }),
   getSettings: () => call<Settings>("get_settings"),
+  updateSettings: (req: UpdateSettings) => call<Settings>("update_settings", { req }),
   setProtectHost: (req: ProtectHostRequest) =>
     call<ProtectHostResponse>("set_protect_host", { req }),
   activity: (query: Partial<ActivityQuery>) =>
     call<ActivityRecord[]>("activity", {
       query: { since: null, kind: null, app_id: null, peer_id: null, before: null, limit: null, ...query },
     }),
+  exportState: () => call<ExportDocument>("export_state"),
+  applyState: (req: ApplyRequest) => call<ApplyResponse>("apply_state", { req }),
   enable: () => call<void>("enable"),
   disable: () => call<void>("disable", { confirm: true }),
   startDaemon: () => call<void>("start_daemon"),

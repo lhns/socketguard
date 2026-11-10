@@ -1,5 +1,6 @@
 import {
-  toDaemonError, type CredentialKind, type NewCredential, type ParsedCredential, type PeerGroup, type Peer, type Subject,
+  toDaemonError, type App, type CredentialKind, type Network, type NewCredential, type ParsedCredential,
+  type Peer, type PeerGroup, type PortRef, type Subject, type Tag, type Target,
 } from "./api";
 import { CREDENTIAL_EXAMPLES } from "./generated/credentialExamples";
 
@@ -33,6 +34,45 @@ export function subjectLabel(s: Subject, peers: Peer[] = [], groups: PeerGroup[]
 }
 
 export const portLabel = (p: { port: number; proto: string }) => `${p.port}/${p.proto}`;
+
+/** Same port (or both "all ports"). */
+export const samePort = (a: PortRef | null, b: PortRef | null) =>
+  a === null || b === null ? a === b : a.port === b.port && a.proto === b.proto;
+
+/** A batch error names its operation: "operation 2: ...". Returns the zero-based index and the
+ * message without that prefix; index null when the error is not about one operation. */
+export function splitOperationError(message: string): { index: number | null; text: string } {
+  const m = /operation (\d+)\)?:?\s*(.*)$/s.exec(message);
+  if (!m) return { index: null, text: message };
+  const before = message.slice(0, m.index).replace(/\s*\($/, "").trim();
+  return { index: Number(m[1]), text: m[2] || before || message };
+}
+
+/** Which form field a daemon error belongs to, from its code and message. */
+export type ErrorField = "label" | "credentials" | "port" | "patterns" | "other";
+export function errorField(e: unknown): ErrorField {
+  const err = toDaemonError(e);
+  const m = err.message.toLowerCase();
+  if (err.code === "conflict" && m.includes("label")) return "label";
+  if (m.includes("label")) return "label";
+  if (m.includes("credential") || m.includes("key") || m.includes("address")) return "credentials";
+  if (m.includes("port")) return "port";
+  if (m.includes("pattern") || m.includes("glob")) return "patterns";
+  return "other";
+}
+
+export function targetLabel(t: Target, apps: App[] = [], tags: Tag[] = []): string {
+  if (t.kind === "app") return apps.find((a) => a.id === t.id)?.name ?? `app ${t.id.slice(0, 8)}`;
+  return `tag ${tags.find((x) => x.id === t.id)?.label ?? t.id.slice(0, 8)}`;
+}
+
+export const networkName = (networks: Network[], id: string | null | undefined) =>
+  id ? (networks.find((n) => n.id === id)?.name ?? id) : "all networks";
+
+/** Wording of an open grant: "Anyone", or everyone on one network (a segment). */
+export function openWording(networkNames: string[]): string {
+  return networkNames.length === 0 ? "Anyone" : `Everyone on ${networkNames.join(", ")}`;
+}
 
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;

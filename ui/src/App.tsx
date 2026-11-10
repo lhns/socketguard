@@ -1,16 +1,18 @@
-import { useState } from "react";
-import { api, toDaemonError } from "./api";
+import { useEffect, useMemo, useState } from "react";
+import { api, onEnforcementNotice, toDaemonError, type Enforcement } from "./api";
 import { errorText } from "./lib";
+import { homeOf, NavContext, readMode, writeMode, type Focus, type Mode, type Page } from "./nav";
+import AccessPage from "./pages/AccessPage";
 import ActivityPage from "./pages/ActivityPage";
 import AppsPage from "./pages/AppsPage";
 import PeersPage from "./pages/PeersPage";
 import SettingsPage from "./pages/SettingsPage";
 import { useDaemonEvents, useStatus } from "./queries";
 
-type Page = "apps" | "peers" | "activity" | "settings";
 const PAGES: { id: Page; label: string }[] = [
   { id: "apps", label: "Apps" },
-  { id: "peers", label: "Peers" },
+  { id: "access", label: "Access" },
+  { id: "peers", label: "Peers & groups" },
   { id: "activity", label: "Activity" },
   { id: "settings", label: "Settings" },
 ];
@@ -49,20 +51,48 @@ function ConnectionBanner({ error }: { error: unknown }) {
   );
 }
 
+/** Simple opens on the apps list, Advanced on the access matrix. */
+function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => void }) {
+  return (
+    <div className="mode-switch" role="group" aria-label="View">
+      {(["simple", "advanced"] as const).map((m) => (
+        <button key={m} className={`nav-btn${mode === m ? " active" : ""}`} aria-pressed={mode === m} onClick={() => onChange(m)}>
+          {m === "simple" ? "Simple" : "Advanced"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export default function App() {
   useDaemonEvents();
   const status = useStatus();
-  const [page, setPage] = useState<Page>("apps");
-  const [appsSearch, setAppsSearch] = useState("");
+  const [mode, setMode] = useState<Mode>(readMode);
+  const [page, setPage] = useState<Page>(() => homeOf(readMode()));
+  const [focus, setFocus] = useState<Focus & { seq: number }>({ seq: 0 });
+  const [notice, setNotice] = useState<Enforcement | null>(null);
 
-  const showApp = (search: string) => {
-    setAppsSearch(search);
-    setPage("apps");
+  // A change the daemon saved but could not enforce everywhere yet (HTTP 202) stays visible.
+  useEffect(() => onEnforcementNotice(setNotice), []);
+
+  const nav = useMemo(
+    () => ({
+      go: (p: Page, f: Focus = {}) => {
+        setFocus((cur) => ({ ...f, seq: cur.seq + 1 }));
+        setPage(p);
+      },
+    }),
+    [],
+  );
+  const switchMode = (m: Mode) => {
+    writeMode(m);
+    setMode(m);
+    nav.go(homeOf(m));
   };
   const pending = status.data?.counts.pending_apps ?? 0;
 
   return (
-    <>
+    <NavContext.Provider value={nav}>
       <header className="header">
         <div className="header-inner">
           <h1>
@@ -75,33 +105,47 @@ export default function App() {
                 key={p.id}
                 className={`nav-btn${page === p.id ? " active" : ""}`}
                 aria-current={page === p.id ? "page" : undefined}
-                onClick={() => setPage(p.id)}
+                onClick={() => nav.go(p.id)}
               >
                 {p.label}
                 {p.id === "apps" && pending > 0 && <span className="nav-count" aria-label={`${pending} pending`}>{pending}</span>}
               </button>
             ))}
           </nav>
+          <ModeSwitch mode={mode} onChange={switchMode} />
         </div>
       </header>
       <main className="content">
         {status.error && <ConnectionBanner error={status.error} />}
+        {notice && (
+          <div className="warn-banner banner" role="status">
+            <div>
+              <strong>Saved, but not enforced everywhere yet.</strong> {notice.message}
+            </div>
+            <button className="btn btn-sm" onClick={() => setNotice(null)}>Dismiss</button>
+          </div>
+        )}
         {status.data?.disabled && (
           <div className="error-banner banner" role="status">
-            Enforcement is off: no firewall rules are applied. Turn it on in Settings.
+            <span>SocketGuard is off: no firewall rules or addresses are applied. Turn it on in Settings.</span>
+            <button className="btn btn-sm" onClick={() => nav.go("settings")}>Settings</button>
           </div>
         )}
-        {status.data?.unadopted && (
+        {status.data?.unadopted && !status.data.disabled && (
           <div className="error-banner banner" role="status">
-            An existing SocketGuard ruleset was found with an empty database and is left in place.
-            Nothing is applied until you turn enforcement on in Settings (this replaces the ruleset).
+            <span>
+              Rules from an earlier install are active, but this database doesn&apos;t know them. Adopt them?
+              Nothing changes until you do.
+            </span>
+            <button className="btn btn-sm" onClick={() => nav.go("settings")}>Settings</button>
           </div>
         )}
-        {page === "apps" && <AppsPage key={appsSearch} initialSearch={appsSearch} />}
-        {page === "peers" && <PeersPage />}
-        {page === "activity" && <ActivityPage />}
-        {page === "settings" && <SettingsPage onShowApp={showApp} />}
+        {page === "apps" && <AppsPage key={focus.seq} focus={focus} />}
+        {page === "access" && <AccessPage key={focus.seq} />}
+        {page === "peers" && <PeersPage key={focus.seq} focus={focus} />}
+        {page === "activity" && <ActivityPage key={focus.seq} />}
+        {page === "settings" && <SettingsPage key={focus.seq} />}
       </main>
-    </>
+    </NavContext.Provider>
   );
 }

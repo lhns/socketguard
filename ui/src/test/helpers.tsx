@@ -4,8 +4,9 @@ import { render } from "@testing-library/react";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { ToastProvider } from "../components/Toast";
 import { createQueryClient } from "../queries";
+import { NavContext, type Focus, type Page } from "../nav";
 import type {
-  AppDetail, App, GrantView, Network, ParsedCredential, Peer, PeerGroup, Settings, StatusResponse,
+  AppDetail, App, Enforcement, GrantView, Network, ParsedCredential, Peer, PeerGroup, Settings, StatusResponse, Tag,
 } from "../api";
 
 export const networks: Network[] = [
@@ -31,6 +32,10 @@ export const alice: Peer = {
 };
 
 export const groups: PeerGroup[] = [];
+export const noTags: Tag[] = [];
+
+/** A change's answer as the Tauri commands return it: the value and the 202 notice (or none). */
+export const saved = <T,>(value: T, enforcement: Enforcement | null = null) => ({ value, enforcement });
 export const settings: Settings = { address_mode: "per_app", protect_host_interfaces: [] };
 export const status: StatusResponse = {
   version: "0.1.0", networks, protect_host_interfaces: [], disabled: false, unadopted: false,
@@ -71,6 +76,8 @@ export function mockDaemon(handlers: Handlers = {}) {
     parse_credentials: (a) => fakeParse(a),
     list_groups: () => groups,
     list_grants: () => [],
+    list_tags: () => noTags,
+    share_app: () => ({ tor: [] }),
     list_networks: () => networks,
     get_settings: () => settings,
     activity: () => [],
@@ -89,10 +96,12 @@ export function mockDaemon(handlers: Handlers = {}) {
   return { calls, count: (cmd: string) => calls.filter((c) => c.cmd === cmd).length, last: (cmd: string) => { const m = calls.filter((c) => c.cmd === cmd); return m[m.length - 1]; } };
 }
 
-export function renderWithProviders(ui: ReactElement) {
+export function renderWithProviders(ui: ReactElement, go: (page: Page, focus?: Focus) => void = () => {}) {
   return render(
     <QueryClientProvider client={createQueryClient()}>
-      <ToastProvider>{ui}</ToastProvider>
+      <NavContext.Provider value={{ go }}>
+        <ToastProvider>{ui}</ToastProvider>
+      </NavContext.Provider>
     </QueryClientProvider>,
   );
 }

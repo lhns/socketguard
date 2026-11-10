@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ParsedCredential } from "./api";
 import { CREDENTIAL_EXAMPLES } from "./generated/credentialExamples";
-import { CREDENTIAL_PLACEHOLDER, credentialsFromParsed } from "./lib";
+import { CREDENTIAL_PLACEHOLDER, credentialsFromParsed, errorField, splitOperationError } from "./lib";
 
 const ok = (input: string, normalized: string): ParsedCredential => ({
   input, kind: "ip", normalized, reach: [], error: null,
@@ -25,5 +25,22 @@ describe("credential examples", () => {
   it("come from the daemon's core crate and include IPv4", () => {
     expect(CREDENTIAL_EXAMPLES.some((e) => e.kind === "ip" && e.value.includes("."))).toBe(true);
     expect(CREDENTIAL_PLACEHOLDER).toContain(CREDENTIAL_EXAMPLES.find((e) => e.kind === "ygg_addr")!.value);
+  });
+});
+
+describe("splitOperationError", () => {
+  it("finds the operation a batch error names", () => {
+    expect(splitOperationError("operation 2: peer label already in use")).toEqual({ index: 2, text: "peer label already in use" });
+    expect(splitOperationError("peer x not found (operation 0)")).toEqual({ index: 0, text: "peer x not found" });
+    expect(splitOperationError("disk full")).toEqual({ index: null, text: "disk full" });
+  });
+});
+
+describe("errorField", () => {
+  it("maps a daemon error to the field it concerns", () => {
+    expect(errorField({ code: "conflict", message: "peer label already in use" })).toBe("label");
+    expect(errorField({ code: "invalid", message: "invalid credential" })).toBe("credentials");
+    expect(errorField({ code: "invalid", message: "the app has no port 99" })).toBe("port");
+    expect(errorField({ code: "internal", message: "boom" })).toBe("other");
   });
 });
