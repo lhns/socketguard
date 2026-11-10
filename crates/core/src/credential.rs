@@ -39,9 +39,10 @@ fn parse_ip_or_net(value: &str) -> Result<Ipv6Net, CredentialError> {
     }
 }
 
-/// Decode `value` as 64 hex characters.
+/// Decode `value` as 64 hex characters (either case).
 pub fn parse_hex32(value: &str) -> Option<[u8; 32]> {
-    if value.len() != 64 || !value.is_ascii() {
+    // `from_str_radix` would also take a leading `+`.
+    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let mut out = [0u8; 32];
@@ -111,15 +112,15 @@ pub fn normalize_credential(
             // A plain IP network must not contain the Yggdrasil range (`::/6`, `::/0`): it
             // would trust overlay sources without the interface binding. Networks inside
             // the range are normalized as Yggdrasil values below.
+            if kind == CredentialKind::Ip && net.prefix_len() == 0 {
+                return invalid("::/0 would match every source; grant to Anyone instead");
+            }
             if kind == CredentialKind::Ip && !in_ygg && net.contains(&ygg_range()) {
                 return invalid("this network crosses the Yggdrasil range 200::/7");
             }
             if in_ygg || kind != CredentialKind::Ip {
                 // Yggdrasil value: a single address, or a /64 in 300::/8.
                 return normalize_ygg(kind, net);
-            }
-            if net.prefix_len() == 0 {
-                return invalid("::/0 would match every source; grant to Anyone instead");
             }
             Ok((CredentialKind::Ip, net.trunc().to_string()))
         }
@@ -278,7 +279,7 @@ mod tests {
             norm(Ip, "fd00:1:2::7/48").unwrap(),
             (Ip, "fd00:1:2::/48".into())
         );
-        assert!(norm(Ip, "::/0").is_err());
+        assert!(norm(Ip, "::/0").unwrap_err().contains("grant to Anyone"));
         assert!(norm(Ip, "not an ip").is_err());
     }
 
@@ -309,9 +310,12 @@ mod tests {
         assert!(norm(Ip, "300:1:2::/48").is_err());
         assert!(norm(Ip, "200::/6").is_err());
         // Networks that contain the range (`::/6`, `::/1`, `::/0`) must not pass as plain IP.
-        for wide in ["::/6", "::/1", "::/0", "::/3", "200::/6"] {
-            assert!(norm(Ip, wide).is_err(), "{wide}");
+        for wide in ["::/6", "::/1", "::/3", "200::/6"] {
+            let err = norm(Ip, wide).unwrap_err();
+            assert!(err.contains("crosses the Yggdrasil range"), "{wide}: {err}");
         }
+        let err = norm(Ip, "::/0").unwrap_err();
+        assert!(err.contains("grant to Anyone"), "{err}");
         assert!(norm(Ip, "2001:db8::/32").is_ok());
         assert!(norm(Ip, "fc00::/7").is_ok());
         // Explicit kinds validate their shape.
@@ -334,6 +338,8 @@ mod tests {
         );
         assert!(norm(YggKey, "abcd").is_err());
         assert!(norm(YggKey, &"zz".repeat(32)).is_err());
+        // Not hex, though `from_str_radix` takes a sign.
+        assert!(norm(YggKey, &format!("+a{}", "00".repeat(31))).is_err());
     }
 
     #[test]
