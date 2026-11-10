@@ -8,7 +8,7 @@ use tracing::{error, info};
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load config first so we can use its log_level for tracing
-    let config = load_config_sync();
+    let config = load_config_sync()?;
 
     if std::env::args().any(|a| a == "--disable") {
         return disable(&config).await;
@@ -165,24 +165,22 @@ async fn shutdown_signal() {
     }
 }
 
-/// Load config before tracing is initialized, so we can't use tracing macros here.
-fn load_config_sync() -> DaemonConfig {
-    let config_path = config_file::config_path().display().to_string();
-    if let Ok(content) = config_file::read(std::path::Path::new(&config_path)) {
-        match serde_json::from_str(&content) {
-            Ok(config) => {
-                eprintln!("[socketguard] Loaded config from {config_path}");
-                config
-            }
-            Err(e) => {
-                eprintln!(
-                    "[socketguard] Failed to parse config {config_path}: {e}, using defaults"
-                );
-                DaemonConfig::default()
-            }
+/// Load config before tracing is initialized, so we can't use tracing macros here. A missing
+/// file means defaults; a file that cannot be read or parsed stops the daemon, because
+/// running on defaults would silently drop the admin's networks and filters.
+fn load_config_sync() -> Result<DaemonConfig> {
+    let path = config_file::config_path();
+    match config_file::load(&path)? {
+        Some(config) => {
+            eprintln!("[socketguard] Loaded config from {}", path.display());
+            Ok(config)
         }
-    } else {
-        eprintln!("[socketguard] No config file found, using defaults");
-        DaemonConfig::default()
+        None => {
+            eprintln!(
+                "[socketguard] No config file at {}, using defaults",
+                path.display()
+            );
+            Ok(DaemonConfig::default())
+        }
     }
 }

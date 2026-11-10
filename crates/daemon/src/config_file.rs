@@ -21,6 +21,26 @@ pub fn read(path: &Path) -> std::io::Result<String> {
     })
 }
 
+/// Running on defaults instead would act on the wrong networks and state (even `--disable`).
+const FIX_HINT: &str = "fix it, or point SOCKETGUARD_CONFIG at the right file";
+
+/// The config at `path`; None if there is no file. A file that cannot be read or parsed is
+/// an error.
+pub fn load(path: &Path) -> anyhow::Result<Option<DaemonConfig>> {
+    use anyhow::Context;
+    let text = match read(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("cannot read config {}; {FIX_HINT}", path.display()))
+        }
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .with_context(|| format!("invalid config {}; {FIX_HINT}", path.display()))
+}
+
 /// Write `config.backends` to the `backends` key of the file at `path`, keeping its other
 /// keys. A missing file is created from the full `config`. The write goes to a temp file
 /// in the same directory and is renamed over the original, so a crash leaves either the
@@ -69,9 +89,21 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("socketguard.json");
         std::fs::write(&path, "\u{feff}{\"poll_interval_secs\": 7}").unwrap();
-        let config: DaemonConfig = serde_json::from_str(&read(&path).unwrap()).unwrap();
+        let config = load(&path).unwrap().unwrap();
         assert_eq!(config.poll_interval_secs, 7);
         persist_backends(&path, &config).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_missing_config_is_none_and_an_invalid_one_an_error() {
+        let dir = std::env::temp_dir().join(format!("sg-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("socketguard.json");
+        assert!(load(&path).unwrap().is_none());
+        std::fs::write(&path, "{\"backends\": [{\"type\": \"nope\"}]}").unwrap();
+        let err = load(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid config"), "{err:#}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
