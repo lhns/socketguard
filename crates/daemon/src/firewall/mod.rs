@@ -3,7 +3,6 @@
 pub mod nflog;
 pub mod nftables;
 pub mod pf;
-#[cfg(target_os = "windows")]
 pub mod wfp;
 
 pub mod desired;
