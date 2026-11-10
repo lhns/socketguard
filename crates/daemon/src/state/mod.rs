@@ -305,24 +305,7 @@ impl Database {
     // ======== Addresses ========
 
     pub async fn insert_address(&self, a: &Address) -> Result<()> {
-        let (kind, locator) = match &a.locator {
-            Locator::Ipv6 { addr } => ("ipv6", addr.to_string()),
-            Locator::Onion { hostname } => ("onion", hostname.clone()),
-        };
-        sqlx::query(
-            "INSERT INTO addresses (id, app_id, network_id, ports, locator_kind, locator, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&a.id)
-        .bind(&a.app_id)
-        .bind(&a.network_id)
-        .bind(encode_ports(&a.ports)?)
-        .bind(kind)
-        .bind(locator)
-        .bind(ts(a.created_at))
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        self.insert_address_with_secret(a, None).await
     }
 
     /// Insert an address together with its locator secret (the onion service key) in one
@@ -332,32 +315,29 @@ impl Database {
         a: &Address,
         secret: Option<&str>,
     ) -> Result<()> {
-        let Some(secret) = secret else {
-            return self.insert_address(a).await;
-        };
         let mut tx = self.pool.begin().await?;
-        let (kind, locator) = match &a.locator {
-            Locator::Ipv6 { addr } => ("ipv6", addr.to_string()),
-            Locator::Onion { hostname } => ("onion", hostname.clone()),
-        };
-        sqlx::query(
-            "INSERT INTO addresses (id, app_id, network_id, ports, locator_kind, locator, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&a.id)
-        .bind(&a.app_id)
-        .bind(&a.network_id)
-        .bind(encode_ports(&a.ports)?)
-        .bind(kind)
-        .bind(locator)
-        .bind(ts(a.created_at))
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query("INSERT INTO onion_keys (address_id, private_key) VALUES (?, ?)")
-            .bind(&a.id)
-            .bind(secret)
-            .execute(&mut *tx)
-            .await?;
+        insert_address_in(&mut tx, a, secret).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Insert a new address and shrink the `Only` set of the address its port came from,
+    /// in one transaction: a crash between the two would leave the port on both.
+    pub async fn split_address(
+        &self,
+        new: &Address,
+        secret: Option<&str>,
+        shrink: Option<(&str, &PortSet)>,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        insert_address_in(&mut tx, new, secret).await?;
+        if let Some((id, ports)) = shrink {
+            sqlx::query("UPDATE addresses SET ports = ? WHERE id = ?")
+                .bind(encode_ports(ports)?)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -374,7 +354,7 @@ impl Database {
     }
 
     pub async fn get_address(&self, id: &str) -> Result<Option<Address>> {
-        let rows = sqlx::query(ADDRESS_SELECT_ONE)
+        let rows = sqlx::query(&format!("{ADDRESS_SELECT} WHERE id = ?"))
             .bind(id)
             .fetch_all(&self.pool)
             .await?;
@@ -382,19 +362,18 @@ impl Database {
     }
 
     pub async fn list_addresses(&self) -> Result<Vec<Address>> {
-        Ok(self
-            .load_addresses(None)
+        sqlx::query(&format!("{ADDRESS_SELECT} ORDER BY created_at, id"))
+            .fetch_all(&self.pool)
             .await?
-            .into_values()
-            .flatten()
-            .collect())
+            .into_iter()
+            .map(address_from_row)
+            .collect()
     }
 
     async fn load_addresses(&self, only: Option<&str>) -> Result<HashMap<String, Vec<Address>>> {
-        let rows = sqlx::query(
-            "SELECT id, app_id, network_id, ports, locator_kind, locator, created_at \
-             FROM addresses WHERE (?1 IS NULL OR app_id = ?1) ORDER BY created_at, id",
-        )
+        let rows = sqlx::query(&format!(
+            "{ADDRESS_SELECT} WHERE (?1 IS NULL OR app_id = ?1) ORDER BY created_at, id"
+        ))
         .bind(only)
         .fetch_all(&self.pool)
         .await?;
@@ -436,13 +415,10 @@ impl Database {
     /// interface).
     pub async fn delete_addresses_by_network(&self, network_id: &str) -> Result<Vec<Address>> {
         let mut tx = self.pool.begin().await?;
-        let rows = sqlx::query(
-            "SELECT id, app_id, network_id, ports, locator_kind, locator, created_at \
-             FROM addresses WHERE network_id = ?",
-        )
-        .bind(network_id)
-        .fetch_all(&mut *tx)
-        .await?;
+        let rows = sqlx::query(&format!("{ADDRESS_SELECT} WHERE network_id = ?"))
+            .bind(network_id)
+            .fetch_all(&mut *tx)
+            .await?;
         let addrs = rows
             .into_iter()
             .map(address_from_row)
@@ -950,11 +926,43 @@ impl NewActivity {
     }
 }
 
-const ADDRESS_SELECT_ONE: &str = "SELECT id, app_id, network_id, ports, locator_kind, locator, \
-     created_at FROM addresses WHERE id = ?";
+const ADDRESS_SELECT: &str = "SELECT id, app_id, network_id, ports, locator_kind, locator, \
+     created_at FROM addresses";
 
 const GRANT_SELECT: &str = "SELECT id, app_id, port, proto, network_id, subject_kind, subject_id, \
      created_at FROM grants";
+
+async fn insert_address_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    a: &Address,
+    secret: Option<&str>,
+) -> Result<()> {
+    let (kind, locator) = match &a.locator {
+        Locator::Ipv6 { addr } => ("ipv6", addr.to_string()),
+        Locator::Onion { hostname } => ("onion", hostname.clone()),
+    };
+    sqlx::query(
+        "INSERT INTO addresses (id, app_id, network_id, ports, locator_kind, locator, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&a.id)
+    .bind(&a.app_id)
+    .bind(&a.network_id)
+    .bind(encode_ports(&a.ports)?)
+    .bind(kind)
+    .bind(locator)
+    .bind(ts(a.created_at))
+    .execute(&mut **tx)
+    .await?;
+    if let Some(secret) = secret {
+        sqlx::query("INSERT INTO onion_keys (address_id, private_key) VALUES (?, ?)")
+            .bind(&a.id)
+            .bind(secret)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
 
 async fn insert_credential(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -1220,6 +1228,65 @@ mod tests {
         assert_eq!(got.ports, PortSet::All);
         assert_eq!(got.locator.ipv6(), Some("300:9::5".parse().unwrap()));
         assert_eq!(db.get_app("a1").await.unwrap().unwrap().addresses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_addresses_is_ordered_by_creation() {
+        let db = db().await;
+        for app_id in ["a1", "a2", "a3"] {
+            db.insert_app(&app(app_id)).await.unwrap();
+        }
+        let mut ids = Vec::new();
+        for i in 0..9 {
+            let mut a = address(
+                ["a1", "a2", "a3"][i as usize % 3],
+                "n",
+                &format!("fd00::{}", i + 1),
+            );
+            a.created_at = now() + Duration::seconds(i);
+            ids.push(a.id.clone());
+            db.insert_address(&a).await.unwrap();
+        }
+        let listed: Vec<_> = db
+            .list_addresses()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(listed, ids);
+    }
+
+    #[tokio::test]
+    async fn split_address_is_all_or_nothing() {
+        let db = db().await;
+        db.insert_app(&app("a1")).await.unwrap();
+        let p = |port| PortRef {
+            port,
+            proto: Protocol::Tcp,
+        };
+        let mut old = address("a1", "n", "fd00::1");
+        old.ports = PortSet::Only(vec![p(80), p(81)]);
+        db.insert_address(&old).await.unwrap();
+
+        // The new address cannot be stored (unknown app): the old one keeps both ports.
+        let mut bad = address("nope", "n", "fd00::2");
+        bad.ports = PortSet::Only(vec![p(81)]);
+        let rest = PortSet::Only(vec![p(80)]);
+        assert!(db
+            .split_address(&bad, None, Some((&old.id, &rest)))
+            .await
+            .is_err());
+        let kept = db.get_address(&old.id).await.unwrap().unwrap();
+        assert_eq!(kept.ports, PortSet::Only(vec![p(80), p(81)]));
+
+        let mut good = address("a1", "n", "fd00::2");
+        good.ports = PortSet::Only(vec![p(81)]);
+        db.split_address(&good, None, Some((&old.id, &rest)))
+            .await
+            .unwrap();
+        assert_eq!(db.get_address(&old.id).await.unwrap().unwrap().ports, rest);
+        assert!(db.get_address(&good.id).await.unwrap().is_some());
     }
 
     #[tokio::test]

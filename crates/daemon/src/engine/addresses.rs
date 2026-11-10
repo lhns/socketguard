@@ -432,16 +432,15 @@ impl Engine {
             locator,
             created_at: Utc::now(),
         };
+        let shrink = shrink.map(|(a, rest)| (a.id.as_str(), PortSet::Only(rest)));
         state
             .db
-            .insert_address_with_secret(&address, secret.as_deref())
+            .split_address(
+                &address,
+                secret.as_deref(),
+                shrink.as_ref().map(|(id, ports)| (*id, ports)),
+            )
             .await?;
-        if let Some((a, rest)) = shrink {
-            state
-                .db
-                .update_address_ports(&a.id, &PortSet::Only(rest))
-                .await?;
-        }
         self.apply_and_ensure(state).await?;
         self.emit(state, DaemonEvent::AppsChanged);
         Ok(address)
