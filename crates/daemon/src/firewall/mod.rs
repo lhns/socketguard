@@ -8,11 +8,39 @@ pub mod wfp;
 
 pub mod desired;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 pub use desired::{
     revocations, safe_text, Counter, DesiredRuleset, DropEvent, DropSink, Families, Revocation,
     Rule, Scope, ScopeKind, ScopeMatch, Sources,
 };
+use std::io::Write as _;
+use std::process::{Command, Stdio};
+
+/// Run `cmd args` with `stdin` piped in (or closed), capturing its output. The caller
+/// checks the exit status.
+fn run_with_stdin(cmd: &str, args: &[&str], stdin: Option<&str>) -> Result<std::process::Output> {
+    let mut child = Command::new(cmd)
+        .args(args)
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to run {cmd}"))?;
+    if let (Some(text), Some(mut si)) = (stdin, child.stdin.take()) {
+        si.write_all(text.as_bytes())?;
+    }
+    Ok(child.wait_with_output()?)
+}
+
+/// `{ a, b, c }`, the list syntax of nft and pf.
+fn brace_list<T: std::fmt::Display>(items: impl IntoIterator<Item = T>) -> String {
+    let v: Vec<String> = items.into_iter().map(|i| i.to_string()).collect();
+    format!("{{ {} }}", v.join(", "))
+}
 
 /// Platform firewall backend (ADR 0029). Implementations hold no per-socket state: every
 /// call to [`Firewall::apply`] replaces SocketGuard's whole ruleset atomically, so a failed

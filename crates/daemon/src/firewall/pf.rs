@@ -3,21 +3,16 @@
 //! on macOS.
 
 use super::{
-    safe_text, DesiredRuleset, Families, Firewall, Revocation, Rule, Scope, ScopeMatch, Sources,
+    brace_list, run_with_stdin, safe_text, DesiredRuleset, Families, Firewall, Revocation, Rule,
+    Scope, ScopeMatch, Sources,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
+use ipnet::IpNet;
 use std::fmt::Write as _;
-use std::io::Write as _;
 use std::net::IpAddr;
-use std::process::{Command, Stdio};
 use tracing::error;
 
 const ANCHOR: &str = "socketguard";
-
-fn list<T: std::fmt::Display>(items: impl IntoIterator<Item = T>) -> String {
-    let v: Vec<String> = items.into_iter().map(|i| i.to_string()).collect();
-    format!("{{ {} }}", v.join(", "))
-}
 
 fn inet(ip: &IpAddr) -> &'static str {
     if ip.is_ipv6() {
@@ -35,7 +30,7 @@ fn rule_line(r: &Rule) -> String {
         .unwrap_or_default();
     let from = match &r.sources {
         Sources::Any => "any".to_string(),
-        Sources::Nets(n) => list(n),
+        Sources::Nets(n) => brace_list(n),
     };
     format!(
         "pass in quick{on} {} proto {} from {from} to {} port {} keep state",
@@ -48,12 +43,17 @@ fn rule_line(r: &Rule) -> String {
 
 fn scope_lines(sc: &Scope) -> Vec<String> {
     match &sc.matcher {
-        ScopeMatch::Destinations(dsts) => {
-            let (v6, v4): (Vec<&IpAddr>, Vec<&IpAddr>) = dsts.iter().partition(|d| d.is_ipv6());
+        ScopeMatch::Destinations(_) => {
+            let (v6, v4) = sc.destinations_by_family();
             [("inet6", v6), ("inet", v4)]
                 .into_iter()
                 .filter(|(_, d)| !d.is_empty())
-                .map(|(fam, d)| format!("block drop in log quick {fam} from any to {}", list(d)))
+                .map(|(fam, d)| {
+                    format!(
+                        "block drop in log quick {fam} from any to {}",
+                        brace_list(d)
+                    )
+                })
                 .collect()
         }
         ScopeMatch::Interface { name, families } => {
@@ -108,20 +108,20 @@ pub fn render(rs: &DesiredRuleset) -> String {
     o
 }
 
+/// The `pfctl -k` arguments killing the states from `src` (any source if None) to `dst`.
+fn kill_pair(src: Option<IpNet>, dst: IpAddr) -> Vec<String> {
+    let any = if dst.is_ipv6() { "::/0" } else { "0.0.0.0/0" };
+    let src = src.map(|n| n.to_string()).unwrap_or_else(|| any.into());
+    ["-k", &src, "-k", &dst.to_string()]
+        .map(String::from)
+        .to_vec()
+}
+
 /// `pfctl -k` commands killing the states from revoked sources to revoked destinations.
 /// pf cannot kill by port, so every state between the pair goes, whatever its port; a
 /// peer that is still allowed on another port reconnects.
 fn kill_commands(revoked: &[Revocation]) -> Vec<Vec<String>> {
-    let mut out: Vec<Vec<String>> = revoked
-        .iter()
-        .map(|r| {
-            let any = if r.dst.is_ipv6() { "::/0" } else { "0.0.0.0/0" };
-            let src = r.src.map(|n| n.to_string()).unwrap_or_else(|| any.into());
-            ["-k", &src, "-k", &r.dst.to_string()]
-                .map(String::from)
-                .to_vec()
-        })
-        .collect();
+    let mut out: Vec<Vec<String>> = revoked.iter().map(|r| kill_pair(r.src, r.dst)).collect();
     out.sort();
     out.dedup();
     out
@@ -138,16 +138,7 @@ fn startup_kill_commands(rs: &DesiredRuleset) -> Vec<Vec<String>> {
     }
     dsts.sort();
     dsts.dedup();
-    let revoked: Vec<Revocation> = dsts
-        .into_iter()
-        .map(|dst| Revocation {
-            dst,
-            port: 0,
-            proto: socketguard_core::Protocol::Tcp,
-            src: None,
-        })
-        .collect();
-    kill_commands(&revoked)
+    dsts.into_iter().map(|dst| kill_pair(None, dst)).collect()
 }
 
 fn run_kills(cmds: Vec<Vec<String>>) {
@@ -161,21 +152,7 @@ fn run_kills(cmds: Vec<Vec<String>>) {
 }
 
 fn pfctl(args: &[&str], stdin: Option<&str>) -> Result<std::process::Output> {
-    let mut child = Command::new("pfctl")
-        .args(args)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to run pfctl")?;
-    if let (Some(text), Some(mut si)) = (stdin, child.stdin.take()) {
-        si.write_all(text.as_bytes())?;
-    }
-    Ok(child.wait_with_output()?)
+    run_with_stdin("pfctl", args, stdin)
 }
 
 /// pf must be enabled and the main ruleset must evaluate our anchor; otherwise the

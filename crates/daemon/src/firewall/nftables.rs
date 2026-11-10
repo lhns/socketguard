@@ -2,14 +2,13 @@
 //! `nft -f -` transaction. `render` is pure and golden-tested on every platform.
 
 use super::{
-    safe_text, Counter, DesiredRuleset, DropSink, Families, Firewall, Revocation, Rule, Scope,
-    ScopeMatch, Sources,
+    brace_list, run_with_stdin, safe_text, Counter, DesiredRuleset, DropSink, Families, Firewall,
+    Revocation, Rule, Scope, ScopeMatch, Sources,
 };
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::io::Write as _;
 use std::net::IpAddr;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,17 +33,9 @@ fn counter_name(id: &str) -> String {
 
 /// Counter name to id, for every rule and scope of `rs`.
 fn counter_names(rs: &DesiredRuleset) -> HashMap<String, String> {
-    rs.scopes
-        .iter()
-        .map(|s| s.id.as_str())
-        .chain(rs.rules.iter().map(|r| r.id.as_str()))
+    rs.ids()
         .map(|id| (counter_name(id), id.to_string()))
         .collect()
-}
-
-fn set<T: std::fmt::Display>(items: impl IntoIterator<Item = T>) -> String {
-    let v: Vec<String> = items.into_iter().map(|i| i.to_string()).collect();
-    format!("{{ {} }}", v.join(", "))
 }
 
 fn l3(ip: &IpAddr) -> &'static str {
@@ -61,7 +52,7 @@ fn rule_line(r: &Rule) -> String {
         let _ = write!(s, "iifname \"{}\" ", safe_text(iif));
     }
     if let Sources::Nets(nets) = &r.sources {
-        let _ = write!(s, "{} saddr {} ", l3(&r.dst), set(nets));
+        let _ = write!(s, "{} saddr {} ", l3(&r.dst), brace_list(nets));
     }
     let _ = write!(
         s,
@@ -78,14 +69,14 @@ fn rule_line(r: &Rule) -> String {
 /// The match expressions of a scope (one per address family for destination lists).
 fn scope_matches(sc: &Scope) -> Vec<String> {
     match &sc.matcher {
-        ScopeMatch::Destinations(dsts) => {
-            let (v6, v4): (Vec<&IpAddr>, Vec<&IpAddr>) = dsts.iter().partition(|d| d.is_ipv6());
+        ScopeMatch::Destinations(_) => {
+            let (v6, v4) = sc.destinations_by_family();
             let mut m = Vec::new();
             if !v6.is_empty() {
-                m.push(format!("ip6 daddr {}", set(v6)));
+                m.push(format!("ip6 daddr {}", brace_list(v6)));
             }
             if !v4.is_empty() {
-                m.push(format!("ip daddr {}", set(v4)));
+                m.push(format!("ip daddr {}", brace_list(v4)));
             }
             m
         }
@@ -102,12 +93,7 @@ fn scope_matches(sc: &Scope) -> Vec<String> {
 
 /// Render the whole `table inet socketguard`.
 pub fn render(rs: &DesiredRuleset) -> String {
-    let mut ids: Vec<&str> = rs
-        .scopes
-        .iter()
-        .map(|s| s.id.as_str())
-        .chain(rs.rules.iter().map(|r| r.id.as_str()))
-        .collect();
+    let mut ids: Vec<&str> = rs.ids().collect();
     ids.sort_unstable();
     ids.dedup();
 
@@ -128,7 +114,7 @@ pub fn render(rs: &DesiredRuleset) -> String {
     } else {
         format!(
             "iifname != {} ",
-            set(overlays.iter().map(|i| format!("\"{}\"", safe_text(i))))
+            brace_list(overlays.iter().map(|i| format!("\"{}\"", safe_text(i))))
         )
     };
     let always = [
@@ -181,24 +167,11 @@ fn transaction(rs: &DesiredRuleset) -> String {
     )
 }
 
+/// Drops the pre-ADR-0029 table; installations from before it may still have one.
 const LEGACY_CLEANUP: &str = "table ip6 socketguard {}\ndelete table ip6 socketguard\n";
 
 fn run_nft(args: &[&str], stdin: Option<&str>) -> Result<std::process::Output> {
-    let mut child = Command::new("nft")
-        .args(args)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to run nft")?;
-    if let (Some(text), Some(mut si)) = (stdin, child.stdin.take()) {
-        si.write_all(text.as_bytes())?;
-    }
-    Ok(child.wait_with_output()?)
+    run_with_stdin("nft", args, stdin)
 }
 
 /// `conntrack` arguments selecting the flows to a revoked destination: the original

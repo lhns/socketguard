@@ -44,6 +44,14 @@ impl DesiredRuleset {
         Ok(())
     }
 
+    /// The ids of all scopes, then all rules.
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.scopes
+            .iter()
+            .map(|s| s.id.as_str())
+            .chain(self.rules.iter().map(|r| r.id.as_str()))
+    }
+
     /// The interfaces of overlay scopes, which get no echo and no DHCP.
     pub fn overlay_interfaces(&self) -> Vec<&str> {
         let mut v: Vec<&str> = self
@@ -82,6 +90,17 @@ pub struct Scope {
     pub id: String,
     pub kind: ScopeKind,
     pub matcher: ScopeMatch,
+}
+
+impl Scope {
+    /// The destination addresses of a destination-list scope as (IPv6, IPv4); both empty
+    /// for an interface scope.
+    pub fn destinations_by_family(&self) -> (Vec<&IpAddr>, Vec<&IpAddr>) {
+        match &self.matcher {
+            ScopeMatch::Destinations(dsts) => dsts.iter().partition(|d| d.is_ipv6()),
+            ScopeMatch::Interface { .. } => Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
