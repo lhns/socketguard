@@ -158,12 +158,14 @@ impl Ipv6Backend for SlaacBackend {
     }
 }
 
-/// Parse a configured prefix, "2001:db8:1:2::/64" or just "2001:db8:1:2::", to its /64.
+/// Parse a configured prefix to its /64: "2001:db8:1:2::/64", "2001:db8:1:2::" or the
+/// bare "2001:db8:1:2".
 fn parse_prefix(prefix: &str) -> Result<Ipv6Addr> {
     let addr = match prefix.parse::<Ipv6Net>() {
         Ok(net) => net.network(),
         Err(_) => prefix
             .parse::<Ipv6Addr>()
+            .or_else(|_| format!("{}::", prefix.trim_end_matches(':')).parse())
             .with_context(|| format!("invalid prefix: {prefix}"))?,
     };
     Ok(with_prefix64(addr, 0))
@@ -184,6 +186,13 @@ mod tests {
     fn parse_prefix_without_slash() {
         let prefix = parse_prefix("2001:db8:abcd:ef01::").unwrap();
         assert_eq!(prefix, "2001:db8:abcd:ef01::".parse::<Ipv6Addr>().unwrap());
+    }
+
+    #[test]
+    fn parse_prefix_bare_groups() {
+        let want = "2001:db8:1:2::".parse::<Ipv6Addr>().unwrap();
+        assert_eq!(parse_prefix("2001:db8:1:2").unwrap(), want);
+        assert_eq!(parse_prefix("2001:db8:1:2:").unwrap(), want);
     }
 
     #[test]

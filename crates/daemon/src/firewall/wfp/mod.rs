@@ -27,7 +27,7 @@
 //! ([`Firewall::revoke`] does nothing here, ADR 0030).
 //!
 //! `plan` (the pure translation of a ruleset to filter specs) lives in [`plan`] and is
-//! compiled and tested on every platform; this module is the Windows-only FFI.
+//! compiled and tested on every platform; `native` is the Windows-only FFI.
 //!
 //! Not used: `FWPM_FILTER_FLAG_BOOTTIME`. Boot-time filters are a separate table enforced
 //! before BFE starts and cannot be combined with PERSISTENT, so adding them would mean a

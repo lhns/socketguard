@@ -1,5 +1,5 @@
-// The renderers are pure, so nftables and pf compile (and are golden-tested) everywhere;
-// only their command invocations are platform specific.
+// The renderers and the WFP plan are pure, so nftables, pf and `wfp::plan` compile (and
+// are tested) everywhere; only the command invocations and the WFP FFI are platform specific.
 pub mod nflog;
 pub mod nftables;
 pub mod pf;
