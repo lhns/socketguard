@@ -110,7 +110,7 @@ const GROUP_KEYS = [["groups"], ["peers"], ["grants"], ["app"], ["activity"]];
 const TAG_KEYS = [["tags"], ["grants"], ["apps"], ["app"], ["activity"]];
 const NETWORK_KEYS = [["networks"], ["status"], ["apps"], ["app"], ["grants"], ["settings"]];
 /** A batch can touch anything. */
-const CHANGES_KEYS = [["grants"], ["apps"], ["app"], ["peers"], ["groups"], ["tags"], ["status"], ["activity"]];
+const CHANGES_KEYS = [["grants"], ["apps"], ["app"], ["peers"], ["groups"], ["tags"], ["socketGroups"], ["status"], ["activity"]];
 
 export const useDeleteApp = () =>
   useInvalidating((id: string) => api.deleteApp(id), [...GRANT_KEYS, ["status"], ["tags"]]);

@@ -148,7 +148,7 @@ describe("Inspector: one peer", () => {
     await user.click(screen.getByRole("checkbox", { name: /^web/ }));
     await user.click(screen.getByRole("checkbox", { name: "nginx" }));
     await user.keyboard("{Escape}");
-    await user.click(within(form).getByRole("button", { name: /^Whole (app|tag)$/ }));
+    await user.click(within(form).getByRole("button", { name: "All ports" }));
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0]).toEqual([
@@ -323,7 +323,7 @@ describe("Inspector: several peers", () => {
     await user.click(within(form).getByRole("button", { name: "Choose apps or tags…" }));
     await user.click(screen.getByRole("checkbox", { name: "nginx" }));
     await user.keyboard("{Escape}");
-    await user.click(within(form).getByRole("button", { name: /^Whole (app|tag)$/ }));
+    await user.click(within(form).getByRole("button", { name: "All ports" }));
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0].map((o) => (o as { subject: { id: string } }).subject.id)).toEqual(["p1", "p2"]);
