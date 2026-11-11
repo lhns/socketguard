@@ -29,6 +29,7 @@ const KIND_LABEL: Record<ActivityKind, string> = {
   protect_host_changed: "Host protection changed",
   blocked: "Blocked",
   remote_admin_exposed: "Remote admin exposed",
+  network_changed: "Network changed",
 };
 
 /** A log of what happened. Decisions are made in Apps; a row links to the thing it is about. */
