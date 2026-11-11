@@ -17,8 +17,4 @@ node_running: boolean,
 /**
  * The programs listening on all addresses (what the block keeps off the network).
  */
-listeners: Array<ExposedListener>, 
-/**
- * The services `socketguard networks setup` started for this network (its setup log).
- */
-services_started_by_setup: Array<string>, };
+listeners: Array<ExposedListener>, };
