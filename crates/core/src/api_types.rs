@@ -83,7 +83,6 @@ pub struct LockoutRiskInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Counts {
     pub apps: u32,
-    pub pending_apps: u32,
     pub addresses: u32,
     pub peers: u32,
     pub groups: u32,
@@ -130,12 +129,6 @@ pub struct StatusResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParseCredentialsRequest {
     pub text: String,
-}
-
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewRequest {
-    pub reviewed: bool,
 }
 
 /// Body of `POST /api/apps/{id}/move`: move grants, tag memberships, addresses and
@@ -773,10 +766,6 @@ pub enum ChangeOp {
         #[serde(default)]
         scope: Scope,
     },
-    Review {
-        app_id: AppId,
-        reviewed: bool,
-    },
     CreateReservation {
         #[serde(rename = "ref", default)]
         #[cfg_attr(feature = "ts", ts(optional, rename = "ref"))]
@@ -918,7 +907,7 @@ pub mod event_name {
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum ApiEvent {
     AppsChanged,
-    /// A new, pending app; carries its id.
+    /// A new app; carries its id.
     AppDiscovered(String),
     PeersChanged,
     GrantsChanged,

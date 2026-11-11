@@ -672,7 +672,6 @@ mod tests {
             interpreter_arg: None,
             identity_note: None,
             exe_missing: false,
-            reviewed: true,
             system: false,
             first_seen: Utc::now(),
             last_seen: Utc::now(),

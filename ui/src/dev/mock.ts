@@ -38,7 +38,7 @@ let apps: App[] = [];
 own.forEach(([name, exe, ports], i) => {
   const id = `a${i + 1}`;
   apps.push({
-    id, name, process_name: name, exe_path: exe, interpreter_arg: null, identity_note: null, exe_missing: false, reviewed: i % 3 !== 2, system: false,
+    id, name, process_name: name, exe_path: exe, interpreter_arg: null, identity_note: null, exe_missing: false, system: false,
     first_seen: T0, last_seen: T0,
     ports: ports.map(([port, proto]) => ({ port, proto, listening: true, last_seen: T0, family: i % 2 ? "dual" : "v6" })),
     addresses: [
@@ -52,7 +52,7 @@ apps[0].addresses[0].excluded = [{ start: 9000, end: 9000, proto: "tcp" }];
 sys.forEach((name, i) => {
   const id = `s${i + 1}`;
   apps.push({
-    id, name, process_name: name, exe_path: null, interpreter_arg: null, identity_note: null, exe_missing: false, reviewed: true, system: true,
+    id, name, process_name: name, exe_path: null, interpreter_arg: null, identity_note: null, exe_missing: false, system: true,
     first_seen: T0, last_seen: T0,
     ports: [{ port: 100 + i, proto: "tcp", listening: true, last_seen: T0, family: "v6" }],
     addresses: [{ id: `${id}-y`, app_id: id, network_id: "n-ygg", scope: ALL_SCOPE, locator: { kind: "ipv6", addr: `302:b${i}::1` }, created_at: T0, reservation_id: null, up: true, excluded: [], notes: [] }],
@@ -422,11 +422,6 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
         widens ||= moving.length > 0;
         break;
       }
-      case "review": {
-        apps = apps.map((a) => (a.id === op.app_id ? { ...a, reviewed: op.reviewed as boolean } : a));
-        out.push({ kind: "update", item: "app", name: apps.find((a) => a.id === op.app_id)?.name ?? "", opens_to_anyone: false });
-        break;
-      }
     }
   }
   if (req.dry_run) {
@@ -477,7 +472,7 @@ function seedFresh() {
     { id: "n-lan", kind: "lan", name: "LAN", interface: "eth0", grants_apply: true, status: { state: "up" } },
   ];
   const mk = (id: string, name: string, system: boolean, ports: [number, "tcp" | "udp"][]): App => ({
-    id, name, process_name: name, exe_path: system ? null : `/usr/bin/${name}`, interpreter_arg: null, identity_note: null, exe_missing: false, reviewed: false, system,
+    id, name, process_name: name, exe_path: system ? null : `/usr/bin/${name}`, interpreter_arg: null, identity_note: null, exe_missing: false, system,
     first_seen: T0, last_seen: T0,
     ports: ports.map(([port, proto]) => ({ port, proto, listening: true, last_seen: T0, family: "dual" as const })),
     addresses: [{ id: `${id}-l`, app_id: id, network_id: "n-local", scope: ALL_SCOPE, locator: { kind: "ipv6", addr: "::1" }, created_at: T0, reservation_id: null, up: true, excluded: [], notes: [] }],
@@ -513,7 +508,7 @@ export function installMock(kind?: string | null) {
       const a = (args ?? {}) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
       switch (cmd) {
         case "status":
-          return { version: "dev", networks, protect_host_interfaces: [], disabled: false, unadopted: false, counts: { apps: apps.length, pending_apps: apps.filter((x) => !x.reviewed).length, addresses: 0, peers: peers.length, groups: groups.length, grants: grants.length } };
+          return { version: "dev", networks, protect_host_interfaces: [], disabled: false, unadopted: false, counts: { apps: apps.length, addresses: 0, peers: peers.length, groups: groups.length, grants: grants.length } };
         case "list_apps": return apps;
         case "get_app": return detail(apps.find((x) => x.id === a.id)!);
         case "list_peers": return peers;

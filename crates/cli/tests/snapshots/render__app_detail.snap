@@ -3,7 +3,6 @@ source: crates/cli/tests/render.rs
 expression: "render::app_detail(&d, &names())"
 ---
 nginx  (5c0d1f2a99887766)
-  state       reviewed
   executable  /usr/sbin/nginx
   first seen  2026-11-01 08:00:00
   last seen   2026-11-09 12:30:00

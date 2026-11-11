@@ -49,7 +49,6 @@ async fn an_unidentified_listener_is_an_app_of_its_own_and_system_apps_are_flagg
         .iter()
         .find(|a| a.name == "unknown:tcp/9999")
         .unwrap();
-    assert!(!a.reviewed, "pending like any new app");
     assert!(!a.system);
     assert_eq!(a.ports.len(), 1);
     assert_eq!(a.ports[0].port, 9999);

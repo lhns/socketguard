@@ -24,8 +24,8 @@ use socketguard_core::api_types::{
     DisableRequest, Enforcement, EnforcementNotice, ExportDocument, ExposureResponse, MemberQuery,
     MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation,
     NewTag, NewTagMember, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse,
-    ReserveRequest, ReviewRequest, SetMembers, ShareResponse, StatusResponse, TorKeyResponse,
-    UpdateLabel, UpdatePortGroup, UpdateTag,
+    ReserveRequest, SetMembers, ShareResponse, StatusResponse, TorKeyResponse, UpdateLabel,
+    UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::setup::NetworkSetup;
 use socketguard_core::{
@@ -282,29 +282,17 @@ impl Client {
 
     // ─── Apps ────────────────────────────────────────────────────────────────
 
-    /// All apps, or only those without a decision yet.
-    pub async fn list_apps(&self, pending_only: bool) -> Result<Vec<App>> {
-        let q = pending_only.then(|| "pending=true".to_string());
-        self.call(&routes::LIST_APPS, &[], q, None).await
+    pub async fn list_apps(&self) -> Result<Vec<App>> {
+        self.call(&routes::LIST_APPS, &[], None, None).await
     }
 
     pub async fn get_app(&self, id: &str) -> Result<AppDetail> {
         self.call(&routes::GET_APP, &[id], None, None).await
     }
 
-    /// Forget an app. It reappears as pending the next time it listens.
+    /// Forget an app. It reappears as a new app the next time it listens.
     pub async fn delete_app(&self, id: &str) -> Result<Saved<()>> {
         self.call_saved(&routes::DELETE_APP, &[id], None).await
-    }
-
-    pub async fn review_app(&self, id: &str, reviewed: bool) -> Result<AppDetail> {
-        self.call(
-            &routes::REVIEW_APP,
-            &[id],
-            None,
-            json(&ReviewRequest { reviewed }),
-        )
-        .await
     }
 
     /// Move the grants, tag memberships, addresses and reservation bindings of app `id` to

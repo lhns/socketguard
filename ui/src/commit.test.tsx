@@ -26,7 +26,7 @@ describe("the commit rule", () => {
   it("applies at once when nobody gains access", async () => {
     const d = mockDaemon({ changes: (a) => batch(a.req as ChangesRequest, false) });
     const user = userEvent.setup();
-    renderWithProviders(<Harness ops={[{ op: "review", app_id: "a1", reviewed: true }]} />);
+    renderWithProviders(<Harness ops={[{ op: "remove_grant", grant_id: "g1" }]} />);
     await user.click(screen.getByRole("button", { name: "go" }));
     expect(await screen.findByText("Did it")).toBeInTheDocument();
     expect(requests(d).map((r) => r.dry_run)).toEqual([true, false]);

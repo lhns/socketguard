@@ -196,17 +196,10 @@ impl GrantFilter {
 }
 
 impl Engine {
-    pub async fn list_apps(
-        &self,
-        state: &AppState,
-        pending_only: bool,
-    ) -> Result<Vec<App>, EngineError> {
+    pub async fn list_apps(&self, state: &AppState) -> Result<Vec<App>, EngineError> {
         let (views, snap) = self.address_views(state).await?;
         let index = AddressIndex::new(&views, &snap.reservations, &snap.tags);
         let mut apps = snap.apps.clone();
-        if pending_only {
-            apps.retain(|a| !a.reviewed);
-        }
         for app in &mut apps {
             app.addresses = index.of_app(&app.id);
             app.exe_missing = super::discovery::exe_missing(app);

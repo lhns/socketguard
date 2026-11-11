@@ -10,7 +10,6 @@ export interface Focus {
   tagId?: string;
   reservationId?: string;
   search?: string;
-  pendingOnly?: boolean;
   peerId?: string;
   groupId?: string;
 }

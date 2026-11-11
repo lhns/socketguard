@@ -42,7 +42,6 @@ function OneApp({ app, partial, highlight, onCollapse, onClose }: { app: AppDeta
   const names = useNameCtx();
   const forget = useDeleteApp();
   const nav = useNav();
-  const review = useCommit();
   const moveTarget = useRef<string | null>(null);
   const move = useCommit(() => {
     if (moveTarget.current) nav.go("apps", { appId: moveTarget.current });
@@ -70,13 +69,12 @@ function OneApp({ app, partial, highlight, onCollapse, onClose }: { app: AppDeta
         <>
           {app.system && <span className="badge reach reach-muted" title="An operating system service or component">system</span>}
           {app.identity_note && <span className="badge badge-pending" title="This app is told apart from other apps by more than its program path">{app.identity_note}</span>}
-          {!app.reviewed && <span className="badge badge-pending">pending</span>}
         </>
       }
       onCollapse={onCollapse}
       onClose={onClose}
     >
-      {!app.reviewed && <MovedHint app={app} />}
+      {!partial && app.access.length === 0 && <MovedHint app={app} />}
       {app.identity_note === "unidentified" && (
         <p className="hint">
           SocketGuard cannot tell which program owns this port, so it is identified by its port alone. It is closed until you
@@ -87,16 +85,6 @@ function OneApp({ app, partial, highlight, onCollapse, onClose }: { app: AppDeta
       <PortsSection app={app} partial={partial} highlight={highlight} onlyLocal={onlyLocal} hasV4={hasV4} />
 
       <div className="actions">
-        {!app.reviewed && (
-          <button className="btn btn-sm" onClick={() => void review.runBatch([{ op: "review", app_id: app.id, reviewed: true }], `${app.name} stays closed`)}>
-            Keep closed
-          </button>
-        )}
-        {app.reviewed && (
-          <button className="btn btn-sm" onClick={() => void review.runBatch([{ op: "review", app_id: app.id, reviewed: false }], `${app.name} is pending again`)}>
-            Mark pending again
-          </button>
-        )}
         <MovePicker app={app} open={moving} onOpenChange={setMoving} onPick={(to) => {
           moveTarget.current = to.id;
           setMoving(false);
@@ -105,7 +93,6 @@ function OneApp({ app, partial, highlight, onCollapse, onClose }: { app: AppDeta
         }} />
       </div>
       <p className="hint">{TRANSFER_HINT}</p>
-      <CommitPreview commit={review} />
       <CommitPreview commit={move} title={`Transfer access to ${names.apps.find((a) => a.id === moveTarget.current)?.name ?? "the other app"}?`} confirmLabel="Transfer access" />
 
       <TorShare appId={app.id} hasOnion={app.addresses.some((a) => a.locator.kind === "onion")} />
@@ -131,7 +118,7 @@ function OneApp({ app, partial, highlight, onCollapse, onClose }: { app: AppDeta
             });
           }}
         >
-          <p>Its addresses and grants are removed. It reappears as pending the next time it listens.</p>
+          <p>Its addresses and grants are removed. It reappears as a new app the next time it listens.</p>
         </ConfirmDialog>
       )}
     </Inspector>
@@ -142,7 +129,7 @@ const TRANSFER_HINT =
   "Moves this app's access, tags and addresses to the app you pick. Use it when a program was moved or reinstalled and now shows up as a new app.";
 
 /**
- * A pending app with the name of an app whose program is gone is probably that program,
+ * An app without access that has the name of an app whose program is gone is probably that program,
  * moved: offer the transfer from the old entry, with the same review as the picker.
  */
 function MovedHint({ app }: { app: AppDetail }) {
@@ -251,13 +238,11 @@ export function AppsInspector({ ids, onCollapse, onClose }: { ids: string[] } & 
   const toast = useToast();
   const grants = useGrants().data ?? [];
   const forget = useDeleteApp();
-  const review = useCommit();
   const { revoke, commit: revokeCommit } = useRevoke();
   const [forgetting, setForgetting] = useState(false);
 
   const selected = names.apps.filter((a) => ids.includes(a.id));
   const entries = mergeEntries(selected.map((a) => appEntriesFromGrants(a.id, grants, names)));
-  const pending = selected.filter((a) => !a.reviewed);
   const shown = selected.length > 6 ? `${selected.slice(0, 6).map((a) => a.name).join(", ")} and ${selected.length - 6} more` : selected.map((a) => a.name).join(", ");
 
   const forgetAll = async () => {
@@ -283,17 +268,6 @@ export function AppsInspector({ ids, onCollapse, onClose }: { ids: string[] } & 
         <ActionRow><AddAccess fixed={{ side: "targets", targets: selected.map((a) => ({ kind: "app" as const, id: a.id })) }} /></ActionRow>
       </Section>
 
-      <div className="actions">
-        <button
-          className="btn btn-sm"
-          disabled={pending.length === 0}
-          onClick={() => void review.runBatch(pending.map((a) => ({ op: "review", app_id: a.id, reviewed: true })), `Marked ${pending.length} reviewed`)}
-        >
-          Mark reviewed{pending.length > 0 ? ` (${pending.length})` : ""}
-        </button>
-      </div>
-      <CommitPreview commit={review} />
-
       <DangerZone>
         <button className="btn btn-danger btn-sm" onClick={() => setForgetting(true)}>Forget {selected.length} apps</button>
       </DangerZone>
@@ -305,7 +279,7 @@ export function AppsInspector({ ids, onCollapse, onClose }: { ids: string[] } & 
           onCancel={() => setForgetting(false)}
           onConfirm={() => void forgetAll()}
         >
-          <p>Their addresses and grants are removed. Each reappears as pending the next time it listens.</p>
+          <p>Their addresses and grants are removed. Each reappears as a new app the next time it listens.</p>
         </ConfirmDialog>
       )}
     </Inspector>

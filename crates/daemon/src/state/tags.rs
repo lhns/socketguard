@@ -96,10 +96,6 @@ pub enum Write {
         binding_id: String,
         to_app: String,
     },
-    SetReviewed {
-        app_id: String,
-        reviewed: bool,
-    },
 }
 
 async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
@@ -234,13 +230,6 @@ async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
             sqlx::query("UPDATE reservation_bindings SET app_id = ? WHERE id = ?")
                 .bind(to_app)
                 .bind(binding_id)
-                .execute(&mut **tx)
-                .await?;
-        }
-        Write::SetReviewed { app_id, reviewed } => {
-            sqlx::query("UPDATE apps SET reviewed = ? WHERE id = ?")
-                .bind(reviewed)
-                .bind(app_id)
                 .execute(&mut **tx)
                 .await?;
         }

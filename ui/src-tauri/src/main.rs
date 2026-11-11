@@ -110,7 +110,7 @@ async fn status() -> CmdResult<StatusResponse> {
 
 #[tauri::command]
 async fn list_apps() -> CmdResult<Vec<App>> {
-    Ok(client().list_apps(false).await?)
+    Ok(client().list_apps().await?)
 }
 
 #[tauri::command]
@@ -121,11 +121,6 @@ async fn get_app(id: String) -> CmdResult<AppDetail> {
 #[tauri::command]
 async fn delete_app(id: String) -> DoneResult<()> {
     Ok(client().delete_app(&id).await?.into())
-}
-
-#[tauri::command]
-async fn review_app(id: String, reviewed: bool) -> CmdResult<AppDetail> {
-    Ok(client().review_app(&id, reviewed).await?)
 }
 
 #[tauri::command]
@@ -871,7 +866,6 @@ fn main() {
             list_apps,
             get_app,
             delete_app,
-            review_app,
             move_app,
             share_app,
             list_peers,

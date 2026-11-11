@@ -53,7 +53,6 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   const [creating, setCreating] = useState(false);
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [search, setSearch] = useState("");
-  const [pendingOnly, setPendingOnly] = useState(false);
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [showSystem, setShowSystem] = useState(false);
   const [scope, setScope] = useState<string | null>(null);
@@ -85,7 +84,6 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   useEffect(() => {
     if (focus.seq === 0) return;
     if (focus.search !== undefined) setSearch(focus.search);
-    if (focus.pendingOnly) setPendingOnly(true);
     const key = focus.appId ? `app:${focus.appId}` : focus.tagId ? `tag:${focus.tagId}` : null;
     if (key) {
       setSelected(new Set([key]));
@@ -116,11 +114,10 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   const shownApps = useMemo(
     () =>
       appList
-        .filter((a) => !pendingOnly || !a.reviewed)
         .filter((a) => !tagFilter || tagMembers.has(a.id))
         .filter((a) => !q || a.name.toLowerCase().includes(q) || a.process_name.toLowerCase().includes(q))
-        .sort((a, b) => Number(a.reviewed) - Number(b.reviewed) || a.name.localeCompare(b.name)),
-    [appList, pendingOnly, tagFilter, tagMembers, q],
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [appList, tagFilter, tagMembers, q],
   );
   const shownTags = useMemo(() => tagList.filter((t) => !q || t.label.toLowerCase().includes(q)), [tagList, q]);
   const shownGroups = useMemo(() => groupList.filter((g) => !q || g.label.toLowerCase().includes(q)), [groupList, q]);
@@ -387,7 +384,6 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
     columns.set(next);
   };
 
-  const pendingCount = appList.filter((a) => !a.reviewed).length;
   const filterTag: Tag | undefined = tagList.find((t) => t.id === tagFilter);
   const grantNetworks = (networks.data ?? []).filter((n) => n.grants_apply);
 
@@ -402,10 +398,6 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <label className="check">
-          <input type="checkbox" checked={pendingOnly} onChange={(e) => setPendingOnly(e.target.checked)} />
-          Pending only ({pendingCount})
-        </label>
         {filterTag && (
           <button className="tag-pill tag-pill-active" onClick={() => setTagFilter(null)} aria-label={`Stop filtering by tag ${filterTag.label}`}>
             tag: {filterTag.label} <span className="pill-x" aria-hidden="true">×</span>
@@ -481,7 +473,6 @@ function RowName({ r }: { r: AppRow }) {
   return (
     <span className="name-badges">
       <span className="name-text" title={a.name}>{a.name}</span>
-      {!a.reviewed && <span className="badge badge-pending">pending</span>}
       {a.identity_note === "unidentified" && <span className="badge reach reach-warn" title="Owner of the port unknown">unidentified</span>}
     </span>
   );

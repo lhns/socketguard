@@ -47,7 +47,7 @@ confirm_open: boolean, } | { "op": "remove_grant", grant_id: string, } | { "op":
 /**
  * Needed when the tag has a grant to Anyone, which would open the app.
  */
-confirm_open: boolean, } | { "op": "remove_tag_member", tag_id: string, app_id: string, scope: Scope, } | { "op": "review", app_id: string, reviewed: boolean, } | { "op": "create_reservation", ref?: string, label: string, bindings: Array<BindingTarget>, confirm_open: boolean, } | { "op": "reserve_address", ref?: string, address_id: string, label: string, } | { "op": "rename_reservation", reservation_id: string, label: string, } | { "op": "add_binding", reservation_id: string, target: BindingTarget, 
+confirm_open: boolean, } | { "op": "remove_tag_member", tag_id: string, app_id: string, scope: Scope, } | { "op": "create_reservation", ref?: string, label: string, bindings: Array<BindingTarget>, confirm_open: boolean, } | { "op": "reserve_address", ref?: string, address_id: string, label: string, } | { "op": "rename_reservation", reservation_id: string, label: string, } | { "op": "add_binding", reservation_id: string, target: BindingTarget, 
 /**
  * Needed when the reservation has a grant to Anyone.
  */

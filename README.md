@@ -132,8 +132,7 @@ state; on stop everything stays in place until `socketguard disable` (or
 ```bash
 socketguard init                              # first-run setup (networks, sshd/RDP grants, protect-host)
 socketguard status                            # daemon, networks, protect-host, counts
-socketguard pending                           # new apps; interactive on a terminal
-socketguard apps list [--pending]             # also: show, review, rm
+socketguard apps list                         # also: show, move, rm
 socketguard apps show nginx                   # addresses (up or not), ports, grants with reach, counters
 socketguard apps move old-nginx nginx [-y]    # a program that came back under a new identity: addresses, grants, tags and bindings move
 socketguard share nginx                       # [addr]:port and http(s):// URLs
@@ -184,7 +183,7 @@ Reach is shown per network as `verified`, `whole subnet`, `IP only`, `open` or `
 
 ### Desktop app
 
-The Tauri app covers the everyday flows: review new apps, grant and revoke with reach badges,
+The Tauri app covers the everyday flows: see what each app lets in, grant and revoke with reach badges,
 manage peers, follow the activity feed (including blocked attempts, with "grant this source"),
 and toggle whole-host protection. Everything else is in the CLI.
 

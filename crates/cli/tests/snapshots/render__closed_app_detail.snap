@@ -3,7 +3,6 @@ source: crates/cli/tests/render.rs
 expression: "render::app_detail(&d, &names())"
 ---
 redis-server  (9e8d7c6b00112233)
-  state       pending (closed until granted)
   first seen  2026-11-09 09:00:00
   last seen   2026-11-09 12:30:00
 

@@ -17,6 +17,17 @@ const inspector = () => screen.getByRole("region", { name: "Details" });
 const listTable = () => within(screen.getByRole("table", { name: "Apps and tags" }));
 
 describe("a fresh host (?mock=fresh): about a dozen apps, nothing granted, Local plus one LAN", () => {
+  it("shows no pending badge, filter or counter, and every app says closed", async () => {
+    installMock("fresh");
+    const { container } = renderWithProviders(<AppsPage />);
+    await listTable().findByRole("button", { name: /^nginx/ });
+    expect(screen.queryByText("pending")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /Pending/ })).not.toBeInTheDocument();
+    const cells = Array.from(container.querySelectorAll("td.col-access"));
+    expect(cells.length).toBeGreaterThan(5);
+    for (const cell of cells) expect(cell).toHaveTextContent(/^closed$/);
+  });
+
   it("offers Add access on All ports and on every port, and Add to reserved address…", async () => {
     installMock("fresh");
     const user = userEvent.setup();
