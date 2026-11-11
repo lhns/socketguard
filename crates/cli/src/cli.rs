@@ -609,6 +609,61 @@ mod tests {
     }
 
     #[test]
+    fn socket_group_commands_and_flags_parse() {
+        let c = parse(&[
+            "socket-groups",
+            "add",
+            "passive",
+            "21/tcp",
+            "50000-51000/tcp",
+            "--app",
+            "ftpd",
+        ])
+        .unwrap();
+        let Command::SocketGroups(SocketGroupsCmd::Add {
+            label, ports, apps, ..
+        }) = c.command
+        else {
+            panic!()
+        };
+        assert_eq!(label, "passive");
+        assert_eq!(ports, ["21/tcp", "50000-51000/tcp"]);
+        assert_eq!(apps, ["ftpd"]);
+        assert!(parse(&["socket-groups", "attach", "passive", "ftpd", "-y"]).is_ok());
+        let c = parse(&[
+            "grant",
+            "--app",
+            "ftpd",
+            "--socket-group",
+            "passive",
+            "--to",
+            "alice",
+        ])
+        .unwrap();
+        let Command::Grant(g) = c.command else {
+            panic!()
+        };
+        assert_eq!(g.socket_groups, ["passive"]);
+        let c = parse(&[
+            "apps",
+            "split",
+            "ftpd",
+            "--network",
+            "ygg",
+            "--socket-group",
+            "passive",
+        ])
+        .unwrap();
+        let Command::Apps(AppsCmd::Split {
+            port, socket_group, ..
+        }) = c.command
+        else {
+            panic!()
+        };
+        assert_eq!((port, socket_group.as_deref()), (None, Some("passive")));
+    }
+
+    #[test]
     fn grant_takes_repeatable_flags() {
         let c = parse(&[
             "grant",
