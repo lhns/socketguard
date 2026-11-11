@@ -145,6 +145,9 @@ pub struct Engine {
     unavailable_ifaces: Mutex<HashSet<String>>,
     /// Networks whose last allocation failed (log once per outage).
     alloc_failing: Mutex<HashSet<String>>,
+    // Lock order (see `AppState`): the engine RwLock, `poll_lock`, `apps_lock`,
+    // `alloc_lock`, `state.firewall_lock`, the ledger lock, `state.config`, a database
+    // transaction. The std mutexes below are never held across an `.await`.
     /// Held while addresses are created, so two mutations never create the same one.
     alloc_lock: tokio::sync::Mutex<()>,
     /// Held for a whole reconcile pass, and by `disable` and `enable`: a pass never puts
@@ -395,6 +398,8 @@ impl Engine {
     /// Startup: apply the desired state over whatever the previous run left (never a
     /// flush, ADR 0026), then make sure the addresses are on their interfaces.
     pub async fn startup_reconcile(&self, state: &AppState) {
+        // The API is already up: a `disable` must not interleave with putting addresses back.
+        let _pass = self.poll_lock.lock().await;
         if let Err(e) = networks::ledger::adopt_stored_keys(&state.db).await {
             warn!("Could not adopt existing onion services: {e:#}");
         }

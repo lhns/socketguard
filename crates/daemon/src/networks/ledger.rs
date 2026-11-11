@@ -12,7 +12,8 @@ use tracing::warn;
 const OWNED: &str = "tor_owned_services";
 const TOMBSTONES: &str = "tor_tombstones";
 
-/// Read-modify-write of the two lists must not interleave.
+/// Read-modify-write of the two lists must not interleave. Taken under `firewall_lock`
+/// and before any database transaction (lock order: see `AppState`).
 static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

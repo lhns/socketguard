@@ -31,16 +31,30 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 
 /// The daemon's shared state.
 ///
-/// **Lock order**, outermost first: `engine`, then `firewall_lock`, then `config`. Take
-/// them in that order and never wait for an earlier one while holding a later one.
+/// **Lock order** (the single global order), outermost first. Take any subset in this
+/// order and never wait for an earlier one while holding a later one:
 ///
-/// - `engine` is read-locked by API handlers and queries, write-locked by the reconcile
-///   pass and by adding or removing a network. The latter also saves the config file
-///   before releasing it, so concurrent changes cannot write each other's stale list.
-/// - `firewall_lock` serializes everything that changes the ruleset or a non-IP network
-///   (the reconcile pass and API mutations).
-/// - `config` is the configuration the daemon started with. After startup it is only read
-///   (the process filter, the persisted settings); the live networks are the engine's.
+/// 1. `engine` (RwLock). Read: API handlers, queries and mutations, the reconcile pass
+///    (`run_loop`), `startup_reconcile`, `disable`/`enable`. Write: only adding or removing
+///    a network, which also saves the config file before releasing it, so concurrent
+///    changes cannot write each other's stale list.
+/// 2. `Engine::poll_lock`: a whole pass, `startup_reconcile`, `disable`, `enable`.
+/// 3. `Engine::apps_lock`: a pass's read-modify-write of apps, and forgetting an app.
+/// 4. `Engine::alloc_lock`: creating addresses (`ensure_addresses`).
+/// 5. `firewall_lock`: applying the ruleset and enforcing non-IP networks (Tor).
+/// 6. `networks::ledger`'s `LOCK`: read-modify-write of the onion service ledger.
+/// 7. `config` (RwLock): only read after startup, so a reader never waits; still, hold
+///    it only for reads and the database, never while waiting for a lock above.
+/// 8. A database connection or transaction: `Database` methods run SQL only, never wait
+///    for a lock while holding one.
+///
+/// Leaves below all of them, taken only inside blocking calls and never held across an
+/// `.await`: the engine's `std::sync::Mutex` fields, Tor's `io` then `state`.
+///
+/// The engine lock is fair (write-preferring): once a writer queues, new readers wait.
+/// So a task that holds `engine.read()` or any lock above must never await
+/// `engine.read()` again, nor wait for a task that does: with a network add or remove
+/// queued that hangs. Engine methods get `&self` and never touch `state.engine`.
 pub struct AppState {
     pub config: RwLock<socketguard_core::config::DaemonConfig>,
     /// The config file the daemon loaded (or would create); networks added or removed
@@ -48,7 +62,8 @@ pub struct AppState {
     pub config_path: Option<std::path::PathBuf>,
     pub db: state::Database,
     pub engine: RwLock<engine::Engine>,
-    /// See the lock order above.
+    /// Serializes everything that changes the ruleset or a non-IP network. See the lock
+    /// order above.
     pub firewall_lock: Mutex<()>,
     /// Broadcast channel for SSE push notifications to GUI
     pub events: broadcast::Sender<api::DaemonEvent>,
