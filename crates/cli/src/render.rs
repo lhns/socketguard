@@ -300,6 +300,23 @@ fn protect_host(interfaces: &[String]) -> String {
     }
 }
 
+/// Where the daemon keeps its state and whether it is a service, one line (with a leading
+/// newline) each; what it did not report is left out.
+fn host_lines(s: &StatusResponse) -> String {
+    let service = s
+        .service_installed
+        .map(|i| if i { "installed" } else { "not installed" });
+    [
+        ("config", s.config_path.as_deref()),
+        ("database", s.db_path.as_deref()),
+        ("socket", s.socket.as_deref()),
+        ("service", service),
+    ]
+    .into_iter()
+    .filter_map(|(k, v)| v.map(|v| format!("\n{k:<13} {v}")))
+    .collect()
+}
+
 pub fn status(s: &StatusResponse) -> String {
     let c = &s.counts;
     let protect = protect_host(&s.protect_host_interfaces);
@@ -316,7 +333,7 @@ pub fn status(s: &StatusResponse) -> String {
          enforcement   {enforcement}\n\
          protect-host  {protect}\n\
          apps          {} ({} pending), {} addresses\n\
-         peers         {}, groups {}, grants {}\n\n{}",
+         peers         {}, groups {}, grants {}{}\n\n{}",
         s.version,
         c.apps,
         c.pending_apps,
@@ -324,6 +341,7 @@ pub fn status(s: &StatusResponse) -> String {
         c.peers,
         c.groups,
         c.grants,
+        host_lines(s),
         section("Networks", networks(&s.networks)),
     )
 }

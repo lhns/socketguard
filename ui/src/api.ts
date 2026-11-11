@@ -76,7 +76,12 @@ export interface SetupRun {
   exit_code: number | null;
   command: string;
 }
-export type { PortRange } from "./generated/PortRange";
+/** Whether the SocketGuard service is installed and running (`service_status`). */
+export interface ServiceStatus {
+  installed: boolean;
+  running: boolean;
+}
+export type { PortRange }from "./generated/PortRange";
 export type { AddrFamily } from "./generated/AddrFamily";
 export type { Binding } from "./generated/Binding";
 export type { BindingTarget } from "./generated/BindingTarget";
@@ -224,7 +229,14 @@ export const api = {
   applyState: (req: ApplyRequest) => call<ApplyResponse>("apply_state", { req }),
   enable: () => call<void>("enable"),
   disable: () => call<void>("disable", { confirm: true }),
-  startDaemon: () => call<void>("start_daemon"),
+  serviceStatus: () => call<ServiceStatus>("service_status"),
+  startDaemon: () => call<SetupRun>("start_daemon"),
+  installService: () => call<SetupRun>("install_service"),
+  currentAccount: () => call<string>("current_account"),
+  allowMyAccount: () => call<SetupRun>("allow_my_account"),
+  removeSocketguard: (purge: boolean) => call<SetupRun>("remove_socketguard", { purge }),
+  clearLocalUiSettings: () => call<void>("clear_local_ui_settings"),
+  quitApp: () => call<void>("quit_app"),
   subscribeEvents: () => call<void>("subscribe_events"),
 };
 

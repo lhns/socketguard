@@ -18,4 +18,20 @@ disabled: boolean,
  * A SocketGuard ruleset was found with an empty database and left in place: nothing is
  * applied or added until `enable` (adopt) or `disable` (remove).
  */
-unadopted: boolean, counts: Counts, };
+unadopted: boolean, counts: Counts, 
+/**
+ * The config file the daemon loaded (or would create) (ADR 0050).
+ */
+config_path?: string, 
+/**
+ * The database in use.
+ */
+db_path?: string, 
+/**
+ * The Unix socket or Windows pipe the API listens on.
+ */
+socket?: string, 
+/**
+ * Whether SocketGuard is registered as a system service (None: could not be told).
+ */
+service_installed?: boolean, };

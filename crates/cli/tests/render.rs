@@ -44,6 +44,7 @@ fn nginx() -> App {
         exe_path: Some("/usr/sbin/nginx".into()),
         interpreter_arg: None,
         identity_note: None,
+        exe_missing: false,
         reviewed: true,
         system: false,
         first_seen: t("2026-11-01T08:00:00Z"),
@@ -87,6 +88,7 @@ fn redis() -> App {
         exe_path: None,
         interpreter_arg: None,
         identity_note: None,
+        exe_missing: false,
         reviewed: false,
         system: false,
         first_seen: t("2026-11-09T09:00:00Z"),
@@ -240,6 +242,10 @@ fn status() {
             groups: 1,
             grants: 3,
         },
+        config_path: None,
+        db_path: None,
+        socket: None,
+        service_installed: None,
     };
     insta::assert_snapshot!("status", render::status(&s));
     s.disabled = true;
@@ -249,6 +255,16 @@ fn status() {
     s.disabled = false;
     s.unadopted = true;
     insta::assert_snapshot!("status_unadopted", render::status(&s));
+    s.unadopted = false;
+    s.config_path = Some("/etc/socketguard/socketguard.json".into());
+    s.db_path = Some("/var/lib/socketguard/socketguard.db".into());
+    s.socket = Some("/run/socketguard/socketguard.sock".into());
+    s.service_installed = Some(false);
+    insta::assert_snapshot!("status_host", render::status(&s));
+    s.config_path = None;
+    s.service_installed = None;
+    assert!(!render::status(&s).contains("config"));
+    assert!(!render::status(&s).contains("service"));
 }
 
 #[test]

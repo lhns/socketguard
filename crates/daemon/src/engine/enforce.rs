@@ -4,7 +4,6 @@ use super::*;
 use crate::api::DaemonEvent;
 use crate::networks;
 use crate::ruleset::Snapshot;
-use crate::state::Database;
 use crate::AppState;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
 use socketguard_core::{Address, Network};
@@ -324,7 +323,7 @@ impl Engine {
 
     /// Release the locators of `addresses` on a network that is not an IP network (the
     /// onion services leave Tor). IP addresses are taken off their interface by
-    /// `remove_from_interface` instead.
+    /// `remove_from_interface` instead; here they only give their lease back (DHCPv6).
     pub(super) async fn remove_locators(
         &self,
         state: &AppState,
@@ -335,6 +334,19 @@ impl Engine {
             return;
         };
         if active.network.capabilities().ip_locators {
+            let ips: Vec<_> = addresses.iter().filter_map(|a| a.locator.ipv6()).collect();
+            let net = active.network.clone();
+            let released = tokio::task::spawn_blocking(move || {
+                for ip in ips {
+                    if let Err(e) = net.release_lease(ip) {
+                        warn!("Could not release the lease of {ip}: {e:#}");
+                    }
+                }
+            })
+            .await;
+            if let Err(e) = released {
+                warn!("Release task failed: {e}");
+            }
             return;
         }
         for a in addresses {
@@ -361,33 +373,82 @@ impl Engine {
     }
 }
 
-/// Take everything of ours off the networks that are not IP networks (the onion services
-/// leave Tor), for the `disable` latch. A network that cannot be reached is logged; its
-/// services stay until it is back and the latch is still set (enforcement is suspended).
-pub(super) async fn disable_networks(
-    db: &Database,
-    networks: Vec<(String, Arc<dyn networks::Network>)>,
-) {
-    let addresses = match db.list_addresses().await {
-        Ok(a) => a,
-        Err(e) => {
-            warn!("Could not list addresses to disable: {e}");
-            return;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::networks::ip::{AllocatedAddress, Ipv6Backend, Prefix};
+    use crate::test_support::*;
+    use socketguard_core::{Locator, Scope};
+    use std::net::Ipv6Addr;
+    use std::sync::Mutex;
+
+    /// A DHCPv6-like allocator that only records the releases it is asked for.
+    #[derive(Clone, Default)]
+    struct ReleaseLog(Arc<Mutex<Vec<Ipv6Addr>>>);
+
+    impl Ipv6Backend for ReleaseLog {
+        fn current_prefix(&self) -> anyhow::Result<Option<Prefix>> {
+            Ok(None)
         }
-    };
-    for (id, net) in networks {
-        if net.capabilities().ip_locators {
-            continue;
+        fn allocate(&self, _iid: Option<u64>) -> anyhow::Result<AllocatedAddress> {
+            anyhow::bail!("not used")
         }
-        let mine: Vec<Address> = addresses
-            .iter()
-            .filter(|a| a.network_id == id)
-            .cloned()
-            .collect();
-        match tokio::task::spawn_blocking(move || net.disable(&mine)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => warn!("Could not disable network '{id}': {e}"),
-            Err(e) => warn!("Disable task failed: {e}"),
+        fn release_address(&self, addr: &Ipv6Addr) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push(*addr);
+            anyhow::bail!("server unreachable")
         }
+    }
+
+    #[tokio::test]
+    async fn removing_the_addresses_of_an_ip_network_releases_their_leases() {
+        let log = ReleaseLog::default();
+        let inst = BackendInstanceConfig {
+            id: "dhcp".into(),
+            backend: socketguard_core::config::BackendConfig::Dhcpv6 {
+                interface: "eth0".into(),
+            },
+        };
+        let mut backends = std::collections::HashMap::new();
+        backends.insert(
+            "dhcp".to_string(),
+            ip_backend(inst.clone(), Box::new(log.clone())),
+        );
+        let engine = crate::engine::Engine::new_injectable(
+            Box::new(MockSocketMonitor::new(vec![])),
+            Arc::new(MockFirewall::new(Arc::new(Mutex::new(vec![])))),
+            Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),
+            backends,
+        );
+        let state = test_app_state(
+            engine,
+            DaemonConfig {
+                backends: vec![inst],
+                ..Default::default()
+            },
+        )
+        .await;
+        let address = |addr: &str| {
+            Address::automatic(
+                "a",
+                Scope::All,
+                "dhcp",
+                Locator::Ipv6 {
+                    addr: addr.parse().unwrap(),
+                },
+            )
+        };
+        let engine = state.engine.read().await;
+        // A failing release does not stop the others.
+        engine
+            .remove_locators(
+                &state,
+                "dhcp",
+                &[address("2001:db8::1"), address("2001:db8::2")],
+            )
+            .await;
+        assert_eq!(
+            *log.0.lock().unwrap(),
+            ["2001:db8::1", "2001:db8::2"].map(|a| a.parse::<Ipv6Addr>().unwrap())
+        );
     }
 }

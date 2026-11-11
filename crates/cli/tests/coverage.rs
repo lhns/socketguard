@@ -76,11 +76,31 @@ const UI_COMMANDS: &str = include_str!("../../../ui/src-tauri/src/main.rs");
 /// `networks setup` runs elevated and edits the system (ADR 0048); the UI starts it through
 /// its own elevation command (not an API route), and its detection route is
 /// `networks detect`.
-const CLI_ONLY: &[&str] = &["completions", "watch", "networks setup"];
+///
+/// `access allow|deny|list` hand over to `socketguard-daemon access` (administrator only,
+/// ADR 0050); the UI runs the same daemon command through its own elevation command.
+const CLI_ONLY: &[&str] = &[
+    "completions",
+    "watch",
+    "networks setup",
+    "access allow",
+    "access deny",
+    "access list",
+];
 
 #[test]
-fn the_cli_only_list_is_exactly_completions_watch_and_networks_setup() {
-    assert_eq!(CLI_ONLY, ["completions", "watch", "networks setup"]);
+fn the_cli_only_list_is_pinned() {
+    assert_eq!(
+        CLI_ONLY,
+        [
+            "completions",
+            "watch",
+            "networks setup",
+            "access allow",
+            "access deny",
+            "access list"
+        ]
+    );
     let root = Cli::command();
     for name in CLI_ONLY {
         let mut cmd = &root;

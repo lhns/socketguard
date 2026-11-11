@@ -74,6 +74,7 @@ function OneApp({ app, partial, highlight, onCollapse, onClose }: { app: AppDeta
       onCollapse={onCollapse}
       onClose={onClose}
     >
+      {!app.reviewed && <MovedHint app={app} />}
       {app.identity_note === "unidentified" && (
         <p className="hint">
           SocketGuard cannot tell which program owns this port, so it is identified by its port alone. It is closed until you
@@ -98,12 +99,13 @@ function OneApp({ app, partial, highlight, onCollapse, onClose }: { app: AppDeta
           moveTarget.current = to.id;
           setMoving(false);
           // The diff is always shown: a move changes grants, tags, addresses and bindings at once.
-          void move.runBatch([{ op: "move_app", from: app.id, to: to.id, confirm_open: false }], `Moved everything to ${to.name}`, undefined, true);
+          void move.runBatch([{ op: "move_app", from: app.id, to: to.id, confirm_open: false }], `Transferred access to ${to.name}`, undefined, true);
         }} />
         <button className="btn btn-danger btn-sm" onClick={() => setForgetting(true)}>Forget app</button>
       </div>
+      <p className="hint">{TRANSFER_HINT}</p>
       <CommitPreview commit={review} />
-      <CommitPreview commit={move} title={`Move everything to ${names.apps.find((a) => a.id === moveTarget.current)?.name ?? "the other app"}`} />
+      <CommitPreview commit={move} title={`Transfer access to ${names.apps.find((a) => a.id === moveTarget.current)?.name ?? "the other app"}`} />
 
       <TorShare appId={app.id} hasOnion={app.addresses.some((a) => a.locator.kind === "onion")} />
       {!partial && <Counters app={app} />}
@@ -131,7 +133,40 @@ function OneApp({ app, partial, highlight, onCollapse, onClose }: { app: AppDeta
   );
 }
 
-/** "Move everything to…": a search over the other apps. */
+const TRANSFER_HINT =
+  "Moves this app's access, tags and addresses to the app you pick. Use it when a program was moved or reinstalled and now shows up as a new app.";
+
+/**
+ * A pending app with the name of an app whose program is gone is probably that program,
+ * moved: offer the transfer from the old entry, with the same review as the picker.
+ */
+function MovedHint({ app }: { app: AppDetail }) {
+  const names = useNameCtx();
+  const nav = useNav();
+  const takeover = useCommit(() => nav.go("apps", { appId: app.id }));
+  const old = names.apps.find((a) => a.id !== app.id && a.exe_missing && a.process_name === app.process_name);
+  if (!old) return null;
+  return (
+    <div className="card moved-hint" role="group" aria-label="Moved program">
+      <p>
+        Looks like <strong>{old.name}</strong> moved. Its old entry points to a program that is no longer there.
+      </p>
+      <div className="actions">
+        <button
+          className="btn btn-primary btn-sm"
+          onClick={() =>
+            void takeover.runBatch([{ op: "move_app", from: old.id, to: app.id, confirm_open: false }], `Transferred access from ${old.name}`, undefined, true)
+          }
+        >
+          Take over from the old entry
+        </button>
+      </div>
+      <CommitPreview commit={takeover} title={`Take over from ${old.name}`} />
+    </div>
+  );
+}
+
+/** "Transfer access to another app…": a search over the other apps. */
 function MovePicker({ app, open, onOpenChange, onPick }: { app: AppDetail; open: boolean; onOpenChange: (o: boolean) => void; onPick: (to: { id: string; name: string }) => void }) {
   const names = useNameCtx();
   const others = names.apps.filter((a) => a.id !== app.id);
@@ -141,8 +176,8 @@ function MovePicker({ app, open, onOpenChange, onPick }: { app: AppDetail; open:
   ];
   return (
     <Picker
-      label="Move everything to"
-      trigger="Move everything to…"
+      label="Transfer access to"
+      trigger="Transfer access to another app…"
       triggerClass="btn btn-sm"
       items={items}
       onToggle={(it) => onPick({ id: it.id, name: it.label })}

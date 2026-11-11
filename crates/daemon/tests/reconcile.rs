@@ -250,6 +250,59 @@ fn net_adds(h: &Harness) -> Vec<(String, Ipv6Addr)> {
 // ─── Discovery ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn an_app_whose_executable_is_gone_is_flagged_exe_missing() {
+    let mut present = listener("present_app", 80, Protocol::Tcp);
+    present.exe_path = Some(std::env::current_exe().unwrap().display().to_string());
+    let mut gone = listener("gone_app", 81, Protocol::Tcp);
+    gone.exe_path = Some("/nonexistent-socketguard-test/gone_app".into());
+    let mut unknown = listener("unknown_app", 82, Protocol::Tcp);
+    unknown.exe_path = None;
+    let h = Harness::new(vec![local_net()], vec![present, gone, unknown]).await;
+    // The check runs on the apps a pass already knew, so the first pass only creates them.
+    h.reconcile().await;
+    h.reconcile().await;
+    let apps = h.apps().await;
+    let flag = |name: &str| apps.iter().find(|a| a.name == name).unwrap().exe_missing;
+    assert!(flag("gone_app"));
+    assert!(!flag("present_app"));
+    assert!(!flag("unknown_app"), "no known path: not missing");
+}
+
+#[tokio::test]
+async fn a_deleted_executable_is_noticed_when_a_new_app_shows_up() {
+    let dir = std::env::temp_dir().join(format!("sg-exe-missing-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("movable_app");
+    std::fs::write(&exe, b"").unwrap();
+    let mut old = listener("movable_app", 80, Protocol::Tcp);
+    old.exe_path = Some(exe.display().to_string());
+    let h = Harness::new(vec![local_net()], vec![old.clone()]).await;
+    h.reconcile().await;
+    h.reconcile().await;
+    assert!(!h.app().await.exe_missing);
+
+    // The program is moved: its old path goes away and a new app listens from another one.
+    // The answer is cached for minutes, but a new app makes the daemon look again.
+    std::fs::remove_file(&exe).unwrap();
+    let mut moved = listener("movable_app", 80, Protocol::Tcp);
+    moved.exe_path = Some(
+        dir.join("elsewhere")
+            .join("movable_app")
+            .display()
+            .to_string(),
+    );
+    h.set_sockets(vec![old, moved]);
+    h.reconcile().await;
+    let apps = h.apps().await;
+    assert_eq!(apps.len(), 2);
+    assert_eq!(apps.iter().filter(|a| a.exe_missing).count(), 1);
+    assert!(apps
+        .iter()
+        .all(|a| a.exe_missing == (a.exe_path.as_deref() == Some(&*exe.display().to_string()))));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn discovery_creates_a_pending_app_with_an_address_on_every_network() {
     let h = Harness::new(
         vec![local_net(), lan_net(), ygg_net()],

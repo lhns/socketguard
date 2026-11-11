@@ -57,7 +57,9 @@ opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = [
+# The service control manager and the service entry point (ADR 0050).
+windows-service = "0.8"
+windows ={ version = "0.62", features = [
     "Win32_NetworkManagement_WindowsFilteringPlatform",
     "Win32_System_Rpc",
     "Win32_NetworkManagement_IpHelper",

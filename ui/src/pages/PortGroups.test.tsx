@@ -523,7 +523,7 @@ describe("Wording", () => {
     await openApp(user, /^nginx/);
     await user.click(within(inspector()).getAllByRole("button", { name: /^Reserve/ })[0]);
     expect(said()).not.toMatch(banned);
-    await user.click(within(inspector()).getByRole("button", { name: "Move everything to…" }));
+    await user.click(within(inspector()).getByRole("button", { name: "Transfer access to another app…" }));
     expect(said()).not.toMatch(banned);
     await user.keyboard("{Escape}");
 

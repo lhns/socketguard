@@ -17,7 +17,7 @@ mod tags;
 #[cfg(windows)]
 mod winacl;
 
-pub use protect::ALLOW_UNPROTECTED_DB_ENV;
+pub use protect::{protect_dir, ALLOW_UNPROTECTED_DB_ENV};
 pub use schema::SCHEMA_VERSION;
 pub use settings::parse_protect_host;
 pub use tags::Write;
@@ -158,6 +158,18 @@ pub fn is_unique_violation(err: &anyhow::Error) -> bool {
     })
 }
 
+/// Connection options for the file at `path` (a plain file name, so spaces and `?` in a
+/// directory such as `/Library/Application Support` are safe), or the shared in-memory
+/// database for ":memory:".
+fn connect_options(path: &str, create: bool) -> Result<SqliteConnectOptions> {
+    if path == ":memory:" {
+        return Ok(SqliteConnectOptions::from_str("sqlite::memory:?mode=rwc")?);
+    }
+    Ok(SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(create))
+}
+
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(suffix);
@@ -182,7 +194,7 @@ impl Database {
         if path != ":memory:" {
             precreate_protected(Path::new(path))?;
         }
-        let options = SqliteConnectOptions::from_str(&format!("sqlite:{path}?mode=rwc"))?
+        let options = connect_options(path, true)?
             .foreign_keys(true)
             // sqlx opens a file in the rollback-journal mode, where a commit locks readers
             // out; WAL lets reads go on while one commits (the -wal and -shm files are
@@ -198,6 +210,32 @@ impl Database {
         Ok(Self {
             pool,
             path: (path != ":memory:").then(|| path.to_string()),
+            last_prune: Mutex::new(None),
+        })
+    }
+
+    /// Open the database at `path` only if it exists: never creates a file or moves an old
+    /// one (`--disable`, uninstall). Call [`Database::migrate`] next.
+    pub async fn open_existing(path: &str) -> Result<Self> {
+        anyhow::ensure!(
+            path != ":memory:" && Path::new(path).is_file(),
+            "there is no database at {path}"
+        );
+        anyhow::ensure!(
+            !is_pre_v1(Path::new(path)).await,
+            "{path} is from before schema v1 and cannot be read"
+        );
+        let options = connect_options(path, false)?
+            .foreign_keys(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(options)
+            .await
+            .with_context(|| format!("cannot open the database {path}"))?;
+        Ok(Self {
+            pool,
+            path: Some(path.to_string()),
             last_prune: Mutex::new(None),
         })
     }
@@ -308,6 +346,7 @@ impl Database {
                 exe_path: r.get("exe_path"),
                 interpreter_arg: r.get("interpreter_arg"),
                 identity_note: r.get("identity_note"),
+                exe_missing: false,
                 reviewed: r.get("reviewed"),
                 system: r.get("system"),
                 first_seen: parse_ts(r.get("first_seen"))?,
@@ -1165,6 +1204,7 @@ mod test_util {
             exe_path: Some("/usr/bin/proc".into()),
             interpreter_arg: None,
             identity_note: None,
+            exe_missing: false,
             reviewed: false,
             system: false,
             first_seen: now(),

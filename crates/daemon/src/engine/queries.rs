@@ -209,6 +209,7 @@ impl Engine {
         }
         for app in &mut apps {
             app.addresses = index.of_app(&app.id);
+            app.exe_missing = super::discovery::exe_missing(app);
         }
         Ok(apps)
     }
@@ -223,6 +224,7 @@ impl Engine {
             .cloned()
             .ok_or_else(|| EngineError::NotFound(format!("app {id}")))?;
         app.addresses = AddressIndex::new(&views, &snap.reservations, &snap.tags).of_app(id);
+        app.exe_missing = super::discovery::exe_missing(&app);
         let ctx = Self::reach_ctx(&snap);
         let protected: Vec<String> = snap.v4_subnets.keys().cloned().collect();
         let grants = snap

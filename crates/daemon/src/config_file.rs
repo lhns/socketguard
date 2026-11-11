@@ -3,12 +3,46 @@
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
 use std::path::{Path, PathBuf};
 
-/// `SOCKETGUARD_CONFIG`, else `socketguard.json` in the working directory.
+/// `SOCKETGUARD_CONFIG`, else the fixed location of this system (ADR 0050); never the
+/// working directory.
 pub fn config_path() -> PathBuf {
-    std::env::var_os("SOCKETGUARD_CONFIG")
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("socketguard.json"))
+    socketguard_core::paths::config_path()
+}
+
+/// Whether the config file is in the default place (no `SOCKETGUARD_CONFIG`).
+pub fn is_default_location(path: &Path) -> bool {
+    path == socketguard_core::paths::default_config_path()
+}
+
+/// The config as the daemon uses it: where it is, what it says and the database it names.
+pub struct Resolved {
+    pub config_path: PathBuf,
+    /// Loaded from the file, else the defaults; `db_path` is the resolved absolute path.
+    pub config: DaemonConfig,
+    pub file_exists: bool,
+    pub db_path: PathBuf,
+}
+
+/// Load the config at `path` (defaults when there is no file) and resolve its database
+/// path: absolute as is, relative to the config file's directory, empty the fixed default.
+pub fn resolve_at(path: &Path) -> anyhow::Result<Resolved> {
+    let (mut config, file_exists) = match load(path)? {
+        Some(c) => (c, true),
+        None => (DaemonConfig::default(), false),
+    };
+    let db_path = socketguard_core::paths::resolve_db_path(path, &config.db_path);
+    config.db_path = db_path.to_string_lossy().into_owned();
+    Ok(Resolved {
+        config_path: path.to_path_buf(),
+        config,
+        file_exists,
+        db_path,
+    })
+}
+
+/// [`resolve_at`] for the config in use (`SOCKETGUARD_CONFIG`, else the fixed location).
+pub fn resolve() -> anyhow::Result<Resolved> {
+    resolve_at(&config_path())
 }
 
 /// The file's text without a leading UTF-8 BOM, which Windows tools (PowerShell 5.1's
@@ -55,7 +89,14 @@ pub fn persist_backends(path: &Path, config: &DaemonConfig) -> anyhow::Result<()
                 path.display()
             ),
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::to_value(config)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut v = serde_json::to_value(config)?;
+            // The resolved database path is not a setting: leave it to the default.
+            if let Some(o) = v.as_object_mut() {
+                o.remove("db_path");
+            }
+            v
+        }
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
     // On load `backends` wins over the legacy `backend` and `interface` keys, which stay.

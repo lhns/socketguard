@@ -87,6 +87,39 @@ impl Drop for Engine {
     }
 }
 
+/// The value of `FWPM_ENGINE_COLLECT_NET_EVENTS`, if it can be read.
+fn read_collect_net_events(e: &Engine) -> Option<u32> {
+    let mut v: *mut FWP_VALUE0 = std::ptr::null_mut();
+    let rc = unsafe { FwpmEngineGetOption0(e.0, FWPM_ENGINE_COLLECT_NET_EVENTS, &mut v) };
+    if rc != 0 || v.is_null() {
+        return None;
+    }
+    let out = unsafe {
+        if (*v).r#type == FWP_UINT32 {
+            Some((*v).Anonymous.uint32)
+        } else {
+            None
+        }
+    };
+    unsafe { FwpmFreeMemory0(&mut v as *mut _ as *mut *mut c_void) };
+    out
+}
+
+fn set_collect_net_events(e: &Engine, value: u32) -> Result<()> {
+    let v = FWP_VALUE0 {
+        r#type: FWP_UINT32,
+        Anonymous: FWP_VALUE0_0 { uint32: value },
+    };
+    check("FwpmEngineSetOption0", unsafe {
+        FwpmEngineSetOption0(e.0, FWPM_ENGINE_COLLECT_NET_EVENTS, &v)
+    })
+}
+
+/// Put `FWPM_ENGINE_COLLECT_NET_EVENTS` back to the value recorded before SocketGuard set it.
+pub fn restore_collect_net_events(prior: u32) -> Result<()> {
+    set_collect_net_events(&Engine::open()?, prior)
+}
+
 /// A transaction that aborts unless committed.
 struct Txn<'a> {
     engine: &'a Engine,
@@ -547,13 +580,10 @@ impl Firewall for WfpFirewall {
         }
         // Dedicated handle, kept for the lifetime of the subscription.
         let engine = Engine::open()?;
-        let one = FWP_VALUE0 {
-            r#type: FWP_UINT32,
-            Anonymous: FWP_VALUE0_0 { uint32: 1 },
-        };
-        check("FwpmEngineSetOption0", unsafe {
-            FwpmEngineSetOption0(engine.0, FWPM_ENGINE_COLLECT_NET_EVENTS, &one)
-        })?;
+        // The option was not ours before: remember its value (once) so uninstall can put it
+        // back. A value that cannot be read is recorded as unknown and never restored.
+        crate::install::record_wfp_option_once(read_collect_net_events(&engine));
+        set_collect_net_events(&engine, 1)?;
         if let Err(err) = self.refresh_filter_map(&engine) {
             tracing::warn!("could not load drop attribution map: {err:#}");
         }

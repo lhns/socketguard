@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { api, type ApplyResponse, type ExportDocument } from "../api";
-import { errorText } from "../lib";
+import { errorText, saveTextFile } from "../lib";
 import { useApplyState } from "../queries";
 import ConfirmDialog from "./ConfirmDialog";
 import { useToast } from "./Toast";
@@ -28,12 +28,7 @@ export default function ExportSection() {
   const download = () => {
     if (exported === null) return;
     try {
-      const url = URL.createObjectURL(new Blob([exported], { type: "application/json" }));
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "socketguard-export.json";
-      a.click();
-      URL.revokeObjectURL(url);
+      saveTextFile(exported, "socketguard-export.json");
     } catch {
       toast.error("Could not save the file; copy the text instead.");
     }

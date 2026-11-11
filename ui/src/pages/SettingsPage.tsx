@@ -3,6 +3,7 @@ import { toDaemonError, type LockoutRiskInfo } from "../api";
 import ConfirmDialog from "../components/ConfirmDialog";
 import ExportSection from "../components/ExportSection";
 import NetworksSection from "../components/NetworksSection";
+import RemoveDialog from "../components/RemoveDialog";
 import { useToast } from "../components/Toast";
 import { errorText } from "../lib";
 import { useNav } from "../nav";
@@ -36,6 +37,7 @@ function DangerZone() {
   const toast = useToast();
   const setEnabled = useSetEnabled();
   const [confirmOff, setConfirmOff] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const s = status.data;
 
   return (
@@ -74,6 +76,11 @@ function DangerZone() {
       ) : (
         <p className="muted">Daemon not reachable.</p>
       )}
+      {/* Removal runs the daemon's own uninstall, so it does not need the API. */}
+      <div className="actions">
+        <button className="btn btn-danger" onClick={() => setRemoving(true)}>Remove SocketGuard…</button>
+      </div>
+      {removing && <RemoveDialog onCancel={() => setRemoving(false)} />}
       {confirmOff && (
         <ConfirmDialog
           title="Turn SocketGuard off?"

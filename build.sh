@@ -20,6 +20,9 @@ if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
     fi
 fi
 
+echo "=== Checking versions ==="
+bash deploy/ci/check-version.sh
+
 if command -v npm.cmd &>/dev/null; then NPM="npm.cmd"; else NPM="npm"; fi
 
 echo "=== Building frontend ==="

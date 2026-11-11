@@ -162,3 +162,64 @@ describe("pending enforcement (HTTP 202)", () => {
     expect(await screen.findByText(/tor is down/)).toBeInTheDocument();
   });
 });
+
+describe("the service cannot be used", () => {
+  const run = (command: string, exit_code = 0) => ({ launched: true, cancelled: false, exit_code, command });
+  const failing = (code: string) => () => {
+    throw { code, message: "Cannot reach the daemon at the socket", details: { hint: "Make sure the service is running." } };
+  };
+
+  it("not installed: offers to install the service and shows the exact command", async () => {
+    const d = setup({ status: failing("connection"), service_status: () => ({ installed: false, running: false }), install_service: () => run("socketguard-daemon service install") });
+    const user = userEvent.setup();
+    renderWithProviders(<App />);
+    const alert = await screen.findByRole("alert");
+    expect(await within(alert).findByText(/service is not installed/)).toBeInTheDocument();
+    expect(alert).toHaveTextContent("socketguard-daemon service install");
+    await user.click(within(alert).getByRole("button", { name: "Install the service" }));
+    await waitFor(() => expect(d.count("install_service")).toBe(1));
+    expect(d.count("start_daemon")).toBe(0);
+  });
+
+  it("installed but stopped: offers Start", async () => {
+    const d = setup({ status: failing("connection"), service_status: () => ({ installed: true, running: false }), start_daemon: () => run("socketguard-daemon service start") });
+    const user = userEvent.setup();
+    renderWithProviders(<App />);
+    const alert = await screen.findByRole("alert");
+    expect(await within(alert).findByText(/installed but stopped/)).toBeInTheDocument();
+    expect(alert).toHaveTextContent("socketguard-daemon service start");
+    expect(within(alert).queryByRole("button", { name: "Install the service" })).not.toBeInTheDocument();
+    await user.click(within(alert).getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(d.count("start_daemon")).toBe(1));
+  });
+
+  it("running but this account has no access: offers Allow my account, then says to sign in again", async () => {
+    const d = setup({
+      status: failing("permission_denied"),
+      service_status: () => ({ installed: true, running: true }),
+      current_account: () => "CORP\\pierre",
+      allow_my_account: () => run("socketguard-daemon access allow CORP\\pierre"),
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<App />);
+    const alert = await screen.findByRole("alert");
+    expect(await within(alert).findByText(/this account may not use it/)).toBeInTheDocument();
+    expect(await within(alert).findByText("socketguard-daemon access allow CORP\\pierre")).toBeInTheDocument();
+    await user.click(within(alert).getByRole("button", { name: "Allow my account" }));
+    await waitFor(() => expect(d.count("allow_my_account")).toBe(1));
+    expect(await within(alert).findByText(/Sign out of this computer and sign in again/)).toBeInTheDocument();
+  });
+
+  it("a declined administrator prompt changes nothing and says so", async () => {
+    setup({
+      status: failing("connection"),
+      service_status: () => ({ installed: true, running: false }),
+      start_daemon: () => ({ launched: true, cancelled: true, exit_code: null, command: "socketguard-daemon service start" }),
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<App />);
+    const alert = await screen.findByRole("alert");
+    await user.click(await within(alert).findByRole("button", { name: "Start" }));
+    expect(await within(alert).findByText(/Cancelled: nothing was changed/)).toBeInTheDocument();
+  });
+});

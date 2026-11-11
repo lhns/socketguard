@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import SettingsPage from "./SettingsPage";
-import { mockDaemon, renderWithProviders, settings, status } from "../test/helpers";
+import { memoryStorage, mockDaemon, renderWithProviders, settings, status } from "../test/helpers";
 
 const risk = {
   process_name: "sshd",
@@ -121,5 +121,73 @@ describe("Settings page", () => {
     renderWithProviders(<SettingsPage />);
     expect(await screen.findByText(/Rules from an earlier install are active, but this database doesn't know them/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Adopt them and turn on" })).toBeInTheDocument();
+  });
+
+  describe("Remove SocketGuard", () => {
+    const ok = { launched: true, cancelled: false, exit_code: 0, command: "x" };
+    const open = async (user: ReturnType<typeof userEvent.setup>) => {
+      await user.click(await screen.findByRole("button", { name: "Remove SocketGuard…" }));
+      return screen.findByRole("dialog", { name: "Remove SocketGuard?" });
+    };
+
+    it("explains what goes, keeps settings by default, runs the uninstall with --keep-data, then clears the window and closes", async () => {
+      vi.stubGlobal("localStorage", memoryStorage());
+      localStorage.setItem("socketguard.columns", '["p1"]');
+      const d = mockDaemon({ remove_socketguard: () => ok, clear_local_ui_settings: () => undefined, quit_app: () => undefined });
+      const user = userEvent.setup();
+      renderWithProviders(<SettingsPage />);
+      const dialog = await open(user);
+      expect(dialog).toHaveTextContent(/firewall rules/);
+      expect(dialog).toHaveTextContent(/service/);
+      expect(dialog).toHaveTextContent(/access group, if SocketGuard created it/);
+      expect(dialog).toHaveTextContent(/network setup/);
+      expect(within(dialog).getByRole("checkbox", { name: "Also delete settings and keys?" })).not.toBeChecked();
+      expect(dialog).toHaveTextContent("socketguard-daemon uninstall --yes --keep-data");
+      expect(dialog).toHaveTextContent("Onion addresses cannot be recovered.");
+      await user.click(within(dialog).getByRole("button", { name: "Remove SocketGuard" }));
+      await waitFor(() => expect(d.count("quit_app")).toBe(1));
+      expect(d.last("remove_socketguard")?.args).toEqual({ purge: false });
+      expect(localStorage.getItem("socketguard.columns")).toBeNull();
+      vi.unstubAllGlobals();
+      expect(d.calls.map((c) => c.cmd).filter((c) => ["remove_socketguard", "clear_local_ui_settings", "quit_app"].includes(c))).toEqual([
+        "remove_socketguard", "clear_local_ui_settings", "quit_app",
+      ]);
+    });
+
+    it("deleting settings and keys runs the uninstall with --purge", async () => {
+      const d = mockDaemon({ remove_socketguard: () => ok, clear_local_ui_settings: () => undefined, quit_app: () => undefined });
+      const user = userEvent.setup();
+      renderWithProviders(<SettingsPage />);
+      const dialog = await open(user);
+      await user.click(within(dialog).getByRole("checkbox", { name: "Also delete settings and keys?" }));
+      expect(dialog).toHaveTextContent("socketguard-daemon uninstall --yes --purge");
+      await user.click(within(dialog).getByRole("button", { name: "Remove SocketGuard" }));
+      await waitFor(() => expect(d.count("quit_app")).toBe(1));
+      expect(d.last("remove_socketguard")?.args).toEqual({ purge: true });
+    });
+
+    it("Export first saves the export and removes nothing", async () => {
+      vi.stubGlobal("URL", { ...URL, createObjectURL: () => "blob:x", revokeObjectURL: () => {} });
+      const d = mockDaemon({ export_state: () => ({ version: 1 }) });
+      const user = userEvent.setup();
+      renderWithProviders(<SettingsPage />);
+      const dialog = await open(user);
+      await user.click(within(dialog).getByRole("button", { name: "Export first" }));
+      await waitFor(() => expect(d.count("export_state")).toBe(1));
+      expect(await within(dialog).findByText(/Saved socketguard-export.json/)).toBeInTheDocument();
+      expect(d.count("remove_socketguard")).toBe(0);
+      vi.unstubAllGlobals();
+    });
+
+    it("a failed uninstall keeps the window open and does not clear its settings", async () => {
+      const d = mockDaemon({ remove_socketguard: () => ({ ...ok, exit_code: 1 }), clear_local_ui_settings: () => undefined, quit_app: () => undefined });
+      const user = userEvent.setup();
+      renderWithProviders(<SettingsPage />);
+      const dialog = await open(user);
+      await user.click(within(dialog).getByRole("button", { name: "Remove SocketGuard" }));
+      expect(await within(dialog).findByText(/exit code 1/)).toBeInTheDocument();
+      expect(d.count("clear_local_ui_settings")).toBe(0);
+      expect(d.count("quit_app")).toBe(0);
+    });
   });
 });

@@ -85,6 +85,28 @@ pub(super) fn precreate_protected(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Protect a directory SocketGuard created (ADR 0050): Unix mode 0755 for `shared` (the
+/// config directory), 0700 otherwise; on Windows the directory gets the SYSTEM and
+/// Administrators only ACL. Files inside keep their own protection.
+pub fn protect_dir(path: &Path, shared: bool) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if shared { 0o755 } else { 0o700 };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(windows)]
+    {
+        let _ = shared;
+        enforce_protected(super::winacl::protect(path), path)?;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, shared);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
