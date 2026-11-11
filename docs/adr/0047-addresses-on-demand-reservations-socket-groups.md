@@ -70,3 +70,15 @@ One type says which sockets of an app are meant: `Scope = All | Port(port, proto
 - **Wording.** Frontends call scope `All` the built-in socket group "All sockets". A detected socket and a socket group are the same kind of row inside an app, and a tag always sits on one of these rows; tagging an app means tagging its "All sockets".
 - **An address belongs to a row, and a row gets one when a grant names it.** This replaces "one for the app once a grant covers the app". "All sockets" gets its address when a grant names "All sockets" (directly, or through a tag member with that scope); a socket or socket group gets its own when a grant names it. A socket that is only covered by an "All sockets" grant has no address of its own and is reached on that one.
 - **A reservation takes several bindings.** Each binding is a row of an app or a tag, so one reserved address can front sockets of several apps, like one IPv4 address in front of several services. Ports are not remapped. A port is served for the app that is detected on it; an undetected port that only one binding claims follows that binding, and one that several bindings claim stays closed until an app is detected on it.
+
+## Amendment (2026-11-11): when an address is up, in one place
+
+This settles the rules where the text above and the first amendment disagree. Where they differ, this section holds.
+
+- **Automatic address:** exists for a row that a grant names, on each network where that grant applies, and is up only while named. When the last naming grant goes, it is taken down but remembered, so the row gets the same address back.
+- **Reservation:** up while a grant covers anything it serves, named or not. A row bound to a reservation gets no automatic address on that network.
+- **What a tag grant names:** the row of each member (the member's scope). A port or socket group on the tag grant only limits which ports are let in; it names no other row.
+- **A reservation is one address on one network,** chosen when it is created.
+- **Shared reservations on Tor:** a service admits a client only if its grants cover every published port (ADR 0039). A reserved onion address that fronts several apps therefore admits only clients granted on all of them. Frontends show the existing note; use one reservation per app on Tor.
+- **Migration:** an existing address that a grant names stays as the automatic address of its row. One that a grant covers without naming it (a port grant on an app address) becomes a reservation on its row, so no address in use changes. One that no grant covers is remembered and taken down.
+- **`move_app`:** grants the target already has are skipped (ADR 0041); a socket group used by a moved grant, tag member or address is attached to the target; port scopes move as they are.
