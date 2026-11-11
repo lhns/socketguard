@@ -12,11 +12,15 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceCmd {
-    Install { no_start: bool },
+    Install {
+        no_start: bool,
+    },
     Uninstall,
     Start,
     Stop,
-    Status { json: bool },
+    Status {
+        json: bool,
+    },
     /// Windows: started by the service control manager.
     Run,
 }
@@ -32,7 +36,9 @@ pub enum AccessCmd {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Run,
-    Disable { force: bool },
+    Disable {
+        force: bool,
+    },
     Service(ServiceCmd),
     Access(AccessCmd),
     Uninstall {
@@ -124,7 +130,13 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             if purge && keep_data {
                 return Err("--purge and --keep-data contradict each other".into());
             }
-            Ok(Command::Uninstall { purge, keep_data, yes, force, export })
+            Ok(Command::Uninstall {
+                purge,
+                keep_data,
+                yes,
+                force,
+                export,
+            })
         }
         [x, ..] => Err(unknown(x)),
     }
@@ -141,16 +153,31 @@ mod tests {
     #[test]
     fn the_grammar() {
         assert_eq!(p("").unwrap(), Command::Run);
-        assert_eq!(p("--disable --force").unwrap(), Command::Disable { force: true });
+        assert_eq!(
+            p("--disable --force").unwrap(),
+            Command::Disable { force: true }
+        );
         assert_eq!(
             p("service install --no-start").unwrap(),
             Command::Service(ServiceCmd::Install { no_start: true })
         );
-        assert_eq!(p("service status --json").unwrap(), Command::Service(ServiceCmd::Status { json: true }));
-        assert_eq!(p("access allow alice").unwrap(), Command::Access(AccessCmd::Allow("alice".into())));
+        assert_eq!(
+            p("service status --json").unwrap(),
+            Command::Service(ServiceCmd::Status { json: true })
+        );
+        assert_eq!(
+            p("access allow alice").unwrap(),
+            Command::Access(AccessCmd::Allow("alice".into()))
+        );
         assert_eq!(
             p("uninstall --purge --yes --export out.json").unwrap(),
-            Command::Uninstall { purge: true, keep_data: false, yes: true, force: false, export: Some("out.json".into()) }
+            Command::Uninstall {
+                purge: true,
+                keep_data: false,
+                yes: true,
+                force: false,
+                export: Some("out.json".into())
+            }
         );
         assert!(p("uninstall --purge --keep-data").is_err());
         assert!(p("uninstall --export").is_err());

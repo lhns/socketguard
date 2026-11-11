@@ -23,15 +23,26 @@ pub fn resolve_for_run() -> Result<Resolved> {
                 install::prepare_dirs(&path, &db, &record)?;
                 let moves = legacy::migrate(&cwd, &path, &db)?;
                 for m in &moves {
-                    eprintln!("[socketguard] Moved {} to {}", m.from.display(), m.to.display());
+                    eprintln!(
+                        "[socketguard] Moved {} to {}",
+                        m.from.display(),
+                        m.to.display()
+                    );
                 }
             }
         }
     }
     let resolved = config_file::resolve_at(&path)?;
-    install::prepare_dirs(&resolved.config_path, &resolved.db_path, &Record::for_config(&resolved.config_path))?;
+    install::prepare_dirs(
+        &resolved.config_path,
+        &resolved.db_path,
+        &Record::for_config(&resolved.config_path),
+    )?;
     if resolved.file_exists {
-        eprintln!("[socketguard] Loaded config from {}", resolved.config_path.display());
+        eprintln!(
+            "[socketguard] Loaded config from {}",
+            resolved.config_path.display()
+        );
     } else {
         eprintln!(
             "[socketguard] No config file at {}, using defaults",
@@ -61,7 +72,10 @@ pub async fn signal_shutdown() {
     }
 }
 
-pub async fn run(resolved: Resolved, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
+pub async fn run(
+    resolved: Resolved,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     let config = resolved.config;
     install::set_record_path(&resolved.config_path);
 

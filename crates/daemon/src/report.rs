@@ -67,7 +67,11 @@ impl Report {
     pub fn render(&self) -> String {
         let mut out = String::new();
         for i in &self.items {
-            let note = i.note.as_deref().map(|n| format!(" ({n})")).unwrap_or_default();
+            let note = i
+                .note
+                .as_deref()
+                .map(|n| format!(" ({n})"))
+                .unwrap_or_default();
             match &i.outcome {
                 Outcome::Removed => out.push_str(&format!("removed         {}{note}\n", i.what)),
                 Outcome::Absent => out.push_str(&format!("already absent  {}{note}\n", i.what)),

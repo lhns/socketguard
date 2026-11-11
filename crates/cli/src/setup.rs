@@ -141,7 +141,11 @@ fn read_log(r: &dyn SetupRunner, path: &Path) -> Result<Vec<Entry>> {
 }
 
 fn write_log(r: &mut dyn SetupRunner, path: &Path, config: &Path, entries: &[Entry]) -> Result<()> {
-    r.write_file_like(path, &socketguard_core::install_log::render(entries), config)
+    r.write_file_like(
+        path,
+        &socketguard_core::install_log::render(entries),
+        config,
+    )
 }
 
 struct Ctx<'a, R: SetupRunner, A: DaemonApi> {
@@ -173,8 +177,7 @@ impl<R: SetupRunner, A: DaemonApi> Ctx<'_, R, A> {
     /// Remember a change so `--undo` can reverse it; written at once, so a run that stops
     /// half way is still recorded.
     fn record(&mut self, change: Change) -> Result<()> {
-        self.log
-            .push(Entry::now(Some(self.kind), change));
+        self.log.push(Entry::now(Some(self.kind), change));
         write_log(
             &mut *self.run,
             &log_path(&self.config),
@@ -1074,7 +1077,11 @@ pub async fn undo<R: SetupRunner, A: DaemonApi>(
         run.say("Not confirmed; nothing changed.");
         return Ok(());
     }
-    let mut kept: Vec<Entry> = all.iter().filter(|e| e.kind != Some(kind)).cloned().collect();
+    let mut kept: Vec<Entry> = all
+        .iter()
+        .filter(|e| e.kind != Some(kind))
+        .cloned()
+        .collect();
     let mut failed = Vec::new();
     let mut keep_mine = Vec::new();
     for e in &mine {

@@ -54,13 +54,19 @@ pub fn strictly_inside(p: &Path, root: &Path) -> bool {
     p != root
         && p.is_absolute()
         && p.starts_with(root)
-        && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
+        && !p
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
 const DATA_QUESTION: &str = "Also delete settings and keys? Onion addresses cannot be recovered; \
 the export does not contain the onion private keys. [y/N]";
 
-pub async fn uninstall(deps: Deps<'_>, opts: &UninstallOptions, paths: &UninstallPaths) -> Result<Report> {
+pub async fn uninstall(
+    deps: Deps<'_>,
+    opts: &UninstallOptions,
+    paths: &UninstallPaths,
+) -> Result<Report> {
     let Deps {
         host,
         mgr,
@@ -89,7 +95,9 @@ pub async fn uninstall(deps: Deps<'_>, opts: &UninstallOptions, paths: &Uninstal
     let incomplete = !disabled.complete();
     report.extend(disabled);
     if incomplete && !opts.force {
-        report.note("Stopped before removing anything else; fix what is LEFT, or run again with --force.");
+        report.note(
+            "Stopped before removing anything else; fix what is LEFT, or run again with --force.",
+        );
         return Ok(report);
     }
 
@@ -128,7 +136,8 @@ pub async fn uninstall(deps: Deps<'_>, opts: &UninstallOptions, paths: &Uninstal
     let mut delete = opts.purge;
     if !opts.purge && !opts.keep_data && host.interactive() && !opts.yes {
         delete = host.confirm(DATA_QUESTION);
-        if delete && opts.export.is_none() && host.confirm("Write an export of the settings first?") {
+        if delete && opts.export.is_none() && host.confirm("Write an export of the settings first?")
+        {
             let target = PathBuf::from(format!(
                 "socketguard-export-{}.json",
                 chrono::Utc::now().format("%Y%m%d-%H%M%S")
@@ -170,7 +179,10 @@ pub async fn uninstall(deps: Deps<'_>, opts: &UninstallOptions, paths: &Uninstal
             remove_named(&mut report, f);
         }
     } else {
-        report.kept("settings and keys (database, config)", "kept; remove them with `uninstall --purge`");
+        report.kept(
+            "settings and keys (database, config)",
+            "kept; remove them with `uninstall --purge`",
+        );
     }
 
     // Owned directories (a child process's data), then the directories we created.
@@ -179,12 +191,18 @@ pub async fn uninstall(deps: Deps<'_>, opts: &UninstallOptions, paths: &Uninstal
             Change::OwnedDirectory { path } => {
                 let p = Path::new(path);
                 if !delete {
-                    report.kept(format!("directory {path}"), "holds node keys; kept with the data");
+                    report.kept(
+                        format!("directory {path}"),
+                        "holds node keys; kept with the data",
+                    );
                     kept_entries.push(e.clone());
                 } else if !strictly_inside(p, &paths.state_dir) {
                     report.left(
                         format!("directory {path}"),
-                        format!("refused: not strictly inside the state directory {}", paths.state_dir.display()),
+                        format!(
+                            "refused: not strictly inside the state directory {}",
+                            paths.state_dir.display()
+                        ),
                     );
                     kept_entries.push(e.clone());
                 } else {
@@ -199,7 +217,9 @@ pub async fn uninstall(deps: Deps<'_>, opts: &UninstallOptions, paths: &Uninstal
             }
             Change::DirectoryCreated { path } => match std::fs::remove_dir(path) {
                 Ok(()) => report.removed(format!("directory {path}")),
-                Err(x) if x.kind() == std::io::ErrorKind::NotFound => report.absent(format!("directory {path}")),
+                Err(x) if x.kind() == std::io::ErrorKind::NotFound => {
+                    report.absent(format!("directory {path}"))
+                }
                 Err(x) => {
                     kept_entries.push(e.clone());
                     if delete {
@@ -257,7 +277,9 @@ pub fn named_files(paths: &UninstallPaths) -> Vec<PathBuf> {
 }
 
 fn list_prefixed(dir: &Path, prefix: &str) -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
     let mut v: Vec<PathBuf> = rd
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
@@ -314,7 +336,12 @@ mod tests {
         ] {
             std::fs::write(f, "x").unwrap();
         }
-        World { d, config, db, state }
+        World {
+            d,
+            config,
+            db,
+            state,
+        }
     }
 
     fn paths(w: &World) -> UninstallPaths {
@@ -328,7 +355,12 @@ mod tests {
 
     fn record(w: &World, changes: Vec<Change>) {
         Record::for_config(&w.config)
-            .write(&changes.into_iter().map(|c| Entry::now(None, c)).collect::<Vec<_>>())
+            .write(
+                &changes
+                    .into_iter()
+                    .map(|c| Entry::now(None, c))
+                    .collect::<Vec<_>>(),
+            )
             .unwrap();
     }
 
@@ -379,27 +411,59 @@ mod tests {
         record(
             &w,
             vec![
-                Change::DirectoryCreated { path: w.state.display().to_string() },
-                Change::DirectoryCreated { path: w.d.join("etc").display().to_string() },
-                Change::AccessGroup { name: "socketguard".into(), created: true },
-                Change::ServiceRegistered { name: "fake-service".into(), manager: "fake".into() },
+                Change::DirectoryCreated {
+                    path: w.state.display().to_string(),
+                },
+                Change::DirectoryCreated {
+                    path: w.d.join("etc").display().to_string(),
+                },
+                Change::AccessGroup {
+                    name: "socketguard".into(),
+                    created: true,
+                },
+                Change::ServiceRegistered {
+                    name: "fake-service".into(),
+                    manager: "fake".into(),
+                },
             ],
         );
         let mut host = FakeHost::new("linux");
-        let mut mgr = FakeServiceManager { installed: true, running: true, ..Default::default() };
+        let mut mgr = FakeServiceManager {
+            installed: true,
+            running: true,
+            ..Default::default()
+        };
         let mut groups = FakeGroups::default();
         groups.groups.insert("socketguard".into(), vec![]);
         let order = RefCell::new(vec![]);
         let report = run(
-            &w, &mut host, &mut mgr, &mut groups,
-            UninstallOptions { purge: true, yes: true, ..Default::default() },
-            Report::default(), &order,
-        ).await.unwrap();
+            &w,
+            &mut host,
+            &mut mgr,
+            &mut groups,
+            UninstallOptions {
+                purge: true,
+                yes: true,
+                ..Default::default()
+            },
+            Report::default(),
+            &order,
+        )
+        .await
+        .unwrap();
         let text = report.render();
         // The unrelated files stay, so both recorded directories are not empty: LEFT, not deleted.
         assert_eq!(names(&w.state), ["unrelated-too.txt"], "{text}");
-        assert_eq!(names(&w.d.join("etc")), ["unrelated.txt"], "{text}");
-        assert!(!report.complete(), "a directory with a stranger's file is reported:\n{text}");
+        // The record stays while a recorded directory is LEFT, so a later run can finish.
+        assert_eq!(
+            names(&w.d.join("etc")),
+            ["setup-log.json", "unrelated.txt"],
+            "{text}"
+        );
+        assert!(
+            !report.complete(),
+            "a directory with a stranger's file is reported:\n{text}"
+        );
         assert_eq!(mgr.calls.first().map(String::as_str), Some("stop"));
         assert!(!mgr.installed);
         assert!(groups.groups.is_empty());
@@ -412,14 +476,33 @@ mod tests {
         std::fs::remove_file(w.d.join("etc").join("unrelated.txt")).unwrap();
         std::fs::remove_file(w.state.join("unrelated-too.txt")).unwrap();
         // Only the state directory is recorded as created by us.
-        record(&w, vec![Change::DirectoryCreated { path: w.state.display().to_string() }]);
-        let (mut host, mut mgr, mut groups) = (FakeHost::new("linux"), FakeServiceManager::default(), FakeGroups::default());
+        record(
+            &w,
+            vec![Change::DirectoryCreated {
+                path: w.state.display().to_string(),
+            }],
+        );
+        let (mut host, mut mgr, mut groups) = (
+            FakeHost::new("linux"),
+            FakeServiceManager::default(),
+            FakeGroups::default(),
+        );
         let order = RefCell::new(vec![]);
         let report = run(
-            &w, &mut host, &mut mgr, &mut groups,
-            UninstallOptions { purge: true, yes: true, ..Default::default() },
-            Report::default(), &order,
-        ).await.unwrap();
+            &w,
+            &mut host,
+            &mut mgr,
+            &mut groups,
+            UninstallOptions {
+                purge: true,
+                yes: true,
+                ..Default::default()
+            },
+            Report::default(),
+            &order,
+        )
+        .await
+        .unwrap();
         assert!(report.complete(), "{}", report.render());
         assert!(!w.state.exists());
         assert!(w.d.join("etc").exists(), "not recorded, so not removed");
@@ -429,10 +512,29 @@ mod tests {
     #[tokio::test]
     async fn non_interactive_without_flags_keeps_the_data_and_the_record_of_directories() {
         let w = world();
-        record(&w, vec![Change::DirectoryCreated { path: w.state.display().to_string() }]);
-        let (mut host, mut mgr, mut groups) = (FakeHost::new("linux"), FakeServiceManager::default(), FakeGroups::default());
+        record(
+            &w,
+            vec![Change::DirectoryCreated {
+                path: w.state.display().to_string(),
+            }],
+        );
+        let (mut host, mut mgr, mut groups) = (
+            FakeHost::new("linux"),
+            FakeServiceManager::default(),
+            FakeGroups::default(),
+        );
         let order = RefCell::new(vec![]);
-        let report = run(&w, &mut host, &mut mgr, &mut groups, UninstallOptions::default(), Report::default(), &order).await.unwrap();
+        let report = run(
+            &w,
+            &mut host,
+            &mut mgr,
+            &mut groups,
+            UninstallOptions::default(),
+            Report::default(),
+            &order,
+        )
+        .await
+        .unwrap();
         assert!(report.complete(), "{}", report.render());
         assert!(w.db.exists() && w.config.exists());
         assert!(host.questions.is_empty(), "no prompt without a terminal");
@@ -444,14 +546,28 @@ mod tests {
     #[tokio::test]
     async fn an_interactive_run_asks_offers_an_export_and_deletes_only_on_yes() {
         let w = world();
-        let (mut host, mut mgr, mut groups) = (FakeHost::new("linux"), FakeServiceManager::default(), FakeGroups::default());
+        let (mut host, mut mgr, mut groups) = (
+            FakeHost::new("linux"),
+            FakeServiceManager::default(),
+            FakeGroups::default(),
+        );
         host.interactive = true;
         host.answers_yes = true;
         let order = RefCell::new(vec![]);
         // The export lands in the working directory by default; give the test its own.
         let before = std::env::current_dir().unwrap();
         std::env::set_current_dir(&w.d).unwrap();
-        let report = run(&w, &mut host, &mut mgr, &mut groups, UninstallOptions::default(), Report::default(), &order).await.unwrap();
+        let report = run(
+            &w,
+            &mut host,
+            &mut mgr,
+            &mut groups,
+            UninstallOptions::default(),
+            Report::default(),
+            &order,
+        )
+        .await
+        .unwrap();
         std::env::set_current_dir(before).unwrap();
         assert!(host.questions[0].contains("Also delete settings and keys?"));
         assert!(host.questions[0].contains("Onion addresses cannot be recovered"));
@@ -461,10 +577,24 @@ mod tests {
         std::fs::remove_dir_all(w.d).unwrap();
 
         let w = world();
-        let (mut host, mut mgr, mut groups) = (FakeHost::new("linux"), FakeServiceManager::default(), FakeGroups::default());
+        let (mut host, mut mgr, mut groups) = (
+            FakeHost::new("linux"),
+            FakeServiceManager::default(),
+            FakeGroups::default(),
+        );
         host.interactive = true;
         let order = RefCell::new(vec![]);
-        run(&w, &mut host, &mut mgr, &mut groups, UninstallOptions::default(), Report::default(), &order).await.unwrap();
+        run(
+            &w,
+            &mut host,
+            &mut mgr,
+            &mut groups,
+            UninstallOptions::default(),
+            Report::default(),
+            &order,
+        )
+        .await
+        .unwrap();
         assert!(w.db.exists(), "default is no");
         std::fs::remove_dir_all(w.d).unwrap();
     }
@@ -472,16 +602,59 @@ mod tests {
     #[tokio::test]
     async fn disable_runs_after_the_stop_and_a_left_item_stops_everything_unless_forced() {
         let w = world();
-        record(&w, vec![Change::ServiceRegistered { name: "fake-service".into(), manager: "fake".into() }]);
+        record(
+            &w,
+            vec![Change::ServiceRegistered {
+                name: "fake-service".into(),
+                manager: "fake".into(),
+            }],
+        );
         let mut left = Report::default();
         left.left("address fd00::1 on lo", "busy");
-        let (mut host, mut mgr, mut groups) = (FakeHost::new("linux"), FakeServiceManager { installed: true, ..Default::default() }, FakeGroups::default());
+        let (mut host, mut mgr, mut groups) = (
+            FakeHost::new("linux"),
+            FakeServiceManager {
+                installed: true,
+                ..Default::default()
+            },
+            FakeGroups::default(),
+        );
         let order = RefCell::new(vec![]);
-        let report = run(&w, &mut host, &mut mgr, &mut groups, UninstallOptions { purge: true, ..Default::default() }, left.clone(), &order).await.unwrap();
+        let report = run(
+            &w,
+            &mut host,
+            &mut mgr,
+            &mut groups,
+            UninstallOptions {
+                purge: true,
+                ..Default::default()
+            },
+            left.clone(),
+            &order,
+        )
+        .await
+        .unwrap();
         assert!(!report.complete());
-        assert!(mgr.installed, "the service registration stays when disable left something");
+        assert!(
+            mgr.installed,
+            "the service registration stays when disable left something"
+        );
         assert!(w.db.exists());
-        let report = run(&w, &mut host, &mut mgr, &mut groups, UninstallOptions { purge: true, force: true, ..Default::default() }, left, &order).await.unwrap();
+        let report = run(
+            &w,
+            &mut host,
+            &mut mgr,
+            &mut groups,
+            UninstallOptions {
+                purge: true,
+                force: true,
+                ..Default::default()
+            },
+            left,
+            &order,
+        )
+        .await
+        .unwrap();
         assert!(!mgr.installed && !w.db.exists());
         assert!(!report.complete(), "still non-zero: the address is LEFT");
         std::fs::remove_dir_all(w.d).unwrap();
@@ -490,20 +663,39 @@ mod tests {
     #[tokio::test]
     async fn a_daemon_that_still_answers_and_a_missing_administrator_right_refuse() {
         let w = world();
-        let (mut host, mut mgr, mut groups) = (FakeHost::new("linux"), FakeServiceManager::default(), FakeGroups::default());
+        let (mut host, mut mgr, mut groups) = (
+            FakeHost::new("linux"),
+            FakeServiceManager::default(),
+            FakeGroups::default(),
+        );
         host.elevated = false;
         let order = RefCell::new(vec![]);
-        assert!(run(&w, &mut host, &mut mgr, &mut groups, UninstallOptions::default(), Report::default(), &order).await.is_err());
+        assert!(run(
+            &w,
+            &mut host,
+            &mut mgr,
+            &mut groups,
+            UninstallOptions::default(),
+            Report::default(),
+            &order
+        )
+        .await
+        .is_err());
         assert!(mgr.calls.is_empty());
         host.elevated = true;
         let mut plat = FakePlatform::default();
         let deps = Deps {
-            host: &mut host, mgr: &mut mgr, groups: &mut groups, platform: &mut plat,
+            host: &mut host,
+            mgr: &mut mgr,
+            groups: &mut groups,
+            platform: &mut plat,
             api_reachable: &|| true,
             disable: Box::new(|_| Box::pin(async { panic!("must not disable") })),
             export: Box::new(|_| Box::pin(async { Ok(()) })),
         };
-        let err = uninstall(deps, &UninstallOptions::default(), &paths(&w)).await.unwrap_err();
+        let err = uninstall(deps, &UninstallOptions::default(), &paths(&w))
+            .await
+            .unwrap_err();
         assert!(format!("{err}").contains("still answers"));
         std::fs::remove_dir_all(w.d).unwrap();
     }
@@ -518,24 +710,66 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("precious"), "p").unwrap();
         let changes = vec![
-            Change::OwnedDirectory { path: tor.display().to_string() },
-            Change::OwnedDirectory { path: outside.display().to_string() },
-            Change::OwnedDirectory { path: w.state.display().to_string() },
+            Change::OwnedDirectory {
+                path: tor.display().to_string(),
+            },
+            Change::OwnedDirectory {
+                path: outside.display().to_string(),
+            },
+            Change::OwnedDirectory {
+                path: w.state.display().to_string(),
+            },
         ];
         // keep-data: everything stays.
         record(&w, changes.clone());
-        let (mut host, mut mgr, mut groups) = (FakeHost::new("linux"), FakeServiceManager::default(), FakeGroups::default());
+        let (mut host, mut mgr, mut groups) = (
+            FakeHost::new("linux"),
+            FakeServiceManager::default(),
+            FakeGroups::default(),
+        );
         let order = RefCell::new(vec![]);
-        let r = run(&w, &mut host, &mut mgr, &mut groups, UninstallOptions { keep_data: true, ..Default::default() }, Report::default(), &order).await.unwrap();
+        let r = run(
+            &w,
+            &mut host,
+            &mut mgr,
+            &mut groups,
+            UninstallOptions {
+                keep_data: true,
+                ..Default::default()
+            },
+            Report::default(),
+            &order,
+        )
+        .await
+        .unwrap();
         assert!(r.complete() && tor.join("keys").join("k").exists());
         // purge
-        let r = run(&w, &mut host, &mut mgr, &mut groups, UninstallOptions { purge: true, ..Default::default() }, Report::default(), &order).await.unwrap();
+        let r = run(
+            &w,
+            &mut host,
+            &mut mgr,
+            &mut groups,
+            UninstallOptions {
+                purge: true,
+                ..Default::default()
+            },
+            Report::default(),
+            &order,
+        )
+        .await
+        .unwrap();
         let text = r.render();
         assert!(!tor.exists(), "{text}");
-        assert!(outside.join("precious").exists(), "outside the state dir is refused:\n{text}");
+        assert!(
+            outside.join("precious").exists(),
+            "outside the state dir is refused:\n{text}"
+        );
         assert!(w.state.exists(), "the state directory itself is refused");
         assert_eq!(r.left_items().len(), 2, "{text}");
-        assert!(r.items.iter().any(|i| matches!(&i.outcome, Outcome::Left(w) if w.contains("refused"))));
+        assert!(r
+            .items
+            .iter()
+            .any(|i| matches!(&i.outcome, Outcome::Left(w) if w.contains("refused"))));
         std::fs::remove_dir_all(w.d).unwrap();
     }
 

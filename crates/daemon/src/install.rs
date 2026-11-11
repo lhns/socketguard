@@ -47,7 +47,11 @@ impl Record {
         self.write(&all)
     }
     /// Change the first matching entry.
-    pub fn update(&self, same: impl Fn(&Change) -> bool, f: impl FnOnce(&mut Change)) -> Result<()> {
+    pub fn update(
+        &self,
+        same: impl Fn(&Change) -> bool,
+        f: impl FnOnce(&mut Change),
+    ) -> Result<()> {
         let mut all = self.entries()?;
         if let Some(e) = all.iter_mut().find(|e| same(&e.change)) {
             f(&mut e.change);
@@ -113,7 +117,9 @@ pub fn set_record_path(config: &Path) {
 /// Windows: record the value `FWPM_ENGINE_COLLECT_NET_EVENTS` had before the daemon first
 /// set it. Only the first call counts, across restarts.
 pub fn record_wfp_option_once(prior: Option<u32>) {
-    let Some(path) = RECORD_PATH.get() else { return };
+    let Some(path) = RECORD_PATH.get() else {
+        return;
+    };
     let rec = Record::new(path.clone());
     let r = rec.push_once(
         |c| matches!(c, Change::WfpEngineOption { .. }),
@@ -138,7 +144,10 @@ fn has_anchor(text: &str) -> bool {
 }
 
 fn pf_enabled(host: &mut dyn Host) -> Result<bool> {
-    Ok(host.run("pfctl", &["-s", "info"])?.stdout.contains("Status: Enabled"))
+    Ok(host
+        .run("pfctl", &["-s", "info"])?
+        .stdout
+        .contains("Status: Enabled"))
 }
 
 fn write_keep_mode(path: &Path, text: &str) -> Result<()> {
@@ -185,12 +194,18 @@ pub fn ensure_pf_anchor(host: &mut dyn Host, conf: &Path, record: &Record) -> Re
             }
         })?;
         host.run_ok("pfctl", &["-f", &conf.display().to_string()])?;
-        host.say(&format!("Added {PF_ANCHOR_LINE} to {} and loaded it.", conf.display()));
+        host.say(&format!(
+            "Added {PF_ANCHOR_LINE} to {} and loaded it.",
+            conf.display()
+        ));
     }
     if !was_enabled {
         host.run_ok("pfctl", &["-e"])?;
         record.update(same, |c| {
-            if let Change::PfAnchor { pf_enabled_by_us, .. } = c {
+            if let Change::PfAnchor {
+                pf_enabled_by_us, ..
+            } = c
+            {
                 *pf_enabled_by_us = true;
             }
         })?;
@@ -251,11 +266,21 @@ pub fn service_install(
     let (name, manager) = (mgr.service_name(), mgr.manager().to_string());
     record.push_once(
         |c| matches!(c, Change::ServiceRegistered { .. }),
-        Entry::now(None, Change::ServiceRegistered { name: name.clone(), manager }),
+        Entry::now(
+            None,
+            Change::ServiceRegistered {
+                name: name.clone(),
+                manager,
+            },
+        ),
     )?;
     host.say(&format!(
         "SocketGuard is installed as the service {name}{}.",
-        if plan.no_start { " (not started)" } else { " and running" }
+        if plan.no_start {
+            " (not started)"
+        } else {
+            " and running"
+        }
     ));
     Ok(())
 }
@@ -307,20 +332,22 @@ pub fn undo_entry(
 ) -> Report {
     let mut r = Report::default();
     match &e.change {
-        Change::ServiceRegistered { name, .. } => match (mgr.status(), mgr.uninstall(), mgr.status()) {
-            (Ok(before), Ok(()), Ok(after)) => {
-                if after.installed {
-                    r.left(format!("service {name}"), "still registered after removal");
-                } else if before.installed {
-                    r.removed(format!("service {name}"));
-                } else {
-                    r.absent(format!("service {name}"));
+        Change::ServiceRegistered { name, .. } => {
+            match (mgr.status(), mgr.uninstall(), mgr.status()) {
+                (Ok(before), Ok(()), Ok(after)) => {
+                    if after.installed {
+                        r.left(format!("service {name}"), "still registered after removal");
+                    } else if before.installed {
+                        r.removed(format!("service {name}"));
+                    } else {
+                        r.absent(format!("service {name}"));
+                    }
+                }
+                (_, Err(err), _) | (Err(err), _, _) | (_, _, Err(err)) => {
+                    r.left(format!("service {name}"), format!("{err:#}"))
                 }
             }
-            (_, Err(err), _) | (Err(err), _, _) | (_, _, Err(err)) => {
-                r.left(format!("service {name}"), format!("{err:#}"))
-            }
-        },
+        }
         Change::AccessGroup { name, created } => {
             let what = format!("group {name}");
             if !created {
@@ -346,7 +373,10 @@ pub fn undo_entry(
         } => {
             let what = format!("pf anchor line in {conf}");
             if !line_added && !pf_enabled_by_us {
-                r.kept(what, "it was there before SocketGuard, and pf was already enabled");
+                r.kept(
+                    what,
+                    "it was there before SocketGuard, and pf was already enabled",
+                );
             } else {
                 match undo_pf_anchor(host, Path::new(conf), line, *line_added, *pf_enabled_by_us) {
                     Ok(()) => {
@@ -362,17 +392,25 @@ pub fn undo_entry(
         Change::WfpEngineOption { option, prior } => {
             let what = format!("WFP engine option {option}");
             match prior {
-                None => r.kept(what, "its earlier value could not be read, so it is not changed"),
+                None => r.kept(
+                    what,
+                    "its earlier value could not be read, so it is not changed",
+                ),
                 Some(p) => match platform.restore_wfp_option(*p) {
                     Ok(()) => r.removed(format!("{what} (set back to {p})")),
                     Err(err) => r.left(what, format!("{err:#}")),
                 },
             }
         }
-        Change::PackageInstalled { package, uninstall, .. } => {
+        Change::PackageInstalled {
+            package, uninstall, ..
+        } => {
             r.kept(
                 format!("package {package}"),
-                format!("packages are never uninstalled here; to remove it: {}", uninstall.join(" ")),
+                format!(
+                    "packages are never uninstalled here; to remove it: {}",
+                    uninstall.join(" ")
+                ),
             );
         }
         Change::ServiceStarted { service, undo, .. } => {
@@ -388,7 +426,11 @@ pub fn undo_entry(
                 }
             }
         }
-        Change::FileEdited { path, lines, backup } => {
+        Change::FileEdited {
+            path,
+            lines,
+            backup,
+        } => {
             let what = format!("lines added to {path}");
             let res = (|| -> Result<bool> {
                 let p = Path::new(path);
@@ -435,7 +477,9 @@ pub fn undo_entry(
                 Err(err) => r.left(what, format!("{err:#}")),
             }
         }
-        Change::NetworkAdded { id } => r.absent(format!("network {id} in the running daemon (the daemon is stopped)")),
+        Change::NetworkAdded { id } => r.absent(format!(
+            "network {id} in the running daemon (the daemon is stopped)"
+        )),
         Change::DirectoryCreated { .. } | Change::OwnedDirectory { .. } => {}
     }
     r
@@ -486,7 +530,11 @@ mod tests {
                 other => format!("{other:?}"),
             })
             .collect();
-        assert_eq!(kinds, ["dir", "dir", "group created=true", "service"], "{kinds:?}");
+        assert_eq!(
+            kinds,
+            ["dir", "dir", "group created=true", "service"],
+            "{kinds:?}"
+        );
         assert!(mgr.running && mgr.installed);
         assert_eq!(groups.calls, ["create socketguard"]);
         std::fs::remove_dir_all(d).unwrap();
@@ -497,7 +545,9 @@ mod tests {
         let d = tmp();
         let config = d.join("socketguard.json");
         let rec = Record::for_config(&config);
-        assert!(prepare_dirs(&config, &d.join("socketguard.db"), &rec).unwrap().is_empty());
+        assert!(prepare_dirs(&config, &d.join("socketguard.db"), &rec)
+            .unwrap()
+            .is_empty());
         assert!(rec.entries().unwrap().is_empty());
         std::fs::remove_dir_all(d).unwrap();
     }
@@ -538,7 +588,13 @@ mod tests {
         assert!(host.ran("pfctl -e"));
         let entries = rec.entries().unwrap();
         assert_eq!(entries.len(), 1);
-        let Change::PfAnchor { line_added, pf_enabled_before, pf_enabled_by_us, .. } = &entries[0].change else {
+        let Change::PfAnchor {
+            line_added,
+            pf_enabled_before,
+            pf_enabled_by_us,
+            ..
+        } = &entries[0].change
+        else {
             panic!()
         };
         assert!(*line_added && !*pf_enabled_before && *pf_enabled_by_us);
@@ -571,10 +627,17 @@ mod tests {
         ensure_pf_anchor(&mut host, &conf, &rec).unwrap();
         assert!(!host.ran("pfctl -e") && !host.ran("pfctl -f"));
         let e = rec.entries().unwrap();
-        let (mut mgr, mut groups, mut plat) = (FakeServiceManager::default(), FakeGroups::default(), FakePlatform::default());
+        let (mut mgr, mut groups, mut plat) = (
+            FakeServiceManager::default(),
+            FakeGroups::default(),
+            FakePlatform::default(),
+        );
         let r = undo_entry(&mut host, &mut mgr, &mut groups, &mut plat, &e[0]);
         assert!(r.complete());
-        assert_eq!(std::fs::read_to_string(&conf).unwrap(), "anchor \"socketguard\"\n");
+        assert_eq!(
+            std::fs::read_to_string(&conf).unwrap(),
+            "anchor \"socketguard\"\n"
+        );
         std::fs::remove_dir_all(d).unwrap();
     }
 
@@ -585,14 +648,32 @@ mod tests {
         let mut groups = FakeGroups::default();
         groups.groups.insert("socketguard".into(), vec![]);
         let mut plat = FakePlatform::default();
-        let g = Entry::now(None, Change::AccessGroup { name: "socketguard".into(), created: false });
+        let g = Entry::now(
+            None,
+            Change::AccessGroup {
+                name: "socketguard".into(),
+                created: false,
+            },
+        );
         let r = undo_entry(&mut host, &mut mgr, &mut groups, &mut plat, &g);
         assert!(groups.groups.contains_key("socketguard"), "never removed");
         assert!(r.complete());
-        let g = Entry::now(None, Change::AccessGroup { name: "socketguard".into(), created: true });
+        let g = Entry::now(
+            None,
+            Change::AccessGroup {
+                name: "socketguard".into(),
+                created: true,
+            },
+        );
         undo_entry(&mut host, &mut mgr, &mut groups, &mut plat, &g);
         assert!(!groups.groups.contains_key("socketguard"));
-        let w = Entry::now(None, Change::WfpEngineOption { option: "COLLECT_NET_EVENTS".into(), prior: Some(0) });
+        let w = Entry::now(
+            None,
+            Change::WfpEngineOption {
+                option: "COLLECT_NET_EVENTS".into(),
+                prior: Some(0),
+            },
+        );
         undo_entry(&mut host, &mut mgr, &mut groups, &mut plat, &w);
         assert_eq!(plat.restored, [0]);
     }

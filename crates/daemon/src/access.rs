@@ -75,9 +75,10 @@ impl<H: Host> GroupManager for Tools<'_, H> {
             "windows" => self
                 .host
                 .run_ok("net", &["localgroup", group, account, "/add"])?,
-            "macos" => self
-                .host
-                .run_ok("dseditgroup", &["-o", "edit", "-a", account, "-t", "user", group])?,
+            "macos" => self.host.run_ok(
+                "dseditgroup",
+                &["-o", "edit", "-a", account, "-t", "user", group],
+            )?,
             _ => self.host.run_ok("usermod", &["-aG", group, account])?,
         };
         Ok(())
@@ -88,9 +89,10 @@ impl<H: Host> GroupManager for Tools<'_, H> {
             "windows" => self
                 .host
                 .run_ok("net", &["localgroup", group, account, "/delete"])?,
-            "macos" => self
-                .host
-                .run_ok("dseditgroup", &["-o", "edit", "-d", account, "-t", "user", group])?,
+            "macos" => self.host.run_ok(
+                "dseditgroup",
+                &["-o", "edit", "-d", account, "-t", "user", group],
+            )?,
             _ => self.host.run_ok("gpasswd", &["-d", account, group])?,
         };
         Ok(())
@@ -99,9 +101,10 @@ impl<H: Host> GroupManager for Tools<'_, H> {
     fn members(&mut self, group: &str) -> Result<Vec<String>> {
         let out = match self.host.os() {
             "windows" => self.host.run_ok("net", &["localgroup", group])?,
-            "macos" => self
-                .host
-                .run_ok("dscl", &[".", "-read", &format!("/Groups/{group}"), "GroupMembership"])?,
+            "macos" => self.host.run_ok(
+                "dscl",
+                &[".", "-read", &format!("/Groups/{group}"), "GroupMembership"],
+            )?,
             _ => self.host.run_ok("getent", &["group", group])?,
         };
         Ok(parse_members(self.host.os(), &out.stdout))
@@ -200,25 +203,32 @@ pub fn allow(
     check_account(account)?;
     ensure_group(host, groups, record)?;
     let name = group_name(host.os());
-    if groups.members(name)?.iter().any(|m| m.eq_ignore_ascii_case(account)) {
+    if groups
+        .members(name)?
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case(account))
+    {
         host.say(&format!("{account} is a member of \"{name}\" already."));
         return Ok(());
     }
     groups.add(name, account)?;
-    host.say(&format!("{account} may now use SocketGuard. {SIGN_IN_NOTE}"));
+    host.say(&format!(
+        "{account} may now use SocketGuard. {SIGN_IN_NOTE}"
+    ));
     Ok(())
 }
 
 /// `access deny <account>`.
-pub fn deny(
-    host: &mut dyn Host,
-    groups: &mut dyn GroupManager,
-    account: &str,
-) -> Result<()> {
+pub fn deny(host: &mut dyn Host, groups: &mut dyn GroupManager, account: &str) -> Result<()> {
     require_admin(host, "changing who may use SocketGuard")?;
     check_account(account)?;
     let name = group_name(host.os());
-    if !groups.exists(name)? || !groups.members(name)?.iter().any(|m| m.eq_ignore_ascii_case(account)) {
+    if !groups.exists(name)?
+        || !groups
+            .members(name)?
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(account))
+    {
         host.say(&format!("{account} is not a member of \"{name}\"."));
         return Ok(());
     }
@@ -274,7 +284,10 @@ impl GroupManager for FakeGroups {
     }
     fn add(&mut self, g: &str, a: &str) -> Result<()> {
         self.calls.push(format!("add {g} {a}"));
-        self.groups.entry(g.to_string()).or_default().push(a.to_string());
+        self.groups
+            .entry(g.to_string())
+            .or_default()
+            .push(a.to_string());
         Ok(())
     }
     fn remove(&mut self, g: &str, a: &str) -> Result<()> {
@@ -309,8 +322,15 @@ mod tests {
         assert!(!ensure_group(&mut host, &mut g, &rec).unwrap());
         assert_eq!(g.calls, ["create socketguard"]);
         let e = rec.entries().unwrap();
-        assert_eq!(e.len(), 1, "the second run does not overwrite the first record");
-        assert!(matches!(&e[0].change, Change::AccessGroup { created: true, .. }));
+        assert_eq!(
+            e.len(),
+            1,
+            "the second run does not overwrite the first record"
+        );
+        assert!(matches!(
+            &e[0].change,
+            Change::AccessGroup { created: true, .. }
+        ));
         std::fs::remove_dir_all(d).unwrap();
     }
 
@@ -351,9 +371,21 @@ mod tests {
     #[test]
     fn the_commands_of_each_system() {
         for (os, create, add) in [
-            ("linux", "groupadd --system socketguard", "usermod -aG socketguard alice"),
-            ("macos", "dseditgroup -o create -q socketguard", "dseditgroup -o edit -a alice -t user socketguard"),
-            ("windows", "net localgroup SocketGuard Users /add", "net localgroup SocketGuard Users alice /add"),
+            (
+                "linux",
+                "groupadd --system socketguard",
+                "usermod -aG socketguard alice",
+            ),
+            (
+                "macos",
+                "dseditgroup -o create -q socketguard",
+                "dseditgroup -o edit -a alice -t user socketguard",
+            ),
+            (
+                "windows",
+                "net localgroup SocketGuard Users /add",
+                "net localgroup SocketGuard Users alice /add",
+            ),
         ] {
             let mut host = FakeHost::new(os);
             let name = group_name(os);
@@ -368,9 +400,15 @@ mod tests {
 
     #[test]
     fn member_listings_are_parsed() {
-        assert_eq!(parse_members("linux", "socketguard:x:998:alice,bob\n"), ["alice", "bob"]);
+        assert_eq!(
+            parse_members("linux", "socketguard:x:998:alice,bob\n"),
+            ["alice", "bob"]
+        );
         assert!(parse_members("linux", "socketguard:x:998:\n").is_empty());
-        assert_eq!(parse_members("macos", "GroupMembership: alice bob\n"), ["alice", "bob"]);
+        assert_eq!(
+            parse_members("macos", "GroupMembership: alice bob\n"),
+            ["alice", "bob"]
+        );
         assert_eq!(
             parse_members(
                 "windows",

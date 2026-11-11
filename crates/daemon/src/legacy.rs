@@ -57,12 +57,18 @@ fn move_one(m: &Move) -> Result<bool> {
 pub fn execute(moves: &[Move]) -> Result<()> {
     for m in moves {
         if m.to.exists() {
-            bail!("{} exists already; not overwriting it with {}", m.to.display(), m.from.display());
+            bail!(
+                "{} exists already; not overwriting it with {}",
+                m.to.display(),
+                m.from.display()
+            );
         }
     }
     let mut done: Vec<(&Move, bool)> = vec![];
     for m in moves {
-        match move_one(m).with_context(|| format!("moving {} to {}", m.from.display(), m.to.display())) {
+        match move_one(m)
+            .with_context(|| format!("moving {} to {}", m.from.display(), m.to.display()))
+        {
             Ok(copied) => done.push((m, copied)),
             Err(e) => {
                 for (d, copied) in done.iter().rev() {
@@ -89,11 +95,19 @@ pub fn execute(moves: &[Move]) -> Result<()> {
 /// database sits at the fixed location); any other relative path becomes the absolute
 /// path it meant, so the daemon keeps using that file.
 pub fn fix_moved_config(config: &Path, old_cwd: &Path) {
-    let Ok(text) = std::fs::read_to_string(config) else { return };
-    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(text.strip_prefix('\u{feff}').unwrap_or(&text)) else {
+    let Ok(text) = std::fs::read_to_string(config) else {
         return;
     };
-    let Some(db) = v.get("db_path").and_then(|d| d.as_str()).map(str::to_string) else {
+    let Ok(mut v) =
+        serde_json::from_str::<serde_json::Value>(text.strip_prefix('\u{feff}').unwrap_or(&text))
+    else {
+        return;
+    };
+    let Some(db) = v
+        .get("db_path")
+        .and_then(|d| d.as_str())
+        .map(str::to_string)
+    else {
         return;
     };
     if Path::new(&db).is_absolute() || db == ":memory:" {
@@ -143,15 +157,33 @@ mod tests {
         let (cwd, to) = (d.join("cwd"), d.join("fixed"));
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::create_dir_all(&to).unwrap();
-        std::fs::write(cwd.join("socketguard.json"), r#"{"db_path":"socketguard.db","poll_interval_secs":7}"#).unwrap();
-        for f in ["socketguard.db", "socketguard.db-wal", "socketguard.db-shm", "setup-log.json", "other.txt"] {
+        std::fs::write(
+            cwd.join("socketguard.json"),
+            r#"{"db_path":"socketguard.db","poll_interval_secs":7}"#,
+        )
+        .unwrap();
+        for f in [
+            "socketguard.db",
+            "socketguard.db-wal",
+            "socketguard.db-shm",
+            "setup-log.json",
+            "other.txt",
+        ] {
             std::fs::write(cwd.join(f), f).unwrap();
         }
-        let moves = migrate(&cwd, &to.join("socketguard.json"), &to.join("socketguard.db")).unwrap();
+        let moves = migrate(
+            &cwd,
+            &to.join("socketguard.json"),
+            &to.join("socketguard.db"),
+        )
+        .unwrap();
         assert_eq!(moves.len(), 5);
         assert!(!cwd.join("socketguard.db").exists());
         assert!(cwd.join("other.txt").exists(), "unrelated files stay");
-        assert_eq!(std::fs::read_to_string(to.join("socketguard.db-wal")).unwrap(), "socketguard.db-wal");
+        assert_eq!(
+            std::fs::read_to_string(to.join("socketguard.db-wal")).unwrap(),
+            "socketguard.db-wal"
+        );
         let cfg = std::fs::read_to_string(to.join("socketguard.json")).unwrap();
         assert!(!cfg.contains("db_path") && cfg.contains("poll_interval_secs"));
         std::fs::remove_dir_all(d).unwrap();
@@ -163,11 +195,26 @@ mod tests {
         let (cwd, to) = (d.join("cwd"), d.join("fixed"));
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::create_dir_all(&to).unwrap();
-        assert!(migrate(&cwd, &to.join("socketguard.json"), &to.join("socketguard.db")).unwrap().is_empty());
+        assert!(migrate(
+            &cwd,
+            &to.join("socketguard.json"),
+            &to.join("socketguard.db")
+        )
+        .unwrap()
+        .is_empty());
         std::fs::write(cwd.join("socketguard.db"), "old").unwrap();
         std::fs::write(to.join("socketguard.db"), "new").unwrap();
-        assert!(migrate(&cwd, &to.join("socketguard.json"), &to.join("socketguard.db")).unwrap().is_empty());
-        assert_eq!(std::fs::read_to_string(cwd.join("socketguard.db")).unwrap(), "old");
+        assert!(migrate(
+            &cwd,
+            &to.join("socketguard.json"),
+            &to.join("socketguard.db")
+        )
+        .unwrap()
+        .is_empty());
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("socketguard.db")).unwrap(),
+            "old"
+        );
         std::fs::remove_dir_all(d).unwrap();
     }
 
@@ -180,10 +227,21 @@ mod tests {
         std::fs::write(cwd.join("socketguard.json"), "{}").unwrap();
         std::fs::write(cwd.join("socketguard.db"), "db").unwrap();
         // The target of the database cannot be written: its parent does not exist.
-        let err = migrate(&cwd, &to.join("socketguard.json"), &to.join("missing").join("socketguard.db")).unwrap_err();
-        assert!(format!("{err:#}").contains("nothing was changed"), "{err:#}");
+        let err = migrate(
+            &cwd,
+            &to.join("socketguard.json"),
+            &to.join("missing").join("socketguard.db"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("nothing was changed"),
+            "{err:#}"
+        );
         assert!(cwd.join("socketguard.json").exists() && cwd.join("socketguard.db").exists());
-        assert!(!to.join("socketguard.json").exists(), "the config went back");
+        assert!(
+            !to.join("socketguard.json").exists(),
+            "the config went back"
+        );
         std::fs::remove_dir_all(d).unwrap();
     }
 }

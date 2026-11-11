@@ -39,11 +39,21 @@ fn main() -> ExitCode {
         Command::Service(c) => commands::service_cmd(c),
         Command::Disable { force } => runtime().block_on(commands::disable_cmd(force)),
         Command::Access(c) => commands::access_cmd(c),
-        Command::Uninstall { purge, keep_data, yes, force, export } => {
-            runtime().block_on(commands::uninstall_cmd(
-                socketguard_daemon::uninstall::UninstallOptions { purge, keep_data, yes, force, export },
-            ))
-        }
+        Command::Uninstall {
+            purge,
+            keep_data,
+            yes,
+            force,
+            export,
+        } => runtime().block_on(commands::uninstall_cmd(
+            socketguard_daemon::uninstall::UninstallOptions {
+                purge,
+                keep_data,
+                yes,
+                force,
+                export,
+            },
+        )),
     };
     ExitCode::from(code as u8)
 }

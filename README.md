@@ -99,18 +99,28 @@ Binaries: `target/<profile>/socketguard-daemon`, `socketguard` (CLI) and `socket
 
 ## Usage
 
-The daemon needs root / Administrator to manage firewall rules and addresses:
+SocketGuard runs as a system service (ADR 0050). From an administrator terminal (Windows) or with sudo:
 
 ```bash
-sudo ./target/release/socketguard-daemon            # Linux/macOS
-.\target\release\socketguard-daemon.exe             # Windows, as Administrator
+socketguard-daemon service install      # registers and starts it: Windows service, systemd unit, launchd daemon
+socketguard-daemon service status       # installed? running?   (also: start, stop, uninstall)
+socketguard-daemon access allow alice   # lets an account use SocketGuard without administrator rights
+socketguard-daemon uninstall            # stops, disables, undoes what install changed; asks before deleting settings and keys
 ```
 
-On Linux, install `deploy/systemd/socketguard.service` (to `/etc/systemd/system/`, binary in `/usr/local/bin`): the daemon then applies the stored state before networking comes up.
+`uninstall --purge` also deletes the database and config, `--keep-data` keeps them, `--export <file>` writes the
+settings first (onion private keys are not in the export). Config, database and setup log live in one fixed place:
+Windows `%ProgramData%\SocketGuard`, Linux `/etc/socketguard` and `/var/lib/socketguard`, macOS
+`/Library/Application Support/SocketGuard`. `$SOCKETGUARD_CONFIG` (and `db_path`, relative to the config file's
+directory) override; nothing uses the working directory. A daemon that finds state in its working directory
+and none at the fixed place moves it once. For a test run without installing, set `SOCKETGUARD_CONFIG`
+and start `socketguard-daemon` yourself as root / Administrator.
+
+The service applies the stored state before networking comes up (the systemd unit is `deploy/systemd/socketguard.service`).
 
 It serves the local API on `/run/socketguard.sock` or the named pipe `\.\pipe\socketguard`.
 To use the CLI or UI without elevation, join the `socketguard` group (Unix) or the local group
-`SocketGuard Users` (Windows) — see [docs/api.md](docs/api.md). On start it applies the stored
+`SocketGuard Users` (Windows): `socketguard-daemon access allow <account>`, see [docs/api.md](docs/api.md). On start it applies the stored
 state; on stop everything stays in place until `socketguard disable` (or
 `socketguard-daemon --disable` while it is stopped), which keeps it off until `socketguard enable`.
 
@@ -179,13 +189,12 @@ and toggle whole-host protection. Everything else is in the CLI.
 
 ## Configuration
 
-The daemon reads `socketguard.json` (or `$SOCKETGUARD_CONFIG`). Networks added with
+The daemon reads `socketguard.json` in its fixed directory (or `$SOCKETGUARD_CONFIG`). Networks added with
 `socketguard networks add` are written back to this file.
 
 ```json
 {
   "poll_interval_secs": 2,
-  "db_path": "socketguard.db",
   "backends": [
     { "type": "ula" },
     { "type": "slaac", "interface": "eth0" },
@@ -200,7 +209,7 @@ The daemon reads `socketguard.json` (or `$SOCKETGUARD_CONFIG`). Networks added w
 | `backends` | Networks; `id` is optional (`ula`, `slaac-eth0`, …) | Local only |
 | `api_socket` / `api_pipe` | Local API endpoint | `/run/socketguard.sock` / `\.\pipe\socketguard` |
 | `poll_interval_secs` | Socket polling interval | `2` |
-| `db_path` | SQLite database (an old pre-v1 database is renamed to `.pre-v1`) | `socketguard.db` |
+| `db_path` | SQLite database: absolute, or relative to the config file's directory (an old pre-v1 database is renamed to `.pre-v1`) | `socketguard.db` in the state directory |
 | `process_filter` | `{"mode": "allowlist"\|"denylist", "patterns": ["nginx*"]}` | deny nothing |
 | `log_level` | `trace` … `error` | `info` |
 

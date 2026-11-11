@@ -27,7 +27,10 @@ fn resolved() -> Result<Resolved> {
 // ─── disable ────────────────────────────────────────────────────────────────
 
 /// Build every configured network; one that cannot be built is kept as its error.
-pub fn network_slots(config: &socketguard_core::config::DaemonConfig, ula: [u8; 5]) -> Vec<NetworkSlot> {
+pub fn network_slots(
+    config: &socketguard_core::config::DaemonConfig,
+    ula: [u8; 5],
+) -> Vec<NetworkSlot> {
     let ifaces: Arc<dyn iface::InterfaceManager> = Arc::from(iface::create());
     config
         .backends
@@ -35,7 +38,8 @@ pub fn network_slots(config: &socketguard_core::config::DaemonConfig, ula: [u8; 
         .map(|b| NetworkSlot {
             id: b.id.clone(),
             is_tor: matches!(b.backend, socketguard_core::BackendConfig::Tor { .. }),
-            network: networks::create(&b.backend, ula, ifaces.clone()).map_err(|e| format!("{e:#}")),
+            network: networks::create(&b.backend, ula, ifaces.clone())
+                .map_err(|e| format!("{e:#}")),
         })
         .collect()
 }
@@ -67,7 +71,9 @@ pub async fn disable_report(r: &Resolved, force: bool, absent_ok: bool) -> Resul
 
 /// `--disable [--force]`.
 pub async fn disable_cmd(force: bool) -> i32 {
-    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
     let r = match resolved() {
         Ok(r) => r,
         Err(e) => return fail(e),
@@ -76,7 +82,10 @@ pub async fn disable_cmd(force: bool) -> i32 {
         Ok(rep) => {
             print!("{}", rep.render());
             if !r.file_exists {
-                println!("note            no config file at {}; default networks assumed", r.config_path.display());
+                println!(
+                    "note            no config file at {}; default networks assumed",
+                    r.config_path.display()
+                );
             }
             i32::from(!rep.complete())
         }
@@ -98,7 +107,11 @@ pub fn service_cmd(cmd: ServiceCmd) -> i32 {
                 if json {
                     println!("{}", serde_json::to_string(&st)?);
                 } else {
-                    println!("installed: {}\nrunning: {}", yn(st.installed), yn(st.running));
+                    println!(
+                        "installed: {}\nrunning: {}",
+                        yn(st.installed),
+                        yn(st.running)
+                    );
                 }
                 Ok(0)
             }
@@ -114,7 +127,14 @@ pub fn service_cmd(cmd: ServiceCmd) -> i32 {
                 };
                 let mut h2 = SystemHost;
                 crate::service::with_system_manager(host, |m| {
-                    install::service_install(&mut h2, m, &mut Tools { host: &mut SystemHost }, &plan)
+                    install::service_install(
+                        &mut h2,
+                        m,
+                        &mut Tools {
+                            host: &mut SystemHost,
+                        },
+                        &plan,
+                    )
                 })?;
                 Ok(0)
             }
@@ -127,7 +147,9 @@ pub fn service_cmd(cmd: ServiceCmd) -> i32 {
             ServiceCmd::Stop => {
                 require_admin(host, "stopping the service")?;
                 crate::service::with_system_manager(host, |m| m.stop())?;
-                println!("SocketGuard service stopped. Firewall rules and addresses stay in place.");
+                println!(
+                    "SocketGuard service stopped. Firewall rules and addresses stay in place."
+                );
                 Ok(0)
             }
             ServiceCmd::Uninstall => {
@@ -176,7 +198,9 @@ pub fn access_cmd(cmd: AccessCmd) -> i32 {
 // ─── uninstall ──────────────────────────────────────────────────────────────
 
 pub async fn uninstall_cmd(opts: UninstallOptions) -> i32 {
-    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
     let r = match resolved() {
         Ok(r) => r,
         Err(e) => return fail(e),
@@ -184,7 +208,11 @@ pub async fn uninstall_cmd(opts: UninstallOptions) -> i32 {
     let paths = UninstallPaths {
         config: r.config_path.clone(),
         db: r.db_path.clone(),
-        socket: if cfg!(unix) { Some(r.config.api_socket.clone().into()) } else { None },
+        socket: if cfg!(unix) {
+            Some(r.config.api_socket.clone().into())
+        } else {
+            None
+        },
         state_dir: socketguard_core::paths::default_locations().state_dir,
     };
     let mut host = SystemHost;
@@ -255,7 +283,9 @@ async fn export_to(r: &Resolved, file: &Path) -> Result<()> {
     };
     let doc = {
         let e = st.engine.read().await;
-        crate::apply::export(&e, &st).await.map_err(|e| anyhow::anyhow!("{e:?}"))?
+        crate::apply::export(&e, &st)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?
     };
     let mut text = serde_json::to_string_pretty(&doc)?;
     text.push('\n');
