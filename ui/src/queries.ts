@@ -45,6 +45,10 @@ export const useTags = () => useQuery({ queryKey: ["tags"], queryFn: api.listTag
 export const usePortGroups = () => useQuery({ queryKey: ["portGroups"], queryFn: api.listPortGroups });
 export const useAddresses = () => useQuery({ queryKey: ["addresses"], queryFn: api.listAddresses });
 export const useReservations = () => useQuery({ queryKey: ["reservations"], queryFn: api.listReservations });
+/** What can be added on this host. Looked at again whenever the window gets focus: the person
+ * may have installed something meanwhile. */
+export const useNetworkSetup = () =>
+  useQuery({ queryKey: ["networkSetup"], queryFn: api.networkSetup, staleTime: 0, refetchOnWindowFocus: true });
 export const useNetworks = () => useQuery({ queryKey: ["networks"], queryFn: api.listNetworks });
 export const useSettings = () => useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
 export const useShare = (appId: string | null) =>
@@ -112,7 +116,7 @@ const PEER_KEYS = [["peers"], ["groups"], ["grants"], ["app"]];
 const GROUP_KEYS = [["groups"], ["peers"], ["grants"], ["app"], ["activity"]];
 const TAG_KEYS = [["tags"], ["grants"], ["apps"], ["app"], ["activity"]];
 const RESERVATION_KEYS = [["reservations"], ["addresses"], ["grants"], ["apps"], ["app"], ["activity"]];
-const NETWORK_KEYS = [["networks"], ["status"], ["apps"], ["app"], ["grants"], ["settings"]];
+const NETWORK_KEYS = [["networks"], ["networkSetup"], ["status"], ["apps"], ["app"], ["grants"], ["settings"]];
 /** A batch can touch anything. */
 const CHANGES_KEYS = [["grants"], ["apps"], ["app"], ["peers"], ["groups"], ["tags"], ["portGroups"], ["reservations"], ["addresses"], ["status"], ["activity"]];
 
@@ -203,7 +207,7 @@ export const EVENT_INVALIDATIONS: Record<string, string[][]> = {
   port_groups_changed: [["portGroups"], ["grants"], ["apps"], ["app"]],
   reservations_changed: [["reservations"], ["addresses"], ["grants"], ["apps"], ["app"]],
   addresses_changed: [["addresses"], ["reservations"], ["apps"], ["app"]],
-  networks_changed: [["networks"], ["status"], ["app"]],
+  networks_changed: [["networks"], ["networkSetup"], ["status"], ["app"]],
   settings_changed: [["settings"], ["status"]],
   activity: [["activity"]],
   daemon_disconnected: [["status"]],

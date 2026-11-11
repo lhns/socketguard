@@ -48,6 +48,8 @@ import type { Tag } from "./generated/Tag";
 import type { TagMember } from "./generated/TagMember";
 import type { Target } from "./generated/Target";
 import type { TorKeyResponse } from "./generated/TorKeyResponse";
+import type { NetworkSetup } from "./generated/NetworkSetup";
+import type { SetupKind } from "./generated/SetupKind";
 import type { UpdateTag } from "./generated/UpdateTag";
 
 export type {
@@ -59,7 +61,21 @@ export type {
   Settings, ShareResponse, StatusResponse, Tag, TagMember, Target, TorKeyResponse,
   UpdateTag,
 };
+export type { NetworkSetup, SetupKind };
+export type { LanCandidate } from "./generated/LanCandidate";
+export type { SetupState } from "./generated/SetupState";
+export type { SetupStatus } from "./generated/SetupStatus";
+export type { InstallOffer } from "./generated/InstallOffer";
 export type { AccessOrigin } from "./generated/AccessOrigin";
+
+/** How `run_network_setup` ended: `launched` false means the elevated command did not start
+ * (`command` is what to run by hand); `cancelled` is a declined prompt, not an error. */
+export interface SetupRun {
+  launched: boolean;
+  cancelled: boolean;
+  exit_code: number | null;
+  command: string;
+}
 export type { PortRange } from "./generated/PortRange";
 export type { AddrFamily } from "./generated/AddrFamily";
 export type { Binding } from "./generated/Binding";
@@ -178,6 +194,9 @@ export const api = {
   detachPortGroup: (id: string, appId: string) =>
     callSaved<PortGroup>("detach_port_group", { id, appId }),
   listNetworks: () => call<Network[]>("list_networks"),
+  networkSetup: () => call<NetworkSetup>("network_setup"),
+  runNetworkSetup: (kind: SetupKind, config: string) => call<SetupRun>("run_network_setup", { kind, config }),
+  openDownloadPage: (url: string) => call<void>("open_download_page", { url }),
   addNetwork: (req: NewNetwork) => call<Network>("add_network", { req }),
   deleteNetwork: (id: string, force: boolean) => call<void>("delete_network", { id, force }),
   listAddresses: () => call<Address[]>("list_addresses"),

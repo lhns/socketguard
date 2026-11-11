@@ -245,11 +245,16 @@ pub fn detect(p: &dyn Probes, existing: &Existing, config_path: Option<&Path>) -
 }
 
 fn detect_local(existing: &Existing) -> SetupState {
-    SetupState::new(if existing.local {
+    let mut s = SetupState::new(if existing.local {
         SetupStatus::Added
     } else {
         SetupStatus::Ready
-    })
+    });
+    s.found.insert(
+        "interface".into(),
+        socketguard_core::config::default_loopback(),
+    );
+    s
 }
 
 /// The LAN interfaces to offer: no loopback or tunnels, default route first.
@@ -420,7 +425,7 @@ fn tor_missing_sentence(p: &dyn Probes) -> String {
     if install_command(SetupKind::Tor, p.os(), &|m| p.has_program(m)).is_some() {
         "Tor is not installed.".into()
     } else if p.os() == "windows" {
-        "Tor is not installed. Windows has no package for it; download the Tor Expert Bundle."
+        "Tor is not installed. Windows has no package for it; download the Tor Expert Bundle, then come back here."
             .into()
     } else {
         "Tor is not installed; install it from the Tor Project's download page.".into()

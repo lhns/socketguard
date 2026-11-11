@@ -406,7 +406,8 @@ fn default_tor_control() -> String {
     DEFAULT_TOR_CONTROL.to_string()
 }
 
-fn default_loopback() -> String {
+/// The loopback interface of this platform.
+pub fn default_loopback() -> String {
     if cfg!(target_os = "linux") {
         "lo".to_string()
     } else if cfg!(target_os = "macos") {

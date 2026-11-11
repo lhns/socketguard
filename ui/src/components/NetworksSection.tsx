@@ -1,8 +1,9 @@
 import { useId, useState } from "react";
 import { toDaemonError, type Network, type NewNetwork } from "../api";
 import { errorText } from "../lib";
-import { useAddNetwork, useDeleteNetwork, useNetworks } from "../queries";
+import { useAddNetwork, useDeleteNetwork, useNetworks, useNetworkSetup } from "../queries";
 import ConfirmDialog from "./ConfirmDialog";
+import NetworkCards from "./NetworkCards";
 import { useToast } from "./Toast";
 
 type Kind = "slaac" | "dhcpv6" | "ula" | "yggdrasil" | "tor";
@@ -11,7 +12,7 @@ const KIND_HELP: Record<Kind, string> = {
   slaac: "A LAN or VLAN: apps get their own addresses from the prefix the router announces. Use an existing VLAN interface (such as eth0.20) for a VLAN; SocketGuard never creates one.",
   dhcpv6: "A LAN whose router hands out addresses by DHCPv6.",
   ula: "Local addresses (fd00::/8) on an interface. On the loopback interface they reach this machine only.",
-  yggdrasil: "The Yggdrasil overlay. One per host.",
+  yggdrasil: "The Yggdrasil overlay. One per host. Leave the interface empty to use the one that holds the node's address.",
   tor: "Onion services through a Tor control port on this machine (127.0.0.1:9051, cookie authentication). Other control settings are edited in the config file. One per host.",
 };
 
@@ -70,7 +71,11 @@ export default function NetworksSection() {
           </li>
         ))}
       </ul>
-      <AddNetworkForm />
+      <NetworkCards />
+      <details className="subform advanced">
+        <summary>Advanced</summary>
+        <AddNetworkForm />
+      </details>
       {removing && (
         <ConfirmDialog
           title={`Remove network ${removing.name}?`}
@@ -90,6 +95,14 @@ export default function NetworksSection() {
 
 function AddNetworkForm() {
   const id = useId();
+  const setup = useNetworkSetup();
+  // Host interfaces to pick from; any other name can still be typed.
+  const hostInterfaces = [
+    ...new Set([
+      ...(setup.data?.lan.map((l) => l.interface) ?? []),
+      ...(setup.data?.yggdrasil.found.interface ? [setup.data.yggdrasil.found.interface] : []),
+    ]),
+  ];
   const toast = useToast();
   const add = useAddNetwork();
   const [kind, setKind] = useState<Kind>("slaac");
@@ -110,7 +123,7 @@ function AddNetworkForm() {
       case "ula":
         return { type: "ula", interface: iface.trim() };
       case "yggdrasil":
-        return { type: "yggdrasil", interface: iface.trim(), ...(endpoint.trim() ? { admin_endpoint: endpoint.trim() } : {}) };
+        return { type: "yggdrasil", ...(iface.trim() ? { interface: iface.trim() } : {}), ...(endpoint.trim() ? { admin_endpoint: endpoint.trim() } : {}) };
       case "tor":
         return { type: "tor", control: "127.0.0.1:9051", auth: "cookie" };
     }
@@ -132,7 +145,7 @@ function AddNetworkForm() {
 
   return (
     <form className="subform" onSubmit={submit} aria-label="Add a network">
-      <h3 className="section-title">Add a network</h3>
+      <h3 className="section-title">Add a network by hand</h3>
       <div className="form-inline">
         <div className="form-row">
           <label htmlFor={`${id}-k`}>Type</label>
@@ -147,7 +160,18 @@ function AddNetworkForm() {
         {kind !== "tor" && (
           <div className="form-row">
             <label htmlFor={`${id}-i`}>Interface</label>
-            <input id={`${id}-i`} className="input mono" value={iface} onChange={(e) => setIface(e.target.value)} placeholder="eth0 or eth0.20" required />
+            <input
+              id={`${id}-i`}
+              className="input mono"
+              list={`${id}-hosts`}
+              value={iface}
+              onChange={(e) => setIface(e.target.value)}
+              placeholder={kind === "yggdrasil" ? "found automatically" : "eth0 or eth0.20"}
+              required={kind !== "yggdrasil"}
+            />
+            <datalist id={`${id}-hosts`}>
+              {hostInterfaces.map((h) => <option key={h} value={h} />)}
+            </datalist>
             {interfaceError && <span className="field-error" role="alert">{error}</span>}
           </div>
         )}

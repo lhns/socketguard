@@ -558,3 +558,16 @@ code { font-family: var(--font-mono); font-size: 12px; background: var(--bg-inpu
 .help ul { margin-top: 10px; }
 .parse-chips { margin: 6px 0 10px; }
 .danger-zone { border-color: rgba(224, 82, 82, 0.4); }
+
+/* Network cards (ADR 0048) */
+.net-cards-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.net-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; margin-top: 8px; align-items: start; }
+.net-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--bg-input); display: flex; flex-direction: column; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
+.net-card .actions { margin: 4px 0 0; }
+.net-card .hint { margin: 0; }
+.hint.warn { color: var(--yellow); }
+.setup-panel { border-top: 1px solid var(--border); margin-top: 8px; padding-top: 8px; font-size: 13px; }
+.setup-panel [role="status"] { margin-top: 8px; }
+.setup-panel ol { margin: 6px 0 6px 18px; }
+.setup-panel pre { margin: 6px 0; padding: 6px 8px; background: var(--bg-card); border-radius: 4px; white-space: pre-wrap; }
+.advanced > summary { cursor: pointer; font-weight: 600; }
