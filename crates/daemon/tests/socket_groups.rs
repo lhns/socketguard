@@ -555,3 +555,102 @@ async fn export_and_apply_carry_socket_groups_by_label() {
     assert!(d.state.db.list_socket_groups().await.unwrap().is_empty());
     assert!(d.state.db.list_grants().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn a_tag_open_to_anyone_makes_attaching_and_widening_a_confirmed_change() {
+    let d = Daemon::new().await;
+    let app_id = d.app_id().await;
+    let gid = create_group(&d, "passive", passive()).await;
+    // The app is a member (All sockets) of a tag that has a grant to Anyone.
+    let (_, tag) = d.post("/api/tags", json!({"label": "open"})).await;
+    d.post(
+        &format!("/api/tags/{}/members", id(&tag)),
+        json!({"app_id": app_id}),
+    )
+    .await;
+    d.post(
+        "/api/grants",
+        json!({"target": {"kind": "tag", "id": id(&tag)}, "subject": {"kind": "anyone"},
+               "confirm_open": true}),
+    )
+    .await;
+    let (s, b) = attach(&d, &gid, &app_id, false).await;
+    assert_eq!(
+        (s, code(&b)),
+        (StatusCode::CONFLICT, "confirmation_required"),
+        "{b}"
+    );
+    // The dry run of the batch lists the reach and says it opens to Anyone.
+    let (s, b) = d
+        .post(
+            "/api/changes",
+            json!({"dry_run": true, "ops": [
+                {"op": "attach_socket_group", "group_id": gid, "app_id": app_id, "confirm_open": true}]}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["changes_reach"], true);
+    assert_eq!(b["changes"][0]["opens_to_anyone"], true);
+    assert!(!b["changes"][0]["reach"].as_array().unwrap().is_empty());
+    assert_eq!(attach(&d, &gid, &app_id, true).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn one_batch_creates_a_group_attaches_it_and_uses_it_by_ref() {
+    let d = Daemon::new().await;
+    let app_id = d.app_id().await;
+    let alice = d.ygg_peer("alice").await;
+    let (_, tag) = d.post("/api/tags", json!({"label": "ftp"})).await;
+    let (s, b) = d
+        .post(
+            "/api/changes",
+            json!({"ops": [
+                {"op": "create_socket_group", "ref": "$g", "label": "passive", "ports": passive()},
+                {"op": "attach_socket_group", "group_id": "$g", "app_id": app_id},
+                {"op": "add_tag_member", "tag_id": id(&tag), "app_id": app_id,
+                 "scope": {"kind": "group", "id": "$g"}},
+                {"op": "add_grant", "target": app_target(&app_id),
+                 "scope": {"kind": "group", "id": "$g"},
+                 "subject": {"kind": "peer", "id": alice}}
+            ]}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let gid = b["refs"]["$g"].as_str().unwrap().to_string();
+    let t = d.state.db.get_tag(&id(&tag)).await.unwrap().unwrap();
+    assert_eq!(t.members[0].scope.group_id(), Some(gid.as_str()));
+    assert_eq!(
+        d.state.db.list_grants().await.unwrap()[0].scope.group_id(),
+        Some(gid.as_str())
+    );
+}
+
+#[tokio::test]
+async fn unidentified_apps_take_no_socket_groups() {
+    let d = Daemon::new().await;
+    let mut sock = listener("mystery", 9999);
+    sock.unidentified = true;
+    d.sockets.lock().unwrap().push(sock);
+    d.reconcile().await;
+    let apps = d.state.db.list_apps().await.unwrap();
+    let unknown = apps.iter().find(|a| a.name == "unknown:tcp/9999").unwrap();
+    let gid = create_group(&d, "passive", passive()).await;
+    let (s, b) = attach(&d, &gid, &unknown.id, true).await;
+    assert_eq!((s, code(&b)), (StatusCode::BAD_REQUEST, "invalid"), "{b}");
+    let (s, b) = d
+        .post(
+            "/api/socket-groups",
+            json!({"label": "other", "ports": passive(), "apps": [unknown.id]}),
+        )
+        .await;
+    assert_eq!((s, code(&b)), (StatusCode::BAD_REQUEST, "invalid"), "{b}");
+    assert!(d
+        .state
+        .db
+        .get_socket_group(&gid)
+        .await
+        .unwrap()
+        .unwrap()
+        .apps
+        .is_empty());
+}

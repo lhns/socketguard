@@ -535,7 +535,7 @@ impl Client {
             .await
     }
 
-    /// Attach a socket group to an app. It widens what the app's whole-app grants cover, so
+    /// Attach a socket group to an app. It widens what the grants that cover All sockets of the app cover, so
     /// where that reaches Anyone it needs `confirm_open`.
     pub async fn attach_socket_group(
         &self,

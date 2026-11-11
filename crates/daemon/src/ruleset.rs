@@ -44,14 +44,10 @@ fn sorted_unique<T: Ord>(v: impl IntoIterator<Item = T>) -> Vec<T> {
 }
 
 impl Snapshot {
-    /// The ports other apps listen on, for the exclusion rule of ranges (ADR 0047). Only
-    /// socket groups bring ranges, so without any there is nothing to exclude.
+    /// The ports other apps listen on, for the exclusion rule (ADR 0047): an address never
+    /// serves a port that another app has and this one does not.
     pub(crate) fn foreign_ports(&self, app: &App) -> PortRangeSet {
-        if self.socket_groups.is_empty() {
-            PortRangeSet::new()
-        } else {
-            foreign_listening(&self.apps, &app.id)
-        }
+        foreign_listening(&self.apps, &app.id)
     }
 }
 
@@ -942,7 +938,7 @@ mod tests {
                 "50006-50010/tcp"
             ]
         );
-        // An address and a grant for the port itself are explicit and not affected.
+        // The one exclusion rule holds for a named port too: 50003 is the other app's.
         s.apps[0].addresses.push(address(
             "ap",
             "web",
@@ -956,17 +952,47 @@ mod tests {
             scope: Scope::port(tcp(50003)),
             ..grant("gp", "web", Subject::Anyone)
         }];
+        assert!(rule_ports(&build(&explicit), "ap").is_empty());
+        assert!(rule_ports(&build(&explicit), "ay").is_empty());
+        // Once the other app lets go of it, the port address serves it again.
+        explicit.apps[1].ports[0].listening = false;
         assert_eq!(rule_ports(&build(&explicit), "ap"), ["50003/tcp"]);
-        assert!(
-            rule_ports(&build(&explicit), "ay").is_empty(),
-            "the all-ports address does not serve it: it is only in the range"
-        );
         // The other app's port going quiet frees the range again.
         s.apps[1].ports[0].listening = false;
         assert_eq!(
             rule_ports(&build(&s), "ay"),
             ["50000-50004/tcp", "50005/tcp", "50006-50010/tcp"]
         );
+    }
+
+    #[test]
+    fn a_port_address_stops_serving_a_port_another_app_took_over() {
+        // A had an address and a grant for 9000; it stopped listening there and B started.
+        let mut s = base();
+        s.apps[0].ports = app("x", &[8080], vec![]).ports;
+        s.apps[0].addresses = vec![address(
+            "ap",
+            "web",
+            "ygg",
+            "300:1:2:3::500",
+            Scope::port(tcp(9000)),
+        )];
+        s.grants = vec![Grant {
+            scope: Scope::port(tcp(9000)),
+            ..grant("g", "web", Subject::Anyone)
+        }];
+        assert_eq!(
+            rule_ports(&build(&s), "ap"),
+            ["9000/tcp"],
+            "nobody else has it"
+        );
+        s.apps.push(app("other", &[9000], vec![]));
+        assert!(rule_ports(&build(&s), "ap").is_empty());
+        // Detected on its own app too, it stays.
+        s.apps[0]
+            .ports
+            .push(app("x", &[9000], vec![]).ports[0].clone());
+        assert_eq!(rule_ports(&build(&s), "ap"), ["9000/tcp"]);
     }
 
     #[test]

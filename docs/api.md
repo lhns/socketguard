@@ -80,7 +80,7 @@ does not cause a 202. Every error has the [error body](#errors).
 | DELETE | `/api/apps/{id}` | | 204 | forgets the app, its addresses and its grants; **it reappears as pending the next time it listens** |
 | POST | `/api/apps/{id}/review` | `ReviewRequest` | `AppDetail` | mark reviewed (or pending again); it stays closed until granted |
 | POST | `/api/apps/{id}/split` | `SplitRequest` | `Address` (201) | adds an address for one port (`port`, `proto`) or one attached socket group (`group`) on a network; the app's other addresses keep serving it too (addresses overlap, ADR 0047). 409 if it has one already |
-| POST | `/api/apps/{id}/merge` | `MergeRequest` | `Address` | folds the listed addresses of one network into the app's address for all ports: it is created if missing, and the listed addresses with a narrower scope go. Returns the all-ports address |
+| POST | `/api/apps/{id}/merge` | `MergeRequest` | `Address` | folds the listed addresses of one network into the app's address for All sockets: it is created if missing, and the listed addresses with a narrower scope go. Returns that address |
 | GET | `/api/peers` | | `Peer[]` | |
 | POST | `/api/peers` | `NewPeer` | `Peer` (201) | credentials are validated and normalized; unique across peers. `label` is optional: an unnamed peer is named after its first credential (see below) |
 | GET | `/api/peers/{id}` | | `Peer` | |
@@ -106,13 +106,13 @@ does not cause a 202. Every error has the [error body](#errors).
 | PATCH | `/api/tags/{id}` | `UpdateTag` | `Tag` | rename and/or replace the patterns; apps matching a new pattern join, none leaves. If any would join a tag that has a grant to Anyone, it needs `"confirm_open": true` (409 `confirmation_required` otherwise) |
 | DELETE | `/api/tags/{id}` | | 204 | also deletes the grants on the tag |
 | POST | `/api/tags/{id}/members` | `NewTagMember` | `Tag` | an app with a `scope` (all of it by default, one port, or a socket group attached to it); a manual addition clears an exclusion. On a tag that has a grant to Anyone it opens the app, so it needs `"confirm_open": true` |
-| DELETE | `/api/tags/{id}/members/{app_id}` | query `port`, `proto` or `group` (optional) | `Tag` | without them the whole-app membership goes; with `port` (and `proto`) or `group` (a socket group id) the membership by that scope. Removing a whole app that a pattern matches records an exclusion (`excluded`) |
+| DELETE | `/api/tags/{id}/members/{app_id}` | query `port`, `proto` or `group` (optional) | `Tag` | without them the All-sockets membership goes; with `port` (and `proto`) or `group` (a socket group id) the membership by that scope. Removing a whole app that a pattern matches records an exclusion (`excluded`) |
 | GET | `/api/socket-groups` | | `SocketGroup[]` | [socket groups](#socket-groups) |
 | POST | `/api/socket-groups` | `NewSocketGroup` | `SocketGroup` (201) | `label`, `ports` (`{start, end, proto}` ranges, normalized), optional `apps` to attach it to. Needs `"confirm_open": true` where attaching opens an app to Anyone |
 | GET | `/api/socket-groups/{id}` | | `SocketGroup` | |
 | PUT | `/api/socket-groups/{id}` | `UpdateSocketGroup` | `SocketGroup` | `label` and/or `ports`; new ports take effect everywhere the group is used (and need `confirm_open` where that opens an app to Anyone) |
 | DELETE | `/api/socket-groups/{id}` | | 204 | 409 `conflict`, naming what uses it, while a grant (on an app or a tag) or a tag member has the group as its scope; addresses that served it go with it |
-| PUT | `/api/socket-groups/{id}/apps/{app_id}` | `AttachSocketGroup` | `SocketGroup` | attach (idempotent). Widens what the app's whole-app grants and tag memberships cover; `confirm_open` is needed where a grant to Anyone covers the new ports |
+| PUT | `/api/socket-groups/{id}/apps/{app_id}` | `AttachSocketGroup` | `SocketGroup` | attach (idempotent). Widens what the grants and tag memberships that cover the app's All sockets cover; `confirm_open` is needed where a grant to Anyone covers the new ports |
 | DELETE | `/api/socket-groups/{id}/apps/{app_id}` | | `SocketGroup` | detach; 409 `conflict`, naming the users, while a grant on the app or a tag member of it has the group as its scope; the app's addresses that served the group go |
 | GET | `/api/networks` | | `Network[]` | |
 | POST | `/api/networks` | `NewNetwork` | `Network` (201) | a backend instance: `{"id"?, "type": "slaac", "interface": "eth0", ...}`; also written to the `backends` key of the config file (`SOCKETGUARD_CONFIG` or the default; created if missing), so it survives a restart |
@@ -224,13 +224,13 @@ The desktop UI's Tauri backend re-emits these events to the frontend under the s
 
 A **scope** (ADR 0047) says which sockets of an app a grant, a tag member or an address means. It is an object tagged by `kind`: `{"kind": "all"}` (the default when `scope` is absent), `{"kind": "port", "port": 80, "proto": "tcp"}`, or `{"kind": "group", "id": "<socket group id>"}`. The ports of a scope on an app:
 
-- `all`: the app's detected ports and the ranges of every socket group attached to it,
+- `all` ("All sockets"): the app's detected ports and the ranges of every socket group attached to it,
 - `port`: that port, detected or not,
 - `group`: the group's ranges if it is attached to the app, else nothing. A grant or a tag member with a `group` scope on an app is refused (400) unless the group is attached to that app.
 
 ### Socket groups
 
-A **socket group** is a label with ports and port ranges (`{"start": 50000, "end": 51000, "proto": "tcp"}`; a single port has `start == end`), standalone and attached to any number of apps (`apps`). Its ports need not be detected: a granted range is open before anything listens in it. A range leaves out ports that another app is listening on now (a wildcard listener answers on every local address), unless the app has the port itself; explicit `port` scopes and detected ports are not affected. Editing a group's ports takes effect everywhere. Detaching or deleting a group that a grant or tag member uses is a 409 whose message lists the users.
+A **socket group** is a label with ports and port ranges (`{"start": 50000, "end": 51000, "proto": "tcp"}`; a single port has `start == end`), standalone and attached to any number of apps (`apps`). Its ports need not be detected: a granted range is open before anything listens in it. One exclusion rule holds for every scope: an address never serves a port that another app is listening on now and this app does not have itself (a wildcard listener answers on every local address); this applies to a named `port`, to a group and to ranges reached through `all`. A range is open to any listener inside it, not only to this app's processes. Adding ports to a group or attaching it to an app is a change of reach, like a new grant: dry runs list it and a grant to Anyone that covers the new ports needs `confirm_open`. An unidentified app (`unknown:<proto>/<port>`) takes no socket groups (400). Editing a group's ports takes effect everywhere. Detaching or deleting a group that a grant or tag member uses is a 409 whose message lists the users.
 
 ### Tags
 
@@ -279,7 +279,7 @@ A peer without a `label` (or with a blank one), in `POST /api/peers` and in `cre
     }
 
 `subject` is `{"peer": label}`, `{"group": label}` or `"anyone"`; `scope` and `network` may be
-absent (all ports, all networks). A grant names a socket group by label:
+absent (All sockets, all networks). A grant names a socket group by label:
 `"scope": {"kind": "group", "label": "passive"}`, and the document must attach that group to
 the grant's app. Socket groups match by label; applying creates, changes (ports, attached
 apps) and deletes them, detaching only after the grants that used them are removed. Apps are named by id, which is stable across restarts and

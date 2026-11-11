@@ -426,7 +426,7 @@ pub struct NewTagMember {
 }
 
 /// Query of `DELETE /api/tags/{id}/members/{app_id}`: without `port` and `group` the
-/// whole-app membership goes, with `port` (and `proto`) the membership of that port, with
+/// All-sockets membership goes, with `port` (and `proto`) the membership of that port, with
 /// `group` (a socket group id) the membership by that group.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -490,7 +490,7 @@ pub struct UpdateSocketGroup {
 }
 
 /// Body of `PUT /api/socket-groups/{id}/apps/{app_id}`. Attaching a group to an app widens
-/// what the app's whole-app grants cover; where that reaches Anyone it needs `confirm_open`.
+/// what the grants covering the app's All sockets cover; where that reaches Anyone it needs `confirm_open`.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachSocketGroup {

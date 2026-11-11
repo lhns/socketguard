@@ -138,6 +138,17 @@ pub fn clean_ranges(ports: &[PortRange]) -> Result<Vec<PortRange>, EngineError> 
     Ok(normalize_ranges(ports))
 }
 
+/// An unidentified app is one port (ADR 0046); it takes no socket groups.
+fn check_takes_groups(app: &socketguard_core::App) -> Result<(), EngineError> {
+    if app.identity_note.as_deref() == Some("unidentified") {
+        return Err(EngineError::Invalid(format!(
+            "{} is an unidentified socket and takes no socket groups",
+            app.name
+        )));
+    }
+    Ok(())
+}
+
 fn join(items: &[String]) -> String {
     items.join("; ")
 }
@@ -182,8 +193,10 @@ impl Engine {
         }
         let mut attached: Vec<AppId> = Vec::new();
         for a in apps {
-            cat.app(a)
-                .ok_or_else(|| EngineError::NotFound(format!("app {a}")))?;
+            check_takes_groups(
+                cat.app(a)
+                    .ok_or_else(|| EngineError::NotFound(format!("app {a}")))?,
+            )?;
             if !attached.contains(a) {
                 attached.push(a.clone());
             }
@@ -313,8 +326,10 @@ impl Engine {
             .socket_group(group_id)
             .ok_or_else(|| EngineError::NotFound(format!("socket group {group_id}")))?
             .clone();
-        cat.app(app_id)
-            .ok_or_else(|| EngineError::NotFound(format!("app {app_id}")))?;
+        check_takes_groups(
+            cat.app(app_id)
+                .ok_or_else(|| EngineError::NotFound(format!("app {app_id}")))?,
+        )?;
         if group.is_attached_to(app_id) {
             return Ok((group, GroupPlan::default()));
         }

@@ -441,7 +441,7 @@ impl Engine {
         Ok(address)
     }
 
-    /// Fold the listed addresses of an app into its address for all ports on a network:
+    /// Fold the listed addresses of an app into its address for All sockets on a network:
     /// that address is created if the app has none there, and the listed addresses with a
     /// narrower scope go (the all-ports address serves what they served). Returns the
     /// all-ports address.

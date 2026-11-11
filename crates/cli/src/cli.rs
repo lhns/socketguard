@@ -117,7 +117,7 @@ pub enum AppsCmd {
         #[arg(long = "socket-group", value_name = "LABEL")]
         socket_group: Option<String>,
     },
-    /// Fold the listed addresses into the app's address for all ports on a network: it is
+    /// Fold the listed addresses into the app's address for all sockets on a network: it is
     /// created if missing, and the listed narrower addresses go
     Merge {
         app: String,

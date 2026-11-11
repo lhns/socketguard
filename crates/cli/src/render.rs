@@ -67,7 +67,7 @@ impl Names {
         label(&self.apps, id)
     }
 
-    /// A scope for people: `all ports`, `80/tcp`, `group <label>`.
+    /// A scope for people: `All sockets`, `80/tcp`, `group <label>`.
     pub fn scope(&self, s: &Scope) -> String {
         match s {
             Scope::Group { id } => format!("group {}", label(&self.socket_groups, id)),

@@ -353,10 +353,10 @@ impl Scope {
         }
     }
 
-    /// For people: `all ports`, `80/tcp`, `group <label>` (the id if the group is unknown).
+    /// For people: `All sockets`, `80/tcp`, `group <label>` (the id if the group is unknown).
     pub fn describe(&self, groups: &[SocketGroup]) -> String {
         match self {
-            Scope::All => "all ports".to_string(),
+            Scope::All => "All sockets".to_string(),
             Scope::Port { port, proto } => format!("{port}/{proto}"),
             Scope::Group { id } => format!(
                 "group {}",
@@ -470,8 +470,9 @@ pub fn detected_ports(app: &App) -> PortRangeSet {
 /// - `Port`: that port, detected or not,
 /// - `Group`: the group's ranges if it is attached to the app, else nothing.
 ///
-/// Ranges that come from a group leave out `foreign` ports (see [`foreign_listening`]) unless
-/// the app has the port itself. Pass an empty set to get the plain semantics.
+/// One exclusion rule for every scope: ports in `foreign` (see [`foreign_listening`]) that the
+/// app does not have itself are left out, whether named by a `Port`, reached through a group
+/// or through `All`. Pass an empty set to get the plain semantics.
 pub fn scope_ports(
     app: &App,
     scope: &Scope,
@@ -495,7 +496,8 @@ pub fn scope_ports(
             fixed: PortRangeSet::from_ports([PortRef {
                 port: *port,
                 proto: *proto,
-            }]),
+            }])
+            .subtract(&excluded),
             ranged: PortRangeSet::new(),
         },
         Scope::Group { id } => match find_group(groups, id) {
@@ -747,13 +749,18 @@ pub(crate) mod tests {
             ["50000-50002/tcp", "50004-50010/tcp"],
             "a's own 50005 is inside the range"
         );
-        // An explicit port and a detected port are not affected.
+        // A detected port of the app is not affected; a named port that another app has is.
         let c = app_with("c", &[(50003, true)]);
         let groups_c = [group("passive", &["50000-50010/tcp"], &["c"])];
         let foreign_c = foreign_listening(&[a.clone(), c.clone()], "c");
         assert!(foreign_c.contains(tcp(50005)));
-        let explicit = scope_ports(&c, &Scope::port(tcp(50005)), &groups_c, &foreign_c);
-        assert!(explicit.contains(tcp(50005)));
+        let named = scope_ports(&c, &Scope::port(tcp(50005)), &groups_c, &foreign_c);
+        assert!(
+            named.is_empty(),
+            "a port another app listens on is not served"
+        );
+        let own = scope_ports(&c, &Scope::port(tcp(50003)), &groups_c, &foreign_c);
+        assert!(own.contains(tcp(50003)));
         let all_c = scope_ports(&c, &Scope::All, &groups_c, &foreign_c);
         assert!(all_c.contains(tcp(50003)) && !all_c.contains(tcp(50005)));
     }
