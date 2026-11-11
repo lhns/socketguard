@@ -573,7 +573,7 @@ mod tests {
             ctl: Some(PathBuf::from("C:/Program Files/Yggdrasil/yggdrasilctl.exe")),
             ..Default::default()
         };
-        p.services.insert("Yggdrasil", ServiceState::Stopped);
+        p.services.insert(YGGDRASIL_SERVICE, ServiceState::Stopped);
         let (s, _) = detect_yggdrasil(&p, &Existing::default());
         assert_eq!(s.state, SetupStatus::NotRunning);
         assert_eq!(
