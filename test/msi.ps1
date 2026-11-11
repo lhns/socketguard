@@ -40,7 +40,10 @@ $script:soft = New-Object System.Collections.Generic.List[string]
 
 function Section([string]$t) { $script:section = $t; Write-Host ''; Write-Host "== $t" -ForegroundColor Cyan }
 function Ok([string]$m) { Write-Host "  ok: $m" }
-function Soft([string]$m) { $script:soft.Add("[$script:section] $m"); Write-Host "  SOFT-FAIL: $m" -ForegroundColor Yellow; Write-Host "::warning::$m" }
+function Soft([string]$m) {
+  if ($StrictFirewall) { Fail $m }
+  $script:soft.Add("[$script:section] $m"); Write-Host "  SOFT-FAIL: $m" -ForegroundColor Yellow; Write-Host "::warning::$m"
+}
 
 # What a failed start looks like from the outside: the service reports Running before the
 # daemon has initialised and writes no log, so look at the event log and run the daemon in the
@@ -66,6 +69,11 @@ function Dump-Diagnostics {
     } catch { Write-Host "foreground run failed: $_" }
   }
   Save-Wfp 'failure'
+  try {
+    Write-Host '--- who am I, and who may read the data directory ---'
+    & whoami /groups | Select-String 'Label|Administrators' | Write-Host
+    if (Test-Path $DataDir) { & icacls $DataDir /t 2>&1 | Write-Host }
+  } catch {}
   Get-ChildItem $Out -Filter *.log | ForEach-Object { Write-Host "== $($_.Name) (tail)"; Get-Content $_.FullName -Tail 80 | Write-Host }
 }
 
@@ -116,7 +124,6 @@ function Save-Wfp([string]$Tag) {
   foreach ($w in @(@('filters', "wfp-filters-$Tag.xml"), @('state', "wfp-state-$Tag.xml"), @('netevents', "wfp-netevents-$Tag.xml"))) {
     try { & netsh wfp show $w[0] file=(Join-Path $Out $w[1]) 2>&1 | Out-Null } catch { Write-Host "netsh wfp show $($w[0]) failed: $_" }
   }
-  try { & netsh wfp show options optionsfor=engine 2>&1 | Out-File (Join-Path $Out "wfp-options-$Tag.txt") } catch {}
 }
 
 function Wait-Until([scriptblock]$Cond, [int]$Seconds, [string]$What) {
