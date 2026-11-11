@@ -39,6 +39,10 @@ pub struct App {
     /// path, foreign mount namespace), for the frontends; None for an ordinary app.
     #[serde(default)]
     pub identity_note: Option<String>,
+    /// The app has a known executable path that no longer exists on disk (moved, reinstalled
+    /// or removed). Computed by the daemon at poll time; not stored.
+    #[serde(default)]
+    pub exe_missing: bool,
     /// False = pending: no decision has been made about this app yet.
     pub reviewed: bool,
     /// An OS component (service or system process), so frontends can group it away from

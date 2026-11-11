@@ -17,6 +17,11 @@ interpreter_arg: string | null,
  */
 identity_note: string | null, 
 /**
+ * The app has a known executable path that no longer exists on disk (moved, reinstalled
+ * or removed). Computed by the daemon at poll time; not stored.
+ */
+exe_missing: boolean, 
+/**
  * False = pending: no decision has been made about this app yet.
  */
 reviewed: boolean, 

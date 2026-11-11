@@ -317,12 +317,53 @@ describe("Inspector: one app", () => {
   });
 });
 
-describe("Move everything to another app", () => {
+describe("A program that moved", () => {
+  const moved = { kind: "update" as const, item: "grant" as const, name: "alice on nginx-old moves to nginx", opens_to_anyone: false, reach: [] };
+  // The old entry: same program name, but its executable is gone.
+  const old = mkApp("o1", "nginx-old", [80], { process_name: "nginx", exe_missing: true });
+  const gone = mkApp("o2", "nginx-gone", [80], { process_name: "nginx", exe_missing: false });
+
+  it("a pending app named like an app with a missing executable offers to take over, after a review", async () => {
+    const d = setup({ list_apps: () => [nginx, redis, old], changes: (a) => batch(a.req as ChangesRequest, false, [moved]) });
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("button", { name: /^nginx$/ }));
+    const card = await within(inspector()).findByRole("group", { name: "Moved program" });
+    expect(card).toHaveTextContent("Looks like nginx-old moved.");
+    await user.click(within(card).getByRole("button", { name: "Take over from the old entry" }));
+    const review = await within(card).findByRole("region", { name: "Review before applying" });
+    expect(applied(d)).toEqual([]);
+    await user.click(within(review).getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "move_app", from: "o1", to: "a1", confirm_open: false }]]));
+  });
+
+  it("is hidden when the other app's executable is still there, or the app is already reviewed", async () => {
+    setup({ list_apps: () => [nginx, redis, gone] });
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("button", { name: /^nginx$/ }));
+    await within(inspector()).findByRole("button", { name: "Keep closed" });
+    expect(screen.queryByRole("group", { name: "Moved program" })).not.toBeInTheDocument();
+  });
+
+  it("is hidden for an app that was already reviewed", async () => {
+    const reviewed = { ...nginx, reviewed: true };
+    setup({ list_apps: () => [reviewed, old], get_app: () => detail(reviewed) });
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("button", { name: /^nginx$/ }));
+    await within(inspector()).findByRole("button", { name: "Mark pending again" });
+    expect(screen.queryByRole("group", { name: "Moved program" })).not.toBeInTheDocument();
+  });
+});
+
+describe("Transfer access to another app", () => {
   const moved = { kind: "update" as const, item: "grant" as const, name: "alice on nginx moves to redis-server", opens_to_anyone: false, reach: [] };
   async function pickTarget(user: ReturnType<typeof userEvent.setup>, go?: (page: Page, focus?: Focus) => void) {
     renderWithProviders(<AppsPage />, go);
     await user.click(await inList().findByRole("button", { name: /^nginx/ }));
-    await user.click(await within(inspector()).findByRole("button", { name: "Move everything to…" }));
+    expect(await within(inspector()).findByText(/Use it when a program was moved or reinstalled/)).toBeInTheDocument();
+    await user.click(await within(inspector()).findByRole("button", { name: "Transfer access to another app…" }));
     await user.click(await screen.findByRole("checkbox", { name: "redis-server" }));
   }
 

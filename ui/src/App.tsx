@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, onEnforcementNotice, toDaemonError, type Enforcement } from "./api";
-import { errorText } from "./lib";
+import ElevatedAction from "./components/ElevatedAction";
 import { NavContext, type Focus, type FocusMessage, type Page } from "./nav";
 import ActivityPage from "./pages/ActivityPage";
 import AppsPage from "./pages/AppsPage";
@@ -17,36 +18,65 @@ const PAGES: { id: Page; label: string }[] = [
   { id: "settings", label: "Settings" },
 ];
 
+/** What is wrong when the daemon cannot be used, and the one action that fixes it (ADR 0050). */
 function ConnectionBanner({ error }: { error: unknown }) {
-  const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState<string | null>(null);
+  const qc = useQueryClient();
   const err = toDaemonError(error);
   const hint = (err.details as { hint?: string } | undefined)?.hint;
-
-  const start = async () => {
-    setStarting(true);
-    setStartError(null);
-    try {
-      await api.startDaemon();
-    } catch (e) {
-      setStartError(errorText(e));
-    } finally {
-      setStarting(false);
-    }
+  const cannotUse = err.code === "connection" || err.code === "permission_denied";
+  const service = useQuery({ queryKey: ["service"], queryFn: api.serviceStatus, enabled: cannotUse, refetchInterval: 4_000 });
+  const account = useQuery({ queryKey: ["account"], queryFn: api.currentAccount, enabled: err.code === "permission_denied" });
+  const [allowed, setAllowed] = useState(false);
+  const s = service.data;
+  const recheck = () => {
+    void qc.invalidateQueries({ queryKey: ["service"] });
+    void qc.invalidateQueries({ queryKey: ["status"] });
   };
+
+  let action: ReactNode = null;
+  if (cannotUse && s && !s.installed) {
+    action = (
+      <>
+        <p>The SocketGuard service is not installed on this computer.</p>
+        <ElevatedAction label="Install the service" command="socketguard-daemon service install" run={api.installService} onDone={recheck} />
+      </>
+    );
+  } else if (cannotUse && s && !s.running) {
+    action = (
+      <>
+        <p>The SocketGuard service is installed but stopped.</p>
+        <ElevatedAction label="Start" command="socketguard-daemon service start" run={api.startDaemon} onDone={recheck} />
+      </>
+    );
+  } else if (err.code === "permission_denied") {
+    action = allowed ? (
+      <p role="status">
+        Done. Sign out of this computer and sign in again, then open SocketGuard: group membership applies from the next sign-in.
+      </p>
+    ) : (
+      <>
+        <p>The service is running, but this account may not use it.</p>
+        {account.data ? (
+          <ElevatedAction
+            label="Allow my account"
+            command={`socketguard-daemon access allow ${account.data}`}
+            run={api.allowMyAccount}
+            onDone={() => setAllowed(true)}
+          />
+        ) : (
+          <p className="hint">Looking up your account name…</p>
+        )}
+      </>
+    );
+  }
 
   return (
     <div className="error-banner banner" role="alert">
       <div>
-        <strong>{err.code === "connection" ? "Cannot reach the daemon." : "Daemon error."}</strong> {err.message}
+        <strong>{cannotUse ? "Cannot use the SocketGuard service." : "Daemon error."}</strong> {err.message}
         {hint && <div>{hint}</div>}
-        {startError && <div>{startError}</div>}
+        {action}
       </div>
-      {err.code === "connection" && (
-        <button className="btn btn-primary btn-sm" onClick={start} disabled={starting}>
-          {starting ? "Starting…" : "Start daemon"}
-        </button>
-      )}
     </div>
   );
 }

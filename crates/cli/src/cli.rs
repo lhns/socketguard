@@ -87,11 +87,25 @@ pub enum Command {
     Disable(DisableArgs),
     /// Undo `disable`: put the rules and addresses back
     Enable,
+    /// Who may use the service: allow or deny an account, list the allowed ones. Runs
+    /// `socketguard-daemon access`, which needs administrator rights (ADR 0050)
+    #[command(subcommand)]
+    Access(AccessCmd),
     /// Print a shell completion script
     Completions {
         #[arg(value_enum)]
         shell: Shell,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AccessCmd {
+    /// Let an account use the service (takes effect at its next sign-in)
+    Allow { account: String },
+    /// Take the right away from an account
+    Deny { account: String },
+    /// List the accounts that may use the service
+    List,
 }
 
 #[derive(Subcommand, Debug)]
