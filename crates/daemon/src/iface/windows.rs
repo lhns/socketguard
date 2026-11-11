@@ -1,3 +1,4 @@
+use super::{is_lan_prefix_address, HostInterface};
 use super::{InterfaceInfo, InterfaceManager};
 use anyhow::Result;
 use ipnet::Ipv4Net;
@@ -8,8 +9,9 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceAliasToLuid, CreateUnicastIpAddressEntry, DeleteUnicastIpAddressEntry,
-    FreeMibTable, GetAdaptersAddresses, GetUnicastIpAddressTable, InitializeUnicastIpAddressEntry,
-    GAA_FLAG_SKIP_ANYCAST, IP_ADAPTER_ADDRESSES_LH, MIB_UNICASTIPADDRESS_ROW,
+    FreeMibTable, GetAdaptersAddresses, GetBestInterface, GetUnicastIpAddressTable,
+    InitializeUnicastIpAddressEntry, GAA_FLAG_SKIP_ANYCAST, IP_ADAPTER_ADDRESSES_LH,
+    MIB_UNICASTIPADDRESS_ROW,
 };
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows::Win32::Networking::WinSock::{
@@ -89,7 +91,62 @@ fn enumerate_interface_names() -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// IANA ifType values of adapters that are not a LAN: software loopback and tunnels.
+const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
+const IF_TYPE_TUNNEL: u32 = 131;
+
+/// The index of the interface the route to a public IPv4 address leaves by.
+fn default_route_index() -> Option<u32> {
+    let mut index = 0u32;
+    // 8.8.8.8 in network byte order. Only the route lookup, nothing is sent.
+    let dest = u32::from_ne_bytes([8, 8, 8, 8]);
+    (unsafe { GetBestInterface(dest, &mut index) } == 0).then_some(index)
+}
+
 impl InterfaceManager for WindowsInterfaces {
+    fn describe_interfaces(&self) -> Result<Vec<HostInterface>> {
+        let default = default_route_index();
+        let mut found: Vec<(String, HostInterface)> = Vec::new();
+        for_each_adapter(|a| {
+            let name = unsafe { a.FriendlyName.to_string() }.unwrap_or_default();
+            if name.is_empty() {
+                return;
+            }
+            let description = unsafe { a.Description.to_string() }
+                .ok()
+                .filter(|d| !d.is_empty());
+            let index = unsafe { a.Anonymous1.Anonymous.IfIndex };
+            let lower = description.as_deref().unwrap_or("").to_ascii_lowercase();
+            let tunnel = a.IfType == IF_TYPE_TUNNEL
+                || lower.contains("wintun")
+                || lower.contains("yggdrasil")
+                || lower.contains("tap-windows")
+                || lower.contains("wireguard");
+            found.push((
+                name.clone(),
+                HostInterface {
+                    name,
+                    description,
+                    vlan_id: None,
+                    loopback: a.IfType == IF_TYPE_SOFTWARE_LOOPBACK,
+                    tunnel,
+                    default_route: default == Some(index),
+                    has_ipv6_prefix: false,
+                },
+            ));
+        })?;
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(found
+            .into_iter()
+            .map(|(name, mut i)| {
+                i.has_ipv6_prefix = self
+                    .list_addresses(&name)
+                    .is_ok_and(|a| a.into_iter().any(is_lan_prefix_address));
+                i
+            })
+            .collect())
+    }
+
     fn add_address(&self, iface: &str, addr: Ipv6Addr, prefix: u8) -> Result<()> {
         let luid = get_interface_luid(iface)?;
 

@@ -1,15 +1,31 @@
 use super::{with_prefix64, AllocatedAddress, Ipv6Backend, Prefix};
+use crate::iface::InterfaceManager;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use socketguard_core::BackendType;
 use std::net::Ipv6Addr;
+use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::warn;
 
 /// How long node info is reused before asking Yggdrasil again.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+
+/// The reasons a status shows when Yggdrasil cannot be used.
+pub const NOT_FOUND: &str = "yggdrasilctl not found";
+pub const NOT_RUNNING: &str = "the Yggdrasil node is not running";
+pub const NO_ADAPTER_ADDRESS: &str = "the Yggdrasil adapter has no address";
+
+/// Why `yggdrasilctl getSelf` gave no answer; the Display text is the status reason.
+#[derive(Debug, thiserror::Error)]
+pub enum NodeProblem {
+    #[error("{NOT_FOUND}")]
+    NotFound,
+    #[error("{NOT_RUNNING}")]
+    NotRunning(String),
+}
 
 /// What `yggdrasilctl getSelf` tells us about the local node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +43,28 @@ pub trait YggdrasilNode: Send + Sync {
     fn get_self(&self) -> Result<NodeInfo>;
 }
 
+/// Where `yggdrasilctl` is: on PATH, else in the installer's directory (a service started
+/// before the install has a PATH without it).
+pub fn find_yggdrasilctl() -> Option<PathBuf> {
+    if let Some(p) = crate::setup::find_in_path("yggdrasilctl") {
+        return Some(p);
+    }
+    #[cfg(windows)]
+    {
+        let dirs = ["ProgramFiles", "ProgramW6432"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .map(|d| PathBuf::from(d).join("Yggdrasil"));
+        for dir in dirs {
+            let p = dir.join("yggdrasilctl.exe");
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 /// Reads node info by running `yggdrasilctl -json getSelf`.
 pub struct YggdrasilctlNode {
     endpoint: Option<String>,
@@ -40,7 +78,9 @@ impl YggdrasilctlNode {
 
 impl YggdrasilNode for YggdrasilctlNode {
     fn get_self(&self) -> Result<NodeInfo> {
-        let mut cmd = Command::new("yggdrasilctl");
+        // Looked up on every call, so a Yggdrasil installed while we run is found.
+        let ctl = find_yggdrasilctl().ok_or(NodeProblem::NotFound)?;
+        let mut cmd = Command::new(ctl);
         cmd.arg("-json");
         if let Some(ep) = &self.endpoint {
             cmd.args(["-endpoint", ep]);
@@ -48,10 +88,10 @@ impl YggdrasilNode for YggdrasilctlNode {
         cmd.arg("getSelf");
         let output = cmd.output().context("failed to run yggdrasilctl")?;
         if !output.status.success() {
-            bail!(
-                "yggdrasilctl getSelf failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+            return Err(NodeProblem::NotRunning(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            )
+            .into());
         }
         parse_get_self(&String::from_utf8_lossy(&output.stdout))
     }
@@ -84,12 +124,32 @@ pub fn parse_get_self(json: &str) -> Result<NodeInfo> {
     })
 }
 
+/// The host's interfaces, to find the one that holds the node's address.
+struct Host {
+    ifaces: Arc<dyn InterfaceManager>,
+    /// The interface named in the config; wins over detection.
+    configured: Option<String>,
+}
+
+#[derive(Default)]
+struct Cache {
+    /// When Yggdrasil was last asked, successfully or not.
+    at: Option<Instant>,
+    /// The last successful answer (kept while Yggdrasil restarts).
+    info: Option<NodeInfo>,
+    /// Why the last ask failed; None after a success.
+    error: Option<String>,
+    /// The interface in use: configured, else the one holding the node's address.
+    interface: Option<String>,
+}
+
 /// Yggdrasil backend: allocates /128s inside the node's own `300::/64` subnet. Yggdrasil
 /// routes the whole /64 to this node, so the addresses need no key material.
 pub struct YggdrasilBackend {
     node: Box<dyn YggdrasilNode>,
     refresh: Duration,
-    cache: Mutex<Option<(Instant, NodeInfo)>>,
+    host: Option<Host>,
+    cache: Mutex<Cache>,
 }
 
 impl YggdrasilBackend {
@@ -101,31 +161,75 @@ impl YggdrasilBackend {
         Self {
             node,
             refresh,
-            cache: Mutex::new(None),
+            host: None,
+            cache: Mutex::new(Cache::default()),
+        }
+    }
+
+    /// Find the interface through `ifaces` (the one that holds the node's address), unless
+    /// `configured` names it.
+    pub fn with_host(
+        mut self,
+        ifaces: Arc<dyn InterfaceManager>,
+        configured: Option<String>,
+    ) -> Self {
+        self.host = Some(Host { ifaces, configured });
+        self
+    }
+
+    /// The interface that holds `address`.
+    fn find_interface(&self, address: Ipv6Addr) -> Option<String> {
+        let host = self.host.as_ref()?;
+        if let Some(name) = &host.configured {
+            return Some(name.clone());
+        }
+        host.ifaces
+            .list_interfaces()
+            .ok()?
+            .into_iter()
+            .find(|i| {
+                host.ifaces
+                    .list_addresses(&i.name)
+                    .is_ok_and(|a| a.contains(&address))
+            })
+            .map(|i| i.name)
+    }
+
+    /// Ask Yggdrasil again if the last answer is older than `refresh`.
+    fn refresh_cache(&self, cache: &mut Cache) {
+        if cache.at.is_some_and(|at| at.elapsed() < self.refresh) {
+            return;
+        }
+        cache.at = Some(Instant::now());
+        match self.node.get_self() {
+            Ok(info) => {
+                cache.interface = self.find_interface(info.address);
+                cache.info = Some(info);
+                cache.error = None;
+            }
+            Err(e) => {
+                let reason = match e.downcast_ref::<NodeProblem>() {
+                    Some(p) => p.to_string(),
+                    None => format!("{e:#}"),
+                };
+                if cache.info.is_some() {
+                    warn!("Yggdrasil node info refresh failed, using last known: {e:#}");
+                }
+                cache.error = Some(reason);
+            }
         }
     }
 
     /// Node info, refreshed at most every `refresh`. If a refresh fails (e.g. Yggdrasil is
-    /// restarting) the last known info is used.
+    /// restarting) the last known info is used for allocation; [`Ipv6Backend::problem`]
+    /// still reports it.
     fn info(&self) -> Result<NodeInfo> {
         let mut cache = self.cache.lock().unwrap();
-        if let Some((at, info)) = cache.as_ref() {
-            if at.elapsed() < self.refresh {
-                return Ok(info.clone());
-            }
-        }
-        match self.node.get_self() {
-            Ok(info) => {
-                *cache = Some((Instant::now(), info.clone()));
-                Ok(info)
-            }
-            Err(e) => match cache.as_ref() {
-                Some((_, stale)) => {
-                    warn!("Yggdrasil node info refresh failed, using last known: {e}");
-                    Ok(stale.clone())
-                }
-                None => Err(e),
-            },
+        self.refresh_cache(&mut cache);
+        match (&cache.info, &cache.error) {
+            (Some(info), _) => Ok(info.clone()),
+            (None, Some(reason)) => bail!("{reason}"),
+            (None, None) => bail!("{NOT_RUNNING}"),
         }
     }
 }
@@ -143,6 +247,22 @@ impl Ipv6Backend for YggdrasilBackend {
             prefix_len: 128,
             backend: BackendType::Yggdrasil,
         })
+    }
+
+    fn interface(&self) -> Option<String> {
+        let mut cache = self.cache.lock().unwrap();
+        self.refresh_cache(&mut cache);
+        let configured = self.host.as_ref().and_then(|h| h.configured.clone());
+        configured.or_else(|| cache.interface.clone())
+    }
+
+    fn problem(&self) -> Option<String> {
+        let mut cache = self.cache.lock().unwrap();
+        self.refresh_cache(&mut cache);
+        if let Some(reason) = &cache.error {
+            return Some(reason.clone());
+        }
+        (self.host.is_some() && cache.interface.is_none()).then(|| NO_ADAPTER_ADDRESS.to_string())
     }
 }
 
@@ -190,6 +310,88 @@ mod tests {
         let b = backend.allocate(Some(iid_of(a.address))).unwrap();
         assert!(same_prefix64(b.address, "300:9:9:9::".parse().unwrap()));
         assert_eq!(iid_of(b.address), iid_of(a.address));
+    }
+
+    fn host(
+        ifaces: &crate::test_support::MockInterfaceManager,
+        configured: Option<&str>,
+    ) -> YggdrasilBackend {
+        let node = MockYggdrasilNode::new("300:1:2:3::/64");
+        node.set_address("200::1");
+        YggdrasilBackend::with_refresh(Box::new(node), Duration::ZERO)
+            .with_host(Arc::new(ifaces.clone()), configured.map(str::to_string))
+    }
+
+    fn ifaces() -> crate::test_support::MockInterfaceManager {
+        crate::test_support::MockInterfaceManager::new(Default::default())
+    }
+
+    #[test]
+    fn the_interface_is_the_one_holding_the_node_address() {
+        let net = ifaces();
+        net.add_interface("Yggdrasil");
+        net.add_interface("Ethernet");
+        let backend = host(&net, None);
+        assert_eq!(backend.interface(), None);
+        assert_eq!(backend.problem().as_deref(), Some(NO_ADAPTER_ADDRESS));
+
+        net.plant_address("Yggdrasil", "200::1".parse().unwrap());
+        assert_eq!(backend.interface().as_deref(), Some("Yggdrasil"));
+        assert_eq!(backend.problem(), None);
+
+        // The adapter is recreated under another name: the backend follows it.
+        net.drop_address("Yggdrasil", "200::1".parse().unwrap());
+        net.plant_address("Ethernet", "200::1".parse().unwrap());
+        assert_eq!(backend.interface().as_deref(), Some("Ethernet"));
+    }
+
+    #[test]
+    fn a_configured_interface_wins_over_detection() {
+        let net = ifaces();
+        net.add_interface("Yggdrasil");
+        net.add_interface("tun0");
+        net.plant_address("Yggdrasil", "200::1".parse().unwrap());
+        let backend = host(&net, Some("tun0"));
+        assert_eq!(backend.interface().as_deref(), Some("tun0"));
+        assert_eq!(backend.problem(), None);
+    }
+
+    #[test]
+    fn a_stopped_node_is_reported_even_though_allocation_keeps_working() {
+        let net = ifaces();
+        let node = MockYggdrasilNode::new("300:1:2:3::/64");
+        let backend = YggdrasilBackend::with_refresh(Box::new(node.clone()), Duration::ZERO)
+            .with_host(Arc::new(net), None);
+        backend.current_prefix().unwrap();
+        node.set_failing(true);
+        assert!(backend.current_prefix().unwrap().is_some());
+        assert!(backend.problem().is_some());
+
+        let down = MockYggdrasilNode::new("300:1:2:3::/64");
+        down.set_failing(true);
+        let fresh = YggdrasilBackend::with_refresh(Box::new(down), Duration::ZERO);
+        assert!(fresh.current_prefix().is_err());
+    }
+
+    #[test]
+    fn problems_are_named_in_plain_words() {
+        struct Missing;
+        impl YggdrasilNode for Missing {
+            fn get_self(&self) -> Result<NodeInfo> {
+                Err(NodeProblem::NotFound.into())
+            }
+        }
+        struct Stopped;
+        impl YggdrasilNode for Stopped {
+            fn get_self(&self) -> Result<NodeInfo> {
+                Err(NodeProblem::NotRunning("connection refused".into()).into())
+            }
+        }
+        let b = YggdrasilBackend::with_refresh(Box::new(Missing), Duration::ZERO);
+        assert_eq!(b.current_prefix().unwrap_err().to_string(), NOT_FOUND);
+        assert_eq!(b.problem().as_deref(), Some(NOT_FOUND));
+        let b = YggdrasilBackend::with_refresh(Box::new(Stopped), Duration::ZERO);
+        assert_eq!(b.current_prefix().unwrap_err().to_string(), NOT_RUNNING);
     }
 
     #[test]

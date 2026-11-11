@@ -102,6 +102,7 @@ routes! {
     LIST_ADDRESSES = list_addresses: GET "/api/addresses",
     RESERVE_ADDRESS = reserve_address: POST "/api/addresses/{id}/reserve",
     LIST_NETWORKS = list_networks: GET "/api/networks",
+    NETWORK_SETUP = network_setup: GET "/api/networks/setup",
     ADD_NETWORK = add_network: POST "/api/networks",
     DELETE_NETWORK = delete_network: DELETE "/api/networks/{id}",
     GET_SETTINGS = get_settings: GET "/api/settings",

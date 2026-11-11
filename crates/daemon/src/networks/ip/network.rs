@@ -1,23 +1,39 @@
 use super::super::{Capabilities, LocatorRequest, Network, NetworkEnforcement, NewLocator};
 use super::{Ipv6Backend, Prefix};
+use crate::iface::InterfaceManager;
 use anyhow::Result;
 use socketguard_core::config::BackendConfig;
 use socketguard_core::{
     is_loopback_interface, Address, CredentialKind, Locator, NetworkKind, NetworkStatus,
 };
 use std::net::Ipv6Addr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
+
+/// How long "the interface exists" is reused: listing interfaces may run a command.
+const HOST_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The host to check the network's interface against.
+struct Host {
+    ifaces: Arc<dyn InterfaceManager>,
+    /// The interface of the config; None when the backend finds it at runtime.
+    configured: Option<String>,
+    checked: Mutex<Option<(Instant, Option<String>)>>,
+}
 
 /// An IP network: allocation through an [`Ipv6Backend`].
 pub struct IpNetwork {
     kind: NetworkKind,
     grants_apply: bool,
     backend: Box<dyn Ipv6Backend>,
+    host: Option<Host>,
     /// Why the network is down, once it has been seen to be (to log changes only).
     down: Mutex<Option<String>>,
     /// The last allocation failed with this (a DHCPv6 server that does not answer).
     alloc_error: Mutex<Option<String>>,
+    /// The interface of the config, handed to [`Host`] by `with_host`.
+    configured_interface: Option<String>,
 }
 
 impl IpNetwork {
@@ -26,8 +42,51 @@ impl IpNetwork {
             kind,
             grants_apply,
             backend,
+            host: None,
             down: Mutex::new(None),
             alloc_error: Mutex::new(None),
+            configured_interface: None,
+        }
+    }
+
+    /// Check the network's interface against the host's (ADR 0048): a network on an
+    /// interface that does not exist is down, whatever its allocator says.
+    pub fn with_host(mut self, ifaces: Arc<dyn InterfaceManager>) -> Self {
+        let configured = self.configured_interface.take();
+        self.host = Some(Host {
+            ifaces,
+            configured,
+            checked: Mutex::new(None),
+        });
+        self
+    }
+
+    /// The reason the interface is unusable: it is not on the host.
+    fn interface_problem(&self) -> Option<String> {
+        let host = self.host.as_ref()?;
+        let name = host
+            .configured
+            .clone()
+            .or_else(|| self.backend.interface())?;
+        if is_loopback_interface(&name) {
+            return None;
+        }
+        let mut checked = host.checked.lock().unwrap();
+        if let Some((at, result)) = checked.as_ref() {
+            if at.elapsed() < HOST_CHECK_INTERVAL && result.as_deref() == Some(name.as_str()) {
+                return None;
+            }
+        }
+        let exists = match host.ifaces.list_interfaces() {
+            Ok(list) => list.iter().any(|i| i.name == name),
+            Err(_) => true, // unknown: do not claim it is missing
+        };
+        if exists {
+            *checked = Some((Instant::now(), Some(name)));
+            None
+        } else {
+            *checked = None;
+            Some(format!("interface {name} does not exist"))
         }
     }
 
@@ -48,7 +107,9 @@ impl IpNetwork {
         let kind = NetworkKind::from(config.backend_type());
         let grants_apply =
             kind != NetworkKind::Local || !config.interface().is_some_and(is_loopback_interface);
-        Self::new(kind, grants_apply, backend)
+        let mut network = Self::new(kind, grants_apply, backend);
+        network.configured_interface = config.interface().map(str::to_string);
+        network
     }
 }
 
@@ -81,6 +142,13 @@ impl Network for IpNetwork {
                 None,
             ),
         };
+        let status = match (
+            status,
+            self.backend.problem().or_else(|| self.interface_problem()),
+        ) {
+            (NetworkStatus::Up, Some(reason)) => NetworkStatus::Down { reason },
+            (s, _) => s,
+        };
         let status = match (status, self.alloc_error.lock().unwrap().clone()) {
             (NetworkStatus::Up, Some(reason)) => NetworkStatus::Down { reason },
             (s, _) => s,
@@ -94,6 +162,10 @@ impl Network for IpNetwork {
 
     fn current_prefix(&self) -> Result<Option<Prefix>> {
         self.backend.current_prefix()
+    }
+
+    fn interface(&self) -> Option<String> {
+        self.backend.interface()
     }
 
     fn ensure_locator(&self, _req: &LocatorRequest) -> Result<NewLocator> {
@@ -138,6 +210,26 @@ impl Network for IpNetwork {
 mod tests {
     use super::*;
     use crate::test_support::MockIpv6Backend;
+
+    #[test]
+    fn a_missing_interface_is_down_with_its_name() {
+        let ifaces = crate::test_support::MockInterfaceManager::new(Default::default());
+        ifaces.add_interface("eth0");
+        let slaac = |name: &str| BackendConfig::Slaac {
+            interface: name.into(),
+            prefix: None,
+        };
+        let mock = || Box::new(MockIpv6Backend::new("2001:db8::", 128, "eth0"));
+        let up = IpNetwork::for_config(&slaac("eth0"), mock()).with_host(Arc::new(ifaces.clone()));
+        assert_eq!(up.status().0, NetworkStatus::Up);
+        let down = IpNetwork::for_config(&slaac("eth9"), mock()).with_host(Arc::new(ifaces));
+        assert_eq!(
+            down.status().0,
+            NetworkStatus::Down {
+                reason: "interface eth9 does not exist".into()
+            }
+        );
+    }
 
     #[test]
     fn local_on_loopback_declares_no_grants() {

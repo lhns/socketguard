@@ -60,6 +60,10 @@ export const useGrants = () => useQuery({ queryKey: ["grants"], queryFn: api.lis
 export const useTags = () => useQuery({ queryKey: ["tags"], queryFn: api.listTags });
 export const usePortGroups = () => useQuery({ queryKey: ["portGroups"], queryFn: api.listPortGroups });
 export const useReservations = () => useQuery({ queryKey: ["reservations"], queryFn: api.listReservations });
+/** What can be added on this host. Looked at again whenever the window gets focus: the person
+ * may have installed something meanwhile. */
+export const useNetworkSetup = () =>
+  useQuery({ queryKey: ["networkSetup"], queryFn: api.networkSetup, staleTime: 0, refetchOnWindowFocus: true });
 export const useNetworks = () => useQuery({ queryKey: ["networks"], queryFn: api.listNetworks });
 export const useSettings = () => useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
 export const useShare = (appId: string | null) =>
@@ -124,7 +128,7 @@ export const EVENT_INVALIDATIONS: Record<string, string[][]> = {
   port_groups_changed: [["portGroups"], ["app"]],
   reservations_changed: [["reservations"], ["addresses"]],
   addresses_changed: [["addresses"], ["reservations"], ["apps"], ["app"]],
-  networks_changed: [["networks"], ["status"]],
+  networks_changed: [["networks"], ["networkSetup"], ["status"]],
   settings_changed: [["settings"], ["status"]],
   activity: [["activity"]],
   daemon_disconnected: [["status"]],

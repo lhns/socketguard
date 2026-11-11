@@ -135,6 +135,7 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::GET, "/api/addresses"),
     (Method::POST, "/api/addresses/{id}/reserve"),
     (Method::GET, "/api/networks"),
+    (Method::GET, "/api/networks/setup"),
     (Method::POST, "/api/networks"),
     (Method::DELETE, "/api/networks/{id}"),
     (Method::GET, "/api/settings"),
@@ -203,6 +204,7 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("GET", "/api/addresses") => get(addresses_list),
         ("POST", "/api/addresses/{id}/reserve") => post(address_reserve),
         ("GET", "/api/networks") => get(networks_list),
+        ("GET", "/api/networks/setup") => get(networks_setup),
         ("POST", "/api/networks") => post(network_create),
         ("DELETE", "/api/networks/{id}") => delete(network_delete),
         ("GET", "/api/settings") => get(settings_get),
@@ -924,6 +926,23 @@ async fn networks_list(State(state): State<Shared>) -> ApiResult<Response> {
     Ok(Json(state.engine.read().await.networks()).into_response())
 }
 
+/// What can be added on this host and how far each kind is (ADR 0048). Reads only; the
+/// probes run off the runtime, after the engine lock is released.
+async fn networks_setup(State(state): State<Shared>) -> ApiResult<Response> {
+    let existing = crate::setup::Existing::from_networks(&state.engine.read().await.networks());
+    let config_path = state.config_path.clone();
+    let setup = tokio::task::spawn_blocking(move || {
+        crate::setup::detect(
+            &crate::setup::SystemProbes::default(),
+            &existing,
+            config_path.as_deref(),
+        )
+    })
+    .await
+    .map_err(anyhow::Error::from)?;
+    Ok(Json(setup).into_response())
+}
+
 async fn network_create(
     State(state): State<Shared>,
     ApiJson(req): ApiJson<NewNetwork>,
@@ -932,6 +951,9 @@ async fn network_create(
         .id
         .filter(|i| !i.trim().is_empty())
         .unwrap_or_else(|| req.backend.default_id());
+    if id == "setup" {
+        return Err(ApiErr::invalid("\"setup\" is not a usable network id"));
+    }
     check_tor_settings(&state, &req.backend).await?;
     let inst = BackendInstanceConfig {
         id,

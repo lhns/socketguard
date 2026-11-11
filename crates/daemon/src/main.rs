@@ -138,8 +138,9 @@ async fn disable(config: &DaemonConfig) -> Result<()> {
         .collect();
     let mut nets = Vec::new();
     for b in &config.backends {
-        // Networks without an interface (Tor) hold services outside the firewall.
-        if b.backend.interface().is_none() {
+        // Tor holds services outside the firewall (a Yggdrasil without a configured
+        // interface has addresses only on the host, which the owned-address table covers).
+        if matches!(b.backend, socketguard_core::BackendConfig::Tor { .. }) {
             nets.push((
                 b.id.clone(),
                 networks::create(&b.backend, [0; 5], Arc::from(iface::create()))?,

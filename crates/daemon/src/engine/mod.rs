@@ -332,13 +332,24 @@ impl Engine {
         ids
     }
 
+    /// The interface a network is on: the config's, else the one it found at runtime
+    /// (Yggdrasil without a configured interface). Never written back to the config.
+    fn interface_in_use(active: &ActiveBackend) -> Option<String> {
+        active
+            .config
+            .backend
+            .interface()
+            .map(str::to_string)
+            .or_else(|| active.network.interface())
+    }
+
     fn network_of(id: &str, active: &ActiveBackend) -> Network {
         let (status, prefix) = active.network.status();
         Network {
             id: id.to_string(),
             kind: active.network.kind(),
             name: id.to_string(),
-            interface: active.config.backend.interface().map(str::to_string),
+            interface: Self::interface_in_use(active),
             grants_apply: active.network.capabilities().grants_apply,
             status,
             prefix,
@@ -377,10 +388,10 @@ impl Engine {
             .collect()
     }
 
-    fn interface_of(&self, network_id: &str) -> Option<&str> {
+    fn interface_of(&self, network_id: &str) -> Option<String> {
         self.backends
             .get(network_id)
-            .and_then(|b| b.config.backend.interface())
+            .and_then(Self::interface_in_use)
     }
 
     /// Startup: apply the desired state over whatever the previous run left (never a
@@ -451,7 +462,7 @@ impl Engine {
         let ifaces = self
             .backends
             .iter()
-            .filter_map(|(id, b)| Some((id.clone(), b.config.backend.interface()?.to_string())))
+            .filter_map(|(id, b)| Some((id.clone(), Self::interface_in_use(b)?)))
             .collect();
         let nets = self
             .backends

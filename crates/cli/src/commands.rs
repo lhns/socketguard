@@ -213,6 +213,60 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
             let n = c.client.list_networks().await?;
             c.print(&n, || render::networks(&n))
         }
+        NetworksCmd::Detect => {
+            let s = c.client.network_setup().await?;
+            c.print(&s, || render::network_setup(&s))
+        }
+        NetworksCmd::Setup {
+            kind,
+            yes,
+            dry_run,
+            config,
+            torrc,
+            pause,
+            undo,
+            uninstall_packages,
+        } => {
+            let opts = crate::setup::Options {
+                yes,
+                dry_run,
+                config: config.clone(),
+                torrc,
+            };
+            let result = if undo {
+                let u = crate::setup::UndoOptions {
+                    yes,
+                    dry_run,
+                    config,
+                    uninstall_packages,
+                };
+                crate::setup::undo(kind.into(), &u, &mut crate::setup::System, &c.client)
+                    .await
+                    .map(|()| Default::default())
+            } else {
+                crate::setup::run(kind.into(), &opts, &mut crate::setup::System, &c.client).await
+            };
+            let outcome = match result {
+                Ok(changes) => {
+                    if !changes.list().is_empty() {
+                        println!("\nDone. Changes made:");
+                        for l in changes.list() {
+                            println!("  - {l}");
+                        }
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("error: {e:#}");
+                    Err(Reported.into())
+                }
+            };
+            if pause {
+                println!("\nPress Enter to close this window.");
+                let _ = std::io::stdin().read_line(&mut String::new());
+            }
+            outcome
+        }
         NetworksCmd::Add {
             r#type,
             interface,
@@ -331,7 +385,7 @@ pub fn backend_config(
             interface: required()?,
         },
         NetworkType::Yggdrasil => BackendConfig::Yggdrasil {
-            interface: required()?,
+            interface,
             admin_endpoint,
         },
         NetworkType::Tor => bail!("tor is configured with tor_config"),
@@ -1803,7 +1857,7 @@ mod tests {
             )
             .unwrap(),
             BackendConfig::Yggdrasil {
-                interface: "ygg0".into(),
+                interface: Some("ygg0".into()),
                 admin_endpoint: Some("unix:///y".into()),
             }
         );

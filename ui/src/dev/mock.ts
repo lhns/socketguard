@@ -3,7 +3,7 @@
 // It is not part of the production bundle.
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
-  Address, App, AppDetail, BatchChange, ChangeOp, EffectiveAccess, GrantReach, GrantView, Network, Peer, PeerGroup, PortRange, ReservationView, Scope, PortGroup, Subject, Tag,
+  Address, App, AppDetail, BatchChange, ChangeOp, EffectiveAccess, GrantReach, GrantView, Network, NetworkSetup, Peer, PeerGroup, PortRange, ReservationView, Scope, PortGroup, Subject, Tag,
 } from "../api";
 import { ALL_SCOPE, rangeLabel, sameScope } from "../lib";
 
@@ -443,6 +443,28 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
   return { dry_run: req.dry_run, refs, changes: out, changes_reach: widens };
 }
 
+/** Several states at once, for the Settings screen of the dev mock. */
+const networkSetup: NetworkSetup = {
+  lan: [
+    { interface: "Ethernet 2", description: "Red Hat VirtIO Ethernet Adapter", has_ipv6_prefix: true, is_default_route: true, already_added: false },
+    { interface: "Ethernet 3", description: "Intel(R) Ethernet Connection", has_ipv6_prefix: false, is_default_route: false, already_added: false },
+    { interface: "eth0", has_ipv6_prefix: true, is_default_route: false, already_added: true },
+  ],
+  yggdrasil: {
+    state: "not_running",
+    found: { yggdrasilctl: "C:\\Program Files\\Yggdrasil\\yggdrasilctl.exe" },
+    missing: "The Yggdrasil service is stopped.",
+  },
+  tor: {
+    state: "not_installed",
+    found: {},
+    missing: "Tor is not installed. Windows has no package for it; download the Tor Expert Bundle, then come back here.",
+    download_link: "https://www.torproject.org/download/tor/",
+  },
+  local: { state: "ready", found: {} },
+  config_path: "C:\\ProgramData\\SocketGuard\\socketguard.json",
+};
+
 const done = <T,>(value: T) => ({ value, enforcement: null });
 
 export function installMock() {
@@ -482,6 +504,11 @@ export function installMock() {
           portGroups = portGroups.map((g) => (g.id === a.id ? { ...g, apps: g.apps.filter((x) => x !== a.appId) } : g));
           return done(portGroups.find((g) => g.id === a.id));
         case "list_networks": return networks;
+        // Data only: nothing here installs or starts anything.
+        case "network_setup": return networkSetup;
+        case "run_network_setup": return { launched: false, cancelled: false, exit_code: null, command: `socketguard networks setup ${a.kind} --yes` };
+        case "open_download_page": return undefined;
+        case "add_network": return { id: a.req.type, kind: a.req.type === "slaac" ? "lan" : a.req.type, name: a.req.type, interface: a.req.interface ?? null, grants_apply: true, status: { state: "up" } };
         case "get_settings": return { protect_host_interfaces: ["eth0"] };
         case "activity": return [];
         case "share_app": return { tor: [] };

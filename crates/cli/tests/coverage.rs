@@ -72,17 +72,23 @@ const UI_COMMANDS: &str = include_str!("../../../ui/src-tauri/src/main.rs");
 /// CLI commands that deliberately have no UI counterpart: shell completion is meaningless in
 /// a window, and `watch` prints the event stream, which the UI consumes through its own bridge.
 /// Pinned: adding to it needs a decision, not an edit of the route table.
-const CLI_ONLY: &[&str] = &["completions", "watch"];
+///
+/// `networks setup` runs elevated and edits the system (ADR 0048); the UI starts it through
+/// its own elevation command (not an API route), and its detection route is
+/// `networks detect`.
+const CLI_ONLY: &[&str] = &["completions", "watch", "networks setup"];
 
 #[test]
-fn the_cli_only_list_is_exactly_completions_and_watch() {
-    assert_eq!(CLI_ONLY, ["completions", "watch"]);
+fn the_cli_only_list_is_exactly_completions_watch_and_networks_setup() {
+    assert_eq!(CLI_ONLY, ["completions", "watch", "networks setup"]);
     let root = Cli::command();
     for name in CLI_ONLY {
-        assert!(
-            root.find_subcommand(name).is_some(),
-            "CLI-only command {name:?} does not exist"
-        );
+        let mut cmd = &root;
+        for word in name.split(' ') {
+            cmd = cmd
+                .find_subcommand(word)
+                .unwrap_or_else(|| panic!("CLI-only command {name:?} does not exist"));
+        }
     }
 }
 

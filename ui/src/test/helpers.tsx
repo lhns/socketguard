@@ -7,7 +7,7 @@ import { createQueryClient } from "../queries";
 import { NavContext, type Focus, type Page } from "../nav";
 import type {
   Address, AppDetail, App, BindingTarget, ChangesResponse, ReservationView, Enforcement, GrantView, Network, ParsedCredential, Peer, PeerGroup, Settings,
-  StatusResponse, Tag,
+  StatusResponse, Tag, NetworkSetup, SetupState,
 } from "../api";
 
 export const networks: Network[] = [
@@ -15,6 +15,27 @@ export const networks: Network[] = [
   { id: "n-ygg", kind: "yggdrasil", name: "Yggdrasil", interface: "ygg0", grants_apply: true, status: { state: "up" } },
   { id: "n-lan", kind: "lan", name: "LAN", interface: "eth0", grants_apply: true, status: { state: "up" } },
 ];
+
+const state = (state: SetupState["state"], over: Partial<SetupState> = {}): SetupState => ({ state, found: {}, ...over });
+
+/** What `network_setup` answers by default: one LAN interface, nothing else installed. */
+export const networkSetup: NetworkSetup = {
+  lan: [
+    { interface: "Ethernet 2", description: "Red Hat VirtIO Ethernet Adapter", has_ipv6_prefix: true, is_default_route: true, already_added: false },
+    { interface: "Ethernet 3", has_ipv6_prefix: false, is_default_route: false, already_added: false },
+  ],
+  yggdrasil: state("not_installed", {
+    missing: "Yggdrasil is not installed.",
+    install: { manager: "winget", command: "winget install --id YggdrasilNetwork.Yggdrasil --source winget -e", link: "https://yggdrasil-network.github.io/installation.html" },
+  }),
+  tor: state("not_installed", {
+    missing: "Tor is not installed. Windows has no package for it; download the Tor Expert Bundle, then come back here.",
+    download_link: "https://www.torproject.org/download/tor/",
+  }),
+  local: state("ready"),
+  config_path: "C:\\ProgramData\\SocketGuard\\socketguard.json",
+};
+export const setupState = state;
 
 export const app1: App = {
   id: "a1", name: "nginx", process_name: "nginx", exe_path: "/usr/sbin/nginx", interpreter_arg: null, identity_note: null,
@@ -131,6 +152,7 @@ export function mockDaemon(handlers: Handlers = {}) {
     list_port_groups: () => [],
     share_app: () => ({ tor: [] }),
     list_networks: () => networks,
+    network_setup: () => networkSetup,
     list_reservations: () => [],
     list_addresses: () => [],
     get_settings: () => settings,

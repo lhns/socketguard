@@ -18,6 +18,7 @@ use socketguard_core::api_types::{
     NewReservation, NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest, ShareResponse,
     StatusResponse, TorKeyResponse, UpdatePortGroup, UpdateTag,
 };
+use socketguard_core::setup::{NetworkSetup, SetupKind};
 use socketguard_core::{
     ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
     NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, PortGroup, ReservationView, Scope,
@@ -379,6 +380,11 @@ async fn list_networks() -> CmdResult<Vec<Network>> {
 }
 
 #[tauri::command]
+async fn network_setup() -> CmdResult<NetworkSetup> {
+    Ok(client().network_setup().await?)
+}
+
+#[tauri::command]
 async fn add_network(req: NewNetwork) -> CmdResult<Network> {
     Ok(client().add_network(&req).await?)
 }
@@ -509,6 +515,249 @@ async fn start_daemon() -> Result<(), String> {
     Err("Starting the daemon from the UI is only supported on Windows; start it with systemd or sudo.".into())
 }
 
+// ─── Network setup (ADR 0048) ────────────────────────────────────────────
+
+/// How a run of `socketguard networks setup` ended, as the frontend needs it.
+#[derive(Debug, Serialize)]
+struct SetupRun {
+    /// The elevated command ran. False: it did not start (no elevation helper, or the
+    /// prompt was cancelled); `command` is what to run by hand.
+    launched: bool,
+    cancelled: bool,
+    exit_code: Option<i32>,
+    command: String,
+}
+
+/// The arguments of `socketguard networks setup <kind> --yes`, with the daemon's config
+/// file and socket given explicitly: the elevated process has another environment.
+fn setup_args(
+    kind: SetupKind,
+    config: &str,
+    socket: &str,
+    pause: bool,
+) -> Result<Vec<String>, UiError> {
+    let bad = |what: &str| UiError {
+        code: "invalid".into(),
+        message: format!("{what} cannot be passed to the elevated command"),
+        details: None,
+    };
+    for (what, v) in [("the config path", config), ("the socket", socket)] {
+        if v.is_empty() || v.contains(['"', '\n', '\r']) {
+            return Err(bad(what));
+        }
+    }
+    let mut args: Vec<String> = ["networks", "setup"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    args.push(kind.to_string());
+    args.extend([
+        "--yes".into(),
+        "--config".into(),
+        config.into(),
+        "--socket".into(),
+        socket.into(),
+    ]);
+    if pause {
+        args.push("--pause".into());
+    }
+    Ok(args)
+}
+
+/// The CLI next to this executable.
+fn cli_path() -> Result<std::path::PathBuf, UiError> {
+    let exe = std::env::current_exe().map_err(|e| UiError {
+        code: "internal".into(),
+        message: e.to_string(),
+        details: None,
+    })?;
+    let name = if cfg!(windows) {
+        "socketguard.exe"
+    } else {
+        "socketguard"
+    };
+    let cli = exe.parent().map(|d| d.join(name)).filter(|p| p.exists());
+    cli.ok_or_else(|| UiError {
+        code: "not_found".into(),
+        message: format!("{name} was not found next to the SocketGuard window"),
+        details: None,
+    })
+}
+
+/// Start `socketguard networks setup <kind>` with administrator rights and wait for it.
+/// Only the kind (an enum) and the two paths of the running daemon are passed on.
+#[tauri::command]
+async fn run_network_setup(kind: SetupKind, config: String) -> CmdResult<SetupRun> {
+    let socket = client().endpoint().to_string();
+    let cli = cli_path();
+    let shown = |pause| {
+        setup_args(kind, &config, &socket, pause)
+            .map(|a| format!("socketguard {}", a.join(" ")))
+            .unwrap_or_default()
+    };
+    let (args, cli) = match (setup_args(kind, &config, &socket, cfg!(windows)), cli) {
+        (Ok(a), Ok(c)) => (a, c),
+        (Err(e), _) => return Err(e),
+        (_, Err(_)) => {
+            return Ok(SetupRun {
+                launched: false,
+                cancelled: false,
+                exit_code: None,
+                command: shown(false),
+            })
+        }
+    };
+    let command = shown(false);
+    let run = tokio::task::spawn_blocking(move || elevated_run(&cli, &args))
+        .await
+        .map_err(|e| UiError {
+            code: "internal".into(),
+            message: e.to_string(),
+            details: None,
+        })?;
+    Ok(match run {
+        ElevatedRun::Done(code) => SetupRun {
+            launched: true,
+            cancelled: false,
+            exit_code: code,
+            command,
+        },
+        ElevatedRun::Cancelled => SetupRun {
+            launched: true,
+            cancelled: true,
+            exit_code: None,
+            command,
+        },
+        ElevatedRun::Unavailable => SetupRun {
+            launched: false,
+            cancelled: false,
+            exit_code: None,
+            command,
+        },
+    })
+}
+
+enum ElevatedRun {
+    Done(Option<i32>),
+    /// The person declined the prompt: not an error.
+    Cancelled,
+    /// No way to ask for administrator rights here.
+    Unavailable,
+}
+
+/// UAC (`runas`) in a visible console that the CLI keeps open at the end (`--pause`).
+#[cfg(windows)]
+fn elevated_run(cli: &std::path::Path, args: &[String]) -> ElevatedRun {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let verb = wide("runas");
+    let file = wide(&cli.to_string_lossy());
+    let params = wide(
+        &args
+            .iter()
+            .map(|a| format!("\"{a}\""))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(params.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    if unsafe { ShellExecuteExW(&mut info) }.is_err() {
+        // ERROR_CANCELLED (1223): the UAC prompt was declined.
+        return if std::io::Error::last_os_error().raw_os_error() == Some(1223) {
+            ElevatedRun::Cancelled
+        } else {
+            ElevatedRun::Unavailable
+        };
+    }
+    let process = info.hProcess;
+    let mut code = None;
+    unsafe {
+        if WaitForSingleObject(process, INFINITE) == WAIT_OBJECT_0 {
+            let mut c = 0u32;
+            if GetExitCodeProcess(process, &mut c).is_ok() {
+                code = Some(c as i32);
+            }
+        }
+        let _ = CloseHandle(process);
+    }
+    ElevatedRun::Done(code)
+}
+
+/// Single-quote for a POSIX shell.
+#[cfg(not(windows))]
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// pkexec on Linux, osascript on macOS; nothing else is tried.
+#[cfg(not(windows))]
+fn elevated_run(cli: &std::path::Path, args: &[String]) -> ElevatedRun {
+    use std::process::Command;
+    let status = if cfg!(target_os = "macos") {
+        let line = std::iter::once(cli.to_string_lossy().to_string())
+            .chain(args.iter().cloned())
+            .map(|a| sh_quote(&a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let script = format!(
+            "do shell script \"{}\" with administrator privileges",
+            line.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        Command::new("osascript").args(["-e", &script]).status()
+    } else {
+        Command::new("pkexec").arg(cli).args(args).status()
+    };
+    match status {
+        Ok(s) => match s.code() {
+            // pkexec: 126 = not authorized, 127 = dismissed. osascript: -128 = cancelled.
+            Some(126) | Some(127) if !cfg!(target_os = "macos") => ElevatedRun::Cancelled,
+            code => ElevatedRun::Done(code),
+        },
+        Err(_) => ElevatedRun::Unavailable,
+    }
+}
+
+/// Open one of the two download pages in the system browser. Only those: the page asks
+/// for a link it got from the daemon, which is not trusted with any other.
+#[tauri::command]
+async fn open_download_page(url: String) -> CmdResult<()> {
+    const ALLOWED: [&str; 2] = [
+        socketguard_core::setup::YGGDRASIL_DOWNLOAD,
+        socketguard_core::setup::TOR_DOWNLOAD,
+    ];
+    let fail = |message: String| UiError {
+        code: "invalid".into(),
+        message,
+        details: None,
+    };
+    if !ALLOWED.contains(&url.as_str()) {
+        return Err(fail("that is not one of the download pages".into()));
+    }
+    #[cfg(windows)]
+    let result = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", &url])
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(&url).spawn();
+    result
+        .map(|_| ())
+        .map_err(|e| fail(format!("cannot open the browser: {e}")))
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -553,6 +802,9 @@ fn main() {
             attach_port_group,
             detach_port_group,
             list_networks,
+            network_setup,
+            run_network_setup,
+            open_download_page,
             add_network,
             delete_network,
             list_addresses,
