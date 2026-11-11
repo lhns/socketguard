@@ -107,7 +107,7 @@ does not cause a 202. Every error has the [error body](#errors).
 | POST | `/api/tags/{id}/members` | `NewTagMember` | `Tag` | an app with a `scope` (all of it by default, one port, or a port group attached to it); a manual addition clears an exclusion. On a tag that has a grant to Anyone it opens the app, so it needs `"confirm_open": true` |
 | DELETE | `/api/tags/{id}/members/{app_id}` | query `port`, `proto` or `group` (optional) | `Tag` | without them the All-ports membership goes; with `port` (and `proto`) or `group` (a port group id) the membership by that scope. Removing a whole app that a pattern matches records an exclusion (`excluded`) |
 | GET | `/api/port-groups` | | `PortGroup[]` | [port groups](#port-groups) |
-| POST | `/api/port-groups` | `NewPortGroup` | `PortGroup` (201) | `label`, `ports` (`{start, end, proto}` ranges, normalized), optional `apps` to attach it to. Needs `"confirm_open": true` where attaching opens an app to Anyone |
+| POST | `/api/port-groups` | `NewPortGroup` | `PortGroup` (201) | `ports` (`{start, end, proto}` ranges, normalized), optional `label` (a missing or blank one names the group after its ports, e.g. `80/tcp, 443/tcp`, with ` (2)` appended on a clash; an explicit label that is taken is a 409), optional `apps` to attach it to. Needs `"confirm_open": true` where attaching opens an app to Anyone |
 | GET | `/api/port-groups/{id}` | | `PortGroup` | |
 | PUT | `/api/port-groups/{id}` | `UpdatePortGroup` | `PortGroup` | `label` and/or `ports`; new ports take effect everywhere the group is used (and need `confirm_open` where that opens an app to Anyone) |
 | DELETE | `/api/port-groups/{id}` | | 204 | 409 `conflict`, naming what uses it, while a grant (on an app or a tag), a tag member or a reservation binding has the group as its scope; addresses that served it go with it |
@@ -268,7 +268,7 @@ A tag (ADR 0043) is a label with members (an app with a scope) and optional glob
 | `create_peer` | `label?`, `credentials` (`NewCredential[]`), `ref?` |
 | `create_group` | `label`, `members` (peer ids or refs of peers created earlier), `ref?` |
 | `create_tag` | `label`, `patterns`, `ref?` |
-| `create_port_group` | `label`, `ports`, `apps?` (attach right away), `confirm_open`, `ref?` |
+| `create_port_group` | `label?` (named after the ports when missing), `ports`, `apps?` (attach right away), `confirm_open`, `ref?` |
 | `update_port_group` | `group_id`, `label?`, `ports?`, `confirm_open` |
 | `delete_port_group` | `group_id` |
 | `attach_port_group` | `group_id`, `app_id`, `confirm_open` |

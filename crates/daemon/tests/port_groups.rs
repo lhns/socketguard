@@ -88,13 +88,6 @@ async fn groups_are_created_listed_changed_and_validated() {
         )
         .await;
     assert_eq!((s, code(&b)), (StatusCode::BAD_REQUEST, "invalid"));
-    let (s, b) = d
-        .post(
-            "/api/port-groups",
-            json!({"label": "  ", "ports": passive()}),
-        )
-        .await;
-    assert_eq!((s, code(&b)), (StatusCode::BAD_REQUEST, "invalid"));
 
     // PUT changes the label and/or ports.
     let (s, g) = d
@@ -653,4 +646,56 @@ async fn unidentified_apps_take_no_port_groups() {
         .unwrap()
         .apps
         .is_empty());
+}
+
+#[tokio::test]
+async fn an_unnamed_port_group_is_named_after_its_ports() {
+    let d = Daemon::new().await;
+    let tcp = |p: u16| json!({"start": p, "end": p, "proto": "tcp"});
+    let (s, g) = d
+        .post(
+            "/api/port-groups",
+            json!({"ports": [tcp(443), tcp(80), {"start": 50000, "end": 51000, "proto": "tcp"}]}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{g}");
+    assert_eq!(g["label"], "80/tcp, 443/tcp, 50000-51000/tcp");
+
+    // A blank label counts as missing; a clash gets a suffix, again and again.
+    for (label, want) in [
+        (json!(null), "80/tcp"),
+        (json!("  "), "80/tcp (2)"),
+        (json!(""), "80/tcp (3)"),
+    ] {
+        let (s, g) = d
+            .post("/api/port-groups", json!({"label": label, "ports": [tcp(80)]}))
+            .await;
+        assert_eq!(s, StatusCode::CREATED, "{g}");
+        assert_eq!(g["label"], want);
+    }
+
+    // An explicit label that is taken stays a conflict.
+    let (s, b) = d
+        .post("/api/port-groups", json!({"label": "80/tcp", "ports": [tcp(8080)]}))
+        .await;
+    assert_eq!((s, code(&b)), (StatusCode::CONFLICT, "conflict"));
+
+    // The batch names them too, and sees the groups made earlier in it.
+    let (s, b) = d
+        .post(
+            "/api/changes",
+            json!({"ops": [
+                {"op": "create_port_group", "ref": "$a", "ports": [tcp(25)]},
+                {"op": "create_port_group", "ref": "$b", "ports": [tcp(25)]}
+            ]}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let names: Vec<String> = b["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["25/tcp", "25/tcp (2)"]);
 }

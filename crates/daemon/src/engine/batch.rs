@@ -461,7 +461,7 @@ impl Engine {
                 let (group, gp) = self.plan_create_group(
                     &mut plan.cat,
                     new_id(),
-                    label,
+                    label.as_deref(),
                     ports,
                     apps,
                     *confirm_open,

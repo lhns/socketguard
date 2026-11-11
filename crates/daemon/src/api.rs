@@ -851,7 +851,7 @@ async fn port_group_create(
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
     let group = engine
-        .create_port_group(&state, &req.label, &req.ports, &req.apps, req.confirm_open)
+        .create_port_group(&state, req.label.as_deref(), &req.ports, &req.apps, req.confirm_open)
         .await?;
     Ok(saved(&engine, StatusCode::CREATED, Some(group)))
 }

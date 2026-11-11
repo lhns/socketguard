@@ -335,6 +335,19 @@ describe("Port groups in the list", () => {
       { op: "create_port_group", label: "mail", ports: [{ start: 25, end: 25, proto: "tcp" }], apps: [], confirm_open: false },
     ]]));
   });
+
+  it("the name of a new port group is optional and shows the default as its placeholder", async () => {
+    const d = setup();
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("button", { name: "New port group" }));
+    await user.type(await screen.findByLabelText("Add a port or range"), "25/tcp{Enter}");
+    expect(screen.getByLabelText("Port group name")).toHaveAttribute("placeholder", "25/tcp");
+    await user.click(screen.getByRole("button", { name: "Create port group" }));
+    await waitFor(() => expect(applied(d)).toEqual([[
+      { op: "create_port_group", ports: [{ start: 25, end: 25, proto: "tcp" }], apps: [], confirm_open: false },
+    ]]));
+  });
 });
 
 describe("Port group inspector", () => {

@@ -61,7 +61,8 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   const [closed, setClosed] = useState(false);
   const [highlight, setHighlight] = useState<AccessHighlight | null>(null);
   const [selectLabel, setSelectLabel] = useState<string | null>(null);
-  const [selectGroupLabel, setSelectGroupLabel] = useState<string | null>(null);
+  // The port groups there were when a new one was started: the first one beyond them is selected.
+  const [groupsBefore, setGroupsBefore] = useState<Set<string> | null>(null);
   // Showing the details again after they were closed or folded away.
   const reveal = () => {
     setStripOpen(true);
@@ -125,13 +126,13 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
 
   // A port group that was just created is selected as soon as it is in the list.
   useEffect(() => {
-    if (!selectGroupLabel) return;
-    const g = groupList.find((x) => x.label === selectGroupLabel);
+    if (!groupsBefore) return;
+    const g = groupList.find((x) => !groupsBefore.has(x.id));
     if (g) {
       setSelected(new Set([`sgroup:${g.id}`]));
-      setSelectGroupLabel(null);
+      setGroupsBefore(null);
     }
-  }, [groupList, selectGroupLabel]);
+  }, [groupList, groupsBefore]);
   const own = useMemo(() => shownApps.filter((a) => !a.system), [shownApps]);
   const system = useMemo(() => shownApps.filter((a) => a.system), [shownApps]);
   const selectedSystem = appList.some((a) => a.system && selected.has(`app:${a.id}`));
@@ -188,7 +189,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
       title: "Port groups",
       count: shownGroups.length,
       rows: groupRows,
-      action: <button className="btn btn-sm" onClick={() => { setCreatingGroup(true); setCreating(false); setSelected(new Set()); reveal(); }}>New port group</button>,
+      action: <button className="btn btn-sm" onClick={() => { setCreatingGroup(true); setCreating(false); setSelected(new Set()); setGroupsBefore(new Set(groupList.map((g) => g.id))); reveal(); }}>New port group</button>,
       emptyText: groupList.length === 0 ? "No port groups yet. A port group names ports and ranges, like FTP's passive range, to attach to apps." : "No port group matches.",
     },
     { key: "apps", title: "Apps", count: own.length, rows: ownRows, emptyText: appList.length === 0 ? "No apps detected yet. The daemon discovers listening programs automatically." : "No app matches." },
@@ -348,7 +349,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   const inspector = (() => {
     if (collapsed) return <Inspector label="Details" title="" collapsed onExpand={reveal} />;
     if (creating) return <NewTagForm onCreated={(label) => { setCreating(false); setSelectLabel(label); }} onClose={() => setCreating(false)} />;
-    if (creatingGroup) return <NewPortGroupForm onCreated={(label) => { setCreatingGroup(false); setSelectGroupLabel(label); }} onClose={() => setCreatingGroup(false)} />;
+    if (creatingGroup) return <NewPortGroupForm onCreated={() => setCreatingGroup(false)} onClose={() => { setCreatingGroup(false); setGroupsBefore(null); }} />;
     if (selectedApps.length === 1 && selectedTags.length === 0 && selectedGroups.length === 0) {
       return <AppInspector key={selectedApps[0].id} id={selectedApps[0].id} highlight={highlight} onCollapse={onCollapse} onClose={close} />;
     }

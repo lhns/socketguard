@@ -117,7 +117,7 @@ socketguard grant tag:dev group:team                       # covers every member
 
 # Port groups: ports and ranges that belong together (ADR 0047), attached to apps, usable as a scope
 # (the command is still `port-groups`)
-socketguard port-groups add passive 21/tcp 50000-51000/tcp --app ftpd   # also: list, set, rm, attach, detach
+socketguard port-groups add 21/tcp 50000-51000/tcp --label passive --app ftpd   # also: list, set, rm, attach, detach
 socketguard grant ftpd:port-group=passive alice          # or: grant --app ftpd --port-group passive --to alice
 
 # Addresses and reservations (ADR 0047): an address exists once a grant names its row

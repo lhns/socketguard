@@ -293,8 +293,9 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
       case "create_port_group": {
         const ports = op.ports as PortRange[];
         if (ports.length === 0) throw { code: "invalid", message: `operation ${out.length}: a port group needs at least one port` };
-        if (portGroups.some((x) => x.label === op.label)) throw { code: "conflict", message: `operation ${out.length}: port group ${op.label} already exists` };
-        const sg: PortGroup = { id: uid("sg"), label: op.label as string, ports, apps: [], created_at: T0 };
+        const label = (op.label as string | undefined)?.trim() || ports.map((r) => (r.start === r.end ? `${r.start}/${r.proto}` : `${r.start}-${r.end}/${r.proto}`)).join(", ");
+        if (portGroups.some((x) => x.label === label)) throw { code: "conflict", message: `operation ${out.length}: port group ${label} already exists` };
+        const sg: PortGroup = { id: uid("sg"), label, ports, apps: [], created_at: T0 };
         if (op.ref) refs[op.ref as string] = sg.id;
         portGroups = [...portGroups, sg];
         out.push({ kind: "create", item: "port_group", name: sg.label, detail: ports.map((r) => (r.start === r.end ? `${r.start}/${r.proto}` : `${r.start}-${r.end}/${r.proto}`)).join(", "), id: sg.id, opens_to_anyone: false });
@@ -463,7 +464,7 @@ export function installMock() {
         case "list_port_groups": return portGroups;
         case "get_port_group": return portGroups.find((g) => g.id === a.id);
         case "create_port_group": {
-          const g: PortGroup = { id: uid("sg"), label: a.req.label, ports: a.req.ports, apps: a.req.apps, created_at: T0 };
+          const g: PortGroup = { id: uid("sg"), label: a.req.label ?? "", ports: a.req.ports, apps: a.req.apps, created_at: T0 };
           portGroups = [...portGroups, g];
           return done(g);
         }
