@@ -692,7 +692,7 @@ describe("Add access: what to open", () => {
     expect(applied(d)).toEqual([]);
   });
 
-  it("the chips toggle independently; several make one grant each", async () => {
+  it("All ports and the narrower chips exclude each other; several ports make one grant each", async () => {
     const d = setup();
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
@@ -702,9 +702,10 @@ describe("Add access: what to open", () => {
     expect(chips.getByRole("button", { name: "All ports" })).toHaveAttribute("aria-pressed", "true");
     await chooseBob(user, form);
     await user.click(chips.getByRole("button", { name: "80/tcp" }));
-    expect(chips.getByRole("button", { name: "All ports" })).toHaveAttribute("aria-pressed", "true");
-    await user.click(chips.getByRole("button", { name: "All ports" }));
     expect(chips.getByRole("button", { name: "All ports" })).toHaveAttribute("aria-pressed", "false");
+    await user.click(chips.getByRole("button", { name: "All ports" }));
+    expect(chips.getByRole("button", { name: "80/tcp" })).toHaveAttribute("aria-pressed", "false");
+    await user.click(chips.getByRole("button", { name: "80/tcp" }));
     await user.click(chips.getByRole("button", { name: "443/tcp" }));
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));

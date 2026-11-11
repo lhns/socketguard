@@ -224,7 +224,10 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
       cell: (r) => {
         if (r.m.kind === "port") return null;
         if (r.sg) {
-          const n = (grants.data ?? []).filter((g) => g.scope.kind === "group" && g.scope.id === r.sg!.id).length;
+          // Grants that name the group: on an app, on a tag whose member is the group, or limited to it.
+          const gid = r.sg.id;
+          const tagsWith = new Set(tagList.filter((t) => t.members.some((m) => m.scope.kind === "group" && m.scope.id === gid)).map((t) => t.id));
+          const n = (grants.data ?? []).filter((g) => (g.scope.kind === "group" && g.scope.id === gid) || (g.target.kind === "tag" && tagsWith.has(g.target.id))).length;
           return <span className="muted">{n === 0 ? "no grants" : `${n} grant${n === 1 ? "" : "s"}`}</span>;
         }
         if (r.m.kind === "tag") {
@@ -436,7 +439,7 @@ function RowName({ r }: { r: AppRow }) {
     <>
       {a.name}{" "}
       {!a.reviewed && <span className="badge badge-pending">pending</span>}
-      {a.identity_note === "unidentified" && <span className="badge reach reach-warn" title="Owner of the socket unknown">unidentified</span>}
+      {a.identity_note === "unidentified" && <span className="badge reach reach-warn" title="Owner of the port unknown">unidentified</span>}
     </>
   );
 }

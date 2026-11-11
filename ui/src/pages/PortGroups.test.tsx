@@ -171,6 +171,44 @@ describe("The Ports section of an app", () => {
   });
 });
 
+describe("Access through a tag names the member's row", () => {
+  const pair: Tag = { ...mkTag("t-pair", "pair"), members: [{ app_id: "a1", scope: { kind: "port", port: 80, proto: "tcp" } }, { app_id: "a1", scope: { kind: "port", port: 443, proto: "tcp" } }] };
+  const whole: Tag = { ...mkTag("t-whole", "whole"), members: [{ app_id: "a1", scope: { kind: "all" } }] };
+  const gPair = grantView({ id: "g-pair", target: { kind: "tag", id: "t-pair" }, subject: { kind: "peer", id: "p2" } });
+  const gLimit = grantView({ id: "g-limit", target: { kind: "tag", id: "t-whole" }, scope: { kind: "port", port: 443, proto: "tcp" }, subject: { kind: "peer", id: "p3" } });
+
+  const withTags = (accessList: EffectiveAccess[]) =>
+    setup({
+      list_tags: () => [pair, whole],
+      list_grants: () => [gPair, gLimit],
+      get_app: (a) => (a.id === "a1" ? detail(nginx, { access: accessList, socket_groups: [passive] }) : detail(redis)),
+    });
+
+  it("an app in a tag by two rows has the grant on those two rows, not on All ports", async () => {
+    withTags([access(gPair, { kind: "tag", tag_id: "t-pair" })]);
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    const ports = await openApp(user, /^nginx/);
+    expect(rowOf(ports, "80/tcp")).toHaveTextContent("bob");
+    expect(rowOf(ports, "443/tcp")).toHaveTextContent("bob");
+    expect(rowOf(ports, "All ports")).not.toHaveTextContent("bob");
+    expect(rowOf(ports, "passive")).not.toHaveTextContent("bob");
+    // Nothing is on All ports, so no row claims that All ports also reaches it.
+    expect(within(ports).queryByText(/also reachable/)).not.toBeInTheDocument();
+  });
+
+  it("a tag grant limited to a port sits on the member's row with its limit shown", async () => {
+    withTags([access(gLimit, { kind: "tag", tag_id: "t-whole" })]);
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    const ports = await openApp(user, /^nginx/);
+    const all = rowOf(ports, "All ports");
+    expect(all).toHaveTextContent("carol");
+    expect(within(all).getByTitle("Only these ports")).toHaveTextContent("443/tcp");
+    expect(rowOf(ports, "443/tcp")).not.toHaveTextContent("carol");
+  });
+});
+
 describe("Attach port group", () => {
   const groupRow = async (user: ReturnType<typeof userEvent.setup>, label: RegExp) => {
     await user.click(within(inspector()).getByRole("button", { name: "Attach port group" }));
@@ -258,7 +296,7 @@ describe("Port groups in the list", () => {
     const row = inList().getByRole("checkbox", { name: "Select passive" }).closest("tr")!;
     expect(row).toHaveTextContent("50000-51000/tcp");
     expect(row).toHaveTextContent("1 app");
-    expect(row).toHaveTextContent("1 grant");
+    expect(row).toHaveTextContent("2 grants");
     expect(inList().getByRole("checkbox", { name: "Select dns" }).closest("tr")).toHaveTextContent("53/udp, 5353/udp");
     expect(inList().getByRole("checkbox", { name: "Select dns" }).closest("tr")).toHaveTextContent("no grants");
     // The app row: a tag on a port or a group is written with it, and the groups follow the ports.
@@ -427,33 +465,40 @@ describe("Tag inspector members", () => {
 
 describe("Wording", () => {
   const banned = /whole app|whole tag|\bsockets?\b|socket group|all sockets/i;
+  // What a screen says: its text and the attributes a reader or a screen reader gets.
+  const said = () =>
+    [
+      document.body.textContent ?? "",
+      ...[...document.body.querySelectorAll("[title], [aria-label], [placeholder]")].flatMap((e) => ["title", "aria-label", "placeholder"].map((a) => e.getAttribute(a) ?? "")),
+    ].join("\n");
 
   it("no screen says Whole app, socket or socket group", async () => {
     setup();
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
-    const text = () => document.body.textContent ?? "";
     await inList().findByRole("button", { name: /^nginx/ });
-    expect(text()).not.toMatch(banned);
-    expect(text()).toMatch(/Port groups/);
+    expect(said()).not.toMatch(banned);
+    expect(said()).toMatch(/Port groups/);
+    await user.click(inList().getByRole("button", { name: /^mystery/ }));
+    await screen.findByRole("heading", { name: /^mystery/ });
+    expect(said()).not.toMatch(banned);
 
     const ports = await openApp(user, /^nginx/);
     await user.click(within(rowOf(ports, "All ports")).getByRole("button", { name: "Add access to All ports" }));
     await user.click(within(inspector()).getByRole("button", { name: "Attach port group" }));
-    expect(text()).not.toMatch(banned);
+    expect(said()).not.toMatch(banned);
     await user.keyboard("{Escape}");
 
     await user.click(inList().getByRole("checkbox", { name: "Select passive" }));
     await screen.findByRole("complementary", { name: "Port group details" });
-    expect(text()).not.toMatch(banned);
+    expect(said()).not.toMatch(banned);
 
     await user.click(inList().getByRole("checkbox", { name: "Select ftp" }));
     await screen.findByRole("heading", { name: "ftp" });
-    expect(text()).not.toMatch(banned);
+    expect(said()).not.toMatch(banned);
 
     await user.click(inList().getByRole("button", { name: "New port group" }));
     await screen.findByRole("heading", { name: "New port group" });
-    expect(text()).not.toMatch(banned);
+    expect(said()).not.toMatch(banned);
   });
 });
-

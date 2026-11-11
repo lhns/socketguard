@@ -283,9 +283,10 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
               className={`scope-chip${o.mono ? " mono" : ""}`}
               aria-pressed={picked.has(o.key)}
               onClick={() => {
-                const next = new Set(picked);
-                if (next.has(o.key)) next.delete(o.key);
-                else next.add(o.key);
+                // All ports covers the rest, so it and the narrower choices exclude each other.
+                const next = new Set(o.key === "*" ? [] : [...picked].filter((k) => k !== "*"));
+                if (!picked.has(o.key)) next.add(o.key);
+                else if (o.key !== "*") next.delete(o.key);
                 setPicked(next);
               }}
             >

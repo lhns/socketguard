@@ -70,7 +70,10 @@ export interface AccessEntry {
   link?: { page: "apps" | "peers"; focus: Focus };
   subject?: Subject;
   scope: Scope;
-  /** The scope as shown ("80/tcp", "group passive"). */
+  /** The row of the app this access is listed on: what a direct grant names, or the tag member's
+   * row for a grant through a tag (its own scope then only limits). Absent: `scope`. */
+  row?: Scope;
+  /** The scope as shown ("80/tcp", "passive"). */
   scopeText: string;
   networkId: string | null;
   reach: GrantReach[];
@@ -131,32 +134,39 @@ export function appEntries(appId: string, access: EffectiveAccess[], grants: Gra
   const seen = new Set<string>();
   const out: AccessEntry[] = [];
   for (const a of access) {
-    // A tag grant on a single member is narrowed to that member's scope.
+    // A grant through a tag names each member's row (its own scope only limits); with no member
+    // found (the tag list is not loaded yet) it is one entry on the grant's scope.
     const members = a.origin.kind === "tag"
       ? ctx.tags.find((t) => t.id === (a.origin as { tag_id: string }).tag_id)?.members.filter((m) => m.app_id === appId) ?? []
       : [];
-    const scope = members.length === 1 ? narrowScope(a.scope, members[0].scope) : a.scope;
-    const key = `${a.grant_id}|${scopeKey(scope)}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const grant = grants.find((g) => g.id === a.grant_id);
-    const origin: EntryOrigin =
-      a.origin.kind === "tag"
-        ? { kind: "tag", id: a.origin.tag_id, label: ctx.tags.find((t) => t.id === (a.origin as { tag_id: string }).tag_id)?.label ?? a.origin.tag_id.slice(0, 8) }
-        : { kind: "direct" };
-    out.push({
-      key,
-      ident: `${subjectKey(a.subject)}|${scopeKey(scope)}|${a.network_id ?? "*"}|${origin.kind === "tag" ? origin.id : "direct"}`,
-      name: subjectName(a.subject, a.network_id, ctx),
-      link: subjectLink(a.subject),
-      subject: a.subject,
-      scope,
-      scopeText: scopeLabel(scope, ctx.socketGroups),
-      networkId: a.network_id,
-      reach: grant?.reach ?? [],
-      origin,
-      grants: origin.kind === "direct" && grant ? [grant] : [],
-    });
+    const rows: { scope: Scope; row: Scope }[] =
+      members.length > 0
+        ? members.map((m) => ({ scope: narrowScope(a.scope, m.scope), row: m.scope }))
+        : [{ scope: a.scope, row: a.scope }];
+    for (const { scope, row } of rows) {
+      const key = `${a.grant_id}|${scopeKey(row)}|${scopeKey(scope)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const grant = grants.find((g) => g.id === a.grant_id);
+      const origin: EntryOrigin =
+        a.origin.kind === "tag"
+          ? { kind: "tag", id: a.origin.tag_id, label: ctx.tags.find((t) => t.id === (a.origin as { tag_id: string }).tag_id)?.label ?? a.origin.tag_id.slice(0, 8) }
+          : { kind: "direct" };
+      out.push({
+        key,
+        ident: `${subjectKey(a.subject)}|${scopeKey(scope)}|${a.network_id ?? "*"}|${origin.kind === "tag" ? origin.id : "direct"}`,
+        name: subjectName(a.subject, a.network_id, ctx),
+        link: subjectLink(a.subject),
+        subject: a.subject,
+        scope,
+        row,
+        scopeText: scopeLabel(scope, ctx.socketGroups),
+        networkId: a.network_id,
+        reach: grant?.reach ?? [],
+        origin,
+        grants: origin.kind === "direct" && grant ? [grant] : [],
+      });
+    }
   }
   return sortEntries(out);
 }
@@ -214,6 +224,7 @@ export function appEntriesFromGrants(appId: string, grants: GrantView[], ctx: Na
       key: `${e.key}|${scopeKey(scope)}`,
       ident: e.ident.replace(/\|direct$/, `|${tag.id}`),
       scope: narrowScope(e.scope, scope),
+      row: scope,
       scopeText: scopeLabel(narrowScope(e.scope, scope), ctx.socketGroups),
       origin: { kind: "tag", id: tag.id, label: tag.label },
       grants: [],

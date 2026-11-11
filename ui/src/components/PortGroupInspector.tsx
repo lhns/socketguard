@@ -28,8 +28,10 @@ export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { 
   const names = useNameCtx();
   const grants = useGrants().data ?? [];
   const edit = useCommit();
+  const attach = useCommit();
   const del = useCommit(onClose);
   const { revoke, commit: revokeCommit } = useRevoke();
+  const [appsOpen, setAppsOpen] = useState(false);
   const [label, setLabel] = useState(group.label);
   const [deleting, setDeleting] = useState(false);
   const [lastPort, setLastPort] = useState(false);
@@ -51,8 +53,10 @@ export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { 
     ...pickable.filter((a) => a.system).map((a) => item(a, "System services")),
   ];
   const toggleApp = (it: PickerItem) => {
-    if (it.state === "on") void edit.runBatch([detachOp(group.id, it.id)], `Detached ${group.label} from ${it.label}`, [attachOp(group.id, it.id)]);
-    else void edit.runBatch([attachOp(group.id, it.id)], `Attached ${group.label} to ${it.label}`);
+    if (it.state === "on") void attach.runBatch([detachOp(group.id, it.id)], `Detached ${group.label} from ${it.label}`, [attachOp(group.id, it.id)]);
+    else void attach.runBatch([attachOp(group.id, it.id)], `Attached ${group.label} to ${it.label}`);
+    // The review is shown below the list, so the list gets out of its way.
+    setAppsOpen(false);
   };
 
   return (
@@ -106,12 +110,15 @@ export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { 
             compactLabel="Attach or detach apps"
             items={items}
             onToggle={toggleApp}
+            open={appsOpen}
+            onOpenChange={setAppsOpen}
             placeholder="Find an app"
             align="right"
           />
         }
       >
         <AttachedApps apps={attachedApps} />
+        <CommitPreview commit={attach} title="This lets more in" />
       </Section>
 
       <Section title="Who can reach it">
@@ -123,13 +130,13 @@ export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { 
               <div key={a.id} className="per-app">
                 <h4 className="sub-title">{a.name}</h4>
                 <AccessList
-                  entries={appEntriesFromGrants(a.id, grants, names).filter((e) => sameScope(e.scope, scope))}
+                  entries={appEntriesFromGrants(a.id, grants, names).filter((e) => sameScope(e.row ?? e.scope, scope))}
                   direction="who"
                   networks={names.networks}
                   onRevoke={revoke}
                   highlight={highlight}
                   empty="Nobody can reach it here."
-                  showScope={false}
+                  rowScope={scope}
                 />
               </div>
             ))}
@@ -181,6 +188,7 @@ export function PortGroupsInspector({ groups, onCollapse, onClose }: { groups: S
   const edit = useCommit();
   const del = useCommit(onClose);
   const [deleting, setDeleting] = useState(false);
+  const [appsOpen, setAppsOpen] = useState(false);
 
   const count = (appId: string) => groups.filter((g) => g.apps.includes(appId)).length;
   const pickable = apps.filter((a) => a.identity_note !== "unidentified" || count(a.id) > 0);
@@ -203,6 +211,7 @@ export function PortGroupsInspector({ groups, onCollapse, onClose }: { groups: S
         `Attached to ${it.label}`,
       );
     }
+    setAppsOpen(false);
   };
   const attachedTo = apps.filter((a) => count(a.id) > 0);
 
@@ -211,7 +220,7 @@ export function PortGroupsInspector({ groups, onCollapse, onClose }: { groups: S
       <Section
         title="Attached to"
         aside={
-          <Picker label="Apps of the port groups" trigger="+" triggerClass="tag-pill tag-pill-add" compactLabel="Attach or detach apps" items={items} onToggle={toggle} placeholder="Find an app" align="right" />
+          <Picker label="Apps of the port groups" trigger="+" triggerClass="tag-pill tag-pill-add" compactLabel="Attach or detach apps" items={items} onToggle={toggle} open={appsOpen} onOpenChange={setAppsOpen} placeholder="Find an app" align="right" />
         }
       >
         {attachedTo.length === 0 ? (

@@ -26,7 +26,7 @@ interface RowDef {
 function rowsOf(app: AppDetail, entries: AccessEntry[], tagScopes: Scope[]): RowDef[] {
   const rows: RowDef[] = [{ key: "*", scope: ALL_SCOPE, label: scopeLabel(ALL_SCOPE) }];
   for (const p of app.ports) rows.push({ key: scopeKey(scopeOfPort(p)), scope: scopeOfPort(p), label: portLabel(p), port: p });
-  for (const s of [...entries.map((e) => e.scope), ...tagScopes]) {
+  for (const s of [...entries.map((e) => e.row ?? e.scope), ...tagScopes]) {
     if (s.kind === "port" && !rows.some((r) => sameScope(r.scope, s))) rows.push({ key: scopeKey(s), scope: s, label: scopeLabel(s) });
   }
   for (const g of app.socket_groups) rows.push({ key: `group:${g.id}`, scope: { kind: "group", id: g.id }, label: g.label, group: g });
@@ -55,7 +55,7 @@ export default function PortsSection({ app, highlight, onlyLocal, hasV4 }: Props
   const entries = appEntries(app.id, app.access, grants, names);
   const tagScopes = names.tags.flatMap((t) => t.members.filter((m) => m.app_id === app.id).map((m) => m.scope));
   const rows = rowsOf(app, entries, tagScopes);
-  const hasAllEntries = entries.some((e) => e.scope.kind === "all");
+  const hasAllEntries = entries.some((e) => (e.row ?? e.scope).kind === "all");
   const unidentified = app.identity_note === "unidentified";
 
   const items: PickerItem[] = allGroups.map((g) => ({
@@ -123,7 +123,7 @@ export default function PortsSection({ app, highlight, onlyLocal, hasV4 }: Props
             key={r.key}
             app={app}
             row={r}
-            entries={entries.filter((e) => sameScope(e.scope, r.scope))}
+            entries={entries.filter((e) => sameScope(e.row ?? e.scope, r.scope))}
             alsoAll={r.scope.kind !== "all" && hasAllEntries && (r.port !== undefined || r.group !== undefined)}
             onlyLocal={onlyLocal}
             anyEntries={entries.length > 0}
@@ -187,7 +187,7 @@ function RowItem({ app, row, entries, alsoAll, onlyLocal, anyEntries, highlight,
       </div>
       {!onlyLocal && (
         <div className="port-access">
-          <AccessList entries={entries} direction="who" networks={names.networks} onRevoke={revoke} highlight={highlight} empty={empty} showScope={false} />
+          <AccessList entries={entries} direction="who" networks={names.networks} onRevoke={revoke} highlight={highlight} empty={empty} rowScope={row.scope} />
           {alsoAll && (
             <button className="link-btn also-line" onClick={jumpToAll}>also reachable by everyone on All ports</button>
           )}
