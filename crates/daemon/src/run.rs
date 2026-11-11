@@ -193,7 +193,7 @@ pub async fn run(
 pub fn api_reachable(config: &socketguard_core::config::DaemonConfig) -> bool {
     #[cfg(unix)]
     {
-        std::os::unix::net::UnixStream::connect(Path::new(&config.api_socket)).is_ok()
+        std::os::unix::net::UnixStream::connect(std::path::Path::new(&config.api_socket)).is_ok()
     }
     #[cfg(windows)]
     {
