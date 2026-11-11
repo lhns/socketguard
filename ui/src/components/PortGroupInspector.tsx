@@ -128,7 +128,7 @@ export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { 
                   networks={names.networks}
                   onRevoke={revoke}
                   highlight={highlight}
-                  empty={`Nobody on ${group.label} of ${a.name}.`}
+                  empty="Nobody can reach it here."
                   showScope={false}
                 />
               </div>
