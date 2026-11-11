@@ -150,11 +150,13 @@ impl Engine {
 
     /// The API's add: validate against the current networks, create the backend, add it
     /// and return the network as it now stands.
+    /// Returns the network and how the apply of its ruleset went: the network is live
+    /// either way, but only an `Ok` means its block (ADR 0051) is in force.
     pub async fn add_network(
         &mut self,
         state: &AppState,
         inst: BackendInstanceConfig,
-    ) -> Result<Network, EngineError> {
+    ) -> Result<(Network, anyhow::Result<()>), EngineError> {
         if self.backends.contains_key(&inst.id) {
             return Err(EngineError::Conflict(format!(
                 "network {} already exists",
@@ -172,11 +174,13 @@ impl Engine {
         })?;
         let n = networks::create(&inst.backend, self.ula_global_id, self.ifaces.clone())
             .map_err(|e| EngineError::Invalid(format!("cannot create network: {e}")))?;
-        self.add_network_instance(state, &inst, n).await;
-        self.networks()
+        let applied = self.add_network_instance(state, &inst, n).await;
+        let network = self
+            .networks()
             .into_iter()
             .find(|n| n.id == inst.id)
-            .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))
+            .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))?;
+        Ok((network, applied))
     }
 
     /// The API's remove. A network that is not an IP network (Tor) first removes every
@@ -242,13 +246,14 @@ impl Engine {
         Ok(passed)
     }
 
-    /// Add a network that is already built.
+    /// Add a network that is already built. The result is the apply of the ruleset that
+    /// knows the network.
     pub async fn add_network_instance(
         &mut self,
         state: &AppState,
         inst: &BackendInstanceConfig,
         network: Arc<dyn networks::Network>,
-    ) {
+    ) -> anyhow::Result<()> {
         // The ruleset (overlay scope, managed addresses) must know the network before
         // its addresses go on the interface.
         self.backends.insert(
@@ -267,7 +272,7 @@ impl Engine {
         };
         // The network is live either way; a failed apply is retried by the next pass.
         let applied = self.apply_and_ensure(state).await;
-        let _ = self
+        let result = self
             .commit(
                 state,
                 applied,
@@ -279,6 +284,7 @@ impl Engine {
             "Backend '{}' initialized, allocated {created} addresses",
             inst.id
         );
+        result
     }
 
     /// Remove a network: its addresses leave the interfaces, then the DB, then the ruleset.

@@ -168,6 +168,10 @@ impl Network for IpNetwork {
         self.backend.interface()
     }
 
+    fn node(&self) -> Option<crate::ruleset::OverlayNode> {
+        self.backend.node()
+    }
+
     fn ensure_locator(&self, _req: &LocatorRequest) -> Result<NewLocator> {
         let alloc = match self.backend.allocate(None) {
             Ok(a) => {

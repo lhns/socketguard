@@ -16,6 +16,26 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
 use tracing::warn;
 
+/// The addresses of a managed Yggdrasil node: its own `200::/7` address and its routed
+/// `300::/64` subnet. SocketGuard denies exactly these as destinations on any interface
+/// (ADR 0051), so a node it does not manage is left alone. Remembered once known, so the
+/// block outlives the node being stopped or its adapter missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OverlayNode {
+    pub address: std::net::Ipv6Addr,
+    pub subnet: Ipv6Net,
+}
+
+/// The id of the scope denying the node address of Yggdrasil network `network_id`.
+pub fn overlay_addr_scope_id(network_id: &str) -> String {
+    format!("overlay:{network_id}:addr")
+}
+
+/// The id of the scope denying the routed subnet of Yggdrasil network `network_id`.
+pub fn overlay_subnet_scope_id(network_id: &str) -> String {
+    format!("overlay:{network_id}:subnet")
+}
+
 /// Everything the producer needs, gathered from the DB and the active networks.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
@@ -32,6 +52,9 @@ pub struct Snapshot {
     pub tags: Vec<Tag>,
     /// Port groups, for the ports of the scopes that name them (ADR 0047).
     pub port_groups: Vec<PortGroup>,
+    /// The known node addresses of the Yggdrasil networks, by network id (live, else the
+    /// last ones remembered).
+    pub ygg_nodes: BTreeMap<String, OverlayNode>,
     /// Interfaces under whole-host protection.
     pub protect_host: Vec<String>,
     /// The IPv4 subnets of the protected interfaces that carry IPv4 (others are absent).
@@ -202,7 +225,8 @@ fn host_ipv4_rules(
 /// - Managed scope: every IP locator that is up (see [`Model`]) and every address still on
 ///   an interface (`owned`), so an address is denied from the moment it exists and until
 ///   it is gone.
-/// - An overlay scope per Yggdrasil network, a whole-host scope per protected interface
+/// - Per Yggdrasil network an overlay scope for each of the node's known addresses (its
+///   `/128` and its `/64`), and one for its interface when that is known, a whole-host scope per protected interface
 ///   (both families: IPv4 grants allow the way in, see [`host_ipv4_rules`]).
 /// - A grant to Anyone scoped to a LAN or Local network ("everyone on <network>") admits
 ///   only that network's prefix and link-local sources, not every source on the interface.
@@ -362,6 +386,32 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
                 name: iface.clone(),
                 families: Families::Both,
             },
+        });
+    }
+    // The managed node's own addresses are closed whatever happens to its adapter (ADR
+    // 0051): an interface rule cannot exist while the adapter does not, so a node that
+    // restarts or a renamed adapter would leave the host open. Rules still admit granted
+    // peers, as they do for the interface scope. A node that was never seen has no
+    // addresses to name yet; SocketGuard has put nothing on it either.
+    for network in snap
+        .networks
+        .iter()
+        .filter(|n| n.kind == NetworkKind::Yggdrasil)
+    {
+        let Some(node) = snap.ygg_nodes.get(&network.id) else {
+            continue;
+        };
+        scopes.push(Scope {
+            id: overlay_addr_scope_id(&network.id),
+            kind: ScopeKind::Overlay,
+            matcher: ScopeMatch::DestinationNet(IpNet::V6(
+                Ipv6Net::new(node.address, 128).expect("full prefix"),
+            )),
+        });
+        scopes.push(Scope {
+            id: overlay_subnet_scope_id(&network.id),
+            kind: ScopeKind::Overlay,
+            matcher: ScopeMatch::DestinationNet(IpNet::V6(node.subnet)),
         });
     }
     for iface in sorted_unique(
@@ -1148,6 +1198,120 @@ mod tests {
             }
         );
         assert!(rs.rules.is_empty());
+    }
+
+    fn node() -> OverlayNode {
+        OverlayNode {
+            address: "200:1:2:3::5".parse().unwrap(),
+            subnet: "300:1:2:3::/64".parse().unwrap(),
+        }
+    }
+
+    fn net_scopes(rs: &DesiredRuleset) -> Vec<(&str, String)> {
+        rs.scopes
+            .iter()
+            .filter_map(|s| match &s.matcher {
+                ScopeMatch::DestinationNet(n) => Some((s.id.as_str(), n.to_string())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_node_addresses_are_denied_whatever_happens_to_the_adapter() {
+        // The node was seen once: no interface (down, adapter missing) changes nothing.
+        let mut no_iface = ygg();
+        no_iface.interface = None;
+        no_iface.status = NetworkStatus::Down {
+            reason: "the Yggdrasil node is not running".into(),
+        };
+        for networks in [vec![ygg()], vec![no_iface]] {
+            let s = Snapshot {
+                networks,
+                ygg_nodes: [("ygg".to_string(), node())].into(),
+                ..Snapshot::default()
+            };
+            let rs = build(&s);
+            assert_eq!(
+                net_scopes(&rs),
+                [
+                    ("overlay:ygg:addr", "200:1:2:3::5/128".to_string()),
+                    ("overlay:ygg:subnet", "300:1:2:3::/64".to_string())
+                ]
+            );
+            assert!(rs.scopes.iter().all(|s| s.kind == ScopeKind::Overlay));
+            assert!(rs.rules.is_empty(), "before any app or address");
+        }
+    }
+
+    #[test]
+    fn the_interface_scope_stays_beside_the_address_scopes() {
+        let s = Snapshot {
+            networks: vec![ygg()],
+            ygg_nodes: [("ygg".to_string(), node())].into(),
+            ..Snapshot::default()
+        };
+        let ids: Vec<_> = build(&s).scopes.into_iter().map(|s| s.id).collect();
+        assert_eq!(
+            ids,
+            ["overlay:ygg0", "overlay:ygg:addr", "overlay:ygg:subnet"]
+        );
+    }
+
+    #[test]
+    fn a_node_never_seen_has_no_address_to_deny_and_nothing_else_is_touched() {
+        // No interface and no address: SocketGuard has put nothing on the node yet.
+        let mut no_iface = ygg();
+        no_iface.interface = None;
+        let s = Snapshot {
+            networks: vec![no_iface],
+            ..Snapshot::default()
+        };
+        assert!(build(&s).scopes.is_empty());
+        // With a configured interface that one is closed.
+        let s = Snapshot {
+            networks: vec![ygg()],
+            ..Snapshot::default()
+        };
+        assert_eq!(build(&s).scopes.len(), 1);
+    }
+
+    #[test]
+    fn an_address_of_a_node_socketguard_does_not_manage_is_left_alone() {
+        let s = Snapshot {
+            networks: vec![ygg()],
+            ygg_nodes: [("ygg".to_string(), node())].into(),
+            ..Snapshot::default()
+        };
+        let rs = build(&s);
+        let other: std::net::Ipv6Addr = "200:9:9:9::7".parse().unwrap();
+        let other_subnet: std::net::Ipv6Addr = "300:9:9:9::1".parse().unwrap();
+        for sc in &rs.scopes {
+            if let ScopeMatch::DestinationNet(n) = &sc.matcher {
+                assert!(!n.contains(&IpAddr::V6(other)), "{}", sc.id);
+                assert!(!n.contains(&IpAddr::V6(other_subnet)), "{}", sc.id);
+            }
+        }
+        assert!(rs.rules.is_empty());
+    }
+
+    #[test]
+    fn granted_ports_are_still_admitted_beside_the_address_scopes() {
+        let mut s = base();
+        s.ygg_nodes = [("ygg".to_string(), node())].into();
+        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        let rs = build(&s);
+        assert!(rs.rules.iter().any(|r| r.id == "a:ay:8080:tcp:g:ygg0"));
+        assert!(rs.scopes.iter().any(|s| s.id == "overlay:ygg:addr"));
+    }
+
+    #[test]
+    fn removing_the_yggdrasil_network_removes_its_scopes() {
+        let mut s = base();
+        s.ygg_nodes = [("ygg".to_string(), node())].into();
+        assert!(!net_scopes(&build(&s)).is_empty());
+        s.networks.retain(|n| n.id != "ygg");
+        assert!(net_scopes(&build(&s)).is_empty());
     }
 
     #[test]

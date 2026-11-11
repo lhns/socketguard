@@ -67,10 +67,29 @@ Everything `socketguard networks setup` changes is recorded in `setup-log.json` 
 | Item | Removal |
 |---|---|
 | Packages it installed through the package manager (never ones that were already there) | `--undo --uninstall-packages`; plain `--undo` only prints the command |
-| Services it started or enabled | `--undo` restores the previous state |
+| Services it started or enabled | `--undo` restores the previous state; `--undo --stop-service-only` stops only the service and keeps the network and its block |
 | Lines appended to Tor's `torrc` (a one-time `.socketguard.bak` is kept) | `--undo` removes exactly those lines; **gap: the backup file stays** |
 | Tor network entry in the config file | `--undo`, or removing the network |
 | `setup-log.json` | **gap: nothing deletes it** |
+
+## Windows of exposure (ADR 0051)
+
+The invariant: a network SocketGuard adds, installs or manages never makes the host reachable outside its rules, at any moment. Each case, and whether it is closed.
+
+| Case | State | By what, or why open |
+|---|---|---|
+| Yggdrasil installed by someone else and running, before it is added | **open, by design** | Not a network SocketGuard manages yet. The network card says so ("Yggdrasil is running but not managed", `exposed` in `GET /api/networks/setup`). |
+| Between starting the node and the network being added | closed | `networks setup yggdrasil` adds the network first and starts nothing until the block is verified (`yggdrasil_block` in `GET /api/networks/setup`). It installs nothing. |
+| Setup stops half way | closed | The network and its block stay; the message says so and how to undo. |
+| Network added before the node was ever seen | closed on the interface only | Its address is unknown, so only the interface is closed: setup names the adapter (Windows: `Yggdrasil`) or refuses to start the service. `closed` is false with the reason until the node answers once. |
+| Node stopped, restarted, adapter missing, renamed or recreated | closed | The node's own `/128` and `/64` are denied as destinations on any interface (`overlay:<network>:addr`, `:subnet`), remembered in the settings table (`ygg_node:<network>`) from the first time they are known. |
+| A second node, not managed by SocketGuard, on the same host | untouched | Only the managed node's addresses are denied. |
+| Network removed, "turn off", uninstall while the node keeps running | **open, by choice** | The block is removed with them. `GET /api/exposure` is shown first, with the programs that become reachable and an offer to stop the service setup started. Removing a running node's network needs `confirm_exposed` (CLI `--yes`). |
+| Linux: boot before the daemon applies its ruleset | partly closed | `Before=network-pre.target`, `Wants=network-pre.target` and `Before=yggdrasil.service` order the daemon first, but `Type=simple` orders on process start, not on the first apply; the rules are in force a moment later. The remembered node addresses are applied in that first ruleset. |
+| macOS: boot before the anchor is loaded | **open** | No launchd service exists yet; nothing orders the node after SocketGuard, and pf rules do not survive a reboot. |
+| Windows: boot | closed | WFP filters are persistent. |
+| Tor, LAN, SLAAC, DHCPv6 | nothing to close | Tor adds a control port on loopback with cookie authentication only and exposes nothing inbound before SocketGuard publishes a service. SocketGuard's own LAN addresses are denied before they are added (the ruleset covers an address before it goes on an interface). |
+| A traffic class the scopes do not match | open | A local program talking to the node's own Yggdrasil address (Windows loopback treatment) is denied like any destination in a scope. |
 
 ## Failures of the removal paths themselves
 

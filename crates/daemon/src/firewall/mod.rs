@@ -139,6 +139,16 @@ pub(crate) fn golden_ruleset() -> DesiredRuleset {
                 },
             },
             Scope {
+                id: "overlay:ygg:addr".into(),
+                kind: ScopeKind::Overlay,
+                matcher: ScopeMatch::DestinationNet("200:1:2:3::5/128".parse().unwrap()),
+            },
+            Scope {
+                id: "overlay:ygg:subnet".into(),
+                kind: ScopeKind::Overlay,
+                matcher: ScopeMatch::DestinationNet("300:1:2:3::/64".parse().unwrap()),
+            },
+            Scope {
                 id: "host:eth0".into(),
                 kind: ScopeKind::WholeHost,
                 matcher: ScopeMatch::Interface {

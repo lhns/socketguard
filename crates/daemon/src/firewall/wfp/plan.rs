@@ -213,6 +213,9 @@ pub(crate) fn plan(desired: &DesiredRuleset) -> Vec<FilterSpec> {
                     out.push(block(Layer::of(a), vec![Cond::LocalAddr(*a)]));
                 }
             }
+            ScopeMatch::DestinationNet(net) => {
+                out.push(block(Layer::of(&net.addr()), vec![Cond::LocalNet(*net)]));
+            }
             ScopeMatch::Interface {
                 name: iif,
                 families,
@@ -264,6 +267,45 @@ mod tests {
     }
     fn with_name<'a>(v: &'a [FilterSpec], n: &str) -> Vec<&'a FilterSpec> {
         v.iter().filter(|s| s.name == n).collect()
+    }
+
+    #[test]
+    fn a_destination_net_scope_blocks_by_local_net_and_a_permit_rule_still_wins() {
+        let d = DesiredRuleset {
+            scopes: vec![
+                scope(
+                    "overlay:ygg:addr",
+                    ScopeMatch::DestinationNet(net("200:1:2:3::5/128")),
+                ),
+                scope(
+                    "overlay:ygg:subnet",
+                    ScopeMatch::DestinationNet(net("300:1:2:3::/64")),
+                ),
+            ],
+            rules: vec![rule(
+                "r",
+                "300:1:2:3::100",
+                Some("Yggdrasil"),
+                Sources::Nets(vec![net("200:7::1/128")]),
+            )],
+        };
+        let p = plan(&d);
+        let blocks: Vec<_> = p.iter().filter(|s| s.action == Action::Block).collect();
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks
+            .iter()
+            .all(|b| b.layer == Layer::V6 && b.weight == W_BLOCK));
+        assert_eq!(
+            blocks[0].conds,
+            vec![Cond::LocalNet(net("200:1:2:3::5/128"))]
+        );
+        assert_eq!(blocks[1].conds, vec![Cond::LocalNet(net("300:1:2:3::/64"))]);
+        assert_eq!(blocks[1].scope_id.as_deref(), Some("overlay:ygg:subnet"));
+        // The rule is a hard permit of a higher weight, so it wins over the block of the
+        // /64 that contains its address.
+        let permit = p.iter().find(|s| s.name == "SocketGuard r").unwrap();
+        assert_eq!(permit.action, Action::Permit);
+        assert!(permit.weight > W_BLOCK);
     }
 
     #[test]

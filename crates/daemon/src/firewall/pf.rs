@@ -63,6 +63,14 @@ fn scope_lines(sc: &Scope) -> Vec<String> {
                 })
                 .collect()
         }
+        ScopeMatch::DestinationNet(net) => vec![format!(
+            "block drop in log quick {} from any to {net}",
+            if net.addr().is_ipv6() {
+                "inet6"
+            } else {
+                "inet"
+            }
+        )],
         ScopeMatch::Interface { name, families } => {
             let fam = match families {
                 Families::Both => "",
@@ -239,6 +247,19 @@ impl Firewall for PfFirewall {
 mod tests {
     use super::*;
     use crate::firewall::golden_ruleset;
+
+    #[test]
+    fn a_destination_net_scope_is_a_block_to_the_prefix_after_the_quick_pass_rules() {
+        let out = render(&golden_ruleset());
+        let pass = out.find("pass in quick on").expect("a pass rule");
+        let addr = out
+            .find("block drop in log quick inet6 from any to 200:1:2:3::5/128")
+            .expect("the address block");
+        let subnet = out
+            .find("block drop in log quick inet6 from any to 300:1:2:3::/64")
+            .expect("the subnet block");
+        assert!(pass < addr && addr < subnet);
+    }
 
     #[test]
     fn golden_render() {

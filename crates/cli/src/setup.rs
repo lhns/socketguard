@@ -102,7 +102,7 @@ impl DaemonApi for socketguard_client::Client {
         Ok(self.add_network(req).await?)
     }
     async fn remove(&self, id: &str) -> Result<()> {
-        Ok(self.delete_network(id, false).await?)
+        Ok(self.delete_network(id, false, true).await?)
     }
 }
 
@@ -277,10 +277,17 @@ pub async fn run<R: SetupRunner, A: DaemonApi>(
             }
         );
     }
-    let setup = api.setup().await.context(
-        "cannot ask the daemon what is installed; start the daemon (and use --socket if it \
-         listens elsewhere)",
-    )?;
+    let setup = api.setup().await.context(match kind {
+        SetupKind::Yggdrasil => {
+            "SocketGuard must be running so it can close the new network before Yggdrasil \
+             starts; nothing was changed. Start the daemon (and use --socket if it listens \
+             elsewhere)"
+        }
+        SetupKind::Tor => {
+            "cannot ask the daemon what is installed; start the daemon (and use --socket if it \
+             listens elsewhere)"
+        }
+    })?;
     let config = config_file(opts.config.as_deref(), &setup)?;
     let log = read_log(&*runner, &log_path(&config))?;
     let mut c = Ctx {
@@ -344,10 +351,14 @@ async fn steps<R: SetupRunner, A: DaemonApi>(
             .say(&format!("{} is already a network; nothing to do.", c.kind));
         return Ok(());
     }
-    let state = install(c, state).await?;
     match c.kind {
+        // SocketGuard installs no Yggdrasil (ADR 0051): a package installer starts the
+        // service before the network could be closed.
         SetupKind::Yggdrasil => yggdrasil(c, state).await,
-        SetupKind::Tor => tor(c, state).await,
+        SetupKind::Tor => {
+            let state = install(c, state).await?;
+            tor(c, state).await
+        }
     }
 }
 
@@ -431,71 +442,123 @@ fn service_stop(os: &str, unit: &str, was_enabled: Option<bool>) -> Vec<String> 
     }
 }
 
+/// What a manual step after the block is in place adds: the host is closed on Yggdrasil.
+const STAYS_CLOSED: &str = "SocketGuard keeps blocking Yggdrasil in the meantime. Start the \
+     Yggdrasil service yourself when you are ready, or undo with `socketguard networks setup \
+     yggdrasil --undo`.";
+
+/// The adapter name to block before Yggdrasil runs. A running node shows its own address, so
+/// it needs none; a stopped one needs a name SocketGuard knows in advance, else the service
+/// would run unprotected until SocketGuard learns the node's address.
+fn block_interface(os: &str, state: &SetupState) -> Result<Option<String>> {
+    if matches!(state.state, SetupStatus::Ready | SetupStatus::NotConfigured) {
+        return Ok(None);
+    }
+    if os == "windows" {
+        // The adapter the Yggdrasil installer's default configuration creates.
+        return Ok(Some("Yggdrasil".into()));
+    }
+    manual(
+        "SocketGuard cannot name Yggdrasil's adapter before the service starts, and will not \
+         start it unprotected. Set IfName in yggdrasil.conf to a fixed name (for example ygg0), \
+         run `socketguard networks add yggdrasil --interface ygg0`, then start the Yggdrasil \
+         service.",
+    )
+}
+
+/// Close first (ADR 0051): add the network, so that SocketGuard blocks Yggdrasil, and check
+/// the block is in force before any software starts.
 async fn yggdrasil<R: SetupRunner, A: DaemonApi>(
     c: &mut Ctx<'_, R, A>,
-    mut state: SetupState,
+    state: SetupState,
 ) -> Result<()> {
-    // Start it if it does not answer. Right after an install the service may still be
-    // starting, so give it a moment first.
-    if state.state == SetupStatus::NotRunning && !c.opts.dry_run {
-        state = c.wait_for(|s| s.state != SetupStatus::NotRunning).await?;
+    if state.state == SetupStatus::NotInstalled {
+        c.announce("Yggdrasil is not installed");
+        return manual(format!(
+            "Yggdrasil is not installed, and SocketGuard does not install it. Download it from \
+             {}, install it, then run this command again.",
+            download_link(c.kind)
+        ));
     }
-    if state.state == SetupStatus::NotRunning {
-        match yggdrasil_start(c.run.os()) {
-            Some((program, args)) => {
-                if c.announce(&format!("start Yggdrasil: {program} {}", args.join(" "))) {
-                    let unit = if c.run.os() == "windows" {
-                        "Yggdrasil"
-                    } else {
-                        "yggdrasil"
-                    };
-                    let was_enabled = c.run.service_enabled(unit);
-                    c.run
-                        .run(program, &args)
-                        .or_else(|e| manual(format!("could not start Yggdrasil ({e}); start its service yourself, then run this command again")))?;
-                    c.changes.0.push("started the Yggdrasil service".into());
-                    let undo = service_stop(c.run.os(), unit, was_enabled);
-                    c.record(Change::ServiceStarted {
-                        service: unit.into(),
-                        previous_state: "stopped".into(),
-                        previous_enabled: was_enabled,
-                        undo,
-                    })?;
-                    state = c.wait_for(|s| s.state != SetupStatus::NotRunning).await?;
-                }
+    let running = matches!(state.state, SetupStatus::Ready | SetupStatus::NotConfigured);
+    let interface = block_interface(c.run.os(), &state)?;
+    c.announce(&format!(
+        "add the Yggdrasil network to the daemon{}, so that SocketGuard blocks it before Yggdrasil can start",
+        interface
+            .as_deref()
+            .map(|i| format!(" on the adapter {i}"))
+            .unwrap_or_default()
+    ));
+    if !c.opts.dry_run {
+        add_network(
+            c,
+            BackendConfig::Yggdrasil {
+                interface: interface.clone(),
+                admin_endpoint: None,
+            },
+        )
+        .await?;
+    }
+    c.announce("check that the block is in force");
+    if !c.opts.dry_run {
+        let block = c.api.setup().await?.yggdrasil_block;
+        // A node that has never been seen has no address to block yet: its adapter is.
+        let closed = block.as_ref().is_some_and(|b| {
+            if running {
+                b.address_blocked || b.interface_blocked
+            } else {
+                b.interface_blocked
             }
-            None => {
-                return manual("start Yggdrasil, then run this command again");
-            }
+        });
+        if !closed {
+            let why = block
+                .and_then(|b| b.reason)
+                .unwrap_or_else(|| "the daemon does not report it".into());
+            return manual(format!(
+                "SocketGuard cannot confirm that the new network is blocked ({why}), so \
+                 nothing was started. The network stays added; undo with `socketguard networks \
+                 setup yggdrasil --undo`, or fix the cause and start Yggdrasil yourself."
+            ));
         }
-    } else {
-        c.skip("Yggdrasil is running");
     }
-    // Yggdrasil's own configuration is never edited.
-    if c.opts.dry_run {
-        c.announce("add the Yggdrasil network to the daemon");
+    if running {
+        c.skip("Yggdrasil is running");
         return Ok(());
     }
-    if state.state == SetupStatus::NotConfigured {
-        state = c.wait_for(|s| s.state == SetupStatus::Ready).await?;
+    match yggdrasil_start(c.run.os()) {
+        Some((program, args)) => {
+            if c.announce(&format!("start Yggdrasil: {program} {}", args.join(" "))) {
+                let unit = if c.run.os() == "windows" {
+                    "Yggdrasil"
+                } else {
+                    "yggdrasil"
+                };
+                let was_enabled = c.run.service_enabled(unit);
+                if let Err(e) = c.run.run(program, &args) {
+                    return manual(format!("could not start Yggdrasil ({e}). {STAYS_CLOSED}"));
+                }
+                c.changes.0.push("started the Yggdrasil service".into());
+                let undo = service_stop(c.run.os(), unit, was_enabled);
+                c.record(Change::ServiceStarted {
+                    service: unit.into(),
+                    previous_state: "stopped".into(),
+                    previous_enabled: was_enabled,
+                    undo,
+                })?;
+                let state = c.wait_for(|s| s.state != SetupStatus::NotRunning).await?;
+                if matches!(
+                    state.state,
+                    SetupStatus::NotRunning | SetupStatus::NotInstalled
+                ) {
+                    return manual(format!(
+                        "Yggdrasil did not answer after it was started. {STAYS_CLOSED}"
+                    ));
+                }
+            }
+            Ok(())
+        }
+        None => manual(format!("start Yggdrasil yourself. {STAYS_CLOSED}")),
     }
-    if state.state != SetupStatus::Ready {
-        return manual(
-            state
-                .missing
-                .unwrap_or_else(|| "Yggdrasil is not ready yet".into())
-                + " Check Yggdrasil, then run this command again.",
-        );
-    }
-    c.announce("add the Yggdrasil network to the daemon");
-    add_network(
-        c,
-        BackendConfig::Yggdrasil {
-            interface: None,
-            admin_endpoint: None,
-        },
-    )
-    .await
 }
 
 async fn add_network<R: SetupRunner, A: DaemonApi>(
@@ -1015,6 +1078,8 @@ pub struct UndoOptions {
     pub config: Option<PathBuf>,
     /// Run the uninstall commands of packages setup installed; else only print them.
     pub uninstall_packages: bool,
+    /// Only stop the services setup started (ADR 0051); everything else stays.
+    pub stop_service_only: bool,
 }
 
 /// `text` without the lines `lines` that were appended to it: the last occurrence of each,
@@ -1107,15 +1172,24 @@ pub async fn undo<R: SetupRunner, A: DaemonApi>(
     };
     let log_file = log_path(&config);
     let all = read_log(&*run, &log_file)?;
-    let mine: Vec<Entry> = all
-        .iter()
-        .filter(|e| e.kind == kind)
-        .rev()
-        .cloned()
-        .collect();
+    let selected = |e: &Entry| {
+        e.kind == kind
+            && (!opts.stop_service_only || matches!(e.change, Change::ServiceStarted { .. }))
+    };
+    let mine: Vec<Entry> = all.iter().filter(|e| selected(e)).rev().cloned().collect();
     if mine.is_empty() {
         run.say(&format!(
-            "Nothing to undo: setup has not changed anything for {kind} ({}).",
+            "Nothing to {}: setup has not {} for {kind} ({}).",
+            if opts.stop_service_only {
+                "stop"
+            } else {
+                "undo"
+            },
+            if opts.stop_service_only {
+                "started a service"
+            } else {
+                "changed anything"
+            },
             log_file.display()
         ));
         return Ok(());
@@ -1136,7 +1210,7 @@ pub async fn undo<R: SetupRunner, A: DaemonApi>(
         run.say("Not confirmed; nothing changed.");
         return Ok(());
     }
-    let mut kept: Vec<Entry> = all.iter().filter(|e| e.kind != kind).cloned().collect();
+    let mut kept: Vec<Entry> = all.iter().filter(|e| !selected(e)).cloned().collect();
     let mut failed = Vec::new();
     let mut keep_mine = Vec::new();
     for e in &mine {
@@ -1457,6 +1531,19 @@ mod tests {
         setup: RefCell<NetworkSetup>,
         networks: RefCell<Vec<Network>>,
         added: RefCell<Vec<NewNetwork>>,
+        /// What the daemon reports about the block once the network is added.
+        block_after_add: RefCell<Option<socketguard_core::setup::YggdrasilBlock>>,
+        /// The daemon cannot be reached.
+        down: bool,
+    }
+
+    fn closed() -> socketguard_core::setup::YggdrasilBlock {
+        socketguard_core::setup::YggdrasilBlock {
+            closed: true,
+            address_blocked: true,
+            interface_blocked: true,
+            reason: None,
+        }
     }
 
     fn st(state: SetupStatus) -> SetupState {
@@ -1470,15 +1557,21 @@ mod tests {
                 yggdrasil: ygg,
                 tor,
                 local: st(SetupStatus::Ready),
+                yggdrasil_block: None,
                 config_path: Some("/var/lib/sg/socketguard.json".into()),
             }),
             networks: RefCell::new(vec![]),
             added: RefCell::new(vec![]),
+            block_after_add: RefCell::new(Some(closed())),
+            down: false,
         }
     }
 
     impl DaemonApi for Daemon {
         async fn setup(&self) -> Result<NetworkSetup> {
+            if self.down {
+                bail!("cannot reach the daemon");
+            }
             Ok(self.setup.borrow().clone())
         }
         async fn networks(&self) -> Result<Vec<Network>> {
@@ -1505,6 +1598,9 @@ mod tests {
                 vlan_id: None,
             };
             self.networks.borrow_mut().push(n.clone());
+            if kind == NetworkKind::Yggdrasil {
+                self.setup.borrow_mut().yggdrasil_block = self.block_after_add.borrow().clone();
+            }
             Ok(n)
         }
     }
@@ -1569,37 +1665,34 @@ mod tests {
             ..opts()
         };
         let mut f = Fake {
-            os: "linux",
+            os: "windows",
             ..Default::default()
         };
         block(run(SetupKind::Yggdrasil, &dry, &mut f, &d)).unwrap();
         assert!(f.commands.is_empty());
         assert!(d.added.borrow().is_empty());
-        assert!(f.said.iter().any(|l| l.contains("would: start Yggdrasil")));
+        // The block comes first, then the service.
+        let at = |needle: &str| f.said.iter().position(|l| l.contains(needle)).unwrap();
+        assert!(at("would: add the Yggdrasil network") < at("would: check that the block"));
+        assert!(at("would: check that the block") < at("would: start Yggdrasil"));
     }
 
     #[test]
-    fn yggdrasil_on_windows_installs_with_winget() {
-        let mut offer = st(SetupStatus::NotInstalled);
-        offer.install = Some(socketguard_core::setup::InstallOffer {
-            manager: "winget".into(),
-            command: "winget install --id YggdrasilNetwork.Yggdrasil --source winget -e".into(),
-            link: None,
-        });
-        let d = daemon(offer, st(SetupStatus::Ready));
+    fn a_missing_yggdrasil_is_never_installed_by_setup() {
+        let mut none = st(SetupStatus::NotInstalled);
+        none.download_link = Some(socketguard_core::setup::YGGDRASIL_DOWNLOAD.into());
+        let d = daemon(none, st(SetupStatus::Ready));
         let mut f = Fake {
             os: "windows",
             elevated: true,
             programs: vec!["winget"],
             ..Default::default()
         };
-        // The fake daemon never sees the install: after running winget it is a manual step.
         let err = block(run(SetupKind::Yggdrasil, &opts(), &mut f, &d)).unwrap_err();
-        assert!(err.downcast_ref::<ManualStep>().is_some(), "{err}");
-        assert_eq!(
-            f.commands,
-            ["winget install --id YggdrasilNetwork.Yggdrasil --source winget -e"]
-        );
+        let ManualStep(msg) = err.downcast_ref::<ManualStep>().unwrap();
+        assert!(msg.contains("does not install it"), "{msg}");
+        assert!(msg.contains("yggdrasil-network.github.io/installation.html"));
+        assert!(f.commands.is_empty());
         assert!(d.added.borrow().is_empty());
     }
 
@@ -1624,37 +1717,96 @@ mod tests {
         assert!(f
             .said
             .iter()
-            .any(|l| l.contains("already done: yggdrasil is installed")));
+            .any(|l| l.contains("already done: Yggdrasil is running")));
     }
 
     #[test]
-    fn a_stopped_yggdrasil_is_started_and_without_a_package_it_is_a_manual_step() {
+    fn a_stopped_yggdrasil_is_blocked_on_its_adapter_before_the_service_starts() {
         let mut stopped = st(SetupStatus::NotRunning);
         stopped.missing = Some("stopped".into());
         let d = daemon(stopped, st(SetupStatus::Ready));
+        // Only the adapter can be blocked: the node's address is not known yet.
+        *d.block_after_add.borrow_mut() = Some(socketguard_core::setup::YggdrasilBlock {
+            closed: false,
+            address_blocked: false,
+            interface_blocked: true,
+            reason: Some("the node's address is not known yet".into()),
+        });
         let mut f = Fake {
-            os: "linux",
+            os: "windows",
             elevated: true,
             ..Default::default()
         };
-        // Starting does not make the fake daemon see it running: a manual step, after
-        // the documented start command ran.
+        // The fake daemon never sees it running: a manual step after the start command,
+        // which says the host stays closed.
         let err = block(run(SetupKind::Yggdrasil, &opts(), &mut f, &d)).unwrap_err();
-        assert!(err.downcast_ref::<ManualStep>().is_some());
-        assert_eq!(f.commands, ["systemctl enable --now yggdrasil"]);
+        let ManualStep(msg) = err.downcast_ref::<ManualStep>().unwrap();
+        assert!(msg.contains("keeps blocking Yggdrasil"), "{msg}");
+        assert_eq!(f.commands, ["sc.exe start Yggdrasil"]);
+        assert_eq!(
+            d.added.borrow()[0].backend,
+            BackendConfig::Yggdrasil {
+                interface: Some("Yggdrasil".into()),
+                admin_endpoint: None
+            }
+        );
+        // The network is logged before the service, so undo stops the service first.
+        let log = log_of(&f);
+        assert!(matches!(&log[0].change, Change::NetworkAdded { .. }));
+        assert!(matches!(&log[1].change, Change::ServiceStarted { .. }));
+    }
 
-        let mut none = st(SetupStatus::NotInstalled);
-        none.download_link = Some(socketguard_core::setup::YGGDRASIL_DOWNLOAD.into());
-        let d = daemon(none, st(SetupStatus::Ready));
+    #[test]
+    fn without_a_known_adapter_name_a_stopped_yggdrasil_is_not_started() {
+        let d = daemon(st(SetupStatus::NotRunning), st(SetupStatus::Ready));
         let mut f = Fake {
             os: "linux",
             elevated: true,
-            programs: vec!["apt-get"],
             ..Default::default()
         };
         let err = block(run(SetupKind::Yggdrasil, &opts(), &mut f, &d)).unwrap_err();
         let ManualStep(msg) = err.downcast_ref::<ManualStep>().unwrap();
-        assert!(msg.contains("yggdrasil-network.github.io/installation.html"));
+        assert!(msg.contains("IfName"), "{msg}");
+        assert!(f.commands.is_empty(), "nothing is started unprotected");
+        assert!(d.added.borrow().is_empty());
+    }
+
+    #[test]
+    fn nothing_starts_when_the_block_cannot_be_confirmed() {
+        let d = daemon(st(SetupStatus::NotRunning), st(SetupStatus::Ready));
+        *d.block_after_add.borrow_mut() = Some(socketguard_core::setup::YggdrasilBlock {
+            closed: false,
+            address_blocked: false,
+            interface_blocked: false,
+            reason: Some("the last attempt to apply the firewall rules failed".into()),
+        });
+        let mut f = Fake {
+            os: "windows",
+            elevated: true,
+            ..Default::default()
+        };
+        let err = block(run(SetupKind::Yggdrasil, &opts(), &mut f, &d)).unwrap_err();
+        let ManualStep(msg) = err.downcast_ref::<ManualStep>().unwrap();
+        assert!(msg.contains("failed"), "{msg}");
+        assert!(f.commands.is_empty());
+        // The network (and what block there is) stays.
+        assert_eq!(d.added.borrow().len(), 1);
+    }
+
+    #[test]
+    fn without_the_daemon_nothing_is_changed_and_the_reason_is_given() {
+        let mut d = daemon(st(SetupStatus::NotRunning), st(SetupStatus::Ready));
+        d.down = true;
+        let mut f = Fake {
+            os: "windows",
+            elevated: true,
+            ..Default::default()
+        };
+        let err = block(run(SetupKind::Yggdrasil, &opts(), &mut f, &d)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must be running so it can close the new network"),
+            "{err:#}"
+        );
         assert!(f.commands.is_empty());
     }
 
@@ -1995,30 +2147,7 @@ mod tests {
     }
 
     #[test]
-    fn a_package_setup_installed_is_logged_and_one_that_was_there_is_not() {
-        let mut offer = st(SetupStatus::NotInstalled);
-        offer.install = Some(socketguard_core::setup::InstallOffer {
-            manager: "winget".into(),
-            command: String::new(),
-            link: None,
-        });
-        let d = daemon(offer, st(SetupStatus::Ready));
-        let mut f = Fake {
-            os: "windows",
-            elevated: true,
-            programs: vec!["winget"],
-            ..Default::default()
-        };
-        let _ = block(run(SetupKind::Yggdrasil, &opts(), &mut f, &d));
-        let log = log_of(&f);
-        assert!(matches!(
-            &log[0].change,
-            Change::PackageInstalled { manager, package, uninstall, .. }
-                if manager == "winget" && package == "YggdrasilNetwork.Yggdrasil"
-                && uninstall == &["winget", "uninstall", "--id", "YggdrasilNetwork.Yggdrasil", "-e"]
-        ));
-
-        // Already installed: only the network is logged, never a package.
+    fn a_yggdrasil_setup_logs_only_the_network_never_a_package() {
         let d = daemon(st(SetupStatus::Ready), st(SetupStatus::Ready));
         let mut f = Fake {
             os: "windows",
@@ -2040,21 +2169,40 @@ mod tests {
     }
 
     #[test]
-    fn a_started_yggdrasil_service_is_logged() {
+    fn a_started_yggdrasil_service_is_logged_and_stopped_alone_by_stop_service_only() {
         let d = daemon(st(SetupStatus::NotRunning), st(SetupStatus::Ready));
         let mut f = Fake {
-            os: "linux",
+            os: "windows",
             elevated: true,
-            enabled: Some(true),
             ..Default::default()
         };
         let _ = block(run(SetupKind::Yggdrasil, &opts(), &mut f, &d));
         let log = log_of(&f);
+        assert!(matches!(&log[0].change, Change::NetworkAdded { .. }));
         assert!(matches!(
-            &log[0].change,
-            Change::ServiceStarted { service, previous_enabled: Some(true), undo, .. }
-                if service == "yggdrasil" && undo == &["systemctl", "stop", "yggdrasil"]
+            &log[1].change,
+            Change::ServiceStarted { service, undo, .. }
+                if service == "Yggdrasil" && undo == &["sc.exe", "stop", "Yggdrasil"]
         ));
+
+        f.commands.clear();
+        let only = UndoOptions {
+            stop_service_only: true,
+            ..undo_opts()
+        };
+        block(undo(SetupKind::Yggdrasil, &only, &mut f, &d)).unwrap();
+        assert_eq!(f.commands, ["sc.exe stop Yggdrasil"]);
+        // The network and its block stay, and so does their log entry.
+        assert_eq!(d.networks.borrow().len(), 1);
+        let log = log_of(&f);
+        assert_eq!(log.len(), 1);
+        assert!(matches!(&log[0].change, Change::NetworkAdded { .. }));
+
+        // A full undo stops nothing more and removes the network.
+        f.commands.clear();
+        block(undo(SetupKind::Yggdrasil, &undo_opts(), &mut f, &d)).unwrap();
+        assert!(f.commands.is_empty());
+        assert!(d.networks.borrow().is_empty());
     }
 
     #[test]
@@ -2101,38 +2249,28 @@ mod tests {
 
     #[test]
     fn undo_only_prints_the_uninstall_command_unless_asked() {
-        let mut offer = st(SetupStatus::NotInstalled);
-        offer.install = Some(socketguard_core::setup::InstallOffer {
-            manager: "winget".into(),
-            command: String::new(),
-            link: None,
-        });
-        let d = daemon(offer, st(SetupStatus::Ready));
+        // Tor on Debian is installed with apt-get; the fake daemon never sees it, so the run
+        // stops as a manual step right after the install, which is logged.
+        let d = daemon(st(SetupStatus::Ready), st(SetupStatus::NotInstalled));
         let mut f = Fake {
-            os: "windows",
+            os: "linux",
             elevated: true,
-            programs: vec!["winget"],
+            programs: vec!["apt-get"],
             ..Default::default()
         };
-        let _ = block(run(SetupKind::Yggdrasil, &opts(), &mut f, &d));
+        let _ = block(run(SetupKind::Tor, &opts(), &mut f, &d));
         f.commands.clear();
-        block(undo(SetupKind::Yggdrasil, &undo_opts(), &mut f, &d)).unwrap();
+        block(undo(SetupKind::Tor, &undo_opts(), &mut f, &d)).unwrap();
         assert!(f.commands.is_empty());
-        assert!(f
-            .said
-            .iter()
-            .any(|l| l.contains("winget uninstall --id YggdrasilNetwork.Yggdrasil -e")));
+        assert!(f.said.iter().any(|l| l.contains("apt-get remove -y tor")));
         assert_eq!(log_of(&f).len(), 1, "still logged: it was not removed");
 
         let o = UndoOptions {
             uninstall_packages: true,
             ..undo_opts()
         };
-        block(undo(SetupKind::Yggdrasil, &o, &mut f, &d)).unwrap();
-        assert_eq!(
-            f.commands,
-            ["winget uninstall --id YggdrasilNetwork.Yggdrasil -e"]
-        );
+        block(undo(SetupKind::Tor, &o, &mut f, &d)).unwrap();
+        assert_eq!(f.commands, ["apt-get remove -y tor"]);
         assert!(log_of(&f).is_empty());
     }
 

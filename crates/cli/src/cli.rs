@@ -83,6 +83,12 @@ pub enum Command {
     Export(ExportArgs),
     /// Apply an exported file: show the diff, confirm, apply
     Apply(ApplyArgs),
+    /// What becomes reachable over Yggdrasil when SocketGuard stops blocking it
+    Exposure {
+        /// A network id [default: all networks]
+        #[arg(long, value_name = "NETWORK")]
+        without: Option<String>,
+    },
     /// Remove all rules and addresses and keep them off until `enable`
     Disable(DisableArgs),
     /// Undo `disable`: put the rules and addresses back
@@ -470,6 +476,10 @@ pub enum NetworksCmd {
         /// only printed otherwise)
         #[arg(long, requires = "undo")]
         uninstall_packages: bool,
+        /// With --undo: only stop the service setup started; the network and everything
+        /// else stay
+        #[arg(long, requires = "undo", conflicts_with = "uninstall_packages")]
+        stop_service_only: bool,
     },
     /// Add a network (saved to the daemon's config file)
     Add {
@@ -505,6 +515,10 @@ pub enum NetworksCmd {
         /// Remove a Tor network even if Tor cannot confirm its onion services are gone
         #[arg(long)]
         force: bool,
+        /// Do not ask, also when the network's software keeps running and its programs
+        /// become reachable over it
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 }
 

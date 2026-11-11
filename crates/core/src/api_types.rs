@@ -44,6 +44,9 @@ pub enum EnforcementStatus {
     /// Saved, but a network could not enforce it yet (e.g. Tor is down); the daemon keeps
     /// retrying.
     Pending,
+    /// The firewall rules could not be applied (ADR 0051): the change is saved, and a
+    /// network added with it is not closed yet.
+    Failed,
 }
 
 /// The `enforcement` field of an HTTP 202 response: the change is saved but not yet
@@ -200,6 +203,53 @@ pub struct ProtectHostResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisableRequest {
     pub confirm: bool,
+}
+
+/// Query of `GET /api/exposure`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ExposureQuery {
+    /// A network id, or `all` (the default): what becomes reachable without that block.
+    pub without: Option<String>,
+}
+
+// ─── Exposure (ADR 0051) ─────────────────────────────────────────────────────
+
+/// A program listening on all addresses, so reachable over a network once SocketGuard's
+/// block on it is gone.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExposedListener {
+    /// The app's name.
+    pub app: String,
+    pub port: u16,
+    pub proto: Protocol,
+}
+
+/// What stays reachable over one network when SocketGuard stops blocking it.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkExposure {
+    /// The network's id.
+    pub network: String,
+    pub kind: crate::model::NetworkKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub interface: Option<String>,
+    /// The software behind the network keeps running when the block goes.
+    pub node_running: bool,
+    /// The programs listening on all addresses (what the block keeps off the network).
+    pub listeners: Vec<ExposedListener>,
+    /// The services `socketguard networks setup` started for this network (its setup log).
+    pub services_started_by_setup: Vec<String>,
+}
+
+/// Response of `GET /api/exposure` and the body of a `confirmation_required` answer to
+/// removing a network that stays reachable.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExposureResponse {
+    /// Only the networks that are affected and whose node runs or has listeners.
+    pub networks: Vec<NetworkExposure>,
 }
 
 // ─── Export and apply ────────────────────────────────────────────────────────

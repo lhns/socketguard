@@ -352,6 +352,9 @@ pub fn network_setup(s: &socketguard_core::setup::NetworkSetup) -> String {
         if let Some(l) = &st.download_link {
             out.push_str(&format!("\n  download: {l}"));
         }
+        if let Some(w) = &st.warning {
+            out.push_str(&format!("\n  warning: {w}"));
+        }
         out
     };
     let mut out = String::from("LAN interfaces:");
@@ -385,6 +388,42 @@ pub fn network_setup(s: &socketguard_core::setup::NetworkSetup) -> String {
         state("Tor", &s.tor),
         state("Local", &s.local)
     )
+}
+
+/// What stays reachable when a block goes (ADR 0051): one paragraph per network whose node
+/// keeps running; empty when nothing does.
+pub fn exposure(e: &socketguard_core::api_types::ExposureResponse) -> String {
+    let mut out = Vec::new();
+    for n in e.networks.iter().filter(|n| n.node_running) {
+        let programs = match n.listeners.len() {
+            0 => "no program listens on all addresses now".to_string(),
+            1 => "1 program on this PC is reachable over it".to_string(),
+            k => format!("{k} programs on this PC are reachable over it"),
+        };
+        let mut s = format!(
+            "{} keeps running. Without SocketGuard, {programs}",
+            n.network
+        );
+        if !n.listeners.is_empty() {
+            let list: Vec<String> = n
+                .listeners
+                .iter()
+                .map(|l| format!("{} (port {}/{})", l.app, l.port, l.proto))
+                .collect();
+            s.push_str(&format!(": {}", list.join(", ")));
+        }
+        s.push('.');
+        if n.services_started_by_setup.is_empty() {
+            s.push_str(" Stop its service yourself to close it.");
+        } else {
+            s.push_str(&format!(
+                " SocketGuard's setup started {}; `socketguard networks setup yggdrasil --undo --stop-service-only` stops it.",
+                n.services_started_by_setup.join(", ")
+            ));
+        }
+        out.push(s);
+    }
+    out.join("\n")
 }
 
 pub fn networks(nets: &[Network]) -> String {

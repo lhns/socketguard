@@ -5,6 +5,10 @@ DefaultDependencies=no
 After=local-fs.target
 Before=network-pre.target
 Wants=network-pre.target
+# A node must not start before the rules that close it (ADR 0051). The Yggdrasil unit is
+# ordered After=network.target upstream, which already follows network-pre.target; this
+# makes it explicit and independent of that. A unit that does not exist is ignored.
+Before=yggdrasil.service
 Conflicts=shutdown.target
 Before=shutdown.target
 

@@ -107,6 +107,11 @@ pub trait Network: Send + Sync {
     fn interface(&self) -> Option<String> {
         None
     }
+    /// The addresses of the node behind the network (Yggdrasil), the last known ones while
+    /// it is down; None until it was seen.
+    fn node(&self) -> Option<crate::ruleset::OverlayNode> {
+        None
+    }
     /// The /64 this network allocates from, for re-homing addresses; None if it has none.
     fn current_prefix(&self) -> Result<Option<Prefix>> {
         Ok(None)

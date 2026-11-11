@@ -87,6 +87,10 @@ fn scope_matches(sc: &Scope) -> Vec<String> {
             }
             m
         }
+        ScopeMatch::DestinationNet(net) => vec![format!(
+            "{} daddr {net}",
+            if net.addr().is_ipv6() { "ip6" } else { "ip" }
+        )],
         ScopeMatch::Interface { name, families } => {
             let fam = match families {
                 Families::Both => "",
@@ -416,6 +420,23 @@ mod tests {
     use super::*;
     use crate::firewall::golden_ruleset;
     use socketguard_core::{PortRef, Protocol};
+
+    #[test]
+    fn a_destination_net_scope_is_a_daddr_match_after_the_permit_rules() {
+        let out = render(&golden_ruleset());
+        let permit = out
+            .find("ip6 saddr { fd00::10/128, fd00:5::/32 } ip6 daddr 301::1 tcp dport 8080")
+            .expect("the permit rule");
+        let addr = out
+            .find("ip6 daddr 200:1:2:3::5/128 counter name")
+            .expect("the address drop");
+        let subnet = out
+            .find("ip6 daddr 300:1:2:3::/64 counter name")
+            .expect("the subnet drop");
+        assert!(permit < addr && permit < subnet, "rules come before scopes");
+        assert!(out.contains("ip6 daddr 300:1:2:3::/64 limit rate 10/second burst 20 packets log group 7 prefix \"sg:overlay:ygg:subnet\""));
+        assert!(out.contains("sg:overlay:ygg:subnet"));
+    }
 
     #[test]
     fn golden_render() {

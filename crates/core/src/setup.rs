@@ -71,6 +71,14 @@ pub struct SetupState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub install: Option<InstallOffer>,
+    /// A node runs that SocketGuard does not manage (ADR 0051): the host may be reachable
+    /// over it. Only set for Yggdrasil.
+    #[serde(default)]
+    pub exposed: bool,
+    /// A plain sentence to show above the Add button.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub warning: Option<String>,
     /// The official download page, where there is no package to offer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
@@ -84,6 +92,8 @@ impl SetupState {
             found: BTreeMap::new(),
             missing: None,
             install: None,
+            exposed: false,
+            warning: None,
             download_link: None,
         }
     }
@@ -108,6 +118,22 @@ pub struct LanCandidate {
     pub already_added: bool,
 }
 
+/// Whether the Yggdrasil network that is added is closed (ADR 0051).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct YggdrasilBlock {
+    /// The ruleset in force denies the node's own addresses on any interface.
+    pub closed: bool,
+    /// The same, by address (needs the node to have been seen once).
+    pub address_blocked: bool,
+    /// The ruleset in force denies everything arriving on the network's interface.
+    pub interface_blocked: bool,
+    /// Why it is not closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub reason: Option<String>,
+}
+
 /// `GET /api/networks/setup`: what can be added on this host and how far each is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -117,6 +143,10 @@ pub struct NetworkSetup {
     pub yggdrasil: SetupState,
     pub tor: SetupState,
     pub local: SetupState,
+    /// Present when a Yggdrasil network is added: whether its block is in force.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub yggdrasil_block: Option<YggdrasilBlock>,
     /// The config file the daemon saves its networks in (what `networks setup` edits).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
@@ -175,20 +205,6 @@ pub fn install_command(
     has: &dyn Fn(&str) -> bool,
 ) -> Option<InstallCommand> {
     match (kind, os) {
-        (SetupKind::Yggdrasil, "windows") if has("winget") => Some(InstallCommand {
-            manager: "winget",
-            package: "YggdrasilNetwork.Yggdrasil",
-            program: "winget",
-            uninstall: vec!["uninstall", "--id", "YggdrasilNetwork.Yggdrasil", "-e"],
-            args: vec![
-                "install",
-                "--id",
-                "YggdrasilNetwork.Yggdrasil",
-                "--source",
-                "winget",
-                "-e",
-            ],
-        }),
         (SetupKind::Tor, "linux") => {
             if has("apt-get") {
                 Some(InstallCommand {
@@ -230,12 +246,8 @@ mod tests {
     fn install_commands_exist_only_where_verified() {
         let all = |_: &str| true;
         let none = |_: &str| false;
-        let ygg = install_command(SetupKind::Yggdrasil, "windows", &all).unwrap();
-        assert_eq!(
-            ygg.command_line(),
-            "winget install --id YggdrasilNetwork.Yggdrasil --source winget -e"
-        );
-        assert!(install_command(SetupKind::Yggdrasil, "windows", &none).is_none());
+        // SocketGuard installs no Yggdrasil package.
+        assert!(install_command(SetupKind::Yggdrasil, "windows", &all).is_none());
         assert!(install_command(SetupKind::Yggdrasil, "linux", &all).is_none());
         assert!(install_command(SetupKind::Yggdrasil, "macos", &all).is_none());
         assert!(install_command(SetupKind::Tor, "windows", &all).is_none());

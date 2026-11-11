@@ -723,3 +723,52 @@ async fn init_offers_a_grant_for_sshd_and_checks_protect_host_for_lockout() {
     );
     env.stop().await;
 }
+
+#[tokio::test]
+async fn exposure_is_shown_and_removing_or_disabling_needs_yes() {
+    let env = Env::start().await;
+    // The Yggdrasil network of the mock daemon has a node that runs.
+    let e = env.ok(&["exposure", "--json"]).await.json();
+    assert_eq!(e["networks"][0]["network"], "ygg");
+    assert_eq!(e["networks"][0]["node_running"], true);
+    assert!(env
+        .ok(&["exposure"])
+        .await
+        .stdout
+        .contains("ygg keeps running"));
+    let one = env
+        .ok(&["exposure", "--without", "ygg", "--json"])
+        .await
+        .json();
+    assert_eq!(one["networks"].as_array().unwrap().len(), 1);
+    env.fails(&["exposure", "--without", "nope"]).await;
+
+    // `networks rm` prints the exposure and refuses without --yes.
+    let out = env.fails(&["networks", "rm", "ygg"]).await;
+    assert!(out.stderr.contains("keeps running"), "{}", out.stderr);
+    assert!(out.stderr.contains("--yes"), "{}", out.stderr);
+    assert_eq!(
+        env.ok(&["networks", "list", "--json"])
+            .await
+            .json()
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    // Disable shows it too.
+    let out = env.fails(&["disable"]).await;
+    assert!(out.stderr.contains("keeps running"), "{}", out.stderr);
+
+    env.ok(&["networks", "rm", "ygg", "--yes"]).await;
+    assert_eq!(
+        env.ok(&["networks", "list", "--json"])
+            .await
+            .json()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    env.stop().await;
+}

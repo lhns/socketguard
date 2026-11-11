@@ -62,6 +62,10 @@ pub trait Ipv6Backend: Send + Sync {
     fn interface(&self) -> Option<String> {
         None
     }
+    /// The node's addresses, the last known ones while the node is down.
+    fn node(&self) -> Option<crate::ruleset::OverlayNode> {
+        None
+    }
     /// Why the network cannot be used right now, beyond `current_prefix` failing.
     fn problem(&self) -> Option<String> {
         None

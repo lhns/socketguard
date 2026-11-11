@@ -17,6 +17,7 @@ mod addresses;
 mod batch;
 mod discovery;
 mod enforce;
+mod exposure;
 mod firewall;
 mod mutations;
 mod port_groups;
