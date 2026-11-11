@@ -22,8 +22,10 @@ interface Props {
   /** Narrow strip: the details are hidden until a row or cell is clicked. */
   collapsed?: boolean;
   onExpand?: () => void;
-  /** Offered with the overview columns, which need the width. */
+  /** Offered with the overview columns, which need the width: the panel shrinks to a strip. */
   onCollapse?: () => void;
+  /** Hides the panel; the selection stays. Without the overview columns (with them `onCollapse`
+   * does the same, so only that button shows). */
   onClose?: () => void;
   children?: ReactNode;
 }
@@ -34,7 +36,7 @@ export default function Inspector({ label, title, subtitle, badges, collapsed, o
   if (collapsed) {
     return (
       <aside className="inspector inspector-strip" aria-label={label}>
-        <button className="btn btn-sm" onClick={onExpand} aria-label="Show details">‹</button>
+        <button className="btn-icon" onClick={onExpand} aria-label="Show details" title="Show details">‹</button>
         <span className="strip-text">Details</span>
       </aside>
     );
@@ -48,8 +50,8 @@ export default function Inspector({ label, title, subtitle, badges, collapsed, o
         </div>
         <div className="inspector-tools">
           {badges && <div className="badges">{badges}</div>}
-          {onCollapse && <button className="btn btn-sm" onClick={onCollapse} aria-label="Hide details" title="Hide details">›</button>}
-          {onClose && <button className="btn btn-sm" onClick={onClose} aria-label="Close details" title="Clear the selection">×</button>}
+          {onCollapse && <button className="btn-icon" onClick={onCollapse} aria-label="Hide details" title="Hide details">›</button>}
+          {onClose && !onCollapse && <button className="btn-icon" onClick={onClose} aria-label="Close details" title="Close details">×</button>}
         </div>
       </header>
       {children}

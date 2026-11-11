@@ -15,21 +15,30 @@ type Chip =
   | { key: string; kind: "target"; target: Target; label: string }
   | { key: string; kind: "new"; text: string; label: string; credentials: NewCredential[] };
 
+interface Props {
+  fixed: FixedSide;
+  /** Open the form at once with only this port chosen (the "Add access" of a port row). */
+  port?: PortRef;
+  /** The form was cancelled or applied. */
+  onDone?: () => void;
+}
+
 const tokens = (text: string) => text.split(/[\s,]+/).filter(Boolean);
 
-/** Give access: the selection fills one side, a picker chooses the other. Ports and networks are
- * optional. Pasting a key, address or IP creates a peer on the way. */
-export default function AddAccess({ fixed }: { fixed: FixedSide }) {
+/** Give access: the selection fills one side, a picker chooses the other. What to open is chosen
+ * explicitly: the whole app, or some of its ports. Networks are optional. Pasting keys, addresses
+ * or IPs creates one peer per value on the way, named by the daemon. */
+export default function AddAccess({ fixed, port, onDone }: Props) {
   const apps = useList(useApps());
   const tags = useList(useTags());
   const peers = useList(usePeers());
   const groups = useList(useGroups());
   const networks = useList(useNetworks());
 
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(port !== undefined);
   const [chips, setChips] = useState<Chip[]>([]);
-  const [allPorts, setAllPorts] = useState(true);
-  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [whole, setWhole] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set(port ? [portLabel(port)] : []));
   const [nets, setNets] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -38,9 +47,10 @@ export default function AddAccess({ fixed }: { fixed: FixedSide }) {
   const reset = () => {
     setOpen(false);
     setChips([]);
-    setAllPorts(true);
+    setWhole(false);
     setPicked(new Set());
     setNets(new Set());
+    onDone?.();
   };
   const commit = useCommit(reset);
 
@@ -103,26 +113,31 @@ export default function AddAccess({ fixed }: { fixed: FixedSide }) {
           : { key: item.id, kind: "target", target: { kind: kind as "app" | "tag", id: ref }, label: item.label };
     setChips([...chips, chip]);
   };
-  const createPeer = () => {
+  // One peer per pasted value.
+  const createPeers = () => {
     if (!parsedOk || !parsed.data) return;
-    const credentials = parsed.data.map((p) => ({ kind: p.kind!, value: p.normalized!, label: null }));
-    setChips([...chips, { key: `new${counter.current++}`, kind: "new", text: query, label: "", credentials }]);
+    const fresh = parsed.data.map<Chip>((p) => ({
+      key: `new${counter.current++}`,
+      kind: "new",
+      text: p.input,
+      label: p.input,
+      credentials: [{ kind: p.kind!, value: p.normalized!, label: null }],
+    }));
+    setChips([...chips, ...fresh]);
   };
 
   // ─── The operations ────────────────────────────────────────────────────────
   const newPeers = chips.filter((c): c is Extract<Chip, { kind: "new" }> => c.kind === "new");
   const chosen = chips.length;
-  const portSelection: (PortRef | undefined)[] = allPorts ? [undefined] : portOptions.filter((p) => picked.has(portLabel(p)));
-  const ready =
-    targets.length > 0 && chosen > 0 && (fixed.side === "targets" || fixed.subjects.length > 0) &&
-    portSelection.length > 0 && newPeers.every((c) => c.label.trim() !== "");
+  const portSelection: (PortRef | undefined)[] = whole ? [undefined] : portOptions.filter((p) => picked.has(portLabel(p)));
+  const ready = targets.length > 0 && chosen > 0 && (fixed.side === "targets" || fixed.subjects.length > 0) && portSelection.length > 0;
 
   const ops = useMemo<ChangeOp[]>(() => {
     if (!ready) return [];
     const out: ChangeOp[] = [];
     const subjectOf = new Map<string, Subject>();
     newPeers.forEach((c, i) => {
-      out.push({ op: "create_peer", ref: `$new${i}`, label: c.label.trim(), credentials: c.credentials });
+      out.push({ op: "create_peer", ref: `$new${i}`, credentials: c.credentials });
       subjectOf.set(c.key, { kind: "peer", id: `$new${i}` });
     });
     const subjects: Subject[] =
@@ -146,9 +161,9 @@ export default function AddAccess({ fixed }: { fixed: FixedSide }) {
       }
     }
     return out;
-    // portSelection and newPeers derive from chips, picked, allPorts and portOptions.
+    // portSelection and newPeers derive from chips, picked, whole and portOptions.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, fixed, chips, targets, allPorts, picked, portOptions, nets]);
+  }, [ready, fixed, chips, targets, whole, picked, portOptions, nets]);
 
   // A review of an earlier form is stale as soon as the form changes.
   const opsKey = JSON.stringify(ops);
@@ -190,12 +205,8 @@ export default function AddAccess({ fixed }: { fixed: FixedSide }) {
         <ul className="chip-row" aria-label={choosingSubjects ? "Chosen subjects" : "Chosen targets"}>
           {chips.map((c) => (
             <li key={c.key} className={`subject-chip${c.kind === "new" ? " subject-chip-new" : ""}`}>
-              {c.kind === "new" ? (
-                <NewPeer chip={c} onLabel={(label) => setChips(chips.map((x) => (x.key === c.key ? { ...c, label } : x)))} />
-              ) : (
-                <span>{c.label}</span>
-              )}
-              <button type="button" className="chip-x" aria-label={`Remove ${c.kind === "new" ? c.text : c.label}`} onClick={() => setChips(chips.filter((x) => x.key !== c.key))}>
+              {c.kind === "new" ? <NewPeer chip={c} /> : <span>{c.label}</span>}
+              <button type="button" className="btn-icon" aria-label={`Remove ${c.label}`} title={`Remove ${c.label}`} onClick={() => setChips(chips.filter((x) => x.key !== c.key))}>
                 ×
               </button>
             </li>
@@ -218,41 +229,52 @@ export default function AddAccess({ fixed }: { fixed: FixedSide }) {
             ? () => ({
                 label: (
                   <>
-                    New peer from <span className="mono">{query.length > 36 ? `${query.slice(0, 33)}…` : query}</span>
+                    {words.length > 1 ? `${words.length} new peers from ` : "New peer from "}
+                    <span className="mono">{query.length > 36 ? `${query.slice(0, 33)}…` : query}</span>
                   </>
                 ),
-                pick: createPeer,
+                pick: createPeers,
               })
             : undefined
         }
       />
 
+      {targets.length > 0 && (
+        <div className="scope-row" role="group" aria-label="What to open">
+          <button
+            type="button"
+            className="scope-chip"
+            aria-pressed={whole}
+            onClick={() => {
+              setWhole(!whole);
+              setPicked(new Set());
+            }}
+          >
+            {targets.every((t) => t.kind === "tag") ? "Whole tag" : "Whole app"}
+          </button>
+          {portOptions.map((p) => (
+            <button
+              key={portLabel(p)}
+              type="button"
+              className="scope-chip mono"
+              aria-pressed={picked.has(portLabel(p))}
+              onClick={() => {
+                const next = new Set(picked);
+                if (next.has(portLabel(p))) next.delete(portLabel(p));
+                else next.add(portLabel(p));
+                setPicked(next);
+                setWhole(false);
+              }}
+            >
+              {portLabel(p)}
+            </button>
+          ))}
+          {!whole && portSelection.length === 0 && <span className="hint">Choose what to open</span>}
+        </div>
+      )}
+
       <details className="add-limits">
-        <summary>Limit to ports or networks (optional)</summary>
-        <fieldset className="field-group">
-          <legend>Ports</legend>
-          <label className="check">
-            <input type="checkbox" checked={allPorts} onChange={(e) => setAllPorts(e.target.checked)} />
-            All ports
-          </label>
-          {!allPorts && portOptions.length === 0 && <p className="muted">Nothing chosen has ports yet.</p>}
-          {!allPorts &&
-            portOptions.map((p) => (
-              <label key={portLabel(p)} className="check">
-                <input
-                  type="checkbox"
-                  checked={picked.has(portLabel(p))}
-                  onChange={(e) => {
-                    const next = new Set(picked);
-                    if (e.target.checked) next.add(portLabel(p));
-                    else next.delete(portLabel(p));
-                    setPicked(next);
-                  }}
-                />
-                {portLabel(p)}
-              </label>
-            ))}
-        </fieldset>
+        <summary>Limit to networks (optional)</summary>
         <fieldset className="field-group">
           <legend>Networks</legend>
           <p className="hint">None ticked: every network that takes grants. Anyone on one network means everyone on it.</p>
@@ -287,13 +309,12 @@ export default function AddAccess({ fixed }: { fixed: FixedSide }) {
   );
 }
 
-function NewPeer({ chip, onLabel }: { chip: Extract<Chip, { kind: "new" }>; onLabel: (l: string) => void }) {
+function NewPeer({ chip }: { chip: Extract<Chip, { kind: "new" }> }) {
   const kinds = [...new Set(chip.credentials.map((c) => CREDENTIAL_INFO[c.kind].name))].join(", ");
-  const short = chip.text.length > 20 ? `${chip.text.slice(0, 17)}…` : chip.text;
   return (
     <span className="new-peer">
-      <span className="badge badge-pending">new peer</span>{" "}
-      <input className="input input-sm" aria-label={`Label for new peer ${short}`} placeholder="label" value={chip.label} onChange={(e) => onLabel(e.target.value)} />{" "}
+      <span className="badge badge-pending">new peer</span>
+      <span className="mono new-peer-name" title={chip.text}>{chip.text}</span>
       <span className="muted">{kinds}</span>
     </span>
   );
