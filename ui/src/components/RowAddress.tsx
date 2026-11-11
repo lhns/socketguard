@@ -5,7 +5,6 @@ import { sameScope } from "../lib";
 import { bindsRow } from "../matrix";
 import { useNav } from "../nav";
 import { useReservations } from "../queries";
-import AddToReserved from "./AddToReserved";
 import AddressLines, { ReserveForm } from "./AddressLines";
 import CommitPreview from "./CommitPreview";
 import { useNameCtx } from "./Inspector";
@@ -60,8 +59,7 @@ export default function RowAddress({ app, scope, onlyLocal }: Props) {
             onCancel={() => setReserving(null)}
           />
         )}
-        <CommitPreview commit={commit} title="This lets more in" />
-        {!onlyLocal && <AddToReserved target={{ kind: "app", app_id: app.id, scope }} />}
+        <CommitPreview commit={commit} title="Reserve this address?" confirmLabel="Reserve address" />
       </>
     );
   }

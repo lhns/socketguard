@@ -7,6 +7,7 @@ import { useNav } from "../nav";
 import { useActivity, useApp, useDeleteApp, useGrants, useShare } from "../queries";
 import AccessList, { type AccessHighlight } from "./AccessList";
 import PortsSection from "./PortsSection";
+import { ActionRow, DangerZone } from "./ActionRow";
 import AddAccess from "./AddAccess";
 import CommitPreview from "./CommitPreview";
 import ConfirmDialog from "./ConfirmDialog";
@@ -102,14 +103,17 @@ function OneApp({ app, partial, highlight, onCollapse, onClose }: { app: AppDeta
           // The diff is always shown: a move changes grants, tags, addresses and bindings at once.
           void move.runBatch([{ op: "move_app", from: app.id, to: to.id, confirm_open: false }], `Transferred access to ${to.name}`, undefined, true);
         }} />
-        <button className="btn btn-danger btn-sm" onClick={() => setForgetting(true)}>Forget app</button>
       </div>
       <p className="hint">{TRANSFER_HINT}</p>
       <CommitPreview commit={review} />
-      <CommitPreview commit={move} title={`Transfer access to ${names.apps.find((a) => a.id === moveTarget.current)?.name ?? "the other app"}`} />
+      <CommitPreview commit={move} title={`Transfer access to ${names.apps.find((a) => a.id === moveTarget.current)?.name ?? "the other app"}?`} confirmLabel="Transfer access" />
 
       <TorShare appId={app.id} hasOnion={app.addresses.some((a) => a.locator.kind === "onion")} />
       {!partial && <Counters app={app} />}
+
+      <DangerZone>
+        <button className="btn btn-danger btn-sm" onClick={() => setForgetting(true)}>Forget app</button>
+      </DangerZone>
 
       {forgetting && (
         <ConfirmDialog
@@ -162,7 +166,7 @@ function MovedHint({ app }: { app: AppDetail }) {
           Take over from the old entry
         </button>
       </div>
-      <CommitPreview commit={takeover} title={`Take over from ${old.name}`} />
+      <CommitPreview commit={takeover} title={`Take over from ${old.name}?`} confirmLabel="Take over" />
     </div>
   );
 }
@@ -276,7 +280,7 @@ export function AppsInspector({ ids, onCollapse, onClose }: { ids: string[] } & 
       <Section title="Who can reach them">
         <AccessList entries={entries} direction="who" networks={names.networks} onRevoke={revoke} unit="apps" empty="Nobody can reach any of them." />
         <CommitPreview commit={revokeCommit} />
-        <AddAccess fixed={{ side: "targets", targets: selected.map((a) => ({ kind: "app" as const, id: a.id })) }} />
+        <ActionRow><AddAccess fixed={{ side: "targets", targets: selected.map((a) => ({ kind: "app" as const, id: a.id })) }} /></ActionRow>
       </Section>
 
       <div className="actions">
@@ -287,9 +291,12 @@ export function AppsInspector({ ids, onCollapse, onClose }: { ids: string[] } & 
         >
           Mark reviewed{pending.length > 0 ? ` (${pending.length})` : ""}
         </button>
-        <button className="btn btn-danger btn-sm" onClick={() => setForgetting(true)}>Forget {selected.length} apps</button>
       </div>
       <CommitPreview commit={review} />
+
+      <DangerZone>
+        <button className="btn btn-danger btn-sm" onClick={() => setForgetting(true)}>Forget {selected.length} apps</button>
+      </DangerZone>
 
       {forgetting && (
         <ConfirmDialog

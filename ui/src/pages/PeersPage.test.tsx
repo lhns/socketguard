@@ -144,7 +144,7 @@ describe("Inspector: one peer", () => {
     await user.click(await p.findByRole("button", { name: "Add access…" }));
     const form = screen.getByRole("form", { name: "Add access" });
     expect(form).toHaveTextContent("What can bob reach?");
-    await user.click(within(form).getByRole("button", { name: "Choose apps, tags or reserved addresses…" }));
+    await user.click(within(form).getByRole("combobox", { name: "What" }));
     await user.click(screen.getByRole("checkbox", { name: /^web/ }));
     await user.click(screen.getByRole("checkbox", { name: "nginx" }));
     await user.keyboard("{Escape}");
@@ -165,11 +165,11 @@ describe("Inspector: one peer", () => {
     const p = within(await screen.findByRole("region", { name: "Peer details" }));
     await user.click(await p.findByRole("button", { name: "Add or remove groups" }));
     await user.click(screen.getByRole("checkbox", { name: /^team/ }));
-    const review = await p.findByRole("region", { name: "Review before applying" });
+    const review = await screen.findByRole("dialog");
     expect(review).toHaveTextContent("bob in group team");
     expect(review).toHaveTextContent("gains access to tag web");
     expect(d.count("set_group_members")).toBe(0);
-    await user.click(within(review).getByRole("button", { name: "Apply" }));
+    await user.click(within(review).getByRole("button", { name: "Add to group" }));
     await waitFor(() => expect(d.last("set_group_members")?.args).toEqual({ id: "g1", peerIds: ["p1", "p2"] }));
   });
 
@@ -182,7 +182,7 @@ describe("Inspector: one peer", () => {
     await user.click(await p.findByRole("button", { name: "Add or remove groups" }));
     await user.click(screen.getByRole("checkbox", { name: /^ops/ }));
     await waitFor(() => expect(d.last("set_group_members")?.args).toEqual({ id: "g2", peerIds: ["p2"] }));
-    expect(screen.queryByRole("region", { name: "Review before applying" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("a group can be created from the picker, with the peer in it", async () => {
@@ -320,7 +320,7 @@ describe("Inspector: several peers", () => {
     const p = await selectAll(user);
     await user.click(await p.findByRole("button", { name: "Add access…" }));
     const form = screen.getByRole("form", { name: "Add access" });
-    await user.click(within(form).getByRole("button", { name: "Choose apps, tags or reserved addresses…" }));
+    await user.click(within(form).getByRole("combobox", { name: "What" }));
     await user.click(screen.getByRole("checkbox", { name: "nginx" }));
     await user.keyboard("{Escape}");
     await user.click(within(form).getByRole("button", { name: "All ports" }));
@@ -497,7 +497,7 @@ describe("Reserved addresses as a target", () => {
     const p = within(await screen.findByRole("region", { name: "Peer details" }));
     await user.click(await p.findByRole("button", { name: "Add access…" }));
     const form = screen.getByRole("form", { name: "Add access" });
-    await user.click(within(form).getByRole("button", { name: "Choose apps, tags or reserved addresses…" }));
+    await user.click(within(form).getByRole("combobox", { name: "What" }));
     const option = await screen.findByRole("checkbox", { name: /^reserved front/ });
     expect(option.closest("li")).toHaveTextContent("Reserved addresses");
     await user.click(option);

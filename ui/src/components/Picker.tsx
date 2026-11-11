@@ -20,8 +20,11 @@ export interface PickerCreate {
 }
 
 interface Props {
-  /** The button that opens the list. */
-  trigger: ReactNode;
+  /** The button that opens the list (not used in field mode). */
+  trigger?: ReactNode;
+  /** Field mode: the picker is a text input (with these chips in front) that opens the list on
+   * focus and typing, instead of a button with a search box inside the list. */
+  field?: ReactNode;
   /** Name of the list for assistive technology. */
   label: string;
   items: PickerItem[];
@@ -47,7 +50,7 @@ interface Props {
  * groups, the other side of "add access" and the columns of the overview. Enter picks the
  * highlighted row, the arrow keys move, Escape and a click outside close it. */
 export default function Picker({
-  trigger, label, items, onToggle, create, onQuery, placeholder = "Search", open: controlled, onOpenChange,
+  trigger, field, label, items, onToggle, create, onQuery, placeholder = "Search", open: controlled, onOpenChange,
   empty = "Nothing to pick.", triggerClass = "btn btn-sm", align = "left", compactLabel,
 }: Props) {
   const id = useId();
@@ -62,6 +65,8 @@ export default function Picker({
   const root = useRef<HTMLDivElement>(null);
   const search = useRef<HTMLInputElement>(null);
   const button = useRef<HTMLButtonElement>(null);
+  const fieldBox = useRef<HTMLDivElement>(null);
+  const isField = field !== undefined;
 
   const q = query.trim().toLowerCase();
   const shown = useMemo(
@@ -74,19 +79,22 @@ export default function Picker({
   const at = Math.min(active, Math.max(rows - 1, 0));
 
   useEffect(() => {
-    if (open) search.current?.focus();
+    if (open) {
+      if (!isField) search.current?.focus();
+    }
     else {
       setQuery("");
       setActive(0);
     }
-  }, [open]);
+  }, [open, isField]);
 
   // The list floats at the button's position, so a scrolling panel around it does not clip it.
   const [pos, setPos] = useState<{ top?: number; bottom?: number; left: number; width: number; max: number } | null>(null);
   useLayoutEffect(() => {
-    if (!open || !button.current) return;
-    const r = button.current.getBoundingClientRect();
-    const width = Math.min(300, window.innerWidth - 16);
+    const anchor = isField ? fieldBox.current : button.current;
+    if (!open || !anchor) return;
+    const r = anchor.getBoundingClientRect();
+    const width = isField ? Math.min(Math.max(r.width, 260), window.innerWidth - 16) : Math.min(300, window.innerWidth - 16);
     const left = align === "right" ? Math.max(8, r.right - width) : Math.min(Math.max(8, r.left), window.innerWidth - width - 8);
     const top = r.bottom + 4;
     const below = window.innerHeight - top - 76;
@@ -96,7 +104,7 @@ export default function Picker({
     } else {
       setPos({ top, left, width, max: Math.max(140, Math.min(320, below)) });
     }
-  }, [open, align]);
+  }, [open, align, isField]);
 
   useEffect(() => {
     if (!open) return;
@@ -120,13 +128,17 @@ export default function Picker({
   }, [open, controlled, onOpenChange]);
 
   const change = (v: string) => {
+    if (isField && v !== "") setOpen(true);
     setQuery(v);
     setActive(0);
     onQuery?.(v.trim());
   };
   const pickRow = (i: number) => {
     if (i < shown.length) {
-      if (!shown[i].disabled) onToggle(shown[i]);
+      if (!shown[i].disabled) {
+        onToggle(shown[i]);
+        if (isField) change("");
+      }
     }
     else if (createRow) {
       createRow.pick();
@@ -147,14 +159,45 @@ export default function Picker({
       e.preventDefault();
       e.stopPropagation();
       setOpen(false);
-      button.current?.focus();
+      if (isField) search.current?.blur();
+      else button.current?.focus();
     }
   };
 
   let lastSection: string | undefined;
   return (
-    <div className="picker" ref={root}>
-      <button
+    <div className={`picker${isField ? " picker-field-wrap" : ""}`} ref={root}>
+      {isField && (
+        <div className="input picker-field" ref={fieldBox} onClick={() => search.current?.focus()}>
+          {field}
+          <input
+            ref={search}
+            className="picker-field-input"
+            type="text"
+            role="combobox"
+            aria-expanded={open}
+            aria-controls={open ? `${id}-list` : undefined}
+            aria-activedescendant={open && rows > 0 ? `${id}-r${at}` : undefined}
+            aria-label={label}
+            placeholder={placeholder}
+            autoComplete="off"
+            value={query}
+            onFocus={() => setOpen(true)}
+            onChange={(e) => change(e.target.value)}
+            onKeyDown={(e) => {
+              if (!open && (e.key === "ArrowDown" || e.key === "Enter")) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setOpen(true);
+                }
+                return;
+              }
+              if (open) onKey(e);
+            }}
+          />
+        </div>
+      )}
+      {!isField && <button
         type="button"
         ref={button}
         className={triggerClass}
@@ -166,17 +209,17 @@ export default function Picker({
         onClick={() => setOpen(!open)}
       >
         {trigger}
-      </button>
+      </button>}
       {open && (
         <div
           className="picker-pop"
           id={id}
-          role="dialog"
-          aria-label={label}
-          onKeyDown={onKey}
+          role={isField ? undefined : "dialog"}
+          aria-label={isField ? undefined : label}
+          onKeyDown={isField ? undefined : onKey}
           style={pos ? { top: pos.top, bottom: pos.bottom, left: pos.left, width: pos.width } : { visibility: "hidden" }}
         >
-          <input
+          {!isField && <input
             ref={search}
             className="input picker-search"
             type="search"
@@ -189,7 +232,7 @@ export default function Picker({
             autoComplete="off"
             value={query}
             onChange={(e) => change(e.target.value)}
-          />
+          />}
           <ul className="picker-list" id={`${id}-list`} role="listbox" aria-label={label} aria-multiselectable="true" style={{ maxHeight: pos?.max }}>
             {shown.map((item, i) => {
               const heading = item.section !== undefined && item.section !== lastSection ? item.section : null;

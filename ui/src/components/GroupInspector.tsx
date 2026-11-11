@@ -6,6 +6,7 @@ import { errorText } from "../lib";
 import { useNav } from "../nav";
 import { useCreateGroup, useDeleteGroup, useGrants, usePeers, useRenameGroup } from "../queries";
 import AccessList from "./AccessList";
+import { ActionRow, DangerZone } from "./ActionRow";
 import AddAccess from "./AddAccess";
 import CommitPreview from "./CommitPreview";
 import ConfirmDialog from "./ConfirmDialog";
@@ -90,19 +91,21 @@ export function GroupInspector({ group, onCollapse, onClose }: { group: PeerGrou
           ))}
           {memberPicker}
         </div>
-        <CommitPreview commit={members} title="Joining this group lets more in" />
+        <CommitPreview commit={members} title="Add to this group?" confirmLabel="Add to group" />
       </Section>
 
       <Section title="What it can reach">
         <AccessList entries={subjectEntries({ kind: "group", id: group.id }, null, grants, names)} direction="what" networks={names.networks} onRevoke={revoke} empty="No grants name this group." />
         <CommitPreview commit={revokeCommit} />
-        <AddAccess fixed={{ side: "subjects", subjects: [{ kind: "group", id: group.id }] }} />
+        <ActionRow><AddAccess fixed={{ side: "subjects", subjects: [{ kind: "group", id: group.id }] }} /></ActionRow>
       </Section>
 
       <div className="actions">
         <ShowAsColumn columnKey={`group:${group.id}`} />
-        <button className="btn btn-danger btn-sm" aria-label={`Delete group ${group.label}`} onClick={() => setDeleting(true)}>Delete group</button>
       </div>
+      <DangerZone>
+        <button className="btn btn-danger btn-sm" aria-label={`Delete group ${group.label}`} onClick={() => setDeleting(true)}>Delete group</button>
+      </DangerZone>
 
       {deleting && (
         <ConfirmDialog
@@ -148,11 +151,11 @@ export function GroupsInspector({ groups, onCollapse, onClose }: { groups: PeerG
       <Section title="What they can reach">
         <AccessList entries={entries} direction="what" networks={names.networks} onRevoke={revoke} unit="groups" empty="No grants name these groups." />
         <CommitPreview commit={revokeCommit} />
-        <AddAccess fixed={{ side: "subjects", subjects: groups.map((g) => ({ kind: "group" as const, id: g.id })) }} />
+        <ActionRow><AddAccess fixed={{ side: "subjects", subjects: groups.map((g) => ({ kind: "group" as const, id: g.id })) }} /></ActionRow>
       </Section>
-      <div className="actions">
+      <DangerZone>
         <button className="btn btn-danger btn-sm" onClick={() => setDeleting(true)}>Delete {groups.length} groups</button>
-      </div>
+      </DangerZone>
       {deleting && (
         <ConfirmDialog title={`Delete ${groups.length} groups?`} confirmLabel="Delete groups" onCancel={() => setDeleting(false)} onConfirm={() => void deleteAll()}>
           <p>The grants naming these groups are removed with them. The peers stay.</p>

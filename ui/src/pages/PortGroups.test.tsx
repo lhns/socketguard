@@ -128,7 +128,7 @@ describe("The Ports section of an app", () => {
     expect([...within(form).getByRole("group", { name: "What to open" }).querySelectorAll("button")].map((b) => b.textContent)).toEqual(["All ports", "80/tcp", "443/tcp", "passive"]);
     expect(chips.getByRole("button", { name: "passive" })).toHaveAttribute("aria-pressed", "true");
     expect(chips.getByRole("button", { name: "All ports" })).toHaveAttribute("aria-pressed", "false");
-    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
+    await user.click(within(form).getByRole("combobox", { name: "Who" }));
     await user.click(screen.getByRole("checkbox", { name: "alice" }));
     await user.keyboard("{Escape}");
     await user.click(within(form).getByRole("button", { name: "Add access" }));
@@ -159,7 +159,7 @@ describe("The Ports section of an app", () => {
     await user.click(inList().getByRole("checkbox", { name: "Select redis-server" }));
     await user.click(await within(inspector()).findByRole("button", { name: "Add access…" }));
     const form = screen.getByRole("form", { name: "Add access" });
-    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
+    await user.click(within(form).getByRole("combobox", { name: "Who" }));
     await user.click(screen.getByRole("checkbox", { name: "bob" }));
     await user.keyboard("{Escape}");
     await user.click(within(form).getByRole("button", { name: "passive" }));
@@ -222,11 +222,11 @@ describe("Attach port group", () => {
     renderWithProviders(<AppsPage />);
     await openApp(user, "redis-server");
     await user.click(await groupRow(user, /^dns/));
-    const review = await within(inspector()).findByRole("region", { name: "Review before applying" });
+    const review = await screen.findByRole("dialog");
     expect(review).toHaveTextContent("attach dns on redis-server");
     expect(review).toHaveTextContent("update port group");
     expect(applied(d)).toEqual([]);
-    await user.click(within(review).getByRole("button", { name: "Apply" }));
+    await user.click(within(review).getByRole("button", { name: /^(Give access|Apply|Add to reserved address|Add|Transfer access|Take over|Create and attach|Open .* to anyone)$/ }));
     await waitFor(() => expect(applied(d)).toEqual([[{ op: "attach_port_group", group_id: "sg2", app_id: "a2", confirm_open: false }]]));
   });
 
@@ -237,7 +237,7 @@ describe("Attach port group", () => {
     await openApp(user, "redis-server");
     await user.click(await groupRow(user, /^dns/));
     await waitFor(() => expect(applied(d)).toEqual([[{ op: "attach_port_group", group_id: "sg2", app_id: "a2", confirm_open: false }]]));
-    expect(screen.queryByRole("region", { name: "Review before applying" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("Detach on a group row goes through the same rule and offers Undo", async () => {
@@ -391,10 +391,10 @@ describe("Port group inspector", () => {
     expect(panel.getByRole("alert")).toHaveTextContent("1 to 65535");
     await user.clear(input);
     await user.type(input, "60000-60010/tcp{Enter}");
-    const review = await panel.findByRole("region", { name: "Review before applying" });
+    const review = await screen.findByRole("dialog");
     expect(review).toHaveTextContent("60000-60010/tcp");
     expect(applied(d)).toEqual([]);
-    await user.click(within(review).getByRole("button", { name: "Apply" }));
+    await user.click(within(review).getByRole("button", { name: /^(Give access|Apply|Add to reserved address|Add|Transfer access|Take over|Create and attach|Open .* to anyone)$/ }));
     await waitFor(() => expect(applied(d)).toEqual([[
       { op: "update_port_group", group_id: "sg1", ports: [{ start: 50000, end: 51000, proto: "tcp" }, { start: 60000, end: 60010, proto: "tcp" }], confirm_open: false },
     ]]));

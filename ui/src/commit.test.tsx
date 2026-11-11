@@ -33,58 +33,69 @@ describe("the commit rule", () => {
     expect(screen.queryByRole("region", { name: "Review before applying" })).not.toBeInTheDocument();
   });
 
-  it("shows what changes and waits for Apply when somebody gains access", async () => {
+  it("shows ONE dialog with the changes when somebody gains access, and applies on its button", async () => {
     const d = mockDaemon({ changes: (a) => batch(a.req as ChangesRequest, true, [created]) });
     const user = userEvent.setup();
     renderWithProviders(<Harness ops={[grantOp]} />);
     await user.click(screen.getByRole("button", { name: "go" }));
-    const review = await screen.findByRole("region", { name: "Review before applying" });
-    expect(within(review).getByText("alice to nginx")).toBeInTheDocument();
-    expect(within(review).getByText(/Yggdrasil: verified by key/)).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "Give access?" });
+    expect(within(dialog).getByText("alice to nginx")).toBeInTheDocument();
+    expect(within(dialog).getByText(/Yggdrasil: verified by key/)).toBeInTheDocument();
     expect(requests(d)).toHaveLength(1);
     expect(requests(d)[0].dry_run).toBe(true);
 
-    await user.click(within(review).getByRole("button", { name: "Apply" }));
+    await user.click(within(dialog).getByRole("button", { name: "Give access" }));
     expect(await screen.findByText("Did it")).toBeInTheDocument();
     expect(requests(d).map((r) => r.dry_run)).toEqual([true, false]);
-    expect(screen.queryByRole("region", { name: "Review before applying" })).not.toBeInTheDocument();
+    expect(requests(d)[1].ops).toMatchObject([{ confirm_open: false }]);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("Cancel drops the review without applying", async () => {
+  it("there is no inline review", async () => {
+    mockDaemon({ changes: (a) => batch(a.req as ChangesRequest, true, [created]) });
+    const user = userEvent.setup();
+    renderWithProviders(<Harness ops={[grantOp]} />);
+    await user.click(screen.getByRole("button", { name: "go" }));
+    await screen.findByRole("dialog");
+    expect(screen.queryByRole("region", { name: "Review before applying" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Apply" })).not.toBeInTheDocument();
+  });
+
+  it("Cancel drops the dialog without applying", async () => {
     const d = mockDaemon({ changes: (a) => batch(a.req as ChangesRequest, true, [created]) });
     const user = userEvent.setup();
     renderWithProviders(<Harness ops={[grantOp]} />);
     await user.click(screen.getByRole("button", { name: "go" }));
-    await user.click(within(await screen.findByRole("region", { name: "Review before applying" })).getByRole("button", { name: "Cancel" }));
-    expect(screen.queryByRole("region", { name: "Review before applying" })).not.toBeInTheDocument();
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(requests(d)).toHaveLength(1);
   });
 
-  it("asks before opening to Anyone, previews with the confirmation set and applies with it", async () => {
-    const opening: BatchChange = { ...created, name: "Anyone to nginx", opens_to_anyone: true };
+  it("opening to Anyone is the same dialog with a warning and a button named after what it opens", async () => {
+    const opening: BatchChange = { ...created, name: "Anyone to nginx 443/tcp", opens_to_anyone: true };
     const d = mockDaemon({ changes: (a) => batch(a.req as ChangesRequest, true, [opening]) });
     const user = userEvent.setup();
     renderWithProviders(<Harness ops={[anyoneOp]} />);
     await user.click(screen.getByRole("button", { name: "go" }));
-    await user.click(within(await screen.findByRole("region", { name: "Review before applying" })).getByRole("button", { name: "Apply" }));
-    const dialog = await screen.findByRole("dialog", { name: /Open to anyone/ });
-    // Nothing is applied before the answer; the dry run was sent confirmed (it saves nothing).
+    const dialog = await screen.findByRole("dialog", { name: /Open nginx 443\/tcp to anyone/ });
+    expect(within(dialog).getByRole("note")).toHaveTextContent("This opens nginx 443/tcp to anyone on every network that takes grants.");
+    expect(within(dialog).getByText("Anyone to nginx 443/tcp")).toBeInTheDocument();
+    // The dry run was sent confirmed (it saves nothing); nothing is applied before the answer.
     expect(requests(d)).toHaveLength(1);
     expect(requests(d)[0].ops).toMatchObject([{ confirm_open: true }]);
 
-    // No: back to the review.
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
-    expect(screen.getByRole("region", { name: "Review before applying" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(requests(d)).toHaveLength(1);
 
-    await user.click(within(screen.getByRole("region")).getByRole("button", { name: "Apply" }));
-    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Open it" }));
+    await user.click(screen.getByRole("button", { name: "go" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Open nginx 443/tcp to anyone" }));
     expect(await screen.findByText("Did it")).toBeInTheDocument();
-    expect(requests(d)).toHaveLength(2);
-    expect(requests(d)[1]).toMatchObject({ dry_run: false, ops: [{ confirm_open: true }] });
+    expect(requests(d).filter((r) => !r.dry_run)).toHaveLength(1);
+    expect(requests(d).filter((r) => !r.dry_run)[0].ops).toMatchObject([{ confirm_open: true }]);
   });
 
-  it("a 409 on apply leads to the Anyone question as well", async () => {
+  it("a 409 on apply shows the same dialog in its Anyone form", async () => {
     let applies = 0;
     const d = mockDaemon({
       changes: (a) => {
@@ -98,10 +109,56 @@ describe("the commit rule", () => {
     const user = userEvent.setup();
     renderWithProviders(<Harness ops={[{ op: "add_tag_member", tag_id: "t1", app_id: "a1", scope: { kind: "all" }, confirm_open: false }]} />);
     await user.click(screen.getByRole("button", { name: "go" }));
-    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Open it" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("note")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: /^Open .* to anyone$/ }));
     expect(await screen.findByText("Did it")).toBeInTheDocument();
     expect(applies).toBe(2);
     expect(requests(d)[requests(d).length - 1].ops).toMatchObject([{ confirm_open: true }]);
+  });
+
+  it("an error from the apply shows inside the dialog and keeps it open", async () => {
+    let fail = true;
+    const d = mockDaemon({
+      changes: (a) => {
+        const req = a.req as ChangesRequest;
+        if (!req.dry_run && fail) throw { code: "conflict", message: "operation 0: grant already exists" };
+        return batch(req, true, [created]);
+      },
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<Harness ops={[grantOp]} />);
+    await user.click(screen.getByRole("button", { name: "go" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Give access" }));
+    expect(await within(await screen.findByRole("dialog")).findByRole("alert")).toHaveTextContent("grant already exists");
+    expect(screen.queryByText("Did it")).not.toBeInTheDocument();
+    // It can be tried again.
+    fail = false;
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Give access" }));
+    expect(await screen.findByText("Did it")).toBeInTheDocument();
+    expect(requests(d).filter((r) => !r.dry_run)).toHaveLength(2);
+  });
+
+  it("alwaysReview (the app transfer) uses the same dialog even when nobody gains access", async () => {
+    const d = mockDaemon({ changes: (a) => batch(a.req as ChangesRequest, false, [{ ...created, kind: "update", name: "alice: a1 to a2" }]) });
+    const user = userEvent.setup();
+    function Transfer() {
+      const commit = useCommit();
+      return (
+        <>
+          <button onClick={() => void commit.runBatch([grantOp], "Did it", undefined, true)}>go</button>
+          <CommitPreview commit={commit} title="Transfer access to nginx?" confirmLabel="Transfer access" />
+        </>
+      );
+    }
+    renderWithProviders(<Transfer />);
+    await user.click(screen.getByRole("button", { name: "go" }));
+    const dialog = await screen.findByRole("dialog", { name: "Transfer access to nginx?" });
+    expect(requests(d)).toHaveLength(1);
+    await user.click(within(dialog).getByRole("button", { name: "Transfer access" }));
+    expect(await screen.findByText("Did it")).toBeInTheDocument();
+    expect(requests(d)).toHaveLength(2);
   });
 
   it("an edit that only closes applies at once and the toast can undo it with the inverse batch", async () => {
@@ -154,11 +211,11 @@ describe("the commit rule for group membership", () => {
     await screen.findByRole("button", { name: "go" });
     await waitFor(() => expect(d.count("list_grants")).toBeGreaterThan(0));
     await user.click(screen.getByRole("button", { name: "go" }));
-    const review = await screen.findByRole("region", { name: "Review before applying" });
+    const review = await screen.findByRole("dialog", { name: "Joining lets more in" });
     expect(review).toHaveTextContent("bob in group team");
     expect(review).toHaveTextContent(/gains access to/);
     expect(d.count("set_group_members")).toBe(0);
-    await user.click(within(review).getByRole("button", { name: "Apply" }));
+    await user.click(within(review).getByRole("button", { name: "Give access" }));
     await waitFor(() => expect(d.last("set_group_members")?.args).toEqual({ id: "g1", peerIds: ["p1", "p2"] }));
   });
 
@@ -168,7 +225,7 @@ describe("the commit rule for group membership", () => {
     renderWithProviders(<GroupHarness group={team} next={["p1", "p2"]} />);
     await user.click(await screen.findByRole("button", { name: "go" }));
     await waitFor(() => expect(d.count("set_group_members")).toBe(1));
-    expect(screen.queryByRole("region", { name: "Review before applying" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("leaving a group applies at once and Undo restores the members", async () => {

@@ -7,7 +7,9 @@ import { bindsRow } from "../matrix";
 import { useNav } from "../nav";
 import { useGrants, useReservations, useSettings, usePortGroups } from "../queries";
 import type { AccessHighlight } from "./AccessList";
+import { RowButton } from "./ActionRow";
 import AddAccess from "./AddAccess";
+import AddToReserved from "./AddToReserved";
 import CommitPreview from "./CommitPreview";
 import { Section, useNameCtx } from "./Inspector";
 import Picker, { type PickerItem } from "./Picker";
@@ -96,7 +98,7 @@ export default function PortsSection({ app, partial, highlight, onlyLocal, hasV4
       {app.ports.length === 0 && <p className="muted">No ports seen.</p>}
 
       {creating !== null && <NewPortGroup label={creating} appId={app.id} commit={attach} onCancel={() => setCreating(null)} />}
-      {creating === null && <CommitPreview commit={attach} title="This lets more in" />}
+      {creating === null && <CommitPreview commit={attach} title="Change this app's port groups?" confirmLabel="Apply" />}
 
       <ul className="plain-list port-list">
         {rows.map((r) => (
@@ -172,6 +174,7 @@ function RowItem({ app, row, entries, alsoAll, partial, onlyLocal, highlight, it
   const empty = isAll ? "Nobody can reach it." : row.group ? "No access on this port group alone." : "No access on this port alone.";
   // A row bound to a reservation that has grants is also reachable by them.
   const covering = reservations.find((r) => r.grants.length > 0 && bindsRow(r.bindings, names.tags, app.id, row.scope));
+  const bound = reservations.some((r) => bindsRow(r.bindings, names.tags, app.id, row.scope));
   return (
     <RowCard
       rowKey={row.key}
@@ -190,7 +193,6 @@ function RowItem({ app, row, entries, alsoAll, partial, onlyLocal, highlight, it
           {!row.port && row.scope.kind === "port" && <span className="badge reach reach-muted">not seen</span>}
           {row.group && <span className="mono muted">{row.group.ports.map(rangeLabel).join(", ")}</span>}
           {isAll && <span className="muted">every port and port group</span>}
-          {onDetach && <button className="btn btn-sm port-action" aria-label={`Detach ${row.label}`} onClick={onDetach}>Detach</button>}
         </>
       }
       tags={<TagPicker appIds={[app.id]} scope={row.scope} />}
@@ -216,7 +218,13 @@ function RowItem({ app, row, entries, alsoAll, partial, onlyLocal, highlight, it
           />
         )
       }
-      add={onlyLocal ? undefined : <AddAccess fixed={{ side: "targets", targets: [{ kind: "app", id: app.id }] }} preselect={row.scope} rowLabel={row.label} />}
+      actions={
+        <>
+          {!onlyLocal && <AddAccess fixed={{ side: "targets", targets: [{ kind: "app", id: app.id }] }} preselect={row.scope} rowLabel={row.label} />}
+          {!onlyLocal && !bound && <AddToReserved target={{ kind: "app", app_id: app.id, scope: row.scope }} />}
+          {onDetach && <RowButton aria-label={`Detach ${row.label}`} onClick={onDetach}>Detach</RowButton>}
+        </>
+      }
       address={<RowAddress app={app} scope={row.scope} onlyLocal={onlyLocal} />}
     />
   );
@@ -226,7 +234,6 @@ function RowItem({ app, row, entries, alsoAll, partial, onlyLocal, highlight, it
 function NewPortGroup({ label, appId, commit, onCancel }: { label: string; appId: string; commit: Commit; onCancel: () => void }) {
   const [ranges, setRanges] = useState<PortRange[]>([]);
   const busy = commit.state.phase === "checking" || commit.state.phase === "applying";
-  const reviewing = commit.state.phase === "review" || commit.state.phase === "confirm";
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     void commit.runBatch(
@@ -240,14 +247,12 @@ function NewPortGroup({ label, appId, commit, onCancel }: { label: string; appId
   return (
     <form className="add-form new-group" aria-label="New port group" onSubmit={submit}>
       <p className="add-lead">Ports of the new port group <strong>{label}</strong></p>
-      <PortRanges ranges={ranges} onAdd={(r) => setRanges(withRange(ranges, r))} onRemove={(r) => setRanges(ranges.filter((x) => rangeLabel(x) !== rangeLabel(r)))} disabled={reviewing} />
-      {!reviewing && (
-        <div className="actions">
-          <button type="submit" className="btn btn-primary btn-sm" disabled={ranges.length === 0 || busy}>Create and attach</button>
-          <button type="button" className="btn btn-sm" onClick={onCancel}>Cancel</button>
-        </div>
-      )}
-      <CommitPreview commit={commit} title="This lets more in" />
+      <PortRanges ranges={ranges} onAdd={(r) => setRanges(withRange(ranges, r))} onRemove={(r) => setRanges(ranges.filter((x) => rangeLabel(x) !== rangeLabel(r)))} />
+      <div className="actions">
+        <button type="submit" className="btn btn-primary btn-sm" disabled={ranges.length === 0 || busy}>Create and attach</button>
+        <button type="button" className="btn btn-sm" onClick={onCancel}>Cancel</button>
+      </div>
+      <CommitPreview commit={commit} title="Create and attach this port group?" confirmLabel="Create and attach" />
     </form>
   );
 }
