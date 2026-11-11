@@ -142,18 +142,42 @@ function Assert-Footprint([hashtable]$Params, [string]$Tag) {
 
 # ---- the firewall exercise: the first real run of the WFP code ---------------------------
 
+function Try-Connect([string]$Ip, [int]$Port, [string]$From) {
+  try {
+    $c = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
+    if ($From) { $c.Client.Bind((New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Parse($From), 0))) }
+    $t = $c.ConnectAsync([System.Net.IPAddress]::Parse($Ip), $Port)
+    $ok = $t.Wait(4000) -and $c.Connected
+    $c.Close()
+    return [bool]$ok
+  } catch { return $false }
+}
+
 function Invoke-FirewallExercise {
   Section 'firewall: network, listener, port range, connections'
-  $net = Run $Cli @('networks', 'add', 'ula') 'fw-networks-add'
-  Write-Host $net.Text
-  if ($net.Code -ne 0) { Soft "networks add ula exited $($net.Code)"; if (-not $StrictFirewall) { return } }
+  Write-Host (Run $Cli @('networks', 'detect') 'fw-networks-detect').Text
   Write-Host (Run $Cli @('networks', 'list', '--json') 'fw-networks-list').Text
+
+  # A LAN network needs a /64 on an adapter. The runner has no router advertisement, so this
+  # gives its first adapter a ULA /64 of its own and lets SocketGuard add /128s from it.
+  $adapter = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | Select-Object -First 1
+  if (-not $adapter) { $adapter = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notmatch 'Loopback' } | Select-Object -First 1 }
+  if (-not $adapter) { Soft 'no adapter that is up'; return }
+  $alias = $adapter.Name
+  $mine = 'fd5a:1b2c:3d4e:1::10'
+  Write-Host "  adapter: $alias ($($adapter.InterfaceDescription)); giving it $mine/64"
+  try { New-NetIPAddress -InterfaceAlias $alias -IPAddress $mine -PrefixLength 64 -ErrorAction Stop | Out-Null } catch { Soft "cannot add $mine to $alias`: $_"; return }
+  $script:addedAddress = @($alias, $mine)
+
+  $net = Run $Cli @('networks', 'add', 'slaac', '--interface', $alias, '--id', 'lan-test') 'fw-networks-add'
+  Write-Host $net.Text
+  if ($net.Code -ne 0) { Soft "networks add slaac exited $($net.Code)"; return }
 
   # One process, two listeners: 50010 inside the granted range, 50030 outside it.
   $code = '$a=[Net.Sockets.TcpListener]::new([Net.IPAddress]::IPv6Any,50010);$a.Start();' +
     '$b=[Net.Sockets.TcpListener]::new([Net.IPAddress]::IPv6Any,50030);$b.Start();Start-Sleep 1200'
   $script:listener = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile', '-Command', $code -PassThru -WindowStyle Hidden
-  $app = $null
+  $script:app = $null
   $found = Wait-Until {
     $r = Run $Cli @('apps', 'list', '--json') $null
     if ($r.Code -ne 0) { return $false }
@@ -166,24 +190,6 @@ function Invoke-FirewallExercise {
   $app = $script:app
   Ok "listener is app $($app.id) ($($app.name))"
 
-  $addr = $null
-  $show = Run $Cli @('apps', 'show', "$($app.id)", '--json') 'fw-apps-show'
-  if ($show.Text -match '(fd[0-9a-f]{2}:[0-9a-f:]+)') { $addr = $Matches[1] }
-  Write-Host "  app address: $addr"
-
-  function Try-Connect([string]$Ip, [int]$Port) {
-    try {
-      $c = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
-      $t = $c.ConnectAsync([System.Net.IPAddress]::Parse($Ip), $Port)
-      $ok = $t.Wait(4000) -and $c.Connected
-      $c.Close()
-      return $ok
-    } catch { return $false }
-  }
-  if ($addr) {
-    Write-Host "  before the grant: $addr`:50010 reachable=$(Try-Connect $addr 50010), :50030 reachable=$(Try-Connect $addr 50030)"
-  }
-
   $pg = Run $Cli @('port-groups', 'add', '50000-50020/tcp', '--label', 'testrange', '--app', "$($app.id)", '--yes') 'fw-portgroup'
   Write-Host $pg.Text
   if ($pg.Code -ne 0) { Soft "port-groups add exited $($pg.Code)"; return }
@@ -191,14 +197,23 @@ function Invoke-FirewallExercise {
   Write-Host $gr.Text
   if ($gr.Code -ne 0) { Soft "grant exited $($gr.Code)"; return }
 
+  # The app's address on the network: from `apps show`, an address in the adapter's /64.
+  $addr = $null
+  $got = Wait-Until {
+    $show = Run $Cli @('apps', 'show', "$($app.id)", '--json') 'fw-apps-show'
+    if ($show.Text -match '(fd5a:1b2c:3d4e:1:[0-9a-f:]+)') { $m = $Matches[1]; if ($m -ne $mine) { $script:addr = $m; return $true } }
+    return $false
+  } 40 'app address'
+  $addr = $script:addr
+  Write-Host "  app address: $addr"
+
   # The range must be in a SocketGuard filter, as one range condition and not 21 filters.
-  $xml = ''
   $has = Wait-Until {
     & netsh wfp show filters file=(Join-Path $Out 'wfp-filters-granted.xml') 2>&1 | Out-Null
     $path = Join-Path $Out 'wfp-filters-granted.xml'
     if (-not (Test-Path $path)) { return $false }
     $script:xml = [IO.File]::ReadAllText($path)
-    return ($script:xml -match 'SocketGuard') -and ($script:xml -match '50000') -and ($script:xml -match '50020')
+    return ($script:xml -match 'SocketGuard') -and ($script:xml -match '>50000<') -and ($script:xml -match '>50020<')
   } 40 'range filter'
   if ($has) {
     Ok 'netsh wfp show filters has SocketGuard filters naming 50000 and 50020'
@@ -209,14 +224,16 @@ function Invoke-FirewallExercise {
   }
 
   if ($addr) {
-    $reachIn = Try-Connect $addr 50010
-    $reachOut = Try-Connect $addr 50030
-    Write-Host "  after the grant: granted port 50010 reachable=$reachIn; port 50030 (not granted) reachable=$reachOut"
+    $reachIn = Try-Connect $addr 50010 $mine
+    $reachOut = Try-Connect $addr 50030 $mine
+    Write-Host "  from $mine to ${addr}: granted port 50010 reachable=$reachIn; port 50030 (not granted) reachable=$reachOut"
     if (-not $reachIn) { Soft 'the granted port was not reachable' }
     if ($reachOut) { Soft 'the port outside the range was reachable' }
-  }
+    if ($StrictFirewall -and (-not $reachIn -or $reachOut)) { Fail 'the firewall did not behave' }
+  } else { Soft 'the app got no address on the network' }
   Save-Wfp 'granted'
   if ($script:listener -and -not $script:listener.HasExited) { Stop-Process -Id $script:listener.Id -Force -ErrorAction SilentlyContinue }
+  if ($script:addedAddress) { Remove-NetIPAddress -InterfaceAlias $script:addedAddress[0] -IPAddress $script:addedAddress[1] -Confirm:$false -ErrorAction SilentlyContinue }
 }
 
 # ---- the run ---------------------------------------------------------------------------------
