@@ -211,7 +211,7 @@ describe("Access through a tag names the member's row", () => {
 
 describe("Attach port group", () => {
   const groupRow = async (user: ReturnType<typeof userEvent.setup>, label: RegExp) => {
-    await user.click(within(inspector()).getByRole("button", { name: "Attach port group" }));
+    await user.click(within(inspector()).getByRole("button", { name: "+ Port group" }));
     return screen.getByRole("checkbox", { name: label });
   };
 
@@ -257,7 +257,7 @@ describe("Attach port group", () => {
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await openApp(user, /^nginx/);
-    await user.click(within(inspector()).getByRole("button", { name: "Attach port group" }));
+    await user.click(within(inspector()).getByRole("button", { name: "+ Port group" }));
     await user.type(screen.getByRole("combobox", { name: "Search Port groups" }), "ftp-data");
     await user.click(screen.getByRole("option", { name: /Create/ }));
     const form = await screen.findByRole("form", { name: "New port group" });
@@ -282,7 +282,7 @@ describe("Attach port group", () => {
     renderWithProviders(<AppsPage />);
     await user.click(await inList().findByRole("button", { name: /^mystery/ }));
     await within(inspector()).findByRole("heading", { name: "Ports" });
-    expect(within(inspector()).queryByRole("button", { name: "Attach port group" })).not.toBeInTheDocument();
+    expect(within(inspector()).queryByRole("button", { name: "+ Port group" })).not.toBeInTheDocument();
   });
 });
 
@@ -507,7 +507,7 @@ describe("Wording", () => {
 
     const ports = await openApp(user, /^nginx/);
     await user.click(within(rowOf(ports, "All ports")).getByRole("button", { name: "Add access to All ports" }));
-    await user.click(within(inspector()).getByRole("button", { name: "Attach port group" }));
+    await user.click(within(inspector()).getByRole("button", { name: "+ Port group" }));
     expect(said()).not.toMatch(banned);
     await user.keyboard("{Escape}");
 

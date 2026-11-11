@@ -6,6 +6,7 @@ use crate::api::DaemonEvent;
 use crate::state::{NewActivity, Write};
 use crate::AppState;
 use chrono::Utc;
+use socketguard_core::api_types::ChangeOp;
 use socketguard_core::{new_id, ActivityKind, App, Scope, Tag, TagMember};
 
 /// The patterns as stored: trimmed, no blanks, no duplicates.
@@ -17,14 +18,6 @@ pub(super) fn clean_patterns(patterns: &[String]) -> Vec<String> {
         }
     }
     out
-}
-
-/// Does a grant to Anyone (on any network) target this tag? Joining such a tag opens the app.
-pub(super) fn tag_is_open(grants: &[socketguard_core::Grant], tag_id: &str) -> bool {
-    grants.iter().any(|g| {
-        g.subject == socketguard_core::Subject::Anyone
-            && matches!(&g.target, socketguard_core::Target::Tag(t) if t == tag_id)
-    })
 }
 
 impl Engine {
@@ -126,7 +119,11 @@ impl Engine {
             probe.patterns = p.clone();
             let apps = state.db.list_apps().await?;
             if !probe.pattern_candidates(&apps).is_empty()
-                && tag_is_open(&state.db.list_grants().await?, id)
+                && super::mutations::Catalog::load(state)
+                    .await?
+                    .grants_through_tag(id)
+                    .iter()
+                    .any(|g| g.subject == socketguard_core::Subject::Anyone)
             {
                 return Err(EngineError::ConfirmationRequired);
             }
@@ -196,42 +193,14 @@ impl Engine {
         scope: Scope,
         confirm_open: bool,
     ) -> Result<Tag, EngineError> {
-        let tag = self.get_tag(state, tag_id).await?;
-        let app = state
-            .db
-            .get_app(app_id)
-            .await?
-            .ok_or_else(|| EngineError::NotFound(format!("app {app_id}")))?;
-        Self::check_scope_on_app(&super::mutations::Catalog::load(state).await?, &app, &scope)?;
-        let member = TagMember {
-            app_id: app_id.to_string(),
-            scope: scope.clone(),
-        };
-        if !confirm_open
-            && !tag.members.contains(&member)
-            && tag_is_open(&state.db.list_grants().await?, tag_id)
-        {
-            return Err(EngineError::ConfirmationRequired);
-        }
-        state
-            .db
-            .apply_writes(&[Write::AddTagMember {
+        self.run_one(
+            state,
+            ChangeOp::AddTagMember {
                 tag_id: tag_id.to_string(),
                 app_id: app_id.to_string(),
                 scope,
-            }])
-            .await?;
-        let applied = self.apply_and_ensure(state).await;
-        let activity = NewActivity::new(
-            ActivityKind::TagChanged,
-            format!("Added {} to tag {}", app.name, tag.label),
-        )
-        .app(app_id);
-        self.commit(
-            state,
-            applied,
-            Some(activity),
-            &[DaemonEvent::TagsChanged, DaemonEvent::GrantsChanged],
+                confirm_open,
+            },
         )
         .await?;
         self.get_tag(state, tag_id).await

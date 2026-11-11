@@ -354,6 +354,7 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
         const r: ReservationView = { id: uid("r"), label, created_at: T0, bindings: [], addresses: [], conflicts: [], grants: [] };
         if (op.ref) refs[op.ref as string] = r.id;
         reservations = [...reservations, r];
+        bindings = [...bindings, ...((op.bindings as ReservationView["bindings"][number]["target"][]) ?? []).map((target) => ({ id: uid("b"), reservation_id: r.id, target }))];
         out.push({ kind: "create", item: "reservation", name: label, id: r.id, opens_to_anyone: false });
         break;
       }

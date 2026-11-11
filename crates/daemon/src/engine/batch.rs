@@ -680,14 +680,9 @@ impl Engine {
                     .ok_or_else(|| EngineError::NotFound(format!("tag {tag_id}")))?;
                 let is_new = !tag.members.contains(&member);
                 let tag_label = tag.label.clone();
-                // What the tag's grants let in on this app.
-                let grants: Vec<Grant> = plan
-                    .cat
-                    .grants
-                    .iter()
-                    .filter(|g| matches!(&g.target, Target::Tag(t) if *t == tag_id))
-                    .cloned()
-                    .collect();
+                // What the tag's grants, and those of a reservation that binds the tag, let in
+                // on this app.
+                let grants = plan.cat.grants_through_tag(&tag_id);
                 let opens = grants.iter().any(|g| g.subject == Subject::Anyone);
                 if is_new && opens && !confirm_open {
                     return Err(EngineError::ConfirmationRequired);

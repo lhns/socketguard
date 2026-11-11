@@ -133,6 +133,12 @@
 .port-address { border-top: 1px dashed var(--border); padding-top: 8px; }
 .part-label { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); margin: 0 0 4px; }
 .address-list { display: flex; flex-direction: column; gap: 6px; }
+.add-reserved { margin-top: 8px; }
+
+/* "+ Port group": the last entry of an app's Ports list */
+.port-add-entry .picker { display: block; }
+.btn-dashed { width: 100%; border-style: dashed; background: transparent; color: var(--text-muted); }
+.btn-dashed:hover { color: var(--text); }
 .address-row { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
 .address-name { font-weight: 600; font-size: 13px; }
 .address-locator { overflow-wrap: anywhere; font-size: 12px; }

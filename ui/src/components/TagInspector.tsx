@@ -4,9 +4,10 @@ import { toDaemonError, type Scope, type Tag } from "../api";
 import { useCommit, useRevoke } from "../commit";
 import { ALL_SCOPE, errorField, errorText, sameScope, scopeKey, scopeLabel, scopeOfPort, splitOperationError } from "../lib";
 import { useNav } from "../nav";
-import { useApps, useDeleteTag, useGrants, usePortGroups, useUpdateTag } from "../queries";
+import { useApps, useDeleteTag, useGrants, useList, usePortGroups, useReservations, useUpdateTag } from "../queries";
 import AccessList, { type AccessHighlight } from "./AccessList";
 import AddAccess from "./AddAccess";
+import AddToReserved from "./AddToReserved";
 import CommitPreview from "./CommitPreview";
 import ConfirmDialog from "./ConfirmDialog";
 import Inspector, { Section, useNameCtx } from "./Inspector";
@@ -26,6 +27,7 @@ export function TagInspector({ tag, highlight, onCollapse, onClose }: { tag: Tag
   const toast = useToast();
   const names = useNameCtx();
   const grants = (useGrants().data ?? []).filter((g) => g.target.kind === "tag" && g.target.id === tag.id);
+  const bound = useList(useReservations()).some((r) => r.bindings.some((b) => b.target.kind === "tag" && b.target.tag_id === tag.id));
   const update = useUpdateTag();
   const del = useDeleteTag();
   const { revoke, commit: revokeCommit } = useRevoke();
@@ -82,6 +84,8 @@ export function TagInspector({ tag, highlight, onCollapse, onClose }: { tag: Tag
         <CommitPreview commit={revokeCommit} />
         <AddAccess fixed={{ side: "targets", targets: [{ kind: "tag", id: tag.id }] }} />
       </Section>
+
+      {!bound && <AddToReserved target={{ kind: "tag", tag_id: tag.id }} />}
 
       <div className="actions">
         <button className="btn btn-danger btn-sm" onClick={() => setDeleting(true)}>Delete tag</button>

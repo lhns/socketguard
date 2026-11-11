@@ -81,32 +81,7 @@ export default function PortsSection({ app, partial, highlight, onlyLocal, hasV4
   };
 
   return (
-    <Section
-      title="Ports"
-      aside={
-        unidentified ? undefined : (
-          <Picker
-            label="Port groups"
-            trigger="Attach port group"
-            triggerClass="btn btn-sm"
-            items={items}
-            onToggle={toggle}
-            create={(typed) => ({
-              label: <>Create &ldquo;{typed}&rdquo;</>,
-              pick: () => {
-                setCreating(typed);
-                setOpen(false);
-              },
-            })}
-            open={open}
-            onOpenChange={setOpen}
-            placeholder="Find or create a port group"
-            empty="No port groups yet. Type a name to create one."
-            align="right"
-          />
-        )
-      }
-    >
+    <Section title="Ports">
       {onlyLocal ? (
         <p className="muted">This machine only. Grants do not apply on the Local network.</p>
       ) : (
@@ -146,6 +121,28 @@ export default function PortsSection({ app, partial, highlight, onlyLocal, hasV4
             } : undefined}
           />
         ))}
+        {!unidentified && (
+          <li className="port-add-entry">
+            <Picker
+              label="Port groups"
+              trigger="+ Port group"
+              triggerClass="btn btn-sm btn-dashed"
+              items={items}
+              onToggle={toggle}
+              create={(typed) => ({
+                label: <>Create &ldquo;{typed}&rdquo;</>,
+                pick: () => {
+                  setCreating(typed);
+                  setOpen(false);
+                },
+              })}
+              open={open}
+              onOpenChange={setOpen}
+              placeholder="Find or create a port group"
+              empty="No port groups yet. Type a name to create one."
+            />
+          </li>
+        )}
       </ul>
     </Section>
   );
