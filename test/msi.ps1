@@ -167,14 +167,17 @@ function Invoke-FirewallExercise {
 
   # A LAN network needs a /64 on an adapter. The runner has no router advertisement, so this
   # gives its first adapter a ULA /64 of its own and lets SocketGuard add /128s from it.
-  $adapter = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | Select-Object -First 1
+  # The adapter of the default route is the one `networks detect` offers as a LAN interface.
+  Get-NetAdapter | Format-Table Name, InterfaceDescription, Status, ifIndex -AutoSize | Out-String | Write-Host
+  $route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
+  $adapter = if ($route) { Get-NetAdapter -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue } else { $null }
   if (-not $adapter) { $adapter = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notmatch 'Loopback' } | Select-Object -First 1 }
   if (-not $adapter) { Soft 'no adapter that is up'; return }
   $alias = $adapter.Name
   $mine = 'fd5a:1b2c:3d4e:1::10'
-  Write-Host "  adapter: $alias ($($adapter.InterfaceDescription)); giving it $mine/64"
-  try { New-NetIPAddress -InterfaceAlias $alias -IPAddress $mine -PrefixLength 64 -ErrorAction Stop | Out-Null } catch { Soft "cannot add $mine to $alias`: $_"; return }
-  $script:addedAddress = @($alias, $mine)
+  Write-Host "  adapter: $alias (index $($adapter.ifIndex), $($adapter.InterfaceDescription)); giving it $mine/64"
+  try { New-NetIPAddress -InterfaceIndex $adapter.ifIndex -IPAddress $mine -PrefixLength 64 -ErrorAction Stop | Out-Null } catch { Soft "cannot add $mine to $alias`: $_"; return }
+  $script:addedAddress = @($adapter.ifIndex, $mine)
 
   $net = Run $Cli @('networks', 'add', 'slaac', '--interface', $alias, '--id', 'lan-test') 'fw-networks-add'
   Write-Host $net.Text
@@ -240,7 +243,7 @@ function Invoke-FirewallExercise {
   } else { Soft 'the app got no address on the network' }
   Save-Wfp 'granted'
   if ($script:listener -and -not $script:listener.HasExited) { Stop-Process -Id $script:listener.Id -Force -ErrorAction SilentlyContinue }
-  if ($script:addedAddress) { Remove-NetIPAddress -InterfaceAlias $script:addedAddress[0] -IPAddress $script:addedAddress[1] -Confirm:$false -ErrorAction SilentlyContinue }
+  if ($script:addedAddress) { Remove-NetIPAddress -InterfaceIndex $script:addedAddress[0] -IPAddress $script:addedAddress[1] -Confirm:$false -ErrorAction SilentlyContinue }
 }
 
 # ---- the run ---------------------------------------------------------------------------------
