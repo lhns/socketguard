@@ -95,3 +95,56 @@ A reservation behaves like an app assembled from sockets of several apps. This r
 - **Tor.** A grant on the reservation covers every published port, so those clients are admitted to its onion address. Clients granted only single rows are left out there, as before.
 - Reserving an automatic address creates a reservation with that row bound and that address as its address on that network.
 - **Bound rows on Tor keep their own address.** On a network that authorises per address (Tor), a bound row that a grant names still gets its automatic address, so a client granted only that row is admitted there. On IP networks a bound row has no automatic address; the firewall separates ports on the reservation's address.
+
+## Amendment (2026-11-11): on Tor a reservation is opened as a whole
+
+This withdraws "bound rows on Tor keep their own address". A reservation has exactly one address per network, on Tor too.
+
+- On Tor only a grant on the reservation itself (its "All sockets") admits a client to its onion address.
+- A grant on a single bound row has no effect on Tor while the row is bound. Its reach there is "not reachable", with the reason, and frontends say so before the grant is made.
+- Nothing changes on networks enforced by the firewall.
+
+## The decision as it stands (2026-11-11)
+
+The amendments above revise each other. This section restates the whole decision; where anything above differs, this holds.
+
+**Rows and scope**
+- Inside an app there are rows: the built-in "All sockets", each detected socket, each attached socket group. A row is (app, scope), `Scope = All | Port | Group`.
+- A socket group is standalone: a name plus ports and ranges, attached to any number of apps. Unidentified apps take none.
+- "All sockets" is the detected sockets plus the attached groups.
+- Tags, grants and addresses sit on rows. A tag member is a row.
+
+**Grants**
+- A grant targets an app row, a tag, or a reservation.
+- A direct grant names its row. A tag grant names each member's row; a port or socket group on it only limits ports. A reservation grant has scope All and covers every bound row.
+- Subjects are unchanged: Anyone, a peer, a peer group. A group stands for its members' credentials wherever a peer does.
+- Attaching a socket group, adding ports to one, adding a tag member or adding a binding counts as opening when an existing grant then covers more: it is shown as a change of reach and needs confirmation when Anyone gains.
+
+**Exclusion**
+- An address never serves a port that another app is listening on and its own app is not. A stale port record is not listening. Excluded ports are reported per address.
+- A granted range is open before anything listens; any listener inside it is reachable through that address until the port is attributed.
+
+**Automatic addresses (apps)**
+- A row has an address on a network while a grant names it there. The address follows the grant, not who the grant lets in: an empty peer group or a peer without a usable credential still names the row.
+- When no grant names the row the address is taken down and remembered; the row gets the same one back.
+- `up` means really on the interface or published. On Tor a service with nobody to admit is not published.
+- A Local network on loopback takes no grants; every app keeps an "All sockets" address there.
+- A remembered DHCPv6 lease is kept. Prefix changes keep the interface ID.
+- A row bound to a reservation has no automatic address on any network.
+- No address mode, split or merge.
+
+**Reservations**
+- A named object with bindings; it behaves like an app assembled from rows of several apps, with its own "All sockets". A binding is its own record and targets an app row or a tag (its members' rows).
+- One static address per network, created the first time a grant covers something it serves there, never deleted or changed by the daemon, removed on release. It survives its apps.
+- On firewall-enforced networks the address serves every bound row, and each (address, port) admits whoever a grant covers for that app and port.
+- A port is served for the app listening on it; an unlistened port claimed by one binding follows it; claimed by several it stays closed. Such conflicts are reported with the reservation.
+- **Tor: opened as a whole.** Only grants that target the reservation count for its onion address: they create it, and their clients are its client list. A grant on a bound row, direct or through a tag, has no effect on Tor while the row is bound, even for a client who holds every bound row that way; its reach is "not reachable" with the reason, shown per member for tag grants.
+- Reserving an automatic address makes a reservation with that row bound and that address as its address on that network.
+- Port remapping is left open, for reservations only.
+
+**Moving an app**
+- `move_app` moves direct grants, tag memberships, automatic addresses and bindings to another app. Grants the target has are skipped; needed socket groups are attached; Anyone grants need confirmation.
+
+**Migration**
+- v6 to v7: an all-ports address becomes an "All sockets" address, a one-port address a socket address, a several-port address a socket group attached to that app.
+- v7 to v8: an address whose row a grant names stays automatic. One a grant covers without naming it becomes a reservation with that row bound. One no grant covers is remembered and taken down. The address mode is dropped.
