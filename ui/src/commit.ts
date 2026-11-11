@@ -35,6 +35,8 @@ interface Edit {
   check: () => Promise<Check>;
   apply: (confirmed: boolean) => Promise<void>;
   undo?: () => Promise<void>;
+  /** Show the review even when nobody gains access (an edit that moves a lot, such as move_app). */
+  alwaysReview?: boolean;
 }
 
 const IDLE: CommitState = { phase: "idle" };
@@ -97,18 +99,20 @@ export function useCommit(onDone?: () => void) {
         setState({ phase: "error", message: errorText(e) });
         return;
       }
-      if (!check.widens && !check.opens) return finish(edit, false, check.changes);
+      if (!check.widens && !check.opens && !edit.alwaysReview) return finish(edit, false, check.changes);
       waiting.current = { edit, changes: check.changes };
       setState({ phase: "review", changes: check.changes, opens: check.opens });
     },
     [finish],
   );
 
-  /** A batch. `undo` is the inverse batch of an edit that only closes. */
+  /** A batch. `undo` is the inverse batch of an edit that only closes; `alwaysReview` shows the
+   * diff before applying whatever the reach. */
   const runBatch = useCallback(
-    (ops: ChangeOp[], done: string, undo?: ChangeOp[]) =>
+    (ops: ChangeOp[], done: string, undo?: ChangeOp[], alwaysReview = false) =>
       run({
         done,
+        alwaysReview,
         check: async () => {
           const r = await changes.mutateAsync({ ops: confirmAll(ops), dryRun: true });
           return {

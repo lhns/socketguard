@@ -9,6 +9,8 @@ export interface PickerItem {
   state: "on" | "off" | "mixed";
   /** Items with the same section are listed under its heading. */
   section?: string;
+  /** Shown but not pickable (its hint says why). */
+  disabled?: boolean;
 }
 
 /** An extra row at the end for something the typed text could create. */
@@ -63,7 +65,7 @@ export default function Picker({
 
   const q = query.trim().toLowerCase();
   const shown = useMemo(
-    () => items.filter((i) => !q || i.label.toLowerCase().includes(q) || (i.hint ?? "").toLowerCase().includes(q)),
+    () => items.filter((i) => !q || i.label.toLowerCase().includes(q) || (i.hint ?? "").toLowerCase().includes(q) || (i.section ?? "").toLowerCase().includes(q)),
     [items, q],
   );
   const typed = query.trim();
@@ -80,14 +82,20 @@ export default function Picker({
   }, [open]);
 
   // The list floats at the button's position, so a scrolling panel around it does not clip it.
-  const [pos, setPos] = useState<{ top: number; left: number; width: number; max: number } | null>(null);
+  const [pos, setPos] = useState<{ top?: number; bottom?: number; left: number; width: number; max: number } | null>(null);
   useLayoutEffect(() => {
     if (!open || !button.current) return;
     const r = button.current.getBoundingClientRect();
     const width = Math.min(300, window.innerWidth - 16);
     const left = align === "right" ? Math.max(8, r.right - width) : Math.min(Math.max(8, r.left), window.innerWidth - width - 8);
     const top = r.bottom + 4;
-    setPos({ top, left, width, max: Math.max(140, Math.min(320, window.innerHeight - top - 76)) });
+    const below = window.innerHeight - top - 76;
+    // A button near the bottom edge opens its list upwards, so the list is not cut off.
+    if (below < 200 && r.top - 60 > below) {
+      setPos({ bottom: window.innerHeight - r.top + 4, left, width, max: Math.max(140, Math.min(320, r.top - 60)) });
+    } else {
+      setPos({ top, left, width, max: Math.max(140, Math.min(320, below)) });
+    }
   }, [open, align]);
 
   useEffect(() => {
@@ -117,7 +125,9 @@ export default function Picker({
     onQuery?.(v.trim());
   };
   const pickRow = (i: number) => {
-    if (i < shown.length) onToggle(shown[i]);
+    if (i < shown.length) {
+      if (!shown[i].disabled) onToggle(shown[i]);
+    }
     else if (createRow) {
       createRow.pick();
       change("");
@@ -164,7 +174,7 @@ export default function Picker({
           role="dialog"
           aria-label={label}
           onKeyDown={onKey}
-          style={pos ? { top: pos.top, left: pos.left, width: pos.width } : { visibility: "hidden" }}
+          style={pos ? { top: pos.top, bottom: pos.bottom, left: pos.left, width: pos.width } : { visibility: "hidden" }}
         >
           <input
             ref={search}
@@ -226,7 +236,8 @@ function PickerRow({
       id={id}
       role="option"
       aria-selected={item.state !== "off"}
-      className={`picker-row${active ? " picker-active" : ""}`}
+      className={`picker-row${active ? " picker-active" : ""}${item.disabled ? " picker-disabled" : ""}`}
+      aria-disabled={item.disabled || undefined}
       onMouseEnter={onHover}
     >
       <input
@@ -234,6 +245,7 @@ function PickerRow({
         type="checkbox"
         tabIndex={-1}
         checked={item.state === "on"}
+        disabled={item.disabled}
         aria-checked={item.state === "mixed" ? "mixed" : item.state === "on"}
         onChange={onPick}
       />

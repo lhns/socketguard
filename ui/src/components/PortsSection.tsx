@@ -1,15 +1,19 @@
 import { useRef, useState } from "react";
 import { appEntries, type AccessEntry } from "../access";
 import type { AppDetail, AppPort, ChangeOp, PortRange, Scope, SocketGroup } from "../api";
-import { useCommit, useRevoke, type Commit } from "../commit";
+import { useCommit, type Commit } from "../commit";
 import { ALL_SCOPE, portLabel, rangeLabel, sameScope, scopeKey, scopeLabel, scopeOfPort, withRange } from "../lib";
-import { useGrants, useSettings, useSocketGroups } from "../queries";
-import AccessList, { type AccessHighlight } from "./AccessList";
+import { bindsRow } from "../matrix";
+import { useNav } from "../nav";
+import { useGrants, useReservations, useSettings, useSocketGroups } from "../queries";
+import type { AccessHighlight } from "./AccessList";
 import AddAccess from "./AddAccess";
 import CommitPreview from "./CommitPreview";
 import { Section, useNameCtx } from "./Inspector";
 import Picker, { type PickerItem } from "./Picker";
 import PortRanges from "./PortRanges";
+import RowAddress from "./RowAddress";
+import RowCard, { RowAccess } from "./RowCard";
 import TagPicker from "./TagPicker";
 
 /** What one row of an app is. */
@@ -126,7 +130,6 @@ export default function PortsSection({ app, highlight, onlyLocal, hasV4 }: Props
             entries={entries.filter((e) => sameScope(e.row ?? e.scope, r.scope))}
             alsoAll={r.scope.kind !== "all" && hasAllEntries && (r.port !== undefined || r.group !== undefined)}
             onlyLocal={onlyLocal}
-            anyEntries={entries.length > 0}
             highlight={highlight}
             itemRef={r.scope.kind === "all" ? allRow : undefined}
             jumpToAll={() => allRow.current?.scrollIntoView?.({ block: "nearest" })}
@@ -152,54 +155,66 @@ interface RowProps {
   /** Grants on All ports also cover this row: say so once instead of repeating them. */
   alsoAll: boolean;
   onlyLocal: boolean;
-  anyEntries: boolean;
   highlight: AccessHighlight | null;
   itemRef?: React.RefObject<HTMLLIElement>;
   jumpToAll: () => void;
   onDetach?: () => void;
 }
 
-/** One row. The parts are always in this order: name, tags, who can reach it, Add access. */
-function RowItem({ app, row, entries, alsoAll, onlyLocal, anyEntries, highlight, itemRef, jumpToAll, onDetach }: RowProps) {
+/** One row of an app: name, tags, who can reach it, Add access, address. */
+function RowItem({ app, row, entries, alsoAll, onlyLocal, highlight, itemRef, jumpToAll, onDetach }: RowProps) {
+  const nav = useNav();
   const names = useNameCtx();
-  const { revoke, commit } = useRevoke();
+  const reservations = useReservations().data ?? [];
   const isAll = row.scope.kind === "all";
-  const empty = isAll ? (anyEntries ? "Nobody on All ports." : "Nobody. The app is closed.") : "Nobody named here.";
+  const empty = isAll ? "Nobody can reach it." : row.group ? "No access on this port group alone." : "No access on this port alone.";
+  // A row bound to a reservation that has grants is also reachable by them.
+  const covering = reservations.find((r) => r.grants.length > 0 && bindsRow(r.bindings, names.tags, app.id, row.scope));
   return (
-    <li className="port-row" ref={itemRef} data-row={row.key}>
-      <div className="port-head">
-        <span className={`port-name${row.group || isAll ? "" : " mono"}`}>{row.label}</span>
-        {row.port && (
-          <>
-            <span className={row.port.listening ? "badge reach reach-ok" : "badge reach reach-muted"}>{row.port.listening ? "listening" : "not listening"}</span>
-            <span className="muted" title="Which IP versions it accepts connections over">
-              {row.port.family === "dual" ? "IPv4+IPv6" : row.port.family === "v4" ? "IPv4" : "IPv6"}
-            </span>
-          </>
-        )}
-        {!row.port && row.scope.kind === "port" && <span className="badge reach reach-muted">not seen</span>}
-        {row.group && <span className="mono muted">{row.group.ports.map(rangeLabel).join(", ")}</span>}
-        {isAll && <span className="muted">every port and port group</span>}
-        {onDetach && <button className="btn btn-sm port-action" aria-label={`Detach ${row.label}`} onClick={onDetach}>Detach</button>}
-      </div>
-      <div className="port-tags">
-        <TagPicker appIds={[app.id]} scope={row.scope} />
-      </div>
-      {!onlyLocal && (
-        <div className="port-access">
-          <AccessList entries={entries} direction="who" networks={names.networks} onRevoke={revoke} highlight={highlight} empty={empty} rowScope={row.scope} />
-          {alsoAll && (
-            <button className="link-btn also-line" onClick={jumpToAll}>also reachable by everyone on All ports</button>
+    <RowCard
+      rowKey={row.key}
+      itemRef={itemRef}
+      head={
+        <>
+          <span className={`port-name${row.group || isAll ? "" : " mono"}`}>{row.label}</span>
+          {row.port && (
+            <>
+              <span className={row.port.listening ? "badge reach reach-ok" : "badge reach reach-muted"}>{row.port.listening ? "listening" : "not listening"}</span>
+              <span className="muted" title="Which IP versions it accepts connections over">
+                {row.port.family === "dual" ? "IPv4+IPv6" : row.port.family === "v4" ? "IPv4" : "IPv6"}
+              </span>
+            </>
           )}
-          <CommitPreview commit={commit} />
-        </div>
-      )}
-      {!onlyLocal && (
-        <div className="port-add">
-          <AddAccess fixed={{ side: "targets", targets: [{ kind: "app", id: app.id }] }} preselect={row.scope} rowLabel={row.label} />
-        </div>
-      )}
-    </li>
+          {!row.port && row.scope.kind === "port" && <span className="badge reach reach-muted">not seen</span>}
+          {row.group && <span className="mono muted">{row.group.ports.map(rangeLabel).join(", ")}</span>}
+          {isAll && <span className="muted">every port and port group</span>}
+          {onDetach && <button className="btn btn-sm port-action" aria-label={`Detach ${row.label}`} onClick={onDetach}>Detach</button>}
+        </>
+      }
+      tags={<TagPicker appIds={[app.id]} scope={row.scope} />}
+      access={
+        onlyLocal ? undefined : (
+          <RowAccess
+            entries={entries}
+            rowScope={row.scope}
+            empty={empty}
+            highlight={highlight}
+            extra={
+              <>
+                {alsoAll && <button className="link-btn also-line" onClick={jumpToAll}>also reachable by everyone on All ports</button>}
+                {covering && (
+                  <button className="link-btn also-line" onClick={() => nav.go("reserved", { reservationId: covering.id })}>
+                    also reachable by everyone on reserved address {covering.label}
+                  </button>
+                )}
+              </>
+            }
+          />
+        )
+      }
+      add={onlyLocal ? undefined : <AddAccess fixed={{ side: "targets", targets: [{ kind: "app", id: app.id }] }} preselect={row.scope} rowLabel={row.label} />}
+      address={<RowAddress app={app} scope={row.scope} onlyLocal={onlyLocal} />}
+    />
   );
 }
 

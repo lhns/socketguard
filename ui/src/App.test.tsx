@@ -37,11 +37,11 @@ const navButtons = () =>
   [...within(screen.getByRole("navigation", { name: "Main" })).getAllByRole("button")].map((b) => b.textContent?.replace(/\d+$/, ""));
 
 describe("navigation", () => {
-  it("is Apps, Peers, Activity and Settings: no Access tab, no Simple/Advanced switch", async () => {
+  it("is Apps, Reserved, Peers, Activity and Settings: no Access tab, no Simple/Advanced switch", async () => {
     setup();
     renderWithProviders(<App />);
     await screen.findByRole("table", { name: "Apps and tags" });
-    expect(navButtons()).toEqual(["Apps", "Peers", "Activity", "Settings"]);
+    expect(navButtons()).toEqual(["Apps", "Reserved", "Peers", "Activity", "Settings"]);
     expect(screen.queryByRole("button", { name: "Simple" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Advanced" })).not.toBeInTheDocument();
     expect(screen.queryByRole("group", { name: "View" })).not.toBeInTheDocument();

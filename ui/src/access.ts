@@ -70,7 +70,7 @@ export interface AccessEntry {
   ident: string;
   name: string;
   /** Where the name leads. */
-  link?: { page: "apps" | "peers"; focus: Focus };
+  link?: { page: "apps" | "reserved" | "peers"; focus: Focus };
   subject?: Subject;
   scope: Scope;
   /** The row of the app this access is listed on: what a direct grant names, or the tag member's
@@ -104,7 +104,7 @@ const subjectLink = (s: Subject): AccessEntry["link"] =>
 const targetLink = (t: Target): AccessEntry["link"] =>
   t.kind === "app" ? { page: "apps", focus: { appId: t.id } }
   : t.kind === "tag" ? { page: "apps", focus: { tagId: t.id } }
-  : undefined;
+  : { page: "reserved", focus: { reservationId: t.id } };
 
 /** All-ports access first, then what only some ports have, each by name. */
 export const sortEntries = (entries: AccessEntry[]) =>

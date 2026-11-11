@@ -26,6 +26,7 @@ const portsOp = (group_id: string, ports: PortRange[]): ChangeOp => ({ op: "upda
 export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { group: SocketGroup; highlight: AccessHighlight | null } & Common) {
   const id = useId();
   const names = useNameCtx();
+  const nav = useNav();
   const grants = useGrants().data ?? [];
   const edit = useCommit();
   const attach = useCommit();
@@ -126,20 +127,29 @@ export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { 
           <p className="muted">Not attached to any app yet.</p>
         ) : (
           <>
-            {attachedApps.map((a) => (
-              <div key={a.id} className="per-app">
-                <h4 className="sub-title">{a.name}</h4>
-                <AccessList
-                  entries={appEntriesFromGrants(a.id, grants, names).filter((e) => sameScope(e.row ?? e.scope, scope))}
-                  direction="who"
-                  networks={names.networks}
-                  onRevoke={revoke}
-                  highlight={highlight}
-                  empty="Nobody can reach it here."
-                  rowScope={scope}
-                />
-              </div>
-            ))}
+            {attachedApps.map((a) => {
+              const all = appEntriesFromGrants(a.id, grants, names);
+              const alsoAll = all.some((e) => (e.row ?? e.scope).kind === "all");
+              return (
+                <div key={a.id} className="per-app">
+                  <h4 className="sub-title">{a.name}</h4>
+                  <AccessList
+                    entries={all.filter((e) => sameScope(e.row ?? e.scope, scope))}
+                    direction="who"
+                    networks={names.networks}
+                    onRevoke={revoke}
+                    highlight={highlight}
+                    empty="No access on this port group alone."
+                    rowScope={scope}
+                  />
+                  {alsoAll && (
+                    <button className="link-btn also-line" onClick={() => nav.go("apps", { appId: a.id })}>
+                      also reachable by everyone on All ports of {a.name}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
             <CommitPreview commit={revokeCommit} />
             <AddAccess fixed={{ side: "targets", targets: attachedApps.map((a) => ({ kind: "app" as const, id: a.id })) }} preselect={scope} rowLabel={group.label} />
           </>

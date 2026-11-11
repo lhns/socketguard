@@ -12,7 +12,7 @@ import { useColumns } from "../columns";
 import { errorText, portLabel, rangeLabel, sameScope, scopeKey, scopeLabel } from "../lib";
 import { buildColumns, buildRows, cellOf, groupsOf, type Cell, type Col, type Ctx, type Row as MatrixRow } from "../matrix";
 import type { FocusMessage } from "../nav";
-import { useApps, useGrants, useGroups, useNetworks, usePeers, useSocketGroups, useTags } from "../queries";
+import { useApps, useGrants, useGroups, useNetworks, usePeers, useReservations, useSocketGroups, useTags } from "../queries";
 
 /** A row of the list: an app, a tag, a row inside an app (`m`), or a port group (`sg`). */
 interface AppRow extends ListRow {
@@ -43,6 +43,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   const peers = usePeers();
   const groups = useGroups();
   const networks = useNetworks();
+  const reservations = useReservations();
   const columns = useColumns();
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -70,9 +71,9 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   const appList = useMemo(() => apps.data ?? [], [apps.data]);
   const ctx: Ctx = useMemo(
     () => ({
-      grants: grants.data ?? [], tags: tagList, peers: peers.data ?? [], groups: groups.data ?? [], networks: networks.data ?? [], scope,
+      grants: grants.data ?? [], tags: tagList, peers: peers.data ?? [], groups: groups.data ?? [], networks: networks.data ?? [], scope, reservations: reservations.data ?? [],
     }),
-    [grants.data, tagList, peers.data, groups.data, networks.data, scope],
+    [grants.data, tagList, peers.data, groups.data, networks.data, scope, reservations.data],
   );
 
   // A link from elsewhere: show what it points at. The page stays mounted, so the rest of its

@@ -358,6 +358,15 @@ describe("Port group inspector", () => {
     expect(within(who).getByRole("button", { name: "Add access to passive" })).toBeInTheDocument();
   });
 
+  it("says when the grants on All ports of an app also cover the group, instead of only that nobody can reach it", async () => {
+    setup();
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    const panel = await openGroup(user, "passive");
+    const who = panel.getByRole("heading", { name: "Who can reach it" }).closest("section")!;
+    expect(within(who).getByRole("button", { name: "also reachable by everyone on All ports of nginx" })).toHaveClass("link-btn");
+  });
+
   it("adding a range shows the review when it lets more in; removing applies at once with Undo", async () => {
     const gaining = { kind: "update" as const, item: "socket_group" as const, name: "add 60000-60010/tcp to passive on nginx", opens_to_anyone: false, reach: [{ network_id: "n-ygg", reach: "verified" as const }] };
     const d = setup({ changes: (a) => ((a.req as ChangesRequest).ops[0].op === "update_socket_group" && ((a.req as ChangesRequest).ops[0] as { ports: unknown[] }).ports.length > 1 ? batch(a.req as ChangesRequest, true, [gaining]) : batch(a.req as ChangesRequest)) });
@@ -496,6 +505,14 @@ describe("Wording", () => {
     await user.click(inList().getByRole("checkbox", { name: "Select ftp" }));
     await screen.findByRole("heading", { name: "ftp" });
     expect(said()).not.toMatch(banned);
+
+    // Addresses on rows, the Reserve form and the move picker.
+    await openApp(user, /^nginx/);
+    await user.click(within(inspector()).getAllByRole("button", { name: /^Reserve/ })[0]);
+    expect(said()).not.toMatch(banned);
+    await user.click(within(inspector()).getByRole("button", { name: "Move everything to…" }));
+    expect(said()).not.toMatch(banned);
+    await user.keyboard("{Escape}");
 
     await user.click(inList().getByRole("button", { name: "New port group" }));
     await screen.findByRole("heading", { name: "New port group" });

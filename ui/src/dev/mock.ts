@@ -12,13 +12,14 @@ const networks: Network[] = [
   { id: "n-local", kind: "local", name: "Local", interface: "lo", grants_apply: false, status: { state: "up" } },
   { id: "n-ygg", kind: "yggdrasil", name: "Yggdrasil", interface: "ygg0", grants_apply: true, status: { state: "up" } },
   { id: "n-lan", kind: "lan", name: "LAN", interface: "eth0", grants_apply: true, status: { state: "up" } },
+  { id: "n-tor", kind: "tor", name: "Tor", interface: null, grants_apply: true, status: { state: "up" } },
 ];
 
 let seq = 100;
 const uid = (p: string) => `${p}${seq++}`;
 
 const own: [string, string, [number, "tcp" | "udp"][]][] = [
-  ["nginx", "/usr/sbin/nginx", [[80, "tcp"], [443, "tcp"]]],
+  ["nginx", "/usr/sbin/nginx", [[80, "tcp"], [443, "tcp"], [8443, "tcp"]]],
   ["postgres", "/usr/lib/postgresql/16/bin/postgres", [[5432, "tcp"]]],
   ["redis-server", "/usr/bin/redis-server", [[6379, "tcp"]]],
   ["sshd", "/usr/sbin/sshd", [[22, "tcp"]]],
@@ -46,7 +47,8 @@ own.forEach(([name, exe, ports], i) => {
     ],
   });
 });
-apps[0].addresses.push({ id: "a1-y2", app_id: "a1", network_id: "n-ygg", scope: { kind: "port", port: 443, proto: "tcp" }, locator: { kind: "ipv6", addr: "302:a0::2" }, created_at: T0, reservation_id: null, up: true, excluded: [], notes: [] });
+apps[0].addresses.push({ id: "a1-y2", app_id: "a1", network_id: "n-ygg", scope: { kind: "port", port: 443, proto: "tcp" }, locator: { kind: "ipv6", addr: "302:a0::2" }, created_at: T0, reservation_id: null, up: false, excluded: [], notes: [] });
+apps[0].addresses[0].excluded = [{ start: 9000, end: 9000, proto: "tcp" }];
 sys.forEach((name, i) => {
   const id = `s${i + 1}`;
   apps.push({
@@ -87,6 +89,7 @@ const rangesOf = (a: App, scope: Scope): PortRange[] =>
   scope.kind === "port" ? [{ start: scope.port, end: scope.port, proto: scope.proto }]
   : scope.kind === "group" ? socketGroups.find((g) => g.id === scope.id)?.ports ?? []
   : [...a.ports.map((p) => ({ start: p.port, end: p.port, proto: p.proto })), ...attached(a).flatMap((g) => g.ports)];
+const scopeText = (s: Scope): string => (s.kind === "all" ? "All ports" : s.kind === "port" ? `${s.port}/${s.proto}` : socketGroups.find((g) => g.id === s.id)?.label ?? s.id);
 const narrow = (grant: Scope, member: Scope): Scope => (grant.kind === "all" ? member : grant);
 
 interface G { id: string; target: GrantView["target"]; scope: Scope; network_id: string | null; subject: Subject }
@@ -99,6 +102,7 @@ let grants: G[] = [
   { id: "gr6", target: { kind: "app", id: "a5" }, scope: { kind: "port", port: 3000, proto: "tcp" }, network_id: null, subject: { kind: "anyone" } },
   { id: "gr7", target: { kind: "tag", id: "t4" }, scope: ALL_SCOPE, network_id: "n-lan", subject: { kind: "peer", id: "p4" } },
   { id: "gr8", target: { kind: "app", id: "a7" }, scope: ALL_SCOPE, network_id: null, subject: { kind: "peer", id: "p2" } },
+  { id: "gr13", target: { kind: "app", id: "a1" }, scope: { kind: "port", port: 80, proto: "tcp" }, network_id: null, subject: { kind: "peer", id: "p2" } },
   { id: "gr12", target: { kind: "reservation", id: "r1" }, scope: ALL_SCOPE, network_id: "n-ygg", subject: { kind: "peer", id: "p1" } },
   { id: "gr9", target: { kind: "app", id: "a6" }, scope: { kind: "group", id: "sg1" }, network_id: null, subject: { kind: "peer", id: "p3" } },
   { id: "gr10", target: { kind: "app", id: "a5" }, scope: ALL_SCOPE, network_id: "n-ygg", subject: { kind: "peer", id: "p1" } },
@@ -109,16 +113,16 @@ let grants: G[] = [
 const resAddress = (id: string, reservation_id: string, network_id: string, addr: string): Address => ({
   id, network_id, locator: { kind: "ipv6", addr }, created_at: T0, app_id: null, scope: ALL_SCOPE, reservation_id, up: true, excluded: [], notes: [],
 });
-const bindings: ReservationView["bindings"] = [
-  { id: "b1", reservation_id: "r1", target: { kind: "app", app_id: "a1", scope: ALL_SCOPE } },
-  { id: "b2", reservation_id: "r1", target: { kind: "app", app_id: "a5", scope: { kind: "port", port: 3000, proto: "tcp" } } },
+let bindings: ReservationView["bindings"] = [
+  { id: "b1", reservation_id: "r1", target: { kind: "app", app_id: "a1", scope: { kind: "port", port: 80, proto: "tcp" } } },
+  { id: "b2", reservation_id: "r1", target: { kind: "app", app_id: "a5", scope: { kind: "port", port: 80, proto: "tcp" } } },
   { id: "b3", reservation_id: "r2", target: { kind: "app", app_id: "a2", scope: ALL_SCOPE } },
 ];
-const reservations: ReservationView[] = [
+let reservations: ReservationView[] = [
   {
     id: "r1", label: "front", created_at: T0, bindings: bindings.filter((b) => b.reservation_id === "r1"),
     addresses: [resAddress("ra1", "r1", "n-ygg", "302:ffff::1")],
-    conflicts: [{ ports: { start: 3000, end: 3000, proto: "tcp" }, bindings: ["b1", "b2"], served_app: null }],
+    conflicts: [{ ports: { start: 80, end: 80, proto: "tcp" }, bindings: ["b1", "b2"], served_app: null }],
     grants: [],
   },
   {
@@ -128,7 +132,7 @@ const reservations: ReservationView[] = [
   },
 ];
 const reservationView = (r: ReservationView): ReservationView => ({
-  ...r, grants: grants.filter((g) => g.target.kind === "reservation" && g.target.id === r.id).map(view),
+  ...r, bindings: bindings.filter((b) => b.reservation_id === r.id), grants: grants.filter((g) => g.target.kind === "reservation" && g.target.id === r.id).map(view),
 });
 
 // ─── Derived views ──────────────────────────────────────────────────────────
@@ -139,8 +143,17 @@ const credNets = (p: Peer): GrantReach[] => {
   if (p.credentials.some((c) => c.kind === "ip")) out.push({ network_id: "n-lan", reach: "ip_only" });
   return out.length ? out : [{ network_id: "n-ygg", reach: "not_reachable" }];
 };
-const reachOf = (g: G): GrantReach[] => {
-  const nets = networks.filter((n) => n.grants_apply && (g.network_id === null || n.id === g.network_id));
+const TOR_NOTE = (label: string) => `bound to reservation ${label}: on Tor grant the reservation as a whole`;
+/** On Tor a grant on a row bound to a reservation does not reach (ADR 0047). */
+const torReach = (g: G): GrantReach[] => {
+  if (g.target.kind !== "app" || (g.network_id !== null && g.network_id !== "n-tor")) return [];
+  const tgt = g.target;
+  const res = reservations.find((r) => bindings.some((b) => b.reservation_id === r.id && b.target.kind === "app" && b.target.app_id === tgt.id && (g.scope.kind === "all" ? b.target.scope.kind === "all" : sameScope(b.target.scope, g.scope))));
+  return res ? [{ network_id: "n-tor", reach: "not_reachable", note: TOR_NOTE(res.label) }] : [];
+};
+const reachOf = (g: G): GrantReach[] => [...reachWithoutTor(g), ...torReach(g)];
+const reachWithoutTor = (g: G): GrantReach[] => {
+  const nets = networks.filter((n) => n.grants_apply && n.kind !== "tor" && (g.network_id === null || n.id === g.network_id));
   if (g.subject.kind === "anyone") return nets.map((n) => ({ network_id: n.id, reach: "open" }));
   const ids = g.subject.kind === "peer" ? [g.subject.id] : (groups.find((x) => x.id === (g.subject as { id: string }).id)?.members ?? []);
   const all = ids.flatMap((id) => credNets(peers.find((p) => p.id === id)!)).filter((r) => nets.some((n) => n.id === r.network_id));
@@ -169,7 +182,7 @@ function detail(a: App): AppDetail {
 
 interface Op { op: string; [k: string]: unknown }
 function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
-  const snap = { groups: [...groups], grants: [...grants], tags: tags.map((t) => ({ ...t, members: [...t.members] })), peers: [...peers], apps: apps.map((a) => ({ ...a })), socketGroups: socketGroups.map((g) => ({ ...g, apps: [...g.apps] })) };
+  const snap = { groups: [...groups], grants: [...grants], tags: tags.map((t) => ({ ...t, members: [...t.members] })), peers: [...peers], apps: apps.map((a) => ({ ...a })), socketGroups: socketGroups.map((g) => ({ ...g, apps: [...g.apps] })), reservations: reservations.map((r) => ({ ...r })), bindings: [...bindings], addresses: apps.map((a) => [...a.addresses]) };
   const refs: Record<string, string> = {};
   const out: BatchChange[] = [];
   let widens = false;
@@ -233,7 +246,7 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
         const subject = op.subject as Subject;
         const g: G = {
           id: uid("gr"),
-          target: { kind: (op.target as { kind: "app" | "tag" }).kind, id: res((op.target as { id: string }).id) },
+          target: { kind: (op.target as { kind: "app" | "tag" | "reservation" }).kind, id: res((op.target as { id: string }).id) },
           scope: resScope((op.scope as Scope | undefined) ?? ALL_SCOPE),
           network_id: (op.network_id as string) ?? null,
           subject: subject.kind === "anyone" ? subject : { kind: subject.kind, id: res(subject.id) },
@@ -242,7 +255,7 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
         grants = [...grants, g];
         const reach = reachOf(g);
         widens ||= reach.some((r) => r.reach !== "not_reachable");
-        const tgt = g.target.kind === "app" ? apps.find((a) => a.id === g.target.id)?.name : `tag ${tags.find((t) => t.id === g.target.id)?.label}`;
+        const tgt = g.target.kind === "app" ? apps.find((a) => a.id === g.target.id)?.name : g.target.kind === "reservation" ? `reserved ${reservations.find((r) => r.id === g.target.id)?.label}` : `tag ${tags.find((t) => t.id === g.target.id)?.label}`;
         const who = g.subject.kind === "anyone" ? "Anyone" : g.subject.kind === "peer" ? peers.find((p) => p.id === (g.subject as { id: string }).id)?.label : `group ${groups.find((x) => x.id === (g.subject as { id: string }).id)?.label}`;
         out.push({ kind: "create", item: "grant", name: `${who} to ${tgt}${g.scope.kind === "port" ? ` ${g.scope.port}/${g.scope.proto}` : g.scope.kind === "group" ? ` group ${socketGroups.find((x) => x.id === (g.scope as { id: string }).id)?.label}` : ""}`, detail: g.network_id ? `on ${g.network_id}` : undefined, id: g.id, opens_to_anyone: g.subject.kind === "anyone", reach });
         break;
@@ -334,6 +347,79 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
         out.push({ kind: "update", item: "socket_group", name: `detach ${g.label} from ${apps.find((a) => a.id === op.app_id)?.name}`, opens_to_anyone: false });
         break;
       }
+      case "create_reservation": {
+        const label = op.label as string;
+        if (reservations.some((x) => x.label === label)) throw { code: "conflict", message: `operation ${out.length}: reservation ${label} already exists` };
+        const r: ReservationView = { id: uid("r"), label, created_at: T0, bindings: [], addresses: [], conflicts: [], grants: [] };
+        if (op.ref) refs[op.ref as string] = r.id;
+        reservations = [...reservations, r];
+        out.push({ kind: "create", item: "reservation", name: label, id: r.id, opens_to_anyone: false });
+        break;
+      }
+      case "reserve_address": {
+        const app = apps.find((a) => a.addresses.some((x) => x.id === op.address_id));
+        const addr = app?.addresses.find((x) => x.id === op.address_id);
+        if (!app || !addr) throw { code: "not_found", message: `address ${op.address_id}` };
+        const r: ReservationView = { id: uid("r"), label: op.label as string, created_at: T0, bindings: [], addresses: [{ ...addr, app_id: null, reservation_id: "" }], conflicts: [], grants: [] };
+        r.addresses[0].reservation_id = r.id;
+        reservations = [...reservations, r];
+        bindings = [...bindings, { id: uid("b"), reservation_id: r.id, target: { kind: "app", app_id: app.id, scope: addr.scope } }];
+        apps = apps.map((a) => (a.id === app.id ? { ...a, addresses: a.addresses.filter((x) => x.id !== addr.id) } : a));
+        out.push({ kind: "create", item: "reservation", name: r.label, id: r.id, detail: `${app.name} ${scopeText(addr.scope)} keeps its address`, opens_to_anyone: false });
+        break;
+      }
+      case "rename_reservation": {
+        const r = reservations.find((x) => x.id === res(op.reservation_id as string));
+        if (!r) throw { code: "not_found", message: "reservation" };
+        reservations = reservations.map((x) => (x.id === r.id ? { ...x, label: op.label as string } : x));
+        out.push({ kind: "update", item: "reservation", name: `${r.label} renamed to ${op.label}`, opens_to_anyone: false });
+        break;
+      }
+      case "add_binding": {
+        const r = reservations.find((x) => x.id === res(op.reservation_id as string));
+        if (!r) throw { code: "not_found", message: "reservation" };
+        const rg = grants.filter((g) => g.target.kind === "reservation" && g.target.id === r.id);
+        const opens = rg.some((g) => g.subject.kind === "anyone");
+        if (opens && !op.confirm_open) throw { code: "confirmation_required", message: "confirm opening to anyone" };
+        const target = op.target as ReservationView["bindings"][number]["target"];
+        bindings = [...bindings, { id: uid("b"), reservation_id: r.id, target }];
+        const reach = rg.flatMap(reachOf);
+        widens ||= reach.some((x) => x.reach !== "not_reachable");
+        const who = reachWho(rg);
+        out.push({ kind: "create", item: "binding", name: `${target.kind === "app" ? `${apps.find((a) => a.id === (target as { app_id: string }).app_id)?.name} ${scopeText(target.scope)}` : `tag ${tags.find((t) => t.id === (target as { tag_id: string }).tag_id)?.label}`} in ${r.label}`, detail: who.length ? `reachable by ${who.join(", ")}` : undefined, opens_to_anyone: opens, reach });
+        break;
+      }
+      case "remove_binding": {
+        const b = bindings.find((x) => x.id === op.binding_id);
+        if (!b) throw { code: "not_found", message: "binding" };
+        bindings = bindings.filter((x) => x.id !== b.id);
+        out.push({ kind: "delete", item: "binding", name: `${reservations.find((r) => r.id === b.reservation_id)?.label} binding`, opens_to_anyone: false });
+        break;
+      }
+      case "release_reservation": {
+        const r = reservations.find((x) => x.id === op.reservation_id);
+        if (!r) throw { code: "not_found", message: "reservation" };
+        reservations = reservations.filter((x) => x.id !== r.id);
+        bindings = bindings.filter((b) => b.reservation_id !== r.id);
+        grants = grants.filter((g) => !(g.target.kind === "reservation" && g.target.id === r.id));
+        out.push({ kind: "delete", item: "reservation", name: r.label, id: r.id, opens_to_anyone: false });
+        break;
+      }
+      case "move_app": {
+        const from = apps.find((a) => a.id === op.from);
+        const to = apps.find((a) => a.id === op.to);
+        if (!from || !to) throw { code: "not_found", message: "app" };
+        const moving = grants.filter((g) => g.target.kind === "app" && g.target.id === from.id);
+        const opens = moving.some((g) => g.subject.kind === "anyone");
+        if (opens && !op.confirm_open) throw { code: "confirmation_required", message: "confirm opening to anyone" };
+        grants = grants.map((g) => (g.target.kind === "app" && g.target.id === from.id ? { ...g, target: { kind: "app", id: to.id } } : g));
+        for (const g of moving) out.push({ kind: "update", item: "grant", name: `${reachWho([g])[0]} ${scopeText(g.scope)}: ${from.name} to ${to.name}`.replace("  ", " "), opens_to_anyone: g.subject.kind === "anyone", reach: reachOf(g) });
+        tags = tags.map((t) => ({ ...t, members: t.members.map((m) => (m.app_id === from.id ? { ...m, app_id: to.id } : m)) }));
+        for (const t of tags.filter((x) => x.members.some((m) => m.app_id === to.id))) out.push({ kind: "update", item: "tag_member", name: `${from.name} in tag ${t.label} becomes ${to.name}`, opens_to_anyone: false });
+        bindings = bindings.map((b) => (b.target.kind === "app" && b.target.app_id === from.id ? { ...b, target: { ...b.target, app_id: to.id } } : b));
+        widens ||= moving.length > 0;
+        break;
+      }
       case "review": {
         apps = apps.map((a) => (a.id === op.app_id ? { ...a, reviewed: op.reviewed as boolean } : a));
         out.push({ kind: "update", item: "app", name: apps.find((a) => a.id === op.app_id)?.name ?? "", opens_to_anyone: false });
@@ -348,6 +434,9 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
     groups = snap.groups;
     apps = snap.apps;
     socketGroups = snap.socketGroups;
+    reservations = snap.reservations;
+    bindings = snap.bindings;
+    apps = snap.apps.map((a, i) => ({ ...a, addresses: snap.addresses[i] }));
   }
   return { dry_run: req.dry_run, refs, changes: out, changes_reach: widens };
 }

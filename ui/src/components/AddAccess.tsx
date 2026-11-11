@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeOp, NewCredential, Scope, Subject, Target } from "../api";
 import { useCommit } from "../commit";
 import { ALL_SCOPE, CREDENTIAL_PLACEHOLDER, portLabel, portOfScope, scopeKey, scopeLabel, scopeOfPort, subjectLabel, targetLabel } from "../lib";
-import { useApps, useGroups, useList, useNetworks, useParsedCredentials, usePeers, useSocketGroups, useTags } from "../queries";
+import { useApps, useGroups, useList, useNetworks, useParsedCredentials, usePeers, useReservations, useSocketGroups, useTags } from "../queries";
 import { CREDENTIAL_INFO } from "../reach";
 import CommitPreview from "./CommitPreview";
 import Picker, { type PickerItem } from "./Picker";
@@ -45,6 +45,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
   const groups = useList(useGroups());
   const networks = useList(useNetworks());
   const socketGroups = useList(useSocketGroups());
+  const reservations = useList(useReservations());
 
   const [open, setOpen] = useState(false);
   const [chips, setChips] = useState<Chip[]>([]);
@@ -87,6 +88,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
     let anyTag = false;
     for (const t of targets) {
       if (t.kind === "app") addApp(t.id, null);
+      else if (t.kind === "reservation") continue;
       else {
         anyTag = true;
         for (const m of tags.find((x) => x.id === t.id)?.members ?? []) addApp(m.app_id, portOfScope(m.scope) ? m.scope : null);
@@ -118,10 +120,11 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
     }
     return [
       ...tags.map<PickerItem>((t) => ({ id: `tag:${t.id}`, label: t.label, hint: `${t.members.length} apps`, section: "Tags", state: has(`tag:${t.id}`) ? "on" : "off" })),
+      ...reservations.map<PickerItem>((r) => ({ id: `reservation:${r.id}`, label: `reserved ${r.label}`, hint: "All ports", section: "Reserved addresses", state: has(`reservation:${r.id}`) ? "on" : "off" })),
       ...apps.filter((a) => !a.system).map<PickerItem>((a) => ({ id: `app:${a.id}`, label: a.name, section: "Apps", state: has(`app:${a.id}`) ? "on" : "off" })),
       ...apps.filter((a) => a.system).map<PickerItem>((a) => ({ id: `app:${a.id}`, label: a.name, section: "System services", state: has(`app:${a.id}`) ? "on" : "off" })),
     ];
-  }, [fixed.side, chips, groups, peers, tags, apps]);
+  }, [fixed.side, chips, groups, peers, tags, apps, reservations]);
 
   const toggle = (item: PickerItem) => {
     if (chips.some((c) => c.key === item.id)) {
@@ -134,7 +137,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
         ? { key: item.id, kind: "subject", subject: { kind: "anyone" }, label: "Anyone" }
         : kind === "group" || kind === "peer"
           ? { key: item.id, kind: "subject", subject: { kind, id: ref }, label: item.label }
-          : { key: item.id, kind: "target", target: { kind: kind as "app" | "tag", id: ref }, label: item.label };
+          : { key: item.id, kind: "target", target: { kind: kind as "app" | "tag" | "reservation", id: ref }, label: item.label };
     setChips([...chips, chip]);
   };
   // One peer per pasted value.
@@ -157,7 +160,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
   const ready = targets.length > 0 && chosen > 0 && (fixed.side === "targets" || fixed.subjects.length > 0) && scopeSelection.length > 0;
   // A port group is only granted on the apps it is attached to.
   const applies = (t: Target, s: Scope) =>
-    s.kind !== "group" || t.kind === "tag" || (socketGroups.find((g) => g.id === s.id)?.apps.includes(t.id) ?? false);
+    t.kind === "reservation" ? s.kind === "all" : s.kind !== "group" || t.kind === "tag" || (socketGroups.find((g) => g.id === s.id)?.apps.includes(t.id) ?? false);
 
   const ops = useMemo<ChangeOp[]>(() => {
     if (!ready) return [];
@@ -209,7 +212,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
 
   const fixedNames =
     fixed.side === "targets"
-      ? fixed.targets.map((t) => targetLabel(t, apps, tags))
+      ? fixed.targets.map((t) => targetLabel(t, apps, tags, reservations))
       : fixed.subjects.map((s) => subjectLabel(s, peers, groups));
   const summary = fixedNames.length > 3 ? `${fixedNames.slice(0, 3).join(", ")} and ${fixedNames.length - 3} more` : fixedNames.join(", ");
 
@@ -251,9 +254,9 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
 
       <Picker
         label={choosingSubjects ? "Who" : "What"}
-        trigger={choosingSubjects ? "Choose who…" : "Choose apps or tags…"}
+        trigger={choosingSubjects ? "Choose who…" : "Choose apps, tags or reserved addresses…"}
         triggerClass="btn btn-sm"
-        placeholder={choosingSubjects ? `Search, or paste a key, address or IP (${CREDENTIAL_PLACEHOLDER})` : "Search apps and tags"}
+        placeholder={choosingSubjects ? `Search, or paste a key, address or IP (${CREDENTIAL_PLACEHOLDER})` : "Search apps, tags and reserved addresses"}
         items={items}
         onToggle={toggle}
         onQuery={setQuery}

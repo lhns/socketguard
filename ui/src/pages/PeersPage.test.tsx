@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import PeersPage from "./PeersPage";
 import type { ChangesRequest, GrantView } from "../api";
 import {
-  batch, grantView, memoryStorage, mkApp, mkGroup, mkPeer, mkTag, mockDaemon, networks, renderWithProviders, saved,
+  batch, grantView, memoryStorage, mkApp, mkGroup, mkPeer, mkReservation, mkTag, mockDaemon, networks, renderWithProviders, saved,
 } from "../test/helpers";
 
 const KEY = "b".repeat(64);
@@ -144,7 +144,7 @@ describe("Inspector: one peer", () => {
     await user.click(await p.findByRole("button", { name: "Add access…" }));
     const form = screen.getByRole("form", { name: "Add access" });
     expect(form).toHaveTextContent("What can bob reach?");
-    await user.click(within(form).getByRole("button", { name: "Choose apps or tags…" }));
+    await user.click(within(form).getByRole("button", { name: "Choose apps, tags or reserved addresses…" }));
     await user.click(screen.getByRole("checkbox", { name: /^web/ }));
     await user.click(screen.getByRole("checkbox", { name: "nginx" }));
     await user.keyboard("{Escape}");
@@ -320,7 +320,7 @@ describe("Inspector: several peers", () => {
     const p = await selectAll(user);
     await user.click(await p.findByRole("button", { name: "Add access…" }));
     const form = screen.getByRole("form", { name: "Add access" });
-    await user.click(within(form).getByRole("button", { name: "Choose apps or tags…" }));
+    await user.click(within(form).getByRole("button", { name: "Choose apps, tags or reserved addresses…" }));
     await user.click(screen.getByRole("checkbox", { name: "nginx" }));
     await user.keyboard("{Escape}");
     await user.click(within(form).getByRole("button", { name: "All ports" }));
@@ -472,5 +472,41 @@ describe("Inspector close", () => {
     const plus = await p.findByRole("button", { name: "Add or remove groups" });
     expect(plus).toHaveClass("tag-pill", "tag-pill-add");
     expect(p.queryByRole("button", { name: "Groups…" })).not.toBeInTheDocument();
+  });
+});
+
+describe("Reserved addresses as a target", () => {
+  const front = mkReservation("r1", "front", [{ kind: "app", app_id: "a1", scope: { kind: "all" } }]);
+  const gRes = grantView({ id: "g-res", target: { kind: "reservation", id: "r1" }, subject: { kind: "peer", id: "p1" } });
+
+  it("what a peer can reach lists a reservation grant as `reserved <name>`", async () => {
+    setup({ list_reservations: () => [front] }, [gRes]);
+    const user = userEvent.setup();
+    renderWithProviders(<PeersPage />);
+    await user.click(await rowButton("alice"));
+    const p = within(await screen.findByRole("region", { name: "Peer details" }));
+    const what = p.getByRole("heading", { name: "What it can reach" }).closest("section")!;
+    expect(await within(what).findByRole("button", { name: "reserved front" })).toBeInTheDocument();
+  });
+
+  it("the target picker also lists reserved addresses, with only All ports to open", async () => {
+    const d = setup({ list_reservations: () => [front] });
+    const user = userEvent.setup();
+    renderWithProviders(<PeersPage />);
+    await user.click(await rowButton("bob"));
+    const p = within(await screen.findByRole("region", { name: "Peer details" }));
+    await user.click(await p.findByRole("button", { name: "Add access…" }));
+    const form = screen.getByRole("form", { name: "Add access" });
+    await user.click(within(form).getByRole("button", { name: "Choose apps, tags or reserved addresses…" }));
+    const option = await screen.findByRole("checkbox", { name: /^reserved front/ });
+    expect(option.closest("li")).toHaveTextContent("Reserved addresses");
+    await user.click(option);
+    await user.keyboard("{Escape}");
+    expect([...within(form).getByRole("group", { name: "What to open" }).querySelectorAll("button")].map((b) => b.textContent)).toEqual(["All ports"]);
+    await user.click(within(form).getByRole("button", { name: "All ports" }));
+    await user.click(within(form).getByRole("button", { name: "Add access" }));
+    await waitFor(() => expect(applied(d)).toEqual([[
+      { op: "add_grant", target: { kind: "reservation", id: "r1" }, scope: { kind: "all" }, subject: { kind: "peer", id: "p2" }, confirm_open: false },
+    ]]));
   });
 });

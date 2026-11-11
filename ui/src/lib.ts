@@ -114,7 +114,7 @@ export function targetLabel(
 ): string {
   if (t.kind === "app") return apps.find((a) => a.id === t.id)?.name ?? `app ${t.id.slice(0, 8)}`;
   if (t.kind === "reservation") {
-    return `reservation ${reservations.find((r) => r.id === t.id)?.label ?? t.id.slice(0, 8)}`;
+    return `reserved ${reservations.find((r) => r.id === t.id)?.label ?? t.id.slice(0, 8)}`;
   }
   return `tag ${tags.find((x) => x.id === t.id)?.label ?? t.id.slice(0, 8)}`;
 }

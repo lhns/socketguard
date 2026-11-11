@@ -5,11 +5,13 @@ import { NavContext, type Focus, type FocusMessage, type Page } from "./nav";
 import ActivityPage from "./pages/ActivityPage";
 import AppsPage from "./pages/AppsPage";
 import PeersPage from "./pages/PeersPage";
+import ReservedPage from "./pages/ReservedPage";
 import SettingsPage from "./pages/SettingsPage";
 import { useDaemonEvents, useStatus } from "./queries";
 
 const PAGES: { id: Page; label: string }[] = [
   { id: "apps", label: "Apps" },
+  { id: "reserved", label: "Reserved" },
   { id: "peers", label: "Peers" },
   { id: "activity", label: "Activity" },
   { id: "settings", label: "Settings" },
@@ -134,6 +136,8 @@ function renderPage(p: Page, focus: FocusMessage) {
   switch (p) {
     case "apps":
       return <AppsPage focus={focus} />;
+    case "reserved":
+      return <ReservedPage focus={focus} />;
     case "peers":
       return <PeersPage focus={focus} />;
     case "activity":

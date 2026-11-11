@@ -2,7 +2,7 @@
 // and the rows of an app (a port or an attached port group); columns are groups, peers, Anyone and "Everyone on <network>". Nothing is
 // edited here; edits are made in the inspector.
 import type {
-  App, GrantView, Network, Peer, PeerGroup, PortRef, Scope, SocketGroup, Subject, Tag, Target,
+  App, GrantView, Network, Peer, PeerGroup, PortRef, ReservationView, Scope, SocketGroup, Subject, Tag, Target,
 } from "./api";
 import { coversScope, sameSubject } from "./access";
 import { ALL_SCOPE, portLabel, sameScope, scopeKey, scopeOfPort } from "./lib";
@@ -41,7 +41,7 @@ export interface Cell {
   /** Granted only through a grant that spans all networks while a network is selected. */
   allNetworks: boolean;
   /** Where an inherited cell gets its access from. */
-  origin?: { kind: "tag" | "group" | "app"; id: string; label: string };
+  origin?: { kind: "tag" | "group" | "app" | "reservation"; id: string; label: string };
 }
 
 export interface Ctx {
@@ -52,6 +52,8 @@ export interface Ctx {
   networks: Network[];
   /** Selected network id, or null for all networks. */
   scope: string | null;
+  /** Their bindings make a grant on a reservation reach the bound rows. */
+  reservations?: Pick<ReservationView, "id" | "label" | "bindings">[];
 }
 
 export const rowKey = (target: Target, port: PortRef | null) =>
@@ -109,6 +111,15 @@ export function buildRows(apps: App[], tags: Tag[], expanded: Set<string>, socke
   return rows;
 }
 
+/** Does one of the bindings serve this row of the app? A binding of All ports serves every row. */
+export function bindsRow(bindings: ReservationView["bindings"], tags: Tag[], appId: string, row: Scope): boolean {
+  return bindings.some((b) =>
+    b.target.kind === "app"
+      ? b.target.app_id === appId && coversScope(b.target.scope, row)
+      : (tags.find((t) => t.id === (b.target as { tag_id: string }).tag_id)?.members ?? []).some((m) => m.app_id === appId && coversScope(m.scope, row)),
+  );
+}
+
 const sameTarget = (a: Target, b: Target) => a.kind === b.kind && a.id === b.id;
 
 /** Does grant network `n` count for this column in the selected scope? */
@@ -164,6 +175,13 @@ function inheritedFrom(row: Row, col: Col, ctx: Ctx): Cell["origin"] | undefined
     // A grant on All ports covers its ports and port groups.
     if (row.kind === "port" && g.target.kind === "app" && g.target.id === appId && g.scope.kind === "all") {
       return groupOrigin ?? { kind: "app", id: appId, label: "All ports" };
+    }
+    // A grant on a reservation that has this row bound (directly or through a tag).
+    if (g.target.kind === "reservation") {
+      const res = ctx.reservations?.find((r) => r.id === (g.target as { id: string }).id);
+      if (res && bindsRow(res.bindings, ctx.tags, appId, row.scope)) {
+        return groupOrigin ? { ...groupOrigin, label: `${groupOrigin.label} on reservation ${res.label}` } : { kind: "reservation", id: res.id, label: res.label };
+      }
     }
     // A grant on a tag the app (or this port of it) belongs to.
     if (g.target.kind === "tag") {

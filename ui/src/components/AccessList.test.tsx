@@ -91,3 +91,30 @@ describe("AccessList, what this can reach", () => {
     expect(document.querySelector(".access-highlight")).not.toBeNull();
   });
 });
+
+describe("AccessList, reservation origin", () => {
+  it("an access that comes through a reservation links to it on the Reserved tab", async () => {
+    const go = vi.fn();
+    const user = userEvent.setup();
+    const g = grantView({ id: "g-res", target: { kind: "reservation", id: "r1" }, subject: { kind: "peer", id: "p1" } });
+    const access: EffectiveAccess[] = [
+      { grant_id: "g-res", scope: { kind: "all" }, ports: [], network_id: null, subject: { kind: "peer", id: "p1" }, origin: { kind: "reservation", reservation_id: "r1" } },
+    ];
+    const entries = appEntries("a1", access, [g], { ...ctx, reservations: [{ id: "r1", label: "front" }] });
+    renderWithProviders(<AccessList entries={entries} direction="who" networks={networks} onRevoke={() => {}} />, go);
+    expect(screen.queryByRole("button", { name: /^Revoke/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Go to reservation front" }));
+    expect(go).toHaveBeenCalledWith("reserved", { reservationId: "r1" });
+  });
+
+  it("what a peer can reach lists a reservation grant as `reserved <name>`, linking to it", async () => {
+    const go = vi.fn();
+    const user = userEvent.setup();
+    const g = grantView({ id: "g-res", target: { kind: "reservation", id: "r1" }, subject: { kind: "peer", id: "p1" } });
+    const entries = subjectEntries({ kind: "peer", id: "p1" }, null, [g], { ...ctx, reservations: [{ id: "r1", label: "front" }] });
+    renderWithProviders(<AccessList entries={entries} direction="what" networks={networks} />, go);
+    await user.click(screen.getByRole("button", { name: "reserved front" }));
+    expect(go).toHaveBeenCalledWith("reserved", { reservationId: "r1" });
+  });
+});
+

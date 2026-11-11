@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildColumns, buildRows, cellOf, type Ctx } from "./matrix";
-import { grantView, mkApp, mkGroup, mkPeer, mkTag, networks } from "./test/helpers";
+import { grantView, mkApp, mkGroup, mkPeer, mkReservation, mkTag, networks } from "./test/helpers";
 
 const alice = mkPeer("p1", "alice", { groups: ["g1"] });
 const bob = mkPeer("p2", "bob");
@@ -76,3 +76,22 @@ describe("what a cell shows", () => {
     expect(cellOf(appRow, col("anyone", c), c).state).toBe("none");
   });
 });
+
+describe("reservations in the overview", () => {
+  const res = mkReservation("r1", "front", [{ kind: "app", app_id: "a1", scope: { kind: "all" } }]);
+  const withRes = (grants: ReturnType<typeof grantView>[]): Ctx => ({ ...ctx(grants), reservations: [res] });
+
+  it("a grant on the reservation is inherited by the rows it serves, naming the reservation", () => {
+    const c = withRes([grantView({ target: { kind: "reservation", id: "r1" }, subject: { kind: "peer", id: "p2" } })]);
+    const cell = cellOf(portRow, col("peer:p2", c), c);
+    expect(cell.state).toBe("inherited");
+    expect(cell.origin).toEqual({ kind: "reservation", id: "r1", label: "front" });
+  });
+
+  it("is not inherited by an app the reservation does not serve", () => {
+    const other = mkReservation("r2", "other", [{ kind: "app", app_id: "a9", scope: { kind: "all" } }]);
+    const c: Ctx = { ...ctx([grantView({ target: { kind: "reservation", id: "r2" }, subject: { kind: "peer", id: "p2" } })]), reservations: [other] };
+    expect(cellOf(appRow, col("peer:p2", c), c).state).toBe("none");
+  });
+});
+
