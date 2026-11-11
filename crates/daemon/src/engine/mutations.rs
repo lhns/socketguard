@@ -481,7 +481,10 @@ impl Engine {
                 if app.has_port(p) || in_group {
                     Ok(())
                 } else {
-                    Err(EngineError::Invalid(format!("{} has no port {p}", app.name)))
+                    Err(EngineError::Invalid(format!(
+                        "{} has no port {p}",
+                        app.name
+                    )))
                 }
             }
             Scope::Group { id } => {

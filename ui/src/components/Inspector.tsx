@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { NameCtx } from "../access";
-import { useApps, useGroups, useNetworks, usePeers, useTags } from "../queries";
+import { useApps, useGroups, useNetworks, usePeers, useSocketGroups, useTags } from "../queries";
 
 /** What names apps, tags, peers, groups and networks in access lists. */
 export function useNameCtx(): NameCtx {
@@ -10,6 +10,7 @@ export function useNameCtx(): NameCtx {
     peers: usePeers().data ?? [],
     groups: useGroups().data ?? [],
     networks: useNetworks().data ?? [],
+    socketGroups: useSocketGroups().data ?? [],
   };
 }
 

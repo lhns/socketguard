@@ -702,7 +702,11 @@ async fn merge_creates_the_all_address_when_the_app_has_only_port_addresses() {
         .unwrap();
     assert_eq!(merged.scope, Scope::All);
     let app = h.app().await;
-    assert_eq!(app.addresses.len(), 1, "the port address went, an all-ports one came");
+    assert_eq!(
+        app.addresses.len(),
+        1,
+        "the port address went, an all-ports one came"
+    );
     assert_eq!(app.addresses[0].id, merged.id);
     assert!(h
         .net

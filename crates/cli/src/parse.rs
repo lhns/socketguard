@@ -212,8 +212,8 @@ mod tests {
 
     #[test]
     fn port_ranges_of_a_socket_group() {
-        let r = parse_ranges(&["443/tcp".into(), "50000-51000/tcp".into(), "80/tcp".into()])
-            .unwrap();
+        let r =
+            parse_ranges(&["443/tcp".into(), "50000-51000/tcp".into(), "80/tcp".into()]).unwrap();
         assert_eq!(
             r.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
             ["80/tcp", "443/tcp", "50000-51000/tcp"]

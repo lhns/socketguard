@@ -24,7 +24,7 @@ const gTeam = grantView({ id: "g-team", target: { kind: "tag", id: "t1" }, subje
 function setup(over: Parameters<typeof mockDaemon>[0] = {}) {
   return mockDaemon({
     list_apps: () => [nginx, sshd],
-    get_app: (a) => detail(a.id === "a1" ? nginx : sshd, a.id === "a1" ? { access: [{ grant_id: "g-team", port: null, network_id: null, subject: gTeam.subject, origin: { kind: "tag", tag_id: "t1" } }], grants: [], tags: ["t1"] } : {}),
+    get_app: (a) => detail(a.id === "a1" ? nginx : sshd, a.id === "a1" ? { access: [{ grant_id: "g-team", scope: { kind: "all" }, ports: [{ start: 8080, end: 8080, proto: "tcp" }], network_id: null, subject: gTeam.subject, origin: { kind: "tag", tag_id: "t1" } }], grants: [], tags: ["t1"] } : {}),
     list_peers: () => [alice],
     list_groups: () => [team],
     list_tags: () => [web],

@@ -734,7 +734,13 @@ mod tests {
 
     fn plan(mode: AddressMode, ports: &[u16], existing: &[&Address]) -> Vec<Scope> {
         let ps: Vec<PortRef> = ports.iter().map(|p| self::p(*p)).collect();
-        plan_addresses(mode, &app(ports), &[group(&["50000-50010/tcp"])], &ps, existing)
+        plan_addresses(
+            mode,
+            &app(ports),
+            &[group(&["50000-50010/tcp"])],
+            &ps,
+            existing,
+        )
     }
 
     #[test]

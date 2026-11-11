@@ -10,7 +10,7 @@ import { toDaemonError, type BatchChange, type ChangeOp, type PeerGroup } from "
 import type { AccessEntry } from "./access";
 import { confirmAll, grantInverse } from "./batch";
 import { useToast } from "./components/Toast";
-import { errorText, portLabel, targetLabel } from "./lib";
+import { errorText, scopeLabel, targetLabel } from "./lib";
 import { useApps, useChanges, useGrants, useList, usePeers, useSetGroupMembers, useTags } from "./queries";
 
 export type CommitState =
@@ -141,7 +141,7 @@ export function useCommit(onDone?: () => void) {
         check: async () => {
           if (added.length === 0 || groupGrants.length === 0) return { changes: [], widens: false, opens: false };
           const what = groupGrants.map(
-            (g) => `${targetLabel(g.target, apps, tags)}${g.port ? ` ${portLabel(g.port)}` : ""}`,
+            (g) => `${targetLabel(g.target, apps, tags)}${g.scope.kind !== "all" ? ` ${scopeLabel(g.scope)}` : ""}`,
           );
           const shown = what.length > 3 ? `${what.slice(0, 3).join(", ")} and ${what.length - 3} more` : what.join(", ");
           return {

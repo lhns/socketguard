@@ -109,8 +109,13 @@ socketguard grant --app web --app api --port 80 --port 443 --to alice --to group
 socketguard revoke --app web --to alice
 
 socketguard tags add dev --match 'python*' --match node   # apps matching join now and when they start
-socketguard tags members add dev web:80                    # an app or one port; also: members rm, show, list, patterns, rename, rm
+socketguard tags members add dev web:80                    # an app, one port or a socket group (web:socket-group=passive); also: members rm, show, list, patterns, rename, rm
 socketguard grant tag:dev group:team                       # covers every member, present and future
+
+# Socket groups: ports and ranges that belong together (ADR 0047), attached to apps, usable as a scope
+socketguard socket-groups add passive 21/tcp 50000-51000/tcp --app ftpd   # also: list, set, rm, attach, detach
+socketguard grant ftpd:socket-group=passive alice          # or: grant --app ftpd --socket-group passive --to alice
+socketguard apps split ftpd --network ygg --socket-group passive   # an extra address for the group (or: apps split APP 80/tcp)
 
 socketguard networks list                     # also: add <type> --interface X, rm <id>
 socketguard settings address-mode per-port    # or per-app; `settings show`

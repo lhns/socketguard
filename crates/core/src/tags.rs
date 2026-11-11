@@ -259,17 +259,30 @@ mod tests {
             texts(covered_ports(&g, &tags, &a, &[], &none())),
             ["22/tcp", "80/tcp", "443/tcp"]
         );
-        assert_eq!(texts(covered_ports(&g, &tags, &b, &[], &none())), ["80/tcp"]);
+        assert_eq!(
+            texts(covered_ports(&g, &tags, &b, &[], &none())),
+            ["80/tcp"]
+        );
         assert!(covered_ports(&g, &tags, &nobody, &[], &none()).is_none());
 
-        let g = grant(Target::Tag("t".into()), Scope::port(p(443)), Subject::Anyone);
-        assert_eq!(texts(covered_ports(&g, &tags, &a, &[], &none())), ["443/tcp"]);
+        let g = grant(
+            Target::Tag("t".into()),
+            Scope::port(p(443)),
+            Subject::Anyone,
+        );
+        assert_eq!(
+            texts(covered_ports(&g, &tags, &a, &[], &none())),
+            ["443/tcp"]
+        );
         assert!(
             covered_ports(&g, &tags, &b, &[], &none()).is_none(),
             "both set and different: nothing"
         );
         let g = grant(Target::Tag("t".into()), Scope::port(p(80)), Subject::Anyone);
-        assert_eq!(texts(covered_ports(&g, &tags, &b, &[], &none())), ["80/tcp"]);
+        assert_eq!(
+            texts(covered_ports(&g, &tags, &b, &[], &none())),
+            ["80/tcp"]
+        );
     }
 
     #[test]
@@ -327,7 +340,11 @@ mod tests {
             ["50050-50100/tcp"]
         );
         let other = [group("far", &["60000-61000/tcp"], &[])];
-        let g_far = grant(Target::Tag("t".into()), Scope::group("far"), Subject::Anyone);
+        let g_far = grant(
+            Target::Tag("t".into()),
+            Scope::group("far"),
+            Subject::Anyone,
+        );
         assert!(covered_ports(&g_far, &tags, &a, &other, &none())
             .unwrap()
             .is_empty());

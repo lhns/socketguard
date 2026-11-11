@@ -1,6 +1,6 @@
 import {
   toDaemonError, type App, type CredentialKind, type NewCredential, type ParsedCredential,
-  type Peer, type PeerGroup, type PortRef, type Subject, type Tag, type Target,
+  type Peer, type PeerGroup, type PortRef, type Scope, type SocketGroup, type Subject, type Tag, type Target,
 } from "./api";
 import { CREDENTIAL_EXAMPLES } from "./generated/credentialExamples";
 
@@ -38,6 +38,31 @@ export const portLabel = (p: { port: number; proto: string }) => `${p.port}/${p.
 /** Same port (or both "all ports"). */
 export const samePort = (a: PortRef | null, b: PortRef | null) =>
   a === null || b === null ? a === b : a.port === b.port && a.proto === b.proto;
+
+export const ALL_SCOPE: Scope = { kind: "all" };
+
+/** The scope of one port, or of the whole app for null. */
+export const scopeOfPort = (p: PortRef | null): Scope =>
+  p === null ? ALL_SCOPE : { kind: "port", port: p.port, proto: p.proto };
+
+/** The port of a port scope; null for the whole app and for a socket group. */
+export const portOfScope = (s: Scope): PortRef | null =>
+  s.kind === "port" ? { port: s.port, proto: s.proto } : null;
+
+/** Structural equality of scopes. */
+export const sameScope = (a: Scope, b: Scope) =>
+  a.kind === "all" ? b.kind === "all"
+  : a.kind === "port" ? b.kind === "port" && a.port === b.port && a.proto === b.proto
+  : b.kind === "group" && a.id === b.id;
+
+/** "all ports", "80/tcp" or "group <label>" (the id when the group is not in `groups`). */
+export const scopeLabel = (s: Scope, groups: SocketGroup[] = []): string =>
+  s.kind === "all" ? "all ports"
+  : s.kind === "port" ? portLabel(s)
+  : `group ${groups.find((g) => g.id === s.id)?.label ?? s.id}`;
+
+/** Key for grouping by scope. */
+export const scopeKey = (s: Scope) => (s.kind === "all" ? "*" : s.kind === "port" ? portLabel(s) : `group:${s.id}`);
 
 /** A batch error names its operation: "operation 2: ...". Returns the zero-based index and the
  * message without that prefix; index null when the error is not about one operation. */

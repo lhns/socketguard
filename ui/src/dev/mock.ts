@@ -3,8 +3,9 @@
 // It is not part of the production bundle.
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
-  App, AppDetail, BatchChange, ChangeOp, EffectiveAccess, GrantReach, GrantView, Network, Peer, PeerGroup, Subject, Tag,
+  App, AppDetail, BatchChange, ChangeOp, EffectiveAccess, GrantReach, GrantView, Network, Peer, PeerGroup, PortRange, Scope, SocketGroup, Subject, Tag,
 } from "../api";
+import { ALL_SCOPE, sameScope } from "../lib";
 
 const T0 = "2026-01-01T00:00:00Z";
 const networks: Network[] = [
@@ -40,19 +41,19 @@ own.forEach(([name, exe, ports], i) => {
     first_seen: T0, last_seen: T0,
     ports: ports.map(([port, proto]) => ({ port, proto, listening: true, last_seen: T0, family: i % 2 ? "dual" : "v6" })),
     addresses: [
-      { id: `${id}-y`, app_id: id, network_id: "n-ygg", ports: "all", locator: { kind: "ipv6", addr: `302:a${i}::1` }, created_at: T0 },
-      { id: `${id}-l`, app_id: id, network_id: "n-lan", ports: "all", locator: { kind: "ipv6", addr: `fd00:1::${i + 10}` }, created_at: T0 },
+      { id: `${id}-y`, app_id: id, network_id: "n-ygg", scope: ALL_SCOPE, locator: { kind: "ipv6", addr: `302:a${i}::1` }, created_at: T0 },
+      { id: `${id}-l`, app_id: id, network_id: "n-lan", scope: ALL_SCOPE, locator: { kind: "ipv6", addr: `fd00:1::${i + 10}` }, created_at: T0 },
     ],
   });
 });
-apps[0].addresses.push({ id: "a1-y2", app_id: "a1", network_id: "n-ygg", ports: { only: [{ port: 443, proto: "tcp" }] }, locator: { kind: "ipv6", addr: "302:a0::2" }, created_at: T0 });
+apps[0].addresses.push({ id: "a1-y2", app_id: "a1", network_id: "n-ygg", scope: { kind: "port", port: 443, proto: "tcp" }, locator: { kind: "ipv6", addr: "302:a0::2" }, created_at: T0 });
 sys.forEach((name, i) => {
   const id = `s${i + 1}`;
   apps.push({
     id, name, process_name: name, exe_path: null, interpreter_arg: null, identity_note: null, reviewed: true, system: true,
     first_seen: T0, last_seen: T0,
     ports: [{ port: 100 + i, proto: "tcp", listening: true, last_seen: T0, family: "v6" }],
-    addresses: [{ id: `${id}-y`, app_id: id, network_id: "n-ygg", ports: "all", locator: { kind: "ipv6", addr: `302:b${i}::1` }, created_at: T0 }],
+    addresses: [{ id: `${id}-y`, app_id: id, network_id: "n-ygg", scope: ALL_SCOPE, locator: { kind: "ipv6", addr: `302:b${i}::1` }, created_at: T0 }],
   });
 });
 
@@ -70,21 +71,33 @@ let groups: PeerGroup[] = [
   { id: "g2", label: "ops", members: ["p3", "p4"], created_at: T0 },
 ];
 let tags: Tag[] = [
-  { id: "t1", label: "web", patterns: ["nginx*"], excluded: [], created_at: T0, members: [{ app_id: "a1", port: null }, { app_id: "a5", port: null }, { app_id: "a6", port: null }] },
-  { id: "t2", label: "data", patterns: [], excluded: [], created_at: T0, members: [{ app_id: "a2", port: null }, { app_id: "a3", port: null }] },
-  { id: "t3", label: "admin", patterns: [], excluded: [], created_at: T0, members: [{ app_id: "a4", port: null }] },
-  { id: "t4", label: "monitoring", patterns: ["prom*", "grafana"], excluded: [], created_at: T0, members: [{ app_id: "a8", port: null }, { app_id: "a5", port: { port: 3000, proto: "tcp" } }] },
+  { id: "t1", label: "web", patterns: ["nginx*"], excluded: [], created_at: T0, members: [{ app_id: "a1", scope: ALL_SCOPE }, { app_id: "a5", scope: ALL_SCOPE }, { app_id: "a6", scope: ALL_SCOPE }] },
+  { id: "t2", label: "data", patterns: [], excluded: [], created_at: T0, members: [{ app_id: "a2", scope: ALL_SCOPE }, { app_id: "a3", scope: ALL_SCOPE }] },
+  { id: "t3", label: "admin", patterns: [], excluded: [], created_at: T0, members: [{ app_id: "a4", scope: ALL_SCOPE }] },
+  { id: "t4", label: "monitoring", patterns: ["prom*", "grafana"], excluded: [], created_at: T0, members: [{ app_id: "a8", scope: ALL_SCOPE }, { app_id: "a5", scope: { kind: "port", port: 3000, proto: "tcp" } }] },
 ];
-interface G { id: string; target: GrantView["target"]; port: GrantView["port"]; network_id: string | null; subject: Subject }
+let socketGroups: SocketGroup[] = [
+  { id: "sg1", label: "passive", ports: [{ start: 50000, end: 51000, proto: "tcp" }], apps: ["a6"], created_at: T0 },
+  { id: "sg2", label: "dns", ports: [{ start: 53, end: 53, proto: "udp" }, { start: 5353, end: 5353, proto: "udp" }], apps: [], created_at: T0 },
+];
+const attached = (a: App) => socketGroups.filter((g) => g.apps.includes(a.id));
+/** What a scope covers on an app: all of its ports and attached groups, one port, or a group's ranges. */
+const rangesOf = (a: App, scope: Scope): PortRange[] =>
+  scope.kind === "port" ? [{ start: scope.port, end: scope.port, proto: scope.proto }]
+  : scope.kind === "group" ? socketGroups.find((g) => g.id === scope.id)?.ports ?? []
+  : [...a.ports.map((p) => ({ start: p.port, end: p.port, proto: p.proto })), ...attached(a).flatMap((g) => g.ports)];
+const narrow = (grant: Scope, member: Scope): Scope => (grant.kind === "all" ? member : grant);
+
+interface G { id: string; target: GrantView["target"]; scope: Scope; network_id: string | null; subject: Subject }
 let grants: G[] = [
-  { id: "gr1", target: { kind: "tag", id: "t1" }, port: null, network_id: null, subject: { kind: "group", id: "g1" } },
-  { id: "gr2", target: { kind: "app", id: "a1" }, port: { port: 443, proto: "tcp" }, network_id: "n-lan", subject: { kind: "anyone" } },
-  { id: "gr3", target: { kind: "app", id: "a4" }, port: null, network_id: null, subject: { kind: "peer", id: "p1" } },
-  { id: "gr4", target: { kind: "app", id: "a2" }, port: null, network_id: "n-ygg", subject: { kind: "group", id: "g2" } },
-  { id: "gr5", target: { kind: "tag", id: "t2" }, port: null, network_id: null, subject: { kind: "peer", id: "p3" } },
-  { id: "gr6", target: { kind: "app", id: "a5" }, port: { port: 3000, proto: "tcp" }, network_id: null, subject: { kind: "anyone" } },
-  { id: "gr7", target: { kind: "tag", id: "t4" }, port: null, network_id: "n-lan", subject: { kind: "peer", id: "p4" } },
-  { id: "gr8", target: { kind: "app", id: "a7" }, port: null, network_id: null, subject: { kind: "peer", id: "p2" } },
+  { id: "gr1", target: { kind: "tag", id: "t1" }, scope: ALL_SCOPE, network_id: null, subject: { kind: "group", id: "g1" } },
+  { id: "gr2", target: { kind: "app", id: "a1" }, scope: { kind: "port", port: 443, proto: "tcp" }, network_id: "n-lan", subject: { kind: "anyone" } },
+  { id: "gr3", target: { kind: "app", id: "a4" }, scope: ALL_SCOPE, network_id: null, subject: { kind: "peer", id: "p1" } },
+  { id: "gr4", target: { kind: "app", id: "a2" }, scope: ALL_SCOPE, network_id: "n-ygg", subject: { kind: "group", id: "g2" } },
+  { id: "gr5", target: { kind: "tag", id: "t2" }, scope: ALL_SCOPE, network_id: null, subject: { kind: "peer", id: "p3" } },
+  { id: "gr6", target: { kind: "app", id: "a5" }, scope: { kind: "port", port: 3000, proto: "tcp" }, network_id: null, subject: { kind: "anyone" } },
+  { id: "gr7", target: { kind: "tag", id: "t4" }, scope: ALL_SCOPE, network_id: "n-lan", subject: { kind: "peer", id: "p4" } },
+  { id: "gr8", target: { kind: "app", id: "a7" }, scope: ALL_SCOPE, network_id: null, subject: { kind: "peer", id: "p2" } },
 ];
 
 // ─── Derived views ──────────────────────────────────────────────────────────
@@ -109,15 +122,16 @@ function detail(a: App): AppDetail {
   const access: EffectiveAccess[] = [];
   for (const g of grants) {
     if (g.target.kind === "app" && g.target.id === a.id) {
-      access.push({ grant_id: g.id, port: g.port, network_id: g.network_id, subject: g.subject, origin: g.subject.kind === "group" ? { kind: "group", group_id: g.subject.id } : { kind: "direct" } });
+      access.push({ grant_id: g.id, scope: g.scope, ports: rangesOf(a, g.scope), network_id: g.network_id, subject: g.subject, origin: g.subject.kind === "group" ? { kind: "group", group_id: g.subject.id } : { kind: "direct" } });
     } else if (g.target.kind === "tag") {
       const tag = tags.find((t) => t.id === (g.target as { id: string }).id);
       for (const m of tag?.members.filter((x) => x.app_id === a.id) ?? []) {
-        access.push({ grant_id: g.id, port: m.port ?? g.port, network_id: g.network_id, subject: g.subject, origin: { kind: "tag", tag_id: g.target.id } });
+        const scope = narrow(g.scope, m.scope);
+        access.push({ grant_id: g.id, scope: g.scope, ports: rangesOf(a, scope), network_id: g.network_id, subject: g.subject, origin: { kind: "tag", tag_id: g.target.id } });
       }
     }
   }
-  return { ...a, grants: mine.map(view), access, tags: tags.filter((t) => t.members.some((m) => m.app_id === a.id)).map((t) => t.id), counters: [] };
+  return { ...a, grants: mine.map(view), access, tags: tags.filter((t) => t.members.some((m) => m.app_id === a.id)).map((t) => t.id), counters: [], socket_groups: attached(a) };
 }
 
 // ─── Batches ────────────────────────────────────────────────────────────────
@@ -168,7 +182,7 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
         const g: G = {
           id: uid("gr"),
           target: { kind: (op.target as { kind: "app" | "tag" }).kind, id: res((op.target as { id: string }).id) },
-          port: (op.port as G["port"]) ?? null,
+          scope: (op.scope as Scope | undefined) ?? ALL_SCOPE,
           network_id: (op.network_id as string) ?? null,
           subject: subject.kind === "anyone" ? subject : { kind: subject.kind, id: res(subject.id) },
         };
@@ -178,7 +192,7 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
         widens ||= reach.some((r) => r.reach !== "not_reachable");
         const tgt = g.target.kind === "app" ? apps.find((a) => a.id === g.target.id)?.name : `tag ${tags.find((t) => t.id === g.target.id)?.label}`;
         const who = g.subject.kind === "anyone" ? "Anyone" : g.subject.kind === "peer" ? peers.find((p) => p.id === (g.subject as { id: string }).id)?.label : `group ${groups.find((x) => x.id === (g.subject as { id: string }).id)?.label}`;
-        out.push({ kind: "create", item: "grant", name: `${who} to ${tgt}${g.port ? ` ${g.port.port}/${g.port.proto}` : ""}`, detail: g.network_id ? `on ${g.network_id}` : undefined, id: g.id, opens_to_anyone: g.subject.kind === "anyone", reach });
+        out.push({ kind: "create", item: "grant", name: `${who} to ${tgt}${g.scope.kind === "port" ? ` ${g.scope.port}/${g.scope.proto}` : g.scope.kind === "group" ? ` group ${socketGroups.find((x) => x.id === (g.scope as { id: string }).id)?.label}` : ""}`, detail: g.network_id ? `on ${g.network_id}` : undefined, id: g.id, opens_to_anyone: g.subject.kind === "anyone", reach });
         break;
       }
       case "remove_grant": {
@@ -195,9 +209,9 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
         const tg = grants.filter((g) => g.target.kind === "tag" && g.target.id === tag.id);
         const opens = tg.some((g) => g.subject.kind === "anyone");
         if (opens && !op.confirm_open) throw { code: "confirmation_required", message: "confirm" };
-        const port = (op.port as { port: number; proto: "tcp" | "udp" } | undefined) ?? null;
-        if (!tag.members.some((m) => m.app_id === app.id && JSON.stringify(m.port) === JSON.stringify(port))) {
-          tags = tags.map((t) => (t.id === tag.id ? { ...t, members: [...t.members, { app_id: app.id, port }] } : t));
+        const scope = (op.scope as Scope | undefined) ?? ALL_SCOPE;
+        if (!tag.members.some((m) => m.app_id === app.id && sameScope(m.scope, scope))) {
+          tags = tags.map((t) => (t.id === tag.id ? { ...t, members: [...t.members, { app_id: app.id, scope }] } : t));
           const reach = tg.flatMap(reachOf);
           widens ||= reach.some((r) => r.reach !== "not_reachable");
           const who = tg.map((g) => (g.subject.kind === "anyone" ? "Anyone" : g.subject.kind === "peer" ? peers.find((p) => p.id === (g.subject as { id: string }).id)?.label : `group ${groups.find((x) => x.id === (g.subject as { id: string }).id)?.label}`));
@@ -207,7 +221,7 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
       }
       case "remove_tag_member": {
         const tag = tags.find((t) => t.id === op.tag_id)!;
-        tags = tags.map((t) => (t.id === tag.id ? { ...t, members: t.members.filter((m) => !(m.app_id === op.app_id && JSON.stringify(m.port) === JSON.stringify(op.port ?? null))) } : t));
+        tags = tags.map((t) => (t.id === tag.id ? { ...t, members: t.members.filter((m) => !(m.app_id === op.app_id && sameScope(m.scope, (op.scope as Scope | undefined) ?? ALL_SCOPE))) } : t));
         out.push({ kind: "delete", item: "tag_member", name: `${op.app_id} from tag ${tag.label}`, opens_to_anyone: false });
         break;
       }
@@ -244,6 +258,25 @@ export function installMock() {
         case "list_groups": return groups;
         case "list_grants": return grants.map(view);
         case "list_tags": return tags;
+        case "list_socket_groups": return socketGroups;
+        case "get_socket_group": return socketGroups.find((g) => g.id === a.id);
+        case "create_socket_group": {
+          const g: SocketGroup = { id: uid("sg"), label: a.req.label, ports: a.req.ports, apps: a.req.apps, created_at: T0 };
+          socketGroups = [...socketGroups, g];
+          return done(g);
+        }
+        case "update_socket_group":
+          socketGroups = socketGroups.map((g) => (g.id === a.id ? { ...g, ...(a.req.label ? { label: a.req.label } : {}), ...(a.req.ports ? { ports: a.req.ports } : {}) } : g));
+          return done(socketGroups.find((g) => g.id === a.id));
+        case "delete_socket_group":
+          socketGroups = socketGroups.filter((g) => g.id !== a.id);
+          return done(null);
+        case "attach_socket_group":
+          socketGroups = socketGroups.map((g) => (g.id === a.id && !g.apps.includes(a.appId) ? { ...g, apps: [...g.apps, a.appId] } : g));
+          return done(socketGroups.find((g) => g.id === a.id));
+        case "detach_socket_group":
+          socketGroups = socketGroups.map((g) => (g.id === a.id ? { ...g, apps: g.apps.filter((x) => x !== a.appId) } : g));
+          return done(socketGroups.find((g) => g.id === a.id));
         case "list_networks": return networks;
         case "get_settings": return { address_mode: "per_app", protect_host_interfaces: ["eth0"] };
         case "activity": return [];

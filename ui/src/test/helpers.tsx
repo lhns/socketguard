@@ -21,11 +21,11 @@ export const app1: App = {
   reviewed: false, system: false, first_seen: "2026-01-01T00:00:00Z", last_seen: "2026-01-01T00:00:00Z",
   ports: [{ port: 8080, proto: "tcp", listening: true, last_seen: "2026-01-01T00:00:00Z", family: "dual" }],
   addresses: [
-    { id: "ad1", app_id: "a1", network_id: "n-ygg", ports: "all", locator: { kind: "ipv6", addr: "302::1" }, created_at: "2026-01-01T00:00:00Z" },
+    { id: "ad1", app_id: "a1", network_id: "n-ygg", scope: { kind: "all" }, locator: { kind: "ipv6", addr: "302::1" }, created_at: "2026-01-01T00:00:00Z" },
   ],
 };
 
-export const appDetail: AppDetail = { ...app1, grants: [], access: [], tags: [], counters: [] };
+export const appDetail: AppDetail = { ...app1, grants: [], access: [], tags: [], counters: [], socket_groups: [] };
 
 export const alice: Peer = {
   id: "p1", label: "alice", groups: [], created_at: "2026-01-01T00:00:00Z",
@@ -44,7 +44,7 @@ export const status: StatusResponse = {
 };
 
 export const grantView = (over: Partial<GrantView> = {}): GrantView => ({
-  id: "g1", target: { kind: "app", id: "a1" }, port: null, network_id: null, subject: { kind: "peer", id: "p1" },
+  id: "g1", target: { kind: "app", id: "a1" }, scope: { kind: "all" }, network_id: null, subject: { kind: "peer", id: "p1" },
   created_at: "2026-01-01T00:00:00Z", reach: [{ network_id: "n-ygg", reach: "verified" }], ...over,
 });
 
@@ -55,12 +55,12 @@ export const mkApp = (id: string, name: string, ports: number[] = [8080], over: 
   id, name, process_name: name, exe_path: `/usr/bin/${name}`, interpreter_arg: null, identity_note: null, reviewed: true,
   system: false, first_seen: T0, last_seen: T0,
   ports: ports.map((port) => ({ port, proto: "tcp" as const, listening: true, last_seen: T0, family: "dual" as const })),
-  addresses: [{ id: `${id}-y`, app_id: id, network_id: "n-ygg", ports: "all", locator: { kind: "ipv6", addr: `302::${id.length}` }, created_at: T0 }],
+  addresses: [{ id: `${id}-y`, app_id: id, network_id: "n-ygg", scope: { kind: "all" }, locator: { kind: "ipv6", addr: `302::${id.length}` }, created_at: T0 }],
   ...over,
 });
 
 export const mkTag = (id: string, label: string, appIds: string[] = [], patterns: string[] = []): Tag => ({
-  id, label, patterns, excluded: [], created_at: T0, members: appIds.map((app_id) => ({ app_id, port: null })),
+  id, label, patterns, excluded: [], created_at: T0, members: appIds.map((app_id) => ({ app_id, scope: { kind: "all" as const } })),
 });
 
 export const mkPeer = (id: string, label: string, over: Partial<Peer> = {}): Peer => ({
@@ -69,7 +69,7 @@ export const mkPeer = (id: string, label: string, over: Partial<Peer> = {}): Pee
 
 export const mkGroup = (id: string, label: string, members: string[] = []): PeerGroup => ({ id, label, members, created_at: T0 });
 
-export const detail = (app: App, over: Partial<AppDetail> = {}): AppDetail => ({ ...app, grants: [], access: [], tags: [], counters: [], ...over });
+export const detail = (app: App, over: Partial<AppDetail> = {}): AppDetail => ({ ...app, grants: [], access: [], tags: [], counters: [], socket_groups: [], ...over });
 
 /** A working Storage: some Node versions shadow jsdom's with a broken experimental one. */
 export function memoryStorage() {

@@ -32,6 +32,11 @@ import type { PeerGroup } from "./generated/PeerGroup";
 import type { PortRef } from "./generated/PortRef";
 import type { ProtectHostRequest } from "./generated/ProtectHostRequest";
 import type { ProtectHostResponse } from "./generated/ProtectHostResponse";
+import type { AttachSocketGroup } from "./generated/AttachSocketGroup";
+import type { NewSocketGroup } from "./generated/NewSocketGroup";
+import type { Scope } from "./generated/Scope";
+import type { SocketGroup } from "./generated/SocketGroup";
+import type { UpdateSocketGroup } from "./generated/UpdateSocketGroup";
 import type { Settings } from "./generated/Settings";
 import type { ShareResponse } from "./generated/ShareResponse";
 import type { SplitRequest } from "./generated/SplitRequest";
@@ -48,10 +53,12 @@ export type {
   ChangeOp, ChangesRequest, ChangesResponse, Credential, Enforcement, ExportDocument, GrantView,
   LockoutRiskInfo, MergeRequest, Network, NewCredential, NewGrant, NewGroup, NewNetwork, NewPeer,
   NewTag, ParsedCredential, Peer, PeerGroup, PortRef, ProtectHostRequest, ProtectHostResponse,
+  AttachSocketGroup, NewSocketGroup, Scope, SocketGroup, UpdateSocketGroup,
   Settings, ShareResponse, SplitRequest, StatusResponse, Tag, TagMember, Target, TorKeyResponse,
   UpdateSettings, UpdateTag,
 };
 export type { AccessOrigin } from "./generated/AccessOrigin";
+export type { PortRange } from "./generated/PortRange";
 export type { AddrFamily } from "./generated/AddrFamily";
 export type { AddressMode } from "./generated/AddressMode";
 export type { AppPort } from "./generated/AppPort";
@@ -154,8 +161,18 @@ export const api = {
   deleteTag: (id: string) => callSaved<null>("delete_tag", { id }),
   addTagMember: (tagId: string, member: TagMember, confirmOpen = false) =>
     callSaved<Tag>("add_tag_member", { tagId, member, confirmOpen }),
-  removeTagMember: (tagId: string, appId: string, port: PortRef | null) =>
-    callSaved<Tag>("remove_tag_member", { tagId, appId, port }),
+  removeTagMember: (tagId: string, appId: string, scope: Scope) =>
+    callSaved<Tag>("remove_tag_member", { tagId, appId, scope }),
+  listSocketGroups: () => call<SocketGroup[]>("list_socket_groups"),
+  getSocketGroup: (id: string) => call<SocketGroup>("get_socket_group", { id }),
+  createSocketGroup: (req: NewSocketGroup) => callSaved<SocketGroup>("create_socket_group", { req }),
+  updateSocketGroup: (id: string, req: UpdateSocketGroup) =>
+    callSaved<SocketGroup>("update_socket_group", { id, req }),
+  deleteSocketGroup: (id: string) => callSaved<null>("delete_socket_group", { id }),
+  attachSocketGroup: (id: string, appId: string, req: AttachSocketGroup) =>
+    callSaved<SocketGroup>("attach_socket_group", { id, appId, req }),
+  detachSocketGroup: (id: string, appId: string) =>
+    callSaved<SocketGroup>("detach_socket_group", { id, appId }),
   listNetworks: () => call<Network[]>("list_networks"),
   addNetwork: (req: NewNetwork) => call<Network>("add_network", { req }),
   deleteNetwork: (id: string, force: boolean) => call<void>("delete_network", { id, force }),

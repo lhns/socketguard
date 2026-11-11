@@ -11,16 +11,16 @@ const team = mkGroup("g1", "team", ["p1"]);
 const web = mkTag("t1", "web", ["a1"]);
 const ctx: NameCtx = { apps: [mkApp("a1", "nginx", [80]), mkApp("a2", "redis", [6379])], tags: [web], peers: [alice], groups: [team], networks };
 
-const direct = grantView({ id: "g-direct", subject: { kind: "peer", id: "p1" }, port: { port: 80, proto: "tcp" } });
+const direct = grantView({ id: "g-direct", subject: { kind: "peer", id: "p1" }, scope: { kind: "port", port: 80, proto: "tcp" } });
 const viaTag = grantView({ id: "g-tag", target: { kind: "tag", id: "t1" }, subject: { kind: "peer", id: "p1" }, network_id: "n-lan", reach: [{ network_id: "n-lan", reach: "ip_only" }] });
 const toGroup = grantView({ id: "g-team", target: { kind: "app", id: "a2" }, subject: { kind: "group", id: "g1" } });
 
 describe("AccessList, who can reach this", () => {
   const access: EffectiveAccess[] = [
-    { grant_id: "g-direct", port: { port: 80, proto: "tcp" }, network_id: null, subject: { kind: "peer", id: "p1" }, origin: { kind: "direct" } },
-    { grant_id: "g-tag", port: null, network_id: "n-lan", subject: { kind: "peer", id: "p1" }, origin: { kind: "tag", tag_id: "t1" } },
+    { grant_id: "g-direct", scope: { kind: "port", port: 80, proto: "tcp" }, ports: [{ start: 80, end: 80, proto: "tcp" }], network_id: null, subject: { kind: "peer", id: "p1" }, origin: { kind: "direct" } },
+    { grant_id: "g-tag", scope: { kind: "all" }, ports: [{ start: 80, end: 80, proto: "tcp" }], network_id: "n-lan", subject: { kind: "peer", id: "p1" }, origin: { kind: "tag", tag_id: "t1" } },
   ];
-  const entries = appEntries(access, [direct, viaTag], ctx);
+  const entries = appEntries("a1", access, [direct, viaTag], ctx);
 
   it("shows port, network, reach and origin; Revoke only on the direct entry", async () => {
     const onRevoke = vi.fn();
@@ -86,7 +86,7 @@ describe("AccessList, what this can reach", () => {
 
   it("marks the entry of the subject a cell of the overview was clicked for", () => {
     renderWithProviders(
-      <AccessList entries={appEntries([{ grant_id: "g-direct", port: null, network_id: null, subject: { kind: "peer", id: "p1" }, origin: { kind: "direct" } }], [direct], ctx)} direction="who" networks={networks} highlight={{ subject: { kind: "peer", id: "p1" }, networkId: null }} />,
+      <AccessList entries={appEntries("a1", [{ grant_id: "g-direct", scope: { kind: "all" }, ports: [{ start: 80, end: 80, proto: "tcp" }], network_id: null, subject: { kind: "peer", id: "p1" }, origin: { kind: "direct" } }], [direct], ctx)} direction="who" networks={networks} highlight={{ subject: { kind: "peer", id: "p1" }, networkId: null }} />,
     );
     expect(document.querySelector(".access-highlight")).not.toBeNull();
   });

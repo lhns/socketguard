@@ -152,8 +152,8 @@ describe("Inspector: one peer", () => {
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0]).toEqual([
-      { op: "add_grant", target: { kind: "tag", id: "t1" }, subject: { kind: "peer", id: "p2" }, confirm_open: false },
-      { op: "add_grant", target: { kind: "app", id: "a1" }, subject: { kind: "peer", id: "p2" }, confirm_open: false },
+      { op: "add_grant", target: { kind: "tag", id: "t1" }, scope: { kind: "all" }, subject: { kind: "peer", id: "p2" }, confirm_open: false },
+      { op: "add_grant", target: { kind: "app", id: "a1" }, scope: { kind: "all" }, subject: { kind: "peer", id: "p2" }, confirm_open: false },
     ]);
   });
 

@@ -503,11 +503,13 @@ impl Client {
     // ─── Socket groups ───────────────────────────────────────────────────────
 
     pub async fn list_socket_groups(&self) -> Result<Vec<SocketGroup>> {
-        self.call(&routes::LIST_SOCKET_GROUPS, &[], None, None).await
+        self.call(&routes::LIST_SOCKET_GROUPS, &[], None, None)
+            .await
     }
 
     pub async fn get_socket_group(&self, id: &str) -> Result<SocketGroup> {
-        self.call(&routes::GET_SOCKET_GROUP, &[id], None, None).await
+        self.call(&routes::GET_SOCKET_GROUP, &[id], None, None)
+            .await
     }
 
     /// Create a socket group (and attach it to `req.apps`). Where attaching would open an
@@ -551,11 +553,7 @@ impl Client {
 
     /// Detach a socket group from an app; refused (409) while a grant or a tag member uses
     /// it there.
-    pub async fn detach_socket_group(
-        &self,
-        id: &str,
-        app_id: &str,
-    ) -> Result<Saved<SocketGroup>> {
+    pub async fn detach_socket_group(&self, id: &str, app_id: &str) -> Result<Saved<SocketGroup>> {
         self.call_saved(&routes::DETACH_SOCKET_GROUP, &[id, app_id], None)
             .await
     }

@@ -10,8 +10,8 @@ use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use socketguard_core::{
     app_identity, credential_source, foreign_listening, grants_for_app, scope_ports,
     valid_interface_name, App, AppPort, Credential, Grant, ListeningSocket, Network, NetworkKind,
-    Peer, PeerGroup, PortRange, PortRangeSet, PortRef, Protocol, ScopePorts, SocketGroup,
-    Subject, Tag,
+    Peer, PeerGroup, PortRange, PortRangeSet, PortRef, Protocol, ScopePorts, SocketGroup, Subject,
+    Tag,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
@@ -540,8 +540,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use socketguard_core::{
-        Address, AppPort, CredentialKind, Locator, NetworkStatus, Reach, Scope, SocketGroup,
-        Target,
+        Address, AppPort, CredentialKind, Locator, NetworkStatus, Reach, Scope, SocketGroup, Target,
     };
 
     const KEY: &str = "ba83a2e554a8a087cebdb3f053468cd3ff915b5dd94bf11b7a5fc2e36f13158b";
@@ -913,8 +912,11 @@ mod tests {
         s.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
         assert_eq!(rule_ports(&rs, "ay"), ["21/tcp", "50000-51000/tcp"]);
-        assert!(rs.rules.iter().any(|r| r.id == "a:ay:50000-51000:tcp:g:ygg0"
-            && r.ports == "50000-51000/tcp".parse().unwrap()));
+        assert!(rs
+            .rules
+            .iter()
+            .any(|r| r.id == "a:ay:50000-51000:tcp:g:ygg0"
+                && r.ports == "50000-51000/tcp".parse().unwrap()));
         // A single-port range keeps the id of a plain port.
         assert!(rs.rules.iter().any(|r| r.id == "a:ay:21:tcp:g:ygg0"));
         // Not attached to the app: no ports from it.

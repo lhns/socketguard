@@ -1,14 +1,14 @@
 // Pure helpers over grants, tags and groups shared by the pages, the lists and the overview.
 import type {
-  App, EffectiveAccess, GrantReach, GrantView, Network, Peer, PeerGroup, PortRef, Subject, Tag, Target,
+  App, EffectiveAccess, GrantReach, GrantView, Network, Peer, PeerGroup, PortRef, Scope, SocketGroup, Subject, Tag, Target,
 } from "./api";
-import { portLabel, samePort, subjectLabel, targetLabel } from "./lib";
+import { sameScope, scopeKey, scopeLabel, scopeOfPort, subjectLabel, targetLabel } from "./lib";
 import type { Focus } from "./nav";
 
-/** The tags an app belongs to, with the port when the membership is for one port only. */
-export function membershipsOf(appId: string, tags: Tag[]): { tag: Tag; port: PortRef | null }[] {
+/** The tags an app belongs to, with the scope when the membership is not for the whole app. */
+export function membershipsOf(appId: string, tags: Tag[]): { tag: Tag; scope: Scope }[] {
   return tags.flatMap((tag) =>
-    tag.members.filter((m) => m.app_id === appId).map((m) => ({ tag, port: m.port })),
+    tag.members.filter((m) => m.app_id === appId).map((m) => ({ tag, scope: m.scope })),
   );
 }
 
@@ -30,10 +30,13 @@ export function accessSummary(appId: string, grants: GrantView[], tags: Tag[]) {
   };
 }
 
-/** Does a grant on `grantPort` cover `port` (null = the whole app)? A port-specific grant does
- * not cover the whole app. */
-export const covers = (grantPort: PortRef | null, port: PortRef | null) =>
-  grantPort === null || (port !== null && samePort(grantPort, port));
+/** Does a grant with `grantScope` cover `port` (null = the whole app)? A port-specific grant does
+ * not cover the whole app; a socket group is not resolved here and covers nothing. */
+export const covers = (grantScope: Scope, port: PortRef | null) =>
+  grantScope.kind === "all" || (port !== null && sameScope(grantScope, scopeOfPort(port)));
+
+/** What a tag grant of scope `grant` means on a member of scope `member`: the narrower one. */
+export const narrowScope = (grant: Scope, member: Scope): Scope => (grant.kind === "all" ? member : grant);
 
 // ─── Access, as the lists show it ───────────────────────────────────────────
 
@@ -44,6 +47,8 @@ export interface NameCtx {
   peers: Peer[];
   groups: PeerGroup[];
   networks: Network[];
+  /** Names the socket groups in scopes; the ids show without it. */
+  socketGroups?: SocketGroup[];
 }
 
 export type EntryOrigin =
@@ -61,7 +66,9 @@ export interface AccessEntry {
   /** Where the name leads. */
   link?: { page: "apps" | "peers"; focus: Focus };
   subject?: Subject;
-  port: PortRef | null;
+  scope: Scope;
+  /** The scope as shown ("80/tcp", "group passive"). */
+  scopeText: string;
   networkId: string | null;
   reach: GrantReach[];
   origin: EntryOrigin;
@@ -81,7 +88,6 @@ export function subjectName(s: Subject, networkId: string | null, ctx: Pick<Name
 }
 
 const subjectKey = (s: Subject) => (s.kind === "anyone" ? "anyone" : `${s.kind}:${s.id}`);
-const portKey = (p: PortRef | null) => (p ? portLabel(p) : "*");
 
 const subjectLink = (s: Subject): AccessEntry["link"] =>
   s.kind === "peer" ? { page: "peers", focus: { peerId: s.id } } : s.kind === "group" ? { page: "peers", focus: { groupId: s.id } } : undefined;
@@ -92,7 +98,7 @@ const targetLink = (t: Target): NonNullable<AccessEntry["link"]> =>
 /** Whole-app access first, then what only some ports have, each by name. */
 export const sortEntries = (entries: AccessEntry[]) =>
   [...entries].sort(
-    (a, b) => Number(a.port !== null) - Number(b.port !== null) || a.name.localeCompare(b.name) || portKey(a.port).localeCompare(portKey(b.port)),
+    (a, b) => Number(a.scope.kind !== "all") - Number(b.scope.kind !== "all") || a.name.localeCompare(b.name) || scopeKey(a.scope).localeCompare(scopeKey(b.scope)),
   );
 
 /** Direct grants as entries: `side` is what the entry names (the subject, for "who can reach this"). */
@@ -102,11 +108,12 @@ export function grantEntries(grants: GrantView[], side: "subject" | "target", ct
     const who = side === "subject" ? subjectKey(g.subject) : `${g.target.kind}:${g.target.id}`;
     return {
       key: g.id,
-      ident: `${who}|${portKey(g.port)}|${g.network_id ?? "*"}|direct`,
+      ident: `${who}|${scopeKey(g.scope)}|${g.network_id ?? "*"}|direct`,
       name,
       link: side === "subject" ? subjectLink(g.subject) : targetLink(g.target),
       subject: g.subject,
-      port: g.port,
+      scope: g.scope,
+      scopeText: scopeLabel(g.scope, ctx.socketGroups),
       networkId: g.network_id,
       reach: g.reach,
       origin: { kind: "direct" },
@@ -117,11 +124,16 @@ export function grantEntries(grants: GrantView[], side: "subject" | "target", ct
 
 /** Everything that lets someone reach one app: its own grants and the grants on its tags, each
  * once, whole-app access first. A grant on the app is revocable here, whoever it names. */
-export function appEntries(access: EffectiveAccess[], grants: GrantView[], ctx: NameCtx): AccessEntry[] {
+export function appEntries(appId: string, access: EffectiveAccess[], grants: GrantView[], ctx: NameCtx): AccessEntry[] {
   const seen = new Set<string>();
   const out: AccessEntry[] = [];
   for (const a of access) {
-    const key = `${a.grant_id}|${portKey(a.port)}`;
+    // A tag grant on a single member is narrowed to that member's scope.
+    const members = a.origin.kind === "tag"
+      ? ctx.tags.find((t) => t.id === (a.origin as { tag_id: string }).tag_id)?.members.filter((m) => m.app_id === appId) ?? []
+      : [];
+    const scope = members.length === 1 ? narrowScope(a.scope, members[0].scope) : a.scope;
+    const key = `${a.grant_id}|${scopeKey(scope)}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const grant = grants.find((g) => g.id === a.grant_id);
@@ -131,11 +143,12 @@ export function appEntries(access: EffectiveAccess[], grants: GrantView[], ctx: 
         : { kind: "direct" };
     out.push({
       key,
-      ident: `${subjectKey(a.subject)}|${portKey(a.port)}|${a.network_id ?? "*"}|${origin.kind === "tag" ? origin.id : "direct"}`,
+      ident: `${subjectKey(a.subject)}|${scopeKey(scope)}|${a.network_id ?? "*"}|${origin.kind === "tag" ? origin.id : "direct"}`,
       name: subjectName(a.subject, a.network_id, ctx),
       link: subjectLink(a.subject),
       subject: a.subject,
-      port: a.port,
+      scope,
+      scopeText: scopeLabel(scope, ctx.socketGroups),
       networkId: a.network_id,
       reach: grant?.reach ?? [],
       origin,
@@ -192,12 +205,13 @@ export function mergeEntries(lists: AccessEntry[][]): AccessEntry[] {
  * the app, and the grants on the tags it belongs to (narrowed to the member's port). */
 export function appEntriesFromGrants(appId: string, grants: GrantView[], ctx: NameCtx): AccessEntry[] {
   const direct = grantEntries(grants.filter((g) => g.target.kind === "app" && g.target.id === appId), "subject", ctx);
-  const viaTags = membershipsOf(appId, ctx.tags).flatMap(({ tag, port }) =>
+  const viaTags = membershipsOf(appId, ctx.tags).flatMap(({ tag, scope }) =>
     grantEntries(grants.filter((g) => g.target.kind === "tag" && g.target.id === tag.id), "subject", ctx).map<AccessEntry>((e) => ({
       ...e,
-      key: `${e.key}|${port ? portLabel(port) : "*"}`,
+      key: `${e.key}|${scopeKey(scope)}`,
       ident: e.ident.replace(/\|direct$/, `|${tag.id}`),
-      port: port ?? e.port,
+      scope: narrowScope(e.scope, scope),
+      scopeText: scopeLabel(narrowScope(e.scope, scope), ctx.socketGroups),
       origin: { kind: "tag", id: tag.id, label: tag.label },
       grants: [],
     })),

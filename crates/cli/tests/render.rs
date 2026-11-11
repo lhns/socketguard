@@ -19,12 +19,12 @@ fn tcp(port: u16) -> PortRef {
     }
 }
 
-fn address(id: &str, net: &str, addr: &str, ports: PortSet) -> Address {
+fn address(id: &str, net: &str, addr: &str, scope: Scope) -> Address {
     Address {
         id: id.into(),
         app_id: "5c0d1f2a99887766".into(),
         network_id: net.into(),
-        ports,
+        scope,
         locator: Locator::Ipv6 {
             addr: addr.parse().unwrap(),
         },
@@ -68,14 +68,9 @@ fn nginx() -> App {
             },
         ],
         addresses: vec![
-            address(
-                "a1b2c3d4e5f6",
-                "ygg",
-                "300:1:2:3::1",
-                PortSet::Only(vec![tcp(443)]),
-            ),
-            address("b2c3d4e5f6a1", "ygg", "300:1:2:3::2", PortSet::All),
-            address("c3d4e5f6a1b2", "lan", "2001:db8:1:2::5", PortSet::All),
+            address("a1b2c3d4e5f6", "ygg", "300:1:2:3::1", Scope::port(tcp(443))),
+            address("b2c3d4e5f6a1", "ygg", "300:1:2:3::2", Scope::All),
+            address("c3d4e5f6a1b2", "lan", "2001:db8:1:2::5", Scope::All),
         ],
     }
 }
@@ -146,7 +141,7 @@ fn grant(
         grant: Grant {
             id: id.into(),
             target: Target::App("5c0d1f2a99887766".into()),
-            port: port.map(tcp),
+            scope: port.map_or(Scope::All, |p| Scope::port(tcp(p))),
             network_id: net.map(Into::into),
             subject,
             created_at: t("2026-11-05T10:00:00Z"),
@@ -270,6 +265,7 @@ fn app_detail() {
         }],
         access: vec![],
         tags: vec![],
+        socket_groups: vec![],
     };
     insta::assert_snapshot!(render::app_detail(&d, &names()));
 }
@@ -282,6 +278,7 @@ fn closed_app_detail() {
         counters: vec![],
         access: vec![],
         tags: vec![],
+        socket_groups: vec![],
     };
     insta::assert_snapshot!(render::app_detail(&d, &names()));
 }
@@ -359,7 +356,7 @@ fn activity_lines() {
 fn share_connection_strings() {
     let lines = render::share_lines(&nginx(), Some("ygg"));
     insta::assert_snapshot!(lines.join("\n"));
-    // 443 has its own address; the other address serves the remaining TCP port.
+    // Addresses overlap: 443 has its own address and the other one serves it too.
     assert!(render::share_lines(&nginx(), Some("nope")).is_empty());
 }
 
@@ -380,7 +377,7 @@ fn share_onion_addresses() {
         last_seen: t("2026-11-09T12:30:00Z"),
         family: Default::default(),
     });
-    let mut onion = address("d4e5f6a1b2c3", "tor", "::1", PortSet::All);
+    let mut onion = address("d4e5f6a1b2c3", "tor", "::1", Scope::All);
     onion.locator = Locator::Onion {
         hostname: "abcdefghijklmnop.onion".into(),
     };
@@ -475,19 +472,33 @@ fn diff_and_risks() {
 fn finding_the_grant_to_revoke() {
     let g = grants();
     let alice = Subject::Peer("peer-alice-1".into());
-    let found = find_grants(&g, "5c0d1f2a99887766", Some(tcp(80)), &alice, None);
+    let found = find_grants(&g, "5c0d1f2a99887766", &Scope::port(tcp(80)), &alice, None);
     assert_eq!(found.len(), 1);
-    assert!(find_grants(&g, "5c0d1f2a99887766", Some(tcp(80)), &alice, Some("lan")).is_empty());
-    assert_eq!(
-        find_grants(&g, "5c0d1f2a99887766", Some(tcp(80)), &alice, Some("ygg")).len(),
-        1
-    );
-    assert!(find_grants(&g, "5c0d1f2a99887766", None, &alice, None).is_empty());
+    assert!(find_grants(
+        &g,
+        "5c0d1f2a99887766",
+        &Scope::port(tcp(80)),
+        &alice,
+        Some("lan")
+    )
+    .is_empty());
     assert_eq!(
         find_grants(
             &g,
             "5c0d1f2a99887766",
-            Some(tcp(443)),
+            &Scope::port(tcp(80)),
+            &alice,
+            Some("ygg")
+        )
+        .len(),
+        1
+    );
+    assert!(find_grants(&g, "5c0d1f2a99887766", &Scope::All, &alice, None).is_empty());
+    assert_eq!(
+        find_grants(
+            &g,
+            "5c0d1f2a99887766",
+            &Scope::port(tcp(443)),
             &Subject::Anyone,
             None
         )
@@ -516,13 +527,17 @@ fn documents_round_trip_through_toml_and_json() {
             label: "team".into(),
             members: vec!["alice".into()],
         }],
+        socket_groups: vec![],
         grants: vec![
             ExportGrant {
                 app: ExportAppRef {
                     id: "5c0d".into(),
                     name: "nginx".into(),
                 },
-                port: Some(tcp(80)),
+                scope: ExportScope::Port {
+                    port: 80,
+                    proto: Protocol::Tcp,
+                },
                 network: Some("ygg".into()),
                 subject: ExportSubject::Peer("alice".into()),
             },
@@ -531,7 +546,7 @@ fn documents_round_trip_through_toml_and_json() {
                     id: "5c0d".into(),
                     name: "nginx".into(),
                 },
-                port: None,
+                scope: ExportScope::All,
                 network: None,
                 subject: ExportSubject::Anyone,
             },

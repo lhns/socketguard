@@ -286,7 +286,8 @@ mod tests {
             rule_line(&rule("50000-51000/tcp")),
             "pass in quick on en0 inet6 proto tcp from any to fd00::9 port 50000:51000 keep state"
         );
-        assert!(rule_line(&rule("53/udp")).ends_with("proto udp from any to fd00::9 port 53 keep state"));
+        assert!(rule_line(&rule("53/udp"))
+            .ends_with("proto udp from any to fd00::9 port 53 keep state"));
     }
 
     #[test]

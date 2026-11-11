@@ -4,6 +4,7 @@ import type { AppCounter } from "./AppCounter";
 import type { AppPort } from "./AppPort";
 import type { EffectiveAccess } from "./EffectiveAccess";
 import type { GrantView } from "./GrantView";
+import type { SocketGroup } from "./SocketGroup";
 
 /**
  * An app with its grants.
@@ -18,9 +19,13 @@ grants: Array<GrantView>,
  */
 access: Array<EffectiveAccess>, 
 /**
- * The tags the app is a member of (as a whole or one port).
+ * The tags the app is a member of (as a whole or by scope).
  */
 tags: Array<string>, 
+/**
+ * The socket groups attached to the app.
+ */
+socket_groups: Array<SocketGroup>, 
 /**
  * Packets and bytes the firewall allowed in, per network and grant subject, as of
  * the last reconcile pass. Empty where the platform has no counters.

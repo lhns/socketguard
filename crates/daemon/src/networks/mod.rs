@@ -228,7 +228,12 @@ pub fn enforcement_for(
             let ports: Vec<PortRef> = served.total().intersect(&listening).ports().collect();
             let grants = app_grants
                 .iter()
-                .filter(|g| g.grant.network_id.as_deref().is_none_or(|n| n == network.id))
+                .filter(|g| {
+                    g.grant
+                        .network_id
+                        .as_deref()
+                        .is_none_or(|n| n == network.id)
+                })
                 .map(|g| EnforcedGrant {
                     ports: g.ports.total(),
                     subject: match &g.grant.subject {
@@ -278,6 +283,82 @@ mod tests {
             prefix: None,
             vlan_id: None,
         }
+    }
+
+    /// An address of a socket group publishes only the group's ports that listen now, even
+    /// though the group's ranges are granted whole (ADR 0047).
+    #[test]
+    fn a_group_address_on_tor_publishes_only_listening_ports() {
+        use chrono::Utc;
+        use socketguard_core::{
+            parse_ranges, App, AppPort, Grant, Locator, Protocol, SocketGroup, Target,
+        };
+        let now = Utc::now();
+        let port = |p: u16, listening| AppPort {
+            port: p,
+            proto: Protocol::Tcp,
+            listening,
+            last_seen: now,
+            family: Default::default(),
+        };
+        let group = SocketGroup {
+            id: "sg".into(),
+            label: "passive".into(),
+            ports: parse_ranges(&["50000-50010/tcp"]).unwrap(),
+            apps: vec!["a".into()],
+            created_at: now,
+        };
+        let app = App {
+            id: "a".into(),
+            name: "ftpd".into(),
+            process_name: "ftpd".into(),
+            exe_path: None,
+            interpreter_arg: None,
+            identity_note: None,
+            reviewed: true,
+            system: false,
+            first_seen: now,
+            last_seen: now,
+            // 80 is outside the group; 50003 listens, 50004 was seen but is quiet.
+            ports: vec![port(80, true), port(50003, true), port(50004, false)],
+            addresses: vec![Address {
+                id: "ad".into(),
+                app_id: "a".into(),
+                network_id: "n".into(),
+                scope: Scope::group("sg"),
+                locator: Locator::Onion {
+                    hostname: "abc.onion".into(),
+                },
+                created_at: now,
+            }],
+        };
+        let snap = Snapshot {
+            apps: vec![app],
+            socket_groups: vec![group],
+            grants: vec![Grant {
+                id: "g".into(),
+                target: Target::App("a".into()),
+                scope: Scope::All,
+                network_id: None,
+                subject: Subject::Anyone,
+                created_at: now,
+            }],
+            ..Snapshot::default()
+        };
+        let secrets = HashMap::from([("ad".to_string(), "ED25519-V3:secret".to_string())]);
+        let enforcement =
+            enforcement_for(&info(NetworkKind::Tor), &snap, &secrets, &HashMap::new());
+        let addr = &enforcement.addresses[0];
+        let published: Vec<u16> = addr.ports.iter().map(|p| p.port).collect();
+        assert_eq!(
+            published,
+            [50003],
+            "the quiet port and the ones outside the group are not published"
+        );
+        let plan = tor::plan(addr);
+        let spec = plan.spec.expect("published");
+        assert_eq!(spec.ports.len(), 1);
+        assert_eq!(spec.ports[0].0, 50003);
     }
 
     /// Whatever a network declares as verified must be Verified in core's reach table.

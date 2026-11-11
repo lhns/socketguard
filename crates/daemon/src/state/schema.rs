@@ -187,7 +187,12 @@ async fn finish_6_to_7(conn: &mut SqliteConnection) -> Result<()> {
                 .await?;
             continue;
         }
-        let ranges = normalize_ranges(&refs.iter().map(|p| PortRange::single(*p)).collect::<Vec<_>>());
+        let ranges = normalize_ranges(
+            &refs
+                .iter()
+                .map(|p| PortRange::single(*p))
+                .collect::<Vec<_>>(),
+        );
         let label = ranges_text(&ranges);
         let group_id = match by_label.get(&label) {
             Some(g) => g.clone(),
@@ -869,7 +874,9 @@ mod tests {
         again.id = "other".into();
         let err = db.insert_grant(&again).await.unwrap_err();
         assert!(super::super::is_unique_violation(&err), "{err:#}");
-        again.scope = Scope::Group { id: "elsewhere".into() };
+        again.scope = Scope::Group {
+            id: "elsewhere".into(),
+        };
         db.insert_grant(&again)
             .await
             .expect("another group is another grant");

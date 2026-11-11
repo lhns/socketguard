@@ -557,8 +557,19 @@ pub(crate) mod tests {
         assert_eq!(r.to_string(), "80/tcp");
         let r: PortRange = "50000-51000/udp".parse().unwrap();
         assert_eq!(r.to_string(), "50000-51000/udp");
-        assert_eq!(" 7 - 9 /tcp".parse::<PortRange>().unwrap().to_string(), "7-9/tcp");
-        for bad in ["80", "80/icmp", "9-5/tcp", "0/tcp", "70000/tcp", "a-b/tcp", ""] {
+        assert_eq!(
+            " 7 - 9 /tcp".parse::<PortRange>().unwrap().to_string(),
+            "7-9/tcp"
+        );
+        for bad in [
+            "80",
+            "80/icmp",
+            "9-5/tcp",
+            "0/tcp",
+            "70000/tcp",
+            "a-b/tcp",
+            "",
+        ] {
             assert!(bad.parse::<PortRange>().is_err(), "{bad:?}");
         }
         assert!(PortRange::new(2, 1, Protocol::Tcp).is_err());
@@ -608,7 +619,10 @@ pub(crate) mod tests {
         let top = set(&["65535/tcp"]);
         assert!(top.subtract(&top).is_empty());
         assert_eq!(texts(&top.union(&set(&["65534/tcp"]))), ["65534-65535/tcp"]);
-        assert_eq!(texts(&set(&["1-3/tcp"]).subtract(&set(&["1/tcp"]))), ["2-3/tcp"]);
+        assert_eq!(
+            texts(&set(&["1-3/tcp"]).subtract(&set(&["1/tcp"]))),
+            ["2-3/tcp"]
+        );
         assert!(all.contains(tcp(0)) && all.contains(tcp(65535)));
     }
 
@@ -621,7 +635,10 @@ pub(crate) mod tests {
     #[test]
     fn scope_serde_shape() {
         use serde_json::json;
-        assert_eq!(serde_json::to_value(Scope::All).unwrap(), json!({"kind":"all"}));
+        assert_eq!(
+            serde_json::to_value(Scope::All).unwrap(),
+            json!({"kind":"all"})
+        );
         assert_eq!(
             serde_json::to_value(Scope::port(tcp(80))).unwrap(),
             json!({"kind":"port","port":80,"proto":"tcp"})
@@ -712,11 +729,18 @@ pub(crate) mod tests {
         let b = app_with("b", &[(50003, true), (50004, false)]);
         let groups = [group("passive", &["50000-50010/tcp"], &["a"])];
         let foreign = foreign_listening(&[a.clone(), b], "a");
-        assert_eq!(texts(&foreign), ["50003/tcp"], "only listening ports of others");
+        assert_eq!(
+            texts(&foreign),
+            ["50003/tcp"],
+            "only listening ports of others"
+        );
         let all = scope_ports(&a, &Scope::All, &groups, &foreign);
         // 50003 is b's; 50005 is a's own and stays (as a fixed port).
         assert_eq!(texts(&all.fixed), ["50005/tcp"]);
-        assert_eq!(texts(&all.ranged), ["50000-50002/tcp", "50004/tcp", "50006-50010/tcp"]);
+        assert_eq!(
+            texts(&all.ranged),
+            ["50000-50002/tcp", "50004/tcp", "50006-50010/tcp"]
+        );
         let g = scope_ports(&a, &Scope::group("passive"), &groups, &foreign);
         assert_eq!(
             texts(&g.total()),

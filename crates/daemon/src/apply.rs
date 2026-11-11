@@ -266,7 +266,10 @@ async fn validate(
         g.apps.sort_by(|a, b| a.id.cmp(&b.id));
         g.apps.dedup_by(|a, b| a.id == b.id);
         if socket_group_apps
-            .insert(g.label.clone(), g.apps.iter().map(|a| a.id.clone()).collect())
+            .insert(
+                g.label.clone(),
+                g.apps.iter().map(|a| a.id.clone()).collect(),
+            )
             .is_some()
         {
             return invalid(format!("socket group {} is listed twice", g.label));
@@ -553,11 +556,7 @@ fn plan(current: &ExportDocument, desired: &ExportDocument) -> Plan {
                     ChangeKind::Create,
                     ChangeItem::SocketGroup,
                     *label,
-                    Some(format!(
-                        "{}; {} apps",
-                        ranges_text(&w.ports),
-                        w.apps.len()
-                    )),
+                    Some(format!("{}; {} apps", ranges_text(&w.ports), w.apps.len())),
                 ));
                 p.create_socket_groups.push((*w).clone());
             }
@@ -694,7 +693,9 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
         };
         let wanted: BTreeSet<&String> = want.apps.iter().map(|a| &a.id).collect();
         for gone in was.apps.iter().filter(|a| !wanted.contains(&a.id)) {
-            engine.detach_socket_group(state, &group.id, &gone.id).await?;
+            engine
+                .detach_socket_group(state, &group.id, &gone.id)
+                .await?;
         }
     }
     for label in &p.delete_socket_groups {

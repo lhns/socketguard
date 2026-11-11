@@ -13,7 +13,7 @@ export const confirmAll = (ops: ChangeOp[]): ChangeOp[] =>
 export const grantInverse = (g: GrantView): ChangeOp => ({
   op: "add_grant",
   target: g.target,
-  ...(g.port ? { port: g.port } : {}),
+  scope: g.scope,
   ...(g.network_id ? { network_id: g.network_id } : {}),
   subject: g.subject,
   confirm_open: false,

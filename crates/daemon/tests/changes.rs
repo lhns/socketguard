@@ -257,7 +257,10 @@ async fn patterns_add_matching_apps_now_and_new_ones_later_but_not_excluded_ones
         .await;
     let tag_id = id(&tag);
     assert_eq!(tag["patterns"], json!(["ngi*"]));
-    assert_eq!(tag["members"], json!([{"app_id": app_id, "scope": {"kind": "all"}}]));
+    assert_eq!(
+        tag["members"],
+        json!([{"app_id": app_id, "scope": {"kind": "all"}}])
+    );
 
     // A grant on the tag, then a new matching listener starts: covered from its first
     // reconcile, with no request in between.
@@ -686,7 +689,10 @@ async fn new_patterns_that_add_apps_to_an_open_tag_need_confirm_open() {
 
     let (s, body) = patch(json!({"patterns": ["ngi*"], "confirm_open": true})).await;
     assert_eq!(s, StatusCode::OK, "{body}");
-    assert_eq!(body["members"], json!([{"app_id": app_id, "scope": {"kind": "all"}}]));
+    assert_eq!(
+        body["members"],
+        json!([{"app_id": app_id, "scope": {"kind": "all"}}])
+    );
 }
 
 #[tokio::test]

@@ -64,7 +64,9 @@ impl Catalog {
     fn peer_or_group_label(&self, s: &Subject) -> String {
         match s {
             Subject::Anyone => "Anyone".to_string(),
-            Subject::Peer(id) => self.peer(id).map_or_else(|| id.clone(), |p| p.label.clone()),
+            Subject::Peer(id) => self
+                .peer(id)
+                .map_or_else(|| id.clone(), |p| p.label.clone()),
             Subject::Group(id) => self
                 .group(id)
                 .map_or_else(|| id.clone(), |g| format!("group {}", g.label)),
@@ -141,7 +143,10 @@ fn join(items: &[String]) -> String {
 }
 
 impl Engine {
-    pub async fn list_socket_groups(&self, state: &AppState) -> Result<Vec<SocketGroup>, EngineError> {
+    pub async fn list_socket_groups(
+        &self,
+        state: &AppState,
+    ) -> Result<Vec<SocketGroup>, EngineError> {
         Ok(state.db.list_socket_groups().await?)
     }
 

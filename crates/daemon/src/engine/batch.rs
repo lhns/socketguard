@@ -109,7 +109,11 @@ impl Plan {
         group: &SocketGroup,
         activity: NewActivity,
     ) {
-        let reach: Vec<GrantReach> = gp.widened.iter().flat_map(|g| self.grant_reach(g)).collect();
+        let reach: Vec<GrantReach> = gp
+            .widened
+            .iter()
+            .flat_map(|g| self.grant_reach(g))
+            .collect();
         self.changes_reach |= lets_in(&reach);
         let who: Vec<String> = gp
             .widened
@@ -393,7 +397,13 @@ impl Engine {
                     ActivityKind::SocketGroupAdded,
                     format!("Added socket group {}", group.label),
                 );
-                plan.push_group_plan(gp, ChangeKind::Create, group.label.clone(), &group, activity);
+                plan.push_group_plan(
+                    gp,
+                    ChangeKind::Create,
+                    group.label.clone(),
+                    &group,
+                    activity,
+                );
             }
             ChangeOp::UpdateSocketGroup {
                 group_id,
@@ -413,7 +423,13 @@ impl Engine {
                     ActivityKind::SocketGroupChanged,
                     format!("Changed socket group {}", group.label),
                 );
-                plan.push_group_plan(gp, ChangeKind::Update, group.label.clone(), &group, activity);
+                plan.push_group_plan(
+                    gp,
+                    ChangeKind::Update,
+                    group.label.clone(),
+                    &group,
+                    activity,
+                );
             }
             ChangeOp::DeleteSocketGroup { group_id } => {
                 let id = plan.resolve(group_id)?;
@@ -422,7 +438,13 @@ impl Engine {
                     ActivityKind::SocketGroupRemoved,
                     format!("Removed socket group {}", group.label),
                 );
-                plan.push_group_plan(gp, ChangeKind::Delete, group.label.clone(), &group, activity);
+                plan.push_group_plan(
+                    gp,
+                    ChangeKind::Delete,
+                    group.label.clone(),
+                    &group,
+                    activity,
+                );
             }
             ChangeOp::AttachSocketGroup {
                 group_id,
@@ -433,7 +455,10 @@ impl Engine {
                 let (group, gp) =
                     self.plan_attach_group(&mut plan.cat, &id, app_id, *confirm_open)?;
                 if !gp.writes.is_empty() {
-                    let app = plan.cat.app(app_id).map_or(app_id.clone(), |a| a.name.clone());
+                    let app = plan
+                        .cat
+                        .app(app_id)
+                        .map_or(app_id.clone(), |a| a.name.clone());
                     let activity = NewActivity::new(
                         ActivityKind::SocketGroupChanged,
                         format!("Attached socket group {} to {app}", group.label),
@@ -451,7 +476,10 @@ impl Engine {
             ChangeOp::DetachSocketGroup { group_id, app_id } => {
                 let id = plan.resolve(group_id)?;
                 let (group, gp) = self.plan_detach_group(&mut plan.cat, &id, app_id)?;
-                let app = plan.cat.app(app_id).map_or(app_id.clone(), |a| a.name.clone());
+                let app = plan
+                    .cat
+                    .app(app_id)
+                    .map_or(app_id.clone(), |a| a.name.clone());
                 let activity = NewActivity::new(
                     ActivityKind::SocketGroupChanged,
                     format!("Detached socket group {} from {app}", group.label),

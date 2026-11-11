@@ -210,7 +210,10 @@ fn conntrack_args(verb: &str, r: &Revocation, src: Option<IpAddr>) -> Vec<String
 
 /// The original source addresses in `conntrack -L` output (the first `src=` of a line).
 fn parse_conntrack_sources(out: &str) -> Vec<IpAddr> {
-    parse_conntrack_flows(out).into_iter().map(|(s, _)| s).collect()
+    parse_conntrack_flows(out)
+        .into_iter()
+        .map(|(s, _)| s)
+        .collect()
 }
 
 /// The original source address and destination port of each flow in `conntrack -L` output

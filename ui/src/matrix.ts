@@ -5,7 +5,7 @@ import type {
   App, GrantView, Network, Peer, PeerGroup, PortRef, Subject, Tag, Target,
 } from "./api";
 import { covers, sameSubject } from "./access";
-import { portLabel, samePort } from "./lib";
+import { portLabel, sameScope, scopeOfPort } from "./lib";
 
 export interface Row {
   key: string;
@@ -110,7 +110,7 @@ function networkCounts(g: GrantView, col: Col, ctx: Ctx): boolean {
 
 export function cellOf(row: Row, col: Col, ctx: Ctx): Cell {
   const direct = ctx.grants.filter(
-    (g) => sameTarget(g.target, row.target) && samePort(g.port, row.port) && sameSubject(g.subject, col.subject) && networkCounts(g, col, ctx),
+    (g) => sameTarget(g.target, row.target) && sameScope(g.scope, scopeOfPort(row.port)) && sameSubject(g.subject, col.subject) && networkCounts(g, col, ctx),
   );
   if (direct.length > 0) {
     const everywhere = direct.some((g) => g.network_id === null);
@@ -144,20 +144,20 @@ function inheritedFrom(row: Row, col: Col, ctx: Ctx): Cell["origin"] | undefined
     const groupOrigin = byGroup && g.subject.kind === "group" ? { kind: "group" as const, id: g.subject.id, label: groupLabel(g.subject.id) } : undefined;
 
     // The same row, reached through a group.
-    if (sameTarget(g.target, row.target) && samePort(g.port, row.port) && groupOrigin) return groupOrigin;
+    if (sameTarget(g.target, row.target) && sameScope(g.scope, scopeOfPort(row.port)) && groupOrigin) return groupOrigin;
     if (row.kind === "tag") continue;
     const appId = row.target.id;
     // A grant on the whole app covers its ports.
-    if (row.kind === "port" && g.target.kind === "app" && g.target.id === appId && g.port === null) {
+    if (row.kind === "port" && g.target.kind === "app" && g.target.id === appId && g.scope.kind === "all") {
       return groupOrigin ?? { kind: "app", id: appId, label: "the whole app" };
     }
     // A grant on a tag the app (or this port of it) belongs to.
     if (g.target.kind === "tag") {
       const tag = ctx.tags.find((t) => t.id === (g.target as { id: string }).id);
       const member = tag?.members.find(
-        (m) => m.app_id === appId && (row.port === null ? m.port === null : m.port === null || samePort(m.port, row.port)),
+        (m) => m.app_id === appId && (row.port === null ? m.scope.kind === "all" : m.scope.kind === "all" || sameScope(m.scope, scopeOfPort(row.port))),
       );
-      if (tag && member && (row.port === null ? g.port === null : covers(g.port, row.port))) {
+      if (tag && member && (row.port === null ? g.scope.kind === "all" : covers(g.scope, row.port))) {
         return groupOrigin ? { ...groupOrigin, label: `${groupOrigin.label} on tag ${tagLabel(tag.id)}` } : { kind: "tag", id: tag.id, label: tag.label };
       }
     }

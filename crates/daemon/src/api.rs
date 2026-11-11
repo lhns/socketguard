@@ -481,7 +481,11 @@ async fn app_split(
             proto: proto.unwrap_or(Protocol::Tcp),
         },
         (None, None, Some(group)) => Scope::Group { id: group },
-        _ => return Err(ApiErr::invalid("give a port (with proto) or a group, not both")),
+        _ => {
+            return Err(ApiErr::invalid(
+                "give a port (with proto) or a group, not both",
+            ))
+        }
     };
     let address = engine.split(&state, &id, &req.network_id, scope).await?;
     Ok(saved(&engine, StatusCode::CREATED, Some(address)))

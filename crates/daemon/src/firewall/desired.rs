@@ -374,7 +374,10 @@ mod tests {
         ]);
         let r = revocations(&old, &new);
         assert_eq!(r.len(), 1);
-        assert_eq!((r[0].ports.start, r[0].ports.end, r[0].src), (50003, 50003, None));
+        assert_eq!(
+            (r[0].ports.start, r[0].ports.end, r[0].src),
+            (50003, 50003, None)
+        );
         // Unchanged or grown: nothing.
         assert!(revocations(&old, &old).is_empty());
         assert!(revocations(&new, &old).is_empty());
