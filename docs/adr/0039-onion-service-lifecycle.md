@@ -64,4 +64,4 @@ Consequences: one more pair of crates (`curve25519-dalek`, `sha3`; `base64`), an
 
 ## Amendment (2026-11-11): one service per granted row; a reservation is opened as a whole
 
-Follows ADR 0047. `split` is gone. A row that a grant names has its own address, so a grant on one socket publishes a service for that socket alone and the advice "give those ports their own address" no longer applies to apps. A reservation's service takes only grants that target the reservation: their clients are its client list, and grants on single bound rows have no effect on Tor while the row is bound.
+Follows ADR 0047. `split` is gone. A row that a grant names has its own address, so a grant on one port publishes a service for that port alone and the advice "give those ports their own address" no longer applies to apps. A reservation's service takes only grants that target the reservation: their clients are its client list, and grants on single bound rows have no effect on Tor while the row is bound.

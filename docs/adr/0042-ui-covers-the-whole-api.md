@@ -40,10 +40,10 @@ The first build followed the decision above and came out incoherent: three tabs 
 Follows ADR 0047.
 
 - **Navigation:** Apps, Reserved, Peers, Activity, Settings.
-- **Rows.** Inside an app the inspector has one "Sockets" section: "All sockets", each socket, each attached socket group. Every row has the same parts: tags, who can reach it, "Add access", its address. A grant is listed once, on the row it names.
-- **Socket groups** are a section of the Apps list, like tags, with their own inspector.
-- **Reserved** looks like Apps: one entry per reservation, with its own "All sockets", its bound rows, its address per network and its port conflicts. A bound row's access is the same grant as under its app.
-- **Adding access** offers "All sockets", each socket and each socket group side by side, with nothing preselected.
+- **Rows.** Inside an app the inspector has one "Ports" section: "All ports", each port, each attached port group. Every row has the same parts: tags, who can reach it, "Add access", its address. A grant is listed once, on the row it names.
+- **Port groups** are a section of the Apps list, like tags, with their own inspector.
+- **Reserved** looks like Apps: one entry per reservation, with its own "All ports", its bound rows, its address per network and its port conflicts. A bound row's access is the same grant as under its app.
+- **Adding access** offers "All ports", each port and each port group side by side, with nothing preselected.
 - **Tags and groups** are added from a "+" pill after the pills, the same on every row.
 - **Peers** need no name; pasted values become one peer each, optionally in a new group.
 - **Tor inside a reservation:** a grant on a single bound row is shown as not reachable on Tor before it is made.
