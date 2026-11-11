@@ -48,3 +48,12 @@ Follows ADR 0047.
 - **Peers** need no name; pasted values become one peer each, optionally in a new group.
 - **Tor inside a reservation:** a grant on a single bound row is shown as not reachable on Tor before it is made.
 - The address mode setting, split and merge are gone from the UI.
+
+## Amendment (2026-11-11): one confirmation, not a review and then a confirmation
+
+Replaces the commit rule of the earlier amendment ("show first if reach changes", with a dialog only for Anyone). In use it meant three steps: submit the form, apply the inline review, confirm the dialog.
+
+- An edit that gives nobody new access applies at once; one that only closes gets Undo, as before.
+- An edit that gives someone access goes from the form straight to one confirmation dialog. The dialog shows what the daemon's dry run says would change: each grant with its reach per network and any note (for example "not reachable on Tor"). There is no inline review step.
+- A change that opens something to Anyone uses the same dialog with a warning and a confirm button that names what it opens. The daemon still requires its confirmation flag.
+- All edits use this through the one commit helper: access, tags, peer groups, port groups, reserved addresses, transfer.
