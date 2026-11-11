@@ -60,3 +60,11 @@ One type says which sockets of an app are meant: `Scope = All | Port(port, proto
 - An app has more addresses than before once it is opened by port, and a tag reservation puts several apps behind one address.
 - Schema v7 migrates: an all-ports address stays the app's address, a one-port address becomes a port address, a several-port address becomes a socket group attached to that app. No existing address goes dark, because a grant that covers a port opens every address serving it.
 - The CLI loses `apps split`, `apps merge` and `settings address-mode`; the export format loses the address mode and gains socket groups and reservations.
+
+## Amendment (2026-11-11): one exclusion rule; a range is open to any listener; "All sockets"
+
+- **One exclusion rule.** An address never serves a port that is detected on another app and not on its own, whatever the scope: a named port, a socket group, or a range reached through `All`. The earlier text applied this to ranges only, which would have let the grantees of a port that app A stopped using reach app B once B listens there.
+- **Correction to the consequence on ranges.** The firewall cannot tell whose process binds a port. Any wildcard listener inside a granted range is reachable through that address until the monitor attributes the port, not only a process of that app.
+- **Changing a socket group changes reach.** Adding ports to a group, or attaching it to an app, is treated like a new grant for everyone whose grant covers it: it is shown as a change of reach and needs confirmation when Anyone is among them.
+- **Unidentified apps** (ADR 0046) take no socket groups: their identity is one port.
+- **Wording.** Frontends call scope `All` the built-in socket group "All sockets". A detected socket and a socket group are the same kind of row inside an app, and a tag always sits on one of these rows; tagging an app means tagging its "All sockets".
