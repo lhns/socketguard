@@ -3,4 +3,4 @@
 /**
  * Whether a change has taken effect on the networks (`enforcement.status`).
  */
-export type EnforcementStatus = "pending";
+export type EnforcementStatus = "pending" | "failed";

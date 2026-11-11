@@ -84,20 +84,54 @@ describe("Network cards", () => {
     await waitFor(() => expect(d.count("network_setup")).toBeGreaterThan(1));
   });
 
-  it("explains what installing does on Windows and offers the winget command", async () => {
-    mockDaemon({});
+  it("offers no install for a missing Yggdrasil, only the download page", async () => {
+    const d = mockDaemon({});
     const user = userEvent.setup();
     renderWithProviders(<NetworksSection />);
     const ygg = await card("Yggdrasil");
-    expect(await ygg.findByText("Yggdrasil is not installed. SocketGuard can install it with winget.")).toBeInTheDocument();
-    await user.click(ygg.getByRole("button", { name: "Set up…" }));
-    expect(ygg.getByText(/winget install --id YggdrasilNetwork.Yggdrasil/)).toBeInTheDocument();
-    expect(ygg.getByText(/Installs the Yggdrasil service and its network adapter driver; it starts with Windows/)).toBeInTheDocument();
+    expect(await ygg.findByText("Yggdrasil is not installed.")).toBeInTheDocument();
+    expect(ygg.queryByRole("button", { name: "Set up…" })).not.toBeInTheDocument();
+    expect(ygg.queryByText(/winget/)).not.toBeInTheDocument();
+    await user.click(ygg.getByRole("button", { name: "Download page" }));
+    await waitFor(() => expect(d.count("open_download_page")).toBe(1));
+  });
+
+  it("warns above Add that a running Yggdrasil is not managed", async () => {
+    const warning =
+      "Yggdrasil is running but not managed: programs on this PC that listen on all addresses are reachable over it until you add it here.";
+    mockDaemon({
+      network_setup: () =>
+        withSetup({ yggdrasil: setupState("ready", { found: { address: "200:1::1", interface: "Y" }, exposed: true, warning }) }),
+    });
+    renderWithProviders(<NetworksSection />);
+    const ygg = await card("Yggdrasil");
+    const text = await ygg.findByText(warning);
+    const add = ygg.getByRole("button", { name: "Add Yggdrasil" });
+    // The warning comes before the button in the card.
+    expect(text.compareDocumentPosition(add) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // A node that is managed or not running carries no warning.
+    expect(screen.queryAllByText(warning)).toHaveLength(1);
+  });
+
+  it("lists the close-first order in the steps of a stopped Yggdrasil", async () => {
+    mockDaemon({ network_setup: () => withSetup({ yggdrasil: setupState("not_running", { missing: "The Yggdrasil service is stopped." }) }) });
+    const user = userEvent.setup();
+    renderWithProviders(<NetworksSection />);
+    const ygg = await card("Yggdrasil");
+    await user.click(await ygg.findByRole("button", { name: "Set up…" }));
+    const steps = ygg.getAllByRole("listitem").map((li) => li.textContent ?? "");
+    const add = steps.findIndex((t) => /Add the Yggdrasil network first/.test(t));
+    const start = steps.findIndex((t) => /Start the Yggdrasil service/.test(t));
+    expect(add).toBeGreaterThanOrEqual(0);
+    expect(add).toBeLessThan(start);
   });
 
   it("shows the command to run by hand when there is no elevation helper; a cancelled prompt is no error", async () => {
     let answer = { launched: false, cancelled: false, exit_code: null as number | null, command: "socketguard networks setup yggdrasil --yes --config C:/c.json" };
-    mockDaemon({ run_network_setup: () => answer });
+    mockDaemon({
+      network_setup: () => withSetup({ yggdrasil: setupState("not_running", { missing: "The Yggdrasil service is stopped." }) }),
+      run_network_setup: () => answer,
+    });
     const user = userEvent.setup();
     renderWithProviders(<NetworksSection />);
     const ygg = await card("Yggdrasil");

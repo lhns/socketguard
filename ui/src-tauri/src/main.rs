@@ -14,9 +14,9 @@ use serde::Serialize;
 use socketguard_client::{Client, Error as ClientError, GrantQuery, Saved};
 use socketguard_core::api_types::{
     ApplyRequest, ApplyResponse, AttachPortGroup, ChangesRequest, ChangesResponse, Enforcement,
-    ExportDocument, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup,
-    NewReservation, NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest, ShareResponse,
-    StatusResponse, TorKeyResponse, UpdatePortGroup, UpdateTag,
+    ExportDocument, ExposureResponse, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer,
+    NewPortGroup, NewReservation, NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest,
+    ShareResponse, StatusResponse, TorKeyResponse, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::setup::{NetworkSetup, SetupKind};
 use socketguard_core::{
@@ -390,8 +390,8 @@ async fn add_network(req: NewNetwork) -> CmdResult<Network> {
 }
 
 #[tauri::command]
-async fn delete_network(id: String, force: bool) -> CmdResult<()> {
-    Ok(client().delete_network(&id, force).await?)
+async fn delete_network(id: String, force: bool, confirm_exposed: bool) -> CmdResult<()> {
+    Ok(client().delete_network(&id, force, confirm_exposed).await?)
 }
 
 #[tauri::command]
@@ -529,12 +529,14 @@ struct SetupRun {
 }
 
 /// The arguments of `socketguard networks setup <kind> --yes`, with the daemon's config
-/// file and socket given explicitly: the elevated process has another environment.
-fn setup_args(
+/// file and socket given explicitly: the elevated process has another environment. `extra`
+/// are fixed flags (`--undo --stop-service-only`).
+fn setup_args_with(
     kind: SetupKind,
     config: &str,
     socket: &str,
     pause: bool,
+    extra: &[&str],
 ) -> Result<Vec<String>, UiError> {
     let bad = |what: &str| UiError {
         code: "invalid".into(),
@@ -551,6 +553,7 @@ fn setup_args(
         .map(|s| s.to_string())
         .collect();
     args.push(kind.to_string());
+    args.extend(extra.iter().map(|s| s.to_string()));
     args.extend([
         "--yes".into(),
         "--config".into(),
@@ -588,14 +591,38 @@ fn cli_path() -> Result<std::path::PathBuf, UiError> {
 /// Only the kind (an enum) and the two paths of the running daemon are passed on.
 #[tauri::command]
 async fn run_network_setup(kind: SetupKind, config: String) -> CmdResult<SetupRun> {
+    launch_setup(kind, config, &[]).await
+}
+
+/// Start `socketguard networks setup <kind> --undo --stop-service-only`: stop the service
+/// that setup started, and nothing else (ADR 0051). Same elevation as the setup.
+#[tauri::command]
+async fn stop_setup_service(kind: SetupKind, config: String) -> CmdResult<SetupRun> {
+    launch_setup(kind, config, &["--undo", "--stop-service-only"]).await
+}
+
+/// What becomes reachable over Yggdrasil without SocketGuard's block (ADR 0051).
+#[tauri::command]
+async fn exposure(without: Option<String>) -> CmdResult<ExposureResponse> {
+    Ok(client().exposure(without.as_deref()).await?)
+}
+
+async fn launch_setup(
+    kind: SetupKind,
+    config: String,
+    extra: &'static [&'static str],
+) -> CmdResult<SetupRun> {
     let socket = client().endpoint().to_string();
     let cli = cli_path();
     let shown = |pause| {
-        setup_args(kind, &config, &socket, pause)
+        setup_args_with(kind, &config, &socket, pause, extra)
             .map(|a| format!("socketguard {}", a.join(" ")))
             .unwrap_or_default()
     };
-    let (args, cli) = match (setup_args(kind, &config, &socket, cfg!(windows)), cli) {
+    let (args, cli) = match (
+        setup_args_with(kind, &config, &socket, cfg!(windows), extra),
+        cli,
+    ) {
         (Ok(a), Ok(c)) => (a, c),
         (Err(e), _) => return Err(e),
         (_, Err(_)) => {
@@ -804,6 +831,8 @@ fn main() {
             list_networks,
             network_setup,
             run_network_setup,
+            stop_setup_service,
+            exposure,
             open_download_page,
             add_network,
             delete_network,

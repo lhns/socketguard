@@ -16,6 +16,7 @@ import type { ChangesResponse } from "./generated/ChangesResponse";
 import type { Credential } from "./generated/Credential";
 import type { Enforcement } from "./generated/Enforcement";
 import type { ExportDocument } from "./generated/ExportDocument";
+import type { ExposureResponse } from "./generated/ExposureResponse";
 import type { GrantView } from "./generated/GrantView";
 import type { LockoutRiskInfo } from "./generated/LockoutRiskInfo";
 import type { MoveAppRequest } from "./generated/MoveAppRequest";
@@ -61,7 +62,10 @@ export type {
   Settings, ShareResponse, StatusResponse, Tag, TagMember, Target, TorKeyResponse,
   UpdateTag,
 };
-export type { NetworkSetup, SetupKind };
+export type { NetworkSetup, SetupKind, ExposureResponse };
+export type { NetworkExposure } from "./generated/NetworkExposure";
+export type { ExposedListener } from "./generated/ExposedListener";
+export type { YggdrasilBlock } from "./generated/YggdrasilBlock";
 export type { LanCandidate } from "./generated/LanCandidate";
 export type { SetupState } from "./generated/SetupState";
 export type { SetupStatus } from "./generated/SetupStatus";
@@ -198,7 +202,12 @@ export const api = {
   runNetworkSetup: (kind: SetupKind, config: string) => call<SetupRun>("run_network_setup", { kind, config }),
   openDownloadPage: (url: string) => call<void>("open_download_page", { url }),
   addNetwork: (req: NewNetwork) => call<Network>("add_network", { req }),
-  deleteNetwork: (id: string, force: boolean) => call<void>("delete_network", { id, force }),
+  deleteNetwork: (id: string, force: boolean, confirmExposed = false) =>
+    call<void>("delete_network", { id, force, confirmExposed }),
+  /** What becomes reachable without the block of one network (or all of them): ADR 0051. */
+  exposure: (without: string | null) => call<ExposureResponse>("exposure", { without }),
+  /** Stop the service that `networks setup` started (elevated); nothing else is undone. */
+  stopSetupService: (kind: SetupKind, config: string) => call<SetupRun>("stop_setup_service", { kind, config }),
   listAddresses: () => call<Address[]>("list_addresses"),
   listReservations: () => call<ReservationView[]>("list_reservations"),
   getReservation: (id: string) => call<ReservationView>("get_reservation", { id }),
