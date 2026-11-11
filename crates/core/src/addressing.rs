@@ -15,8 +15,8 @@
 //!   always up.
 
 use crate::model::{
-    Address, AddressId, App, AppId, Binding, BindingId, Grant, Network, NetworkId,
-    NetworkKind, PortConflict, PortRef, Reservation, ReservationId, Target,
+    Address, AddressId, App, AppId, Binding, BindingId, Grant, Network, NetworkId, NetworkKind,
+    PortConflict, PortRef, Reservation, ReservationId, Target,
 };
 use crate::scope::{
     foreign_listening, scope_ports, PortRange, PortRangeSet, Scope, ScopePorts, SocketGroup,
@@ -54,11 +54,7 @@ pub fn serves_udp(network: &Network) -> bool {
 
 /// Whether `grant` applies on `network`.
 pub fn grant_applies(grant: &Grant, network: &Network) -> bool {
-    network.grants_apply
-        && grant
-            .network_id
-            .as_deref()
-            .is_none_or(|n| n == network.id)
+    network.grants_apply && grant.network_id.as_deref().is_none_or(|n| n == network.id)
 }
 
 /// The state the models reads.
@@ -101,7 +97,12 @@ pub struct Model<'a> {
 }
 
 fn listening(app: &App) -> PortRangeSet {
-    PortRangeSet::from_ports(app.ports.iter().filter(|p| p.listening).map(|p| p.port_ref()))
+    PortRangeSet::from_ports(
+        app.ports
+            .iter()
+            .filter(|p| p.listening)
+            .map(|p| p.port_ref()),
+    )
 }
 
 impl<'a> Model<'a> {
@@ -152,7 +153,11 @@ impl<'a> Model<'a> {
                 return false;
             }
         }
-        !(row.scope.as_port().is_some_and(|p| p.proto == Protocol::Udp) && !serves_udp(network))
+        !(row
+            .scope
+            .as_port()
+            .is_some_and(|p| p.proto == Protocol::Udp)
+            && !serves_udp(network))
     }
 
     /// The rows a grant that applies on `network` names.
@@ -227,8 +232,7 @@ impl<'a> Model<'a> {
         // Rows, with the bindings that produce them.
         let mut rows: Vec<(Row, Vec<BindingId>)> = Vec::new();
         for b in &res.bindings {
-            let members: Vec<TagMember> =
-                reservation_members(&single(res, b), self.w.tags);
+            let members: Vec<TagMember> = reservation_members(&single(res, b), self.w.tags);
             for m in members {
                 let row = Row::from(&m);
                 match rows.iter_mut().find(|(r, _)| *r == row) {
@@ -271,7 +275,11 @@ impl<'a> Model<'a> {
         let listens: BTreeMap<&AppId, PortRangeSet> = ids
             .iter()
             .map(|a| {
-                let l = self.apps.get(a.as_str()).map(|x| listening(x)).unwrap_or_default();
+                let l = self
+                    .apps
+                    .get(a.as_str())
+                    .map(|x| listening(x))
+                    .unwrap_or_default();
                 (*a, totals[a].intersect(&l))
             })
             .collect();
@@ -715,8 +723,16 @@ mod tests {
         // The grant on the row covers what the reservation serves on IP only.
         assert_eq!(m.reservation_networks(&res[0]), ["lan"]);
         // A grant on the reservation covers it everywhere.
-        let grants = [grant("g", Target::Reservation("r".into()), Scope::All, None)];
-        let w = World { grants: &grants, ..w };
+        let grants = [grant(
+            "g",
+            Target::Reservation("r".into()),
+            Scope::All,
+            None,
+        )];
+        let w = World {
+            grants: &grants,
+            ..w
+        };
         assert_eq!(Model::new(w).reservation_networks(&res[0]), ["lan", "tor"]);
     }
 
@@ -774,10 +790,7 @@ mod tests {
         assert_eq!(s.conflicts[0].ports.to_string(), "9000-9001/tcp");
         assert_eq!(s.conflicts[0].served_app, None);
         // Only one binding claims 9005: it follows that binding.
-        let res2 = reservation(
-            "r2",
-            &[bind("a", Scope::group("g1")), bind("b", tcp(9005))],
-        );
+        let res2 = reservation("r2", &[bind("a", Scope::group("g1")), bind("b", tcp(9005))]);
         let w2 = World {
             reservations: std::slice::from_ref(&res2),
             ..w
@@ -795,7 +808,12 @@ mod tests {
         let groups = [group("web", &["80-81/tcp"], &["a"])];
         let nets = [net("lan", NetworkKind::Lan, true)];
         let a = Address::automatic("a", Scope::group("web"), "lan", loc());
-        let grants = [grant("g", Target::App("a".into()), Scope::group("web"), None)];
+        let grants = [grant(
+            "g",
+            Target::App("a".into()),
+            Scope::group("web"),
+            None,
+        )];
         let addrs = [a.clone()];
         let w = World {
             apps: &apps,
@@ -824,7 +842,12 @@ mod tests {
         let covered = Address::automatic("a", Scope::All, "ygg", loc());
         let nothing = Address::automatic("a", tcp(81), "ygg", loc());
         let local = Address::automatic("a", Scope::All, "lo", loc());
-        let addrs = [named.clone(), covered.clone(), nothing.clone(), local.clone()];
+        let addrs = [
+            named.clone(),
+            covered.clone(),
+            nothing.clone(),
+            local.clone(),
+        ];
         let w = World {
             apps: &apps,
             networks: &nets,

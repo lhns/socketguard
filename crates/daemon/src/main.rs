@@ -51,6 +51,18 @@ async fn main() -> Result<()> {
         events: events_tx,
     });
 
+    // A database migrated from v7 still has every address automatic; now that the networks
+    // are known, the ones a grant covers without naming become reservations (ADR 0047).
+    if let Err(e) = state
+        .engine
+        .read()
+        .await
+        .classify_legacy_addresses(&state)
+        .await
+    {
+        error!("Could not classify the existing addresses: {e:#}");
+    }
+
     // Shutdown signal channel
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 

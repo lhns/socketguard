@@ -39,8 +39,12 @@ impl Catalog {
     /// The grants that cover more on one of `app_ids` than they did in `before`.
     pub(super) fn widened_since(&self, before: &Catalog, app_ids: &[AppId]) -> Vec<Grant> {
         let none = PortRangeSet::new();
-        let total = |cat: &Catalog, grant: &Grant, app: &socketguard_core::App| {
-            covered_ports(grant, &cat.tags, app, &cat.socket_groups, &none)
+        let (targets, targets_before) = (self.targets(), before.targets());
+        let total = |targets: &[socketguard_core::Tag],
+                     cat: &Catalog,
+                     grant: &Grant,
+                     app: &socketguard_core::App| {
+            covered_ports(grant, targets, app, &cat.socket_groups, &none)
                 .map(|c| c.total())
                 .unwrap_or_default()
         };
@@ -50,8 +54,8 @@ impl Catalog {
                 let (Some(app), Some(was)) = (self.app(id), before.app(id)) else {
                     return false;
                 };
-                !total(self, grant, app)
-                    .subtract(&total(before, grant, was))
+                !total(&targets, self, grant, app)
+                    .subtract(&total(&targets_before, before, grant, was))
                     .is_empty()
             });
             if widened {
@@ -81,11 +85,16 @@ impl Catalog {
         for g in self.grants.iter().filter(|g| g.scope == scope) {
             let on = match (&g.target, app_id) {
                 (Target::App(a), Some(want)) if a != want => continue,
-                (Target::Tag(_), Some(_)) => continue,
+                (Target::Tag(_) | Target::Reservation(_), Some(_)) => continue,
                 (Target::App(a), _) => self.app(a).map_or_else(|| a.clone(), |a| a.name.clone()),
                 (Target::Tag(t), None) => format!(
                     "tag {}",
                     self.tag(t).map_or_else(|| t.clone(), |t| t.label.clone())
+                ),
+                (Target::Reservation(r), None) => format!(
+                    "reservation {}",
+                    self.reservation(r)
+                        .map_or_else(|| r.clone(), |r| r.label.clone())
                 ),
             };
             out.push(format!(
@@ -104,24 +113,33 @@ impl Catalog {
                 out.push(format!("{app} in tag {}", t.label));
             }
         }
+        for r in &self.reservations {
+            for b in &r.bindings {
+                if let socketguard_core::BindingTarget::App { app_id: a, scope } = &b.target {
+                    if *scope != Scope::group(group_id) || app_id.is_some_and(|want| a != want) {
+                        continue;
+                    }
+                    let app = self.app(a).map_or_else(|| a.clone(), |a| a.name.clone());
+                    out.push(format!("{app} bound to reservation {}", r.label));
+                }
+            }
+        }
         out
     }
 
-    /// Take the addresses with group `group_id` out of the catalog (of `app_id` only, or of
-    /// every app) and return them.
+    /// Take the automatic addresses with group `group_id` out of the catalog (of `app_id`
+    /// only, or of every app) and return them.
     fn take_group_addresses(&mut self, group_id: &str, app_id: Option<&str>) -> Vec<Address> {
-        let mut taken = Vec::new();
-        for app in &mut self.apps {
-            if app_id.is_some_and(|want| app.id != want) {
-                continue;
-            }
-            let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut app.addresses)
-                .into_iter()
-                .partition(|a| a.scope.group_id() == Some(group_id));
-            app.addresses = kept;
-            taken.extend(gone);
-        }
-        taken
+        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.addresses)
+            .into_iter()
+            .partition(|a| {
+                a.scope.group_id() == Some(group_id)
+                    && a.app_id
+                        .as_deref()
+                        .is_some_and(|id| app_id.is_none_or(|want| id == want))
+            });
+        self.addresses = kept;
+        gone
     }
 }
 

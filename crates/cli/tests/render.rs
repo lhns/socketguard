@@ -151,6 +151,7 @@ fn grant(
             .map(|(n, r)| GrantReach {
                 network_id: n.to_string(),
                 reach: *r,
+                note: None,
             })
             .collect(),
     }

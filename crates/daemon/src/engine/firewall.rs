@@ -23,6 +23,8 @@ impl Engine {
         let protect_host = db.protect_host().await?;
         Ok(Snapshot {
             apps: db.list_apps().await?,
+            addresses: db.list_addresses().await?,
+            reservations: db.list_reservations().await?,
             networks: self.networks(),
             peers: db.list_peers().await?,
             groups: db.list_groups().await?,
@@ -186,8 +188,13 @@ impl Engine {
         result
     }
 
-    /// Apply, then put missing addresses on their interfaces (the ruleset first).
+    /// Create the addresses that grants now call for, apply, then put them on their
+    /// interfaces (the ruleset first) and take the ones no grant calls for any more off.
+    /// Every change that can name or un-name a row ends in this.
     pub(super) async fn apply_and_ensure(&self, state: &AppState) -> anyhow::Result<()> {
+        if let Err(e) = self.ensure_addresses(state).await {
+            warn!("Could not create addresses: {e:#}");
+        }
         let applied = self.apply_firewall(state).await;
         // Also after a failed apply: it adds nothing then, but still takes retired
         // addresses off their interfaces.
@@ -291,14 +298,15 @@ impl Engine {
 
     pub(super) async fn refresh_metric_counts(&self, state: &AppState) {
         let db = &state.db;
-        let (Ok(apps), Ok(peers), Ok(grants)) = (
+        let (Ok(apps), Ok(peers), Ok(grants), Ok(addresses)) = (
             db.list_apps().await,
             db.list_peers().await,
             db.list_grants().await,
+            db.list_addresses().await,
         ) else {
             return;
         };
-        let addresses = apps.iter().map(|a| a.addresses.len()).sum();
+        let addresses = addresses.len();
         self.metrics
             .set_counts(apps.len(), addresses, peers.len(), grants.len());
     }
@@ -406,19 +414,33 @@ impl Engine {
         }
 
         let apps = state.db.list_apps().await.unwrap_or_default();
-        let mut by_dst: HashMap<Ipv6Addr, (&App, &Address)> = HashMap::new();
-        for app in &apps {
-            for a in &app.addresses {
-                if let Some(ip) = a.locator.ipv6() {
-                    by_dst.insert(ip, (app, a));
-                }
-            }
+        let reservations = state.db.list_reservations().await.unwrap_or_default();
+        let addresses = state.db.list_addresses().await.unwrap_or_default();
+        // The app an address belongs to, or the label of the reservation.
+        let mut by_dst: HashMap<Ipv6Addr, (Option<&App>, String, &Address)> = HashMap::new();
+        for a in &addresses {
+            let Some(ip) = a.locator.ipv6() else {
+                continue;
+            };
+            let app = a
+                .app_id
+                .as_deref()
+                .and_then(|id| apps.iter().find(|x| x.id == id));
+            let name = match (&a.reservation_id, app) {
+                (Some(r), _) => reservations
+                    .iter()
+                    .find(|x| &x.id == r)
+                    .map_or(r.clone(), |x| format!("reservation {}", x.label)),
+                (None, Some(app)) => app.name.clone(),
+                (None, None) => ip.to_string(),
+            };
+            by_dst.insert(ip, (app, name, a));
         }
         let records: Vec<NewActivity> = closed
             .into_iter()
             .map(|((src, dst, port, proto, minute), count)| {
                 let target = match dst {
-                    IpAddr::V6(d) => by_dst.get(&d).copied(),
+                    IpAddr::V6(d) => by_dst.get(&d),
                     IpAddr::V4(_) => None,
                 };
                 let what = match (port, proto) {
@@ -426,13 +448,13 @@ impl Engine {
                     _ => String::new(),
                 };
                 let message = match target {
-                    Some((app, _)) => format!("Blocked {src} from {}{what}", app.name),
+                    Some((_, name, _)) => format!("Blocked {src} from {name}{what}"),
                     None => format!("Blocked {src} from {dst}{what}"),
                 };
                 let mut n = NewActivity::new(ActivityKind::Blocked, message);
                 n.at = chrono::DateTime::from_timestamp(minute * 60, 0).unwrap_or_else(Utc::now);
-                n.app_id = target.map(|(app, _)| app.id.clone());
-                n.network_id = target.map(|(_, a)| a.network_id.clone());
+                n.app_id = target.and_then(|(app, _, _)| app.map(|a| a.id.clone()));
+                n.network_id = target.map(|(_, _, a)| a.network_id.clone());
                 n.src = Some(src);
                 n.port = port;
                 n.proto = proto;
@@ -459,6 +481,7 @@ fn counter_keys(snap: &Snapshot, desired: &DesiredRuleset) -> HashMap<String, Co
             },
         );
     }
+    let info = socketguard_core::Model::new(snap.world()).address_info();
     let peers: HashMap<&str, &str> = snap
         .peers
         .iter()
@@ -481,12 +504,25 @@ fn counter_keys(snap: &Snapshot, desired: &DesiredRuleset) -> HashMap<String, Co
             continue;
         };
         let grant_id = rest.split(':').next().unwrap_or(rest);
-        let Some((app, address)) = snap.apps.iter().find_map(|a| {
-            a.addresses
+        let Some(address) = snap.addresses.iter().find(|x| x.id == address_id) else {
+            continue;
+        };
+        // A reservation's rule counts for the app that serves the rule's port.
+        let owner = match (&address.app_id, info.get(address_id)) {
+            (Some(id), _) => Some(id.clone()),
+            (None, Some(i)) => i
+                .served
                 .iter()
-                .find(|x| x.id == address_id)
-                .map(|x| (a, x))
-        }) else {
+                .find(|(_, s)| {
+                    s.total().contains(PortRef {
+                        port: rule.ports.start,
+                        proto: rule.ports.proto,
+                    })
+                })
+                .map(|(id, _)| id.clone()),
+            (None, None) => None,
+        };
+        let Some(app) = owner.and_then(|id| snap.apps.iter().find(|a| a.id == id)) else {
             continue;
         };
         let Some(grant) = snap.grants.iter().find(|g| g.id == grant_id) else {

@@ -7,24 +7,13 @@ use crate::state::{self, NewActivity};
 use crate::AppState;
 use chrono::Utc;
 use socketguard_core::{
-    new_id, normalize_credential, ActivityKind, AddressMode, App, Credential, CredentialKind,
-    Grant, GrantView, NewCredential, NewGrant, Peer, PeerGroup, SocketGroup, Subject, Tag, Target,
+    new_id, normalize_credential, ActivityKind, Address, App, Credential, CredentialKind, Grant,
+    GrantView, NewCredential, NewGrant, Peer, PeerGroup, Reservation, SocketGroup, Subject, Tag,
+    Target,
 };
 use std::collections::{BTreeSet, HashSet};
 
 impl Engine {
-    /// Choose how new apps and ports get addresses; existing layouts are untouched.
-    pub async fn set_address_mode(
-        &self,
-        state: &AppState,
-        mode: AddressMode,
-    ) -> Result<(), EngineError> {
-        state.db.set_address_mode(mode).await?;
-        self.commit(state, Ok(()), None, &[DaemonEvent::SettingsChanged])
-            .await?;
-        Ok(())
-    }
-
     /// Mark an app reviewed (or pending again). It stays closed until granted.
     pub async fn review_app(
         &self,
@@ -48,10 +37,18 @@ impl Engine {
             .get_app(id)
             .await?
             .ok_or_else(|| EngineError::NotFound(format!("app {id}")))?;
-        self.retire_addresses(state, &app.addresses).await?;
-        self.remove_app_locators(state, &app.addresses).await;
+        // Its automatic addresses go with it; reservations stay (their bindings to it go).
+        let addresses: Vec<Address> = state
+            .db
+            .list_addresses()
+            .await?
+            .into_iter()
+            .filter(|a| a.app_id.as_deref() == Some(id))
+            .collect();
+        self.retire_addresses(state, &addresses).await?;
+        self.remove_app_locators(state, &addresses).await;
         state.db.delete_app(id).await?;
-        let applied = self.apply_firewall(state).await;
+        let applied = self.apply_and_ensure(state).await;
         self.sweep_owned(state).await;
         let activity = NewActivity::new(
             ActivityKind::AppRemoved,
@@ -223,7 +220,7 @@ impl Engine {
     pub async fn delete_peer(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
         let peer = self.get_peer(state, id).await?;
         state.db.delete_peer(id).await?;
-        let applied = self.apply_firewall(state).await;
+        let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::PeerRemoved,
             format!("Removed peer {}", peer.label),
@@ -252,7 +249,7 @@ impl Engine {
             .add_credential(peer_id, &c)
             .await
             .map_err(|e| Self::conflict_or_internal(e, &format!("{} {}", c.kind, c.value)))?;
-        let applied = self.apply_firewall(state).await;
+        let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::PeerChanged,
             format!("Added {} to peer {}", c.kind, peer.label),
@@ -278,7 +275,7 @@ impl Engine {
         if !state.db.remove_credential(peer_id, cred_id).await? {
             return Err(EngineError::NotFound(format!("credential {cred_id}")));
         }
-        let applied = self.apply_firewall(state).await;
+        let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::PeerChanged,
             format!("Removed a credential from peer {}", peer.label),
@@ -351,7 +348,7 @@ impl Engine {
     pub async fn delete_group(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
         let group = self.get_group(state, id).await?;
         state.db.delete_group(id).await?;
-        let applied = self.apply_firewall(state).await;
+        let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::GroupRemoved,
             format!("Removed group {}", group.label),
@@ -376,7 +373,7 @@ impl Engine {
         let group = self.get_group(state, id).await?;
         self.check_peers_exist(state, peer_ids).await?;
         state.db.set_group_members(id, peer_ids).await?;
-        let applied = self.apply_firewall(state).await;
+        let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::GroupChanged,
             format!("Changed the members of group {}", group.label),
@@ -433,7 +430,7 @@ impl Engine {
             .insert_grant(&grant)
             .await
             .map_err(|e| Self::conflict_or_internal(e, "this grant"))?;
-        let applied = self.apply_firewall(state).await;
+        let applied = self.apply_and_ensure(state).await;
         let act = Self::grant_added_activity(&grant, &info);
         self.commit(state, applied, Some(act), &[DaemonEvent::GrantsChanged])
             .await?;
@@ -517,6 +514,18 @@ impl Engine {
                 Self::check_scope_on_app(cat, app, &req.scope)?;
                 app.name.clone()
             }
+            Target::Reservation(id) => {
+                let res = cat
+                    .reservation(id)
+                    .ok_or_else(|| EngineError::NotFound(format!("reservation {id}")))?;
+                if !req.scope.is_all() {
+                    return Err(EngineError::Invalid(
+                        "a grant on a reservation covers all of its ports; its scope must be All"
+                            .into(),
+                    ));
+                }
+                format!("reservation {}", res.label)
+            }
             Target::Tag(id) => {
                 let tag = cat
                     .tag(id)
@@ -578,7 +587,7 @@ impl Engine {
             .await?
             .ok_or_else(|| EngineError::NotFound(format!("grant {id}")))?;
         state.db.delete_grant(id).await?;
-        let applied = self.apply_firewall(state).await;
+        let applied = self.apply_and_ensure(state).await;
         let act = self.grant_removed_activity(state, &grant).await;
         self.commit(state, applied, Some(act), &[DaemonEvent::GrantsChanged])
             .await?;
@@ -607,6 +616,14 @@ impl Engine {
                 .flatten()
                 .map(|t| format!("tag {}", t.label))
                 .unwrap_or_else(|| format!("tag {id}")),
+            Target::Reservation(id) => state
+                .db
+                .get_reservation(id)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| format!("reservation {}", r.label))
+                .unwrap_or_else(|| format!("reservation {id}")),
         };
         let mut act = NewActivity::new(
             ActivityKind::GrantRemoved,
@@ -639,9 +656,21 @@ pub(super) struct Catalog {
     pub tags: Vec<Tag>,
     pub socket_groups: Vec<SocketGroup>,
     pub grants: Vec<Grant>,
+    pub reservations: Vec<Reservation>,
+    /// Every address as stored (no computed fields).
+    pub addresses: Vec<Address>,
 }
 
 impl Catalog {
+    /// Tags and, standing in for tags, reservations: what `covered_ports` expands.
+    pub fn targets(&self) -> Vec<Tag> {
+        socketguard_core::grant_targets(&self.tags, &self.reservations)
+    }
+
+    pub fn reservation(&self, id: &str) -> Option<&Reservation> {
+        self.reservations.iter().find(|r| r.id == id)
+    }
+
     pub async fn load(state: &AppState) -> anyhow::Result<Self> {
         let db = &state.db;
         Ok(Self {
@@ -651,6 +680,8 @@ impl Catalog {
             tags: db.list_tags().await?,
             socket_groups: db.list_socket_groups().await?,
             grants: db.list_grants().await?,
+            reservations: db.list_reservations().await?,
+            addresses: db.list_addresses().await?,
         })
     }
 

@@ -1,5 +1,6 @@
 //! Export and apply (`GET /api/export`, `POST /api/apply`): the settings, peers, groups,
-//! socket groups and grants as a portable document, and a diff-then-apply of such a
+//! socket groups, grants and reservations (with their bindings and the grants on them) as a
+//! portable document, and a diff-then-apply of such a
 //! document over the current state. Peers, groups and socket groups match by label, grants
 //! by (app id, scope, network, subject); a grant names its socket group by label. Everything
 //! the document lacks is deleted, so the document is the whole truth. Tags are not part of
@@ -12,13 +13,13 @@
 use crate::engine::{Engine, EngineError, GrantFilter, ProtectHostError};
 use crate::AppState;
 use socketguard_core::api_types::{
-    ApplyRequest, ApplyResponse, Change, ChangeItem, ChangeKind, ExportAppRef, ExportCredential,
-    ExportDocument, ExportGrant, ExportGroup, ExportPeer, ExportScope, ExportSocketGroup,
-    ExportSubject, EXPORT_VERSION,
+    ApplyRequest, ApplyResponse, Change, ChangeItem, ChangeKind, ExportAppRef, ExportBinding,
+    ExportCredential, ExportDocument, ExportGrant, ExportGroup, ExportPeer, ExportReservation,
+    ExportReservationGrant, ExportScope, ExportSocketGroup, ExportSubject, EXPORT_VERSION,
 };
 use socketguard_core::{
-    normalize_credential, ranges_text, AddressMode, NewCredential, NewGrant, Peer, PeerGroup,
-    PortRef, Scope, SocketGroup, Subject, Target,
+    normalize_credential, ranges_text, BindingTarget, NewCredential, NewGrant, Peer, PeerGroup,
+    PortRef, Scope, SocketGroup, Subject, Tag, Target,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -129,6 +130,35 @@ pub async fn export(engine: &Engine, state: &AppState) -> Result<ExportDocument,
     }
     out_grants.sort_by_key(grant_key);
 
+    let tags = state.db.list_tags().await?;
+    let mut out_reservations: Vec<ExportReservation> = Vec::new();
+    for r in engine.list_reservations(state).await? {
+        let mut bindings: Vec<ExportBinding> = r
+            .reservation
+            .bindings
+            .iter()
+            .filter_map(|b| export_binding(&b.target, &apps, &tags, &socket_groups))
+            .collect();
+        bindings.sort();
+        let mut grants: Vec<ExportReservationGrant> = r
+            .grants
+            .iter()
+            .filter_map(|g| {
+                Some(ExportReservationGrant {
+                    network: g.grant.network_id.clone(),
+                    subject: export_subject(&g.grant.subject, &peers, &groups)?,
+                })
+            })
+            .collect();
+        grants.sort_by_key(res_grant_key);
+        out_reservations.push(ExportReservation {
+            label: r.reservation.label.clone(),
+            bindings,
+            grants,
+        });
+    }
+    out_reservations.sort_by(|a, b| a.label.cmp(&b.label));
+
     Ok(ExportDocument {
         version: EXPORT_VERSION,
         settings: engine.settings(state).await?,
@@ -136,7 +166,35 @@ pub async fn export(engine: &Engine, state: &AppState) -> Result<ExportDocument,
         groups: out_groups,
         socket_groups: out_socket_groups,
         grants: out_grants,
+        reservations: out_reservations,
     })
+}
+
+/// A binding as the document names it; None when what it names is gone.
+fn export_binding(
+    t: &BindingTarget,
+    apps: &HashMap<String, String>,
+    tags: &[Tag],
+    groups: &[SocketGroup],
+) -> Option<ExportBinding> {
+    Some(match t {
+        BindingTarget::App { app_id, scope } => ExportBinding::App {
+            app: ExportAppRef {
+                id: app_id.clone(),
+                name: apps.get(app_id)?.clone(),
+            },
+            scope: export_scope(scope, groups)?,
+        },
+        BindingTarget::Tag { tag_id } => ExportBinding::Tag {
+            label: tags.iter().find(|t| &t.id == tag_id)?.label.clone(),
+        },
+    })
+}
+
+type ResGrantKey = (Option<String>, (u8, String));
+
+fn res_grant_key(g: &ExportReservationGrant) -> ResGrantKey {
+    (g.network.clone(), subject_key(&g.subject))
 }
 
 type GrantKey = (String, ExportScope, Option<String>, (u8, String));
@@ -152,6 +210,24 @@ fn export_scope(s: &Scope, groups: &[SocketGroup]) -> Option<ExportScope> {
         },
         Scope::Group { id } => ExportScope::Group {
             label: groups.iter().find(|g| g.id == *id)?.label.clone(),
+        },
+    })
+}
+
+/// A document scope as a scope (a port group by label); an error when the group is gone.
+fn export_to_scope(s: &ExportScope, groups: &[SocketGroup]) -> Result<Scope, EngineError> {
+    Ok(match s {
+        ExportScope::All => Scope::All,
+        ExportScope::Port { port, proto } => Scope::Port {
+            port: *port,
+            proto: *proto,
+        },
+        ExportScope::Group { label } => Scope::Group {
+            id: groups
+                .iter()
+                .find(|x| x.label == *label)
+                .map(|x| x.id.clone())
+                .ok_or_else(|| EngineError::NotFound(format!("port group {label}")))?,
         },
     })
 }
@@ -342,6 +418,81 @@ async fn validate(
         }
     }
     doc.grants.sort_by_key(grant_key);
+
+    let tags = state.db.list_tags().await?;
+    let mut res_labels = BTreeSet::new();
+    let mut bound_rows = BTreeSet::new();
+    for r in &mut doc.reservations {
+        r.label = Engine::clean_label(&r.label, "reservation")?;
+        if !res_labels.insert(r.label.clone()) {
+            return invalid(format!("reservation {} is listed twice", r.label));
+        }
+        r.bindings.sort();
+        r.bindings.dedup();
+        for b in &r.bindings {
+            match b {
+                ExportBinding::App { app, scope } => {
+                    let Some(a) = apps.get(&app.id) else {
+                        return invalid(format!(
+                            "reservation {} names unknown app {} ({})",
+                            r.label, app.id, app.name
+                        ));
+                    };
+                    if let ExportScope::Group { label } = scope {
+                        if !socket_group_apps
+                            .get(label)
+                            .is_some_and(|attached| attached.contains(&a.id))
+                        {
+                            return invalid(format!(
+                                "reservation {} binds {} to port group {label}, which the document does not attach to it",
+                                r.label, a.name
+                            ));
+                        }
+                    }
+                    if !bound_rows.insert((app.id.clone(), scope.clone())) {
+                        return invalid(format!(
+                            "{} is bound to more than one reservation",
+                            a.name
+                        ));
+                    }
+                }
+                ExportBinding::Tag { label } => {
+                    if !tags.iter().any(|t| t.label == *label) {
+                        return invalid(format!(
+                            "reservation {} names unknown tag {label}",
+                            r.label
+                        ));
+                    }
+                }
+            }
+        }
+        let mut seen = BTreeSet::new();
+        for g in &r.grants {
+            if let Some(n) = &g.network {
+                match networks.iter().find(|x| x.id == *n) {
+                    None => return invalid(format!("grant names unknown network {n}")),
+                    Some(net) if !net.grants_apply => return Err(EngineError::LocalNetwork),
+                    Some(_) => {}
+                }
+            }
+            match &g.subject {
+                ExportSubject::Peer(l) if !peer_labels.contains(l) => {
+                    return invalid(format!("grant names unknown peer {l}"));
+                }
+                ExportSubject::Group(l) if !group_labels.contains(l) => {
+                    return invalid(format!("grant names unknown group {l}"));
+                }
+                _ => {}
+            }
+            if !seen.insert(res_grant_key(g)) {
+                return invalid(format!(
+                    "a grant on reservation {} is listed twice",
+                    r.label
+                ));
+            }
+        }
+    }
+    doc.reservations.sort_by(|a, b| a.label.cmp(&b.label));
     Ok(doc)
 }
 
@@ -361,7 +512,13 @@ struct Plan {
     create_groups: Vec<ExportGroup>,
     set_members: Vec<ExportGroup>,
     create_grants: Vec<ExportGrant>,
-    address_mode: Option<AddressMode>,
+    /// Reservations: grants and bindings that go, reservations that go, then what is new.
+    remove_reservation_grants: Vec<(String, ExportReservationGrant)>,
+    remove_bindings: Vec<(String, ExportBinding)>,
+    delete_reservations: Vec<String>,
+    create_reservations: Vec<ExportReservation>,
+    add_bindings: Vec<(String, ExportBinding)>,
+    add_reservation_grants: Vec<(String, ExportReservationGrant)>,
     protect_host: Option<Vec<String>>,
     changes: Vec<Change>,
 }
@@ -402,19 +559,6 @@ fn plan(current: &ExportDocument, desired: &ExportDocument) -> Plan {
     let mut sorted_changes: Vec<Change> = Vec::new();
 
     // Settings.
-    if current.settings.address_mode != desired.settings.address_mode {
-        p.address_mode = Some(desired.settings.address_mode);
-        sorted_changes.push(change(
-            ChangeKind::Update,
-            ChangeItem::Setting,
-            "address_mode",
-            Some(format!(
-                "{} -> {}",
-                current.settings.address_mode.as_str(),
-                desired.settings.address_mode.as_str()
-            )),
-        ));
-    }
     let norm = |v: &[String]| -> Vec<String> {
         let mut v: Vec<String> = v.iter().filter(|s| !s.trim().is_empty()).cloned().collect();
         v.sort();
@@ -620,6 +764,99 @@ fn plan(current: &ExportDocument, desired: &ExportDocument) -> Plan {
             p.delete_grants.push((*g).clone());
         }
     }
+
+    // Reservations: by label.
+    let cur: BTreeMap<&str, &ExportReservation> = current
+        .reservations
+        .iter()
+        .map(|x| (x.label.as_str(), x))
+        .collect();
+    let want: BTreeMap<&str, &ExportReservation> = desired
+        .reservations
+        .iter()
+        .map(|x| (x.label.as_str(), x))
+        .collect();
+    for (label, w) in &want {
+        match cur.get(label) {
+            None => {
+                sorted_changes.push(change(
+                    ChangeKind::Create,
+                    ChangeItem::Reservation,
+                    *label,
+                    Some(format!(
+                        "{} bindings, {} grants",
+                        w.bindings.len(),
+                        w.grants.len()
+                    )),
+                ));
+                p.create_reservations.push((*w).clone());
+            }
+            Some(c) => {
+                let (old_b, new_b): (BTreeSet<&ExportBinding>, BTreeSet<&ExportBinding>) =
+                    (c.bindings.iter().collect(), w.bindings.iter().collect());
+                for b in old_b.difference(&new_b) {
+                    sorted_changes.push(change(
+                        ChangeKind::Delete,
+                        ChangeItem::Binding,
+                        format!("binding of reservation {label}"),
+                        None,
+                    ));
+                    p.remove_bindings.push((label.to_string(), (*b).clone()));
+                }
+                for b in new_b.difference(&old_b) {
+                    sorted_changes.push(change(
+                        ChangeKind::Create,
+                        ChangeItem::Binding,
+                        format!("binding of reservation {label}"),
+                        None,
+                    ));
+                    p.add_bindings.push((label.to_string(), (*b).clone()));
+                }
+                let (old_g, new_g): (
+                    BTreeMap<ResGrantKey, &ExportReservationGrant>,
+                    BTreeMap<ResGrantKey, &ExportReservationGrant>,
+                ) = (
+                    c.grants.iter().map(|g| (res_grant_key(g), g)).collect(),
+                    w.grants.iter().map(|g| (res_grant_key(g), g)).collect(),
+                );
+                for (k, g) in &old_g {
+                    if !new_g.contains_key(k) {
+                        sorted_changes.push(change(
+                            ChangeKind::Delete,
+                            ChangeItem::Grant,
+                            format!("grant on reservation {label}"),
+                            None,
+                        ));
+                        p.remove_reservation_grants
+                            .push((label.to_string(), (*g).clone()));
+                    }
+                }
+                for (k, g) in &new_g {
+                    if !old_g.contains_key(k) {
+                        let mut c = change(
+                            ChangeKind::Create,
+                            ChangeItem::Grant,
+                            format!("grant on reservation {label}"),
+                            None,
+                        );
+                        c.opens_to_anyone = g.subject == ExportSubject::Anyone;
+                        sorted_changes.push(c);
+                        p.add_reservation_grants
+                            .push((label.to_string(), (*g).clone()));
+                    }
+                }
+            }
+        }
+    }
+    for label in cur.keys().filter(|l| !want.contains_key(*l)) {
+        sorted_changes.push(change(
+            ChangeKind::Delete,
+            ChangeItem::Reservation,
+            *label,
+            None,
+        ));
+        p.delete_reservations.push(label.to_string());
+    }
     p.changes = sorted_changes;
     p
 }
@@ -672,7 +909,7 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
             (
                 match &v.grant.target {
                     Target::App(id) => id.clone(),
-                    Target::Tag(_) => return false,
+                    Target::Tag(_) | Target::Reservation(_) => return false,
                 },
                 scope,
                 v.grant.network_id.clone(),
@@ -681,6 +918,54 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
         });
         if let Some(v) = found {
             engine.delete_grant(state, &v.grant.id).await?;
+        }
+    }
+
+    // Phase 1a: reservations. Grants on them and bindings go first, then reservations that
+    // go (their addresses leave); what a port group is bound to blocks detaching it.
+    let reservations = engine.list_reservations(state).await?;
+    let tags = state.db.list_tags().await?;
+    let res_id = |label: &str, rs: &[socketguard_core::ReservationView]| {
+        rs.iter()
+            .find(|r| r.reservation.label == label)
+            .map(|r| r.reservation.id.clone())
+            .ok_or_else(|| EngineError::NotFound(format!("reservation {label}")))
+    };
+    for (label, g) in &p.remove_reservation_grants {
+        let Some(view) = reservations.iter().find(|r| r.reservation.label == *label) else {
+            continue;
+        };
+        let found = view.grants.iter().find(|v| {
+            export_subject(&v.grant.subject, &peers, &groups)
+                .is_some_and(|s| (v.grant.network_id.clone(), subject_key(&s)) == res_grant_key(g))
+        });
+        if let Some(v) = found {
+            engine.delete_grant(state, &v.grant.id).await?;
+        }
+    }
+    for (label, b) in &p.remove_bindings {
+        let Some(view) = reservations.iter().find(|r| r.reservation.label == *label) else {
+            continue;
+        };
+        let apps_by_id: HashMap<String, String> = state
+            .db
+            .list_apps()
+            .await?
+            .into_iter()
+            .map(|a| (a.id, a.name))
+            .collect();
+        let found = view.reservation.bindings.iter().find(|x| {
+            export_binding(&x.target, &apps_by_id, &tags, &socket_groups).as_ref() == Some(b)
+        });
+        if let Some(x) = found {
+            engine
+                .remove_binding(state, &view.reservation.id, &x.id)
+                .await?;
+        }
+    }
+    for label in &p.delete_reservations {
+        if let Ok(id) = res_id(label, &reservations) {
+            engine.release_reservation(state, &id).await?;
         }
     }
 
@@ -834,10 +1119,74 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
             .await?;
     }
 
-    // Phase 6: settings. Whole-host protection last: the lockout guard looks at the grants.
-    if let Some(mode) = p.address_mode {
-        engine.set_address_mode(state, mode).await?;
+    // Phase 5b: reservations, their bindings and the grants on them. The document is
+    // explicit about Anyone, so it counts as confirmed.
+    let to_target = |b: &ExportBinding| -> Result<BindingTarget, EngineError> {
+        Ok(match b {
+            ExportBinding::App { app, scope } => BindingTarget::App {
+                app_id: app.id.clone(),
+                scope: export_to_scope(scope, &socket_groups)?,
+            },
+            ExportBinding::Tag { label } => BindingTarget::Tag {
+                tag_id: tags
+                    .iter()
+                    .find(|t| t.label == *label)
+                    .map(|t| t.id.clone())
+                    .ok_or_else(|| EngineError::NotFound(format!("tag {label}")))?,
+            },
+        })
+    };
+    for r in &p.create_reservations {
+        let bindings = r
+            .bindings
+            .iter()
+            .map(&to_target)
+            .collect::<Result<Vec<_>, _>>()?;
+        engine
+            .create_reservation(state, &r.label, bindings, true)
+            .await?;
     }
+    let reservations = engine.list_reservations(state).await?;
+    for (label, b) in &p.add_bindings {
+        engine
+            .add_binding(state, &res_id(label, &reservations)?, to_target(b)?, true)
+            .await?;
+    }
+    let subject_of = |s: &ExportSubject| -> Result<Subject, EngineError> {
+        Ok(match s {
+            ExportSubject::Anyone => Subject::Anyone,
+            ExportSubject::Peer(l) => Subject::Peer(peer_id(l)?),
+            ExportSubject::Group(l) => Subject::Group(
+                groups
+                    .iter()
+                    .find(|x| x.label == *l)
+                    .map(|x| x.id.clone())
+                    .ok_or_else(|| EngineError::NotFound(format!("peer group {l}")))?,
+            ),
+        })
+    };
+    let wanted_grants: Vec<(String, ExportReservationGrant)> = p
+        .create_reservations
+        .iter()
+        .flat_map(|r| r.grants.iter().map(|g| (r.label.clone(), g.clone())))
+        .chain(p.add_reservation_grants.iter().cloned())
+        .collect();
+    for (label, g) in &wanted_grants {
+        engine
+            .create_grant(
+                state,
+                &NewGrant {
+                    target: Target::Reservation(res_id(label, &reservations)?),
+                    scope: Scope::All,
+                    network_id: g.network.clone(),
+                    subject: subject_of(&g.subject)?,
+                    confirm_open: true,
+                },
+            )
+            .await?;
+    }
+
+    // Phase 6: settings. Whole-host protection last: the lockout guard looks at the grants.
     if let Some(interfaces) = &p.protect_host {
         match engine
             .set_protect_host(state, interfaces.clone(), false)

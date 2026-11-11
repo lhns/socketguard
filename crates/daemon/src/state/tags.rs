@@ -1,15 +1,20 @@
 //! Tags (ADR 0043), the writes a batch of changes applies in one transaction (ADR 0045)
 //! and the Tor client keys the daemon generated.
 
+use super::reservations::{
+    assign_address_in, delete_reservation_in, insert_binding_in, insert_reservation_in,
+};
 use super::socket_groups::{
     attach_in, delete_socket_group_in, detach_in, insert_socket_group_in, update_socket_group_in,
 };
 use super::{
-    insert_grant_in, insert_peer_in, parse_ts, scope_columns, scope_from_columns, ts, Database, Tx,
+    insert_address_in, insert_grant_in, insert_peer_in, parse_ts, scope_columns,
+    scope_from_columns, ts, Database, Tx,
 };
 use anyhow::Result;
 use socketguard_core::{
-    App, Credential, Grant, Peer, PeerGroup, PortRange, Scope, SocketGroup, Tag, TagId, TagMember,
+    Address, App, Binding, Credential, Grant, Peer, PeerGroup, PortRange, Reservation, Scope,
+    SocketGroup, Tag, TagId, TagMember,
 };
 use sqlx::Row;
 use std::collections::HashMap;
@@ -58,6 +63,39 @@ pub enum Write {
     },
     /// An address and, with it, its onion key.
     DeleteAddress(String),
+    /// A new address with its locator secret (the onion service key).
+    InsertAddress {
+        address: Address,
+        secret: Option<String>,
+    },
+    /// The reservation with its bindings.
+    InsertReservation(Reservation),
+    RenameReservation {
+        id: String,
+        label: String,
+    },
+    /// The reservation, the grants on it, its bindings and its addresses.
+    DeleteReservation(String),
+    InsertBinding(Binding),
+    DeleteBinding(String),
+    /// An automatic address becomes the address of a reservation, locator kept.
+    AssignAddress {
+        address_id: String,
+        reservation_id: String,
+    },
+    /// `move_app`: a grant, an automatic address or a binding of one app goes to another.
+    MoveGrant {
+        grant_id: String,
+        to_app: String,
+    },
+    MoveAddress {
+        address_id: String,
+        to_app: String,
+    },
+    MoveBinding {
+        binding_id: String,
+        to_app: String,
+    },
     SetReviewed {
         app_id: String,
         reviewed: bool,
@@ -150,6 +188,52 @@ async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
         Write::DeleteAddress(id) => {
             sqlx::query("DELETE FROM addresses WHERE id = ?")
                 .bind(id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        Write::InsertAddress { address, secret } => {
+            insert_address_in(tx, address, secret.as_deref()).await?
+        }
+        Write::InsertReservation(r) => insert_reservation_in(tx, r).await?,
+        Write::RenameReservation { id, label } => {
+            sqlx::query("UPDATE reservations SET label = ? WHERE id = ?")
+                .bind(label)
+                .bind(id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        Write::DeleteReservation(id) => {
+            delete_reservation_in(tx, id).await?;
+        }
+        Write::InsertBinding(b) => insert_binding_in(tx, b).await?,
+        Write::DeleteBinding(id) => {
+            sqlx::query("DELETE FROM reservation_bindings WHERE id = ?")
+                .bind(id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        Write::AssignAddress {
+            address_id,
+            reservation_id,
+        } => assign_address_in(tx, address_id, reservation_id).await?,
+        Write::MoveGrant { grant_id, to_app } => {
+            sqlx::query("UPDATE grants SET target_id = ? WHERE id = ? AND target_kind = 'app'")
+                .bind(to_app)
+                .bind(grant_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        Write::MoveAddress { address_id, to_app } => {
+            sqlx::query("UPDATE addresses SET app_id = ? WHERE id = ?")
+                .bind(to_app)
+                .bind(address_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        Write::MoveBinding { binding_id, to_app } => {
+            sqlx::query("UPDATE reservation_bindings SET app_id = ? WHERE id = ?")
+                .bind(to_app)
+                .bind(binding_id)
                 .execute(&mut **tx)
                 .await?;
         }

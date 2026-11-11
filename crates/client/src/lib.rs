@@ -20,16 +20,16 @@ use hyper_util::rt::TokioIo;
 use serde::{de::DeserializeOwned, Serialize};
 use socketguard_core::api_types::{
     ApiError, ApplyRequest, ApplyResponse, AttachSocketGroup, ChangesRequest, ChangesResponse,
-    DisableRequest, Enforcement, EnforcementNotice, ExportDocument, MemberQuery, MergeRequest,
-    NewGroup, NewNetwork, NewPeer, NewSocketGroup, NewTag, NewTagMember, ParseCredentialsRequest,
-    ProtectHostRequest, ProtectHostResponse, ReviewRequest, SetMembers, ShareResponse,
-    SplitRequest, StatusResponse, TorKeyResponse, UpdateLabel, UpdateSettings, UpdateSocketGroup,
-    UpdateTag,
+    DisableRequest, Enforcement, EnforcementNotice, ExportDocument, MemberQuery, MoveAppRequest,
+    NewBinding, NewGroup, NewNetwork, NewPeer, NewReservation, NewSocketGroup, NewTag,
+    NewTagMember, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse, ReserveRequest,
+    ReviewRequest, SetMembers, ShareResponse, StatusResponse, TorKeyResponse, UpdateLabel,
+    UpdateSocketGroup, UpdateTag,
 };
 use socketguard_core::{
     ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
-    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, Scope, Settings, SocketGroup, Tag,
-    TagMember,
+    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, ReservationView, Scope, Settings,
+    SocketGroup, Tag, TagMember,
 };
 
 /// Environment variable that overrides the endpoint (socket path or pipe name).
@@ -303,12 +303,10 @@ impl Client {
         .await
     }
 
-    pub async fn split_app(&self, id: &str, req: &SplitRequest) -> Result<Saved<Address>> {
-        self.call_saved(&routes::SPLIT_APP, &[id], json(req)).await
-    }
-
-    pub async fn merge_app(&self, id: &str, req: &MergeRequest) -> Result<Saved<Address>> {
-        self.call_saved(&routes::MERGE_APP, &[id], json(req)).await
+    /// Move the grants, tag memberships, addresses and reservation bindings of app `id` to
+    /// `req.to`. Needs `confirm_open` where Anyone is among what moves or gains access.
+    pub async fn move_app(&self, id: &str, req: &MoveAppRequest) -> Result<Saved<AppDetail>> {
+        self.call_saved(&routes::MOVE_APP, &[id], json(req)).await
     }
 
     /// What the app's granted Tor peers need to connect: their client authorization lines.
@@ -558,6 +556,73 @@ impl Client {
             .await
     }
 
+    // ─── Reservations and addresses ──────────────────────────────────────────
+
+    /// Every address, automatic and reserved, with `up`, `excluded` and Tor `notes`.
+    pub async fn list_addresses(&self) -> Result<Vec<Address>> {
+        self.call(&routes::LIST_ADDRESSES, &[], None, None).await
+    }
+
+    pub async fn list_reservations(&self) -> Result<Vec<ReservationView>> {
+        self.call(&routes::LIST_RESERVATIONS, &[], None, None).await
+    }
+
+    pub async fn get_reservation(&self, id: &str) -> Result<ReservationView> {
+        self.call(&routes::GET_RESERVATION, &[id], None, None).await
+    }
+
+    pub async fn create_reservation(&self, req: &NewReservation) -> Result<Saved<ReservationView>> {
+        self.call_saved(&routes::CREATE_RESERVATION, &[], json(req))
+            .await
+    }
+
+    pub async fn rename_reservation(
+        &self,
+        id: &str,
+        label: &str,
+    ) -> Result<Saved<ReservationView>> {
+        self.call_saved(
+            &routes::RENAME_RESERVATION,
+            &[id],
+            json(&UpdateLabel {
+                label: label.to_string(),
+            }),
+        )
+        .await
+    }
+
+    /// Delete a reservation, its addresses and the grants on it.
+    pub async fn release_reservation(&self, id: &str) -> Result<Saved<()>> {
+        self.call_saved(&routes::RELEASE_RESERVATION, &[id], None)
+            .await
+    }
+
+    /// Bind a row (or a tag) to a reservation. Where a grant to Anyone targets the
+    /// reservation it needs `confirm_open`.
+    pub async fn add_binding(&self, id: &str, req: &NewBinding) -> Result<Saved<ReservationView>> {
+        self.call_saved(&routes::ADD_BINDING, &[id], json(req))
+            .await
+    }
+
+    pub async fn remove_binding(
+        &self,
+        id: &str,
+        binding_id: &str,
+    ) -> Result<Saved<ReservationView>> {
+        self.call_saved(&routes::REMOVE_BINDING, &[id, binding_id], None)
+            .await
+    }
+
+    /// Turn an automatic address into a reservation with that row bound.
+    pub async fn reserve_address(
+        &self,
+        id: &str,
+        req: &ReserveRequest,
+    ) -> Result<Saved<ReservationView>> {
+        self.call_saved(&routes::RESERVE_ADDRESS, &[id], json(req))
+            .await
+    }
+
     // ─── Networks ────────────────────────────────────────────────────────────
 
     pub async fn list_networks(&self) -> Result<Vec<Network>> {
@@ -581,11 +646,6 @@ impl Client {
 
     pub async fn get_settings(&self) -> Result<Settings> {
         self.call(&routes::GET_SETTINGS, &[], None, None).await
-    }
-
-    pub async fn update_settings(&self, req: &UpdateSettings) -> Result<Settings> {
-        self.call(&routes::UPDATE_SETTINGS, &[], None, json(req))
-            .await
     }
 
     /// Turn whole-host protection on for `interfaces` (empty list: off). The daemon refuses

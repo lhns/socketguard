@@ -9,6 +9,7 @@
 //! the -wal/-shm files and any `.pre-v1` backup too.
 
 mod protect;
+mod reservations;
 mod schema;
 mod settings;
 mod socket_groups;
@@ -236,10 +237,8 @@ impl Database {
             });
         }
         let mut ports = self.load_ports(only).await?;
-        let mut addresses = self.load_addresses(only).await?;
         for app in &mut apps {
             app.ports = ports.remove(&app.id).unwrap_or_default();
-            app.addresses = addresses.remove(&app.id).unwrap_or_default();
         }
         Ok(apps)
     }
@@ -376,21 +375,6 @@ impl Database {
             .into_iter()
             .map(address_from_row)
             .collect()
-    }
-
-    async fn load_addresses(&self, only: Option<&str>) -> Result<HashMap<String, Vec<Address>>> {
-        let rows = sqlx::query(&format!(
-            "{ADDRESS_SELECT} WHERE (?1 IS NULL OR app_id = ?1) ORDER BY created_at, id"
-        ))
-        .bind(only)
-        .fetch_all(&self.pool)
-        .await?;
-        let mut out: HashMap<String, Vec<Address>> = HashMap::new();
-        for r in rows {
-            let a = address_from_row(r)?;
-            out.entry(a.app_id.clone()).or_default().push(a);
-        }
-        Ok(out)
     }
 
     pub async fn update_address_ipv6(&self, id: &str, addr: Ipv6Addr) -> Result<bool> {
@@ -915,8 +899,8 @@ impl NewActivity {
     }
 }
 
-const ADDRESS_SELECT: &str = "SELECT id, app_id, network_id, port, proto, socket_group, \
-     locator_kind, locator, created_at FROM addresses";
+const ADDRESS_SELECT: &str = "SELECT id, app_id, reservation_id, network_id, port, proto, \
+     socket_group, locator_kind, locator, created_at FROM addresses";
 
 const GRANT_SELECT: &str = "SELECT id, target_kind, target_id, port, proto, socket_group, \
      network_id, subject_kind, subject_id, created_at FROM grants";
@@ -945,6 +929,7 @@ async fn insert_grant_in(tx: &mut Tx<'_>, g: &Grant) -> Result<()> {
     let (target_kind, target_id) = match &g.target {
         Target::App(id) => ("app", id),
         Target::Tag(id) => ("tag", id),
+        Target::Reservation(id) => ("reservation", id),
     };
     let (port, proto, group) = scope_columns(&g.scope);
     sqlx::query(
@@ -977,11 +962,13 @@ async fn insert_address_in(
     };
     let (port, proto, group) = scope_columns(&a.scope);
     sqlx::query(
-        "INSERT INTO addresses (id, app_id, network_id, port, proto, socket_group, locator_kind, \
-         locator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO addresses (id, app_id, reservation_id, network_id, port, proto, \
+         socket_group, locator_kind, locator, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&a.id)
     .bind(&a.app_id)
+    .bind(&a.reservation_id)
     .bind(&a.network_id)
     .bind(port)
     .bind(proto)
@@ -1057,10 +1044,14 @@ fn address_from_row(r: sqlx::sqlite::SqliteRow) -> Result<Address> {
     Ok(Address {
         id: r.get("id"),
         app_id: r.get("app_id"),
+        reservation_id: r.get("reservation_id"),
         network_id: r.get("network_id"),
         scope: scope_from_columns(r.get("port"), r.get("proto"), r.get("socket_group"))?,
         locator,
         created_at: parse_ts(r.get("created_at"))?,
+        up: false,
+        excluded: Vec::new(),
+        notes: Vec::new(),
     })
 }
 
@@ -1077,6 +1068,7 @@ fn grant_from_row(r: sqlx::sqlite::SqliteRow) -> Result<Grant> {
     let target = match r.get::<String, _>("target_kind").as_str() {
         "app" => Target::App(target_id),
         "tag" => Target::Tag(target_id),
+        "reservation" => Target::Reservation(target_id),
         k => bail!("bad grant target {k:?}"),
     };
     Ok(Grant {
@@ -1146,16 +1138,14 @@ mod test_util {
     }
 
     pub(super) fn address(app_id: &str, net: &str, a: &str) -> Address {
-        Address {
-            id: new_id(),
-            app_id: app_id.into(),
-            network_id: net.into(),
-            scope: Scope::All,
-            locator: Locator::Ipv6 {
+        Address::automatic(
+            app_id,
+            Scope::All,
+            net,
+            Locator::Ipv6 {
                 addr: a.parse().unwrap(),
             },
-            created_at: now(),
-        }
+        )
     }
 
     pub(super) fn peer(label: &str, creds: &[(CredentialKind, &str)]) -> Peer {
