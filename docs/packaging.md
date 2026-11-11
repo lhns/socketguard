@@ -32,9 +32,10 @@ service before replacing the file (`ServiceControl`, stop only) and `service ins
   administrator's credentials). Silent installs add nobody unless
   `msiexec /i SocketGuard.msi /qn ALLOWUSER=PC\alice` (public property `ALLOWUSER`). The account
   must sign out and in again before the group applies.
-- **WebView2.** The app needs the Microsoft Edge WebView2 Runtime. Windows 11 ships it and Windows
-  10 gets it through Windows Update and Edge. Tauri's own bundler defaults to downloading a
-  bootstrapper at install time, which a firewall's installer should not do; the MSI instead looks
+- **WebView2.** The app needs the Microsoft Edge WebView2 Runtime. Windows 11 ships it; that Windows
+  10 receives it through Windows Update and Edge is from memory, not checked. Tauri's own bundler
+  defaults to downloading a bootstrapper at install time (`WebviewInstallMode::default()` is
+  `DownloadBootstrapper { silent: true }` in tauri-utils 2.8.3, `config.rs`), which a firewall's installer should not do; the MSI instead looks
   for the runtime (`pv` under `EdgeUpdate\Clients\{F3017226-...}`, machine or user) and the dialog
   says when it is missing. The service and the CLI do not need it.
 - **A removal that leaves something fails** (the daemon exits 1: persistent filters would outlive
