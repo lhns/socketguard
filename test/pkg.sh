@@ -11,7 +11,7 @@ set -euo pipefail
 pkg="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 next="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 here="$(cd "$(dirname "$0")/.." && pwd)"
-fp="$here/deploy/ci/footprint-check.sh"
+fp="bash $here/deploy/ci/footprint-check.sh"
 label=de.lhns.socketguard
 db="/Library/Application Support/SocketGuard/socketguard.db"
 
@@ -47,7 +47,7 @@ test -x /Applications/SocketGuard.app/Contents/MacOS/socketguard-ui || fail "the
 /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' /Applications/SocketGuard.app/Contents/Info.plist
 sudo pfctl -a socketguard -sr 2>&1 | head -5
 grep -q 'anchor "socketguard"' /etc/pf.conf || fail "no anchor line in /etc/pf.conf"
-sudo "$fp" expect-present --require pf-conf-anchor-line
+sudo $fp expect-present --require pf-conf-anchor-line
 sudo /usr/local/bin/socketguard port-groups add 7000-7010/tcp --label upgrade-marker >/dev/null || fail "cannot create the marker port group"
 inode=$(sudo stat -f %i "$db"); pid1=$(daemon_pid)
 
@@ -66,7 +66,7 @@ diff -u "${RUNNER_TEMP:-/tmp}/pf.conf.before" /etc/pf.conf || fail "/etc/pf.conf
 echo "pf before: $pf_enabled_before"; sudo pfctl -s info 2>&1 | head -1 || true
 
 step "the files a pkg cannot remove"
-sudo "$fp" expect-absent
+sudo $fp expect-absent
 sudo rm -rf /Applications/SocketGuard.app /usr/local/bin/socketguard-daemon /usr/local/bin/socketguard /usr/local/lib/socketguard
 sudo pkgutil --forget de.lhns.socketguard
 ! pkgutil --pkg-info de.lhns.socketguard >/dev/null 2>&1 || fail "the receipt is still there"

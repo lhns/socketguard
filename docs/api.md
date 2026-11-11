@@ -11,7 +11,7 @@ types are generated from the same Rust types (see below).
 
 | Platform | Endpoint | Config key | Default |
 |---|---|---|---|
-| Linux, macOS | Unix socket | `api_socket` | `/run/socketguard.sock` |
+| Linux, macOS | Unix socket | `api_socket` | `/run/socketguard.sock` (macOS: `/var/run/socketguard.sock`) |
 | Windows | named pipe | `api_pipe` | `\\.\pipe\socketguard` |
 
 Clients (`socketguard`, the UI, `socketguard-client`) take the endpoint from the

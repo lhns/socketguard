@@ -160,7 +160,7 @@ and start `socketguard-daemon` yourself as root / Administrator.
 
 The service applies the stored state before networking comes up (the systemd unit is `deploy/systemd/socketguard.service`).
 
-It serves the local API on `/run/socketguard.sock` or the named pipe `\.\pipe\socketguard`.
+It serves the local API on `/run/socketguard.sock` (macOS: `/var/run/socketguard.sock`) or the named pipe `\.\pipe\socketguard`.
 To use the CLI or UI without elevation, join the `socketguard` group (Unix) or the local group
 `SocketGuard Users` (Windows): `socketguard-daemon access allow <account>`, see [docs/api.md](docs/api.md). On start it applies the stored
 state; on stop everything stays in place until `socketguard disable` (or

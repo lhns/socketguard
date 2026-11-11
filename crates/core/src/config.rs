@@ -472,7 +472,11 @@ impl<'de> Deserialize<'de> for DaemonConfig {
     }
 }
 
-/// Default path of the API socket on Unix.
+/// Default path of the API socket on Unix. macOS has no `/run` (the root volume is read-only,
+/// so the daemon could not create it): `/var/run` is the writable equivalent.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_API_SOCKET: &str = "/var/run/socketguard.sock";
+#[cfg(not(target_os = "macos"))]
 pub const DEFAULT_API_SOCKET: &str = "/run/socketguard.sock";
 
 /// Default name of the API pipe on Windows.

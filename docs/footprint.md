@@ -52,7 +52,7 @@ Default locations (ADR 0050): Windows `%ProgramData%\SocketGuard`, Linux `/etc/s
 | Install record and setup log `setup-log.json` | next to the config | `uninstall --purge`; kept (with the entries still to undo) otherwise |
 | `.socketguard.bak` backup of Tor's `torrc` | next to the `torrc` | `networks setup tor --undo`, `uninstall` |
 | Directories created by SocketGuard | the config and state directories | `uninstall`, only if the install record says SocketGuard created them and they are empty |
-| Unix socket `/run/socketguard.sock` | | graceful stop; `uninstall --purge` |
+| Unix socket `/run/socketguard.sock` (macOS `/var/run/socketguard.sock`) | | graceful stop; `uninstall --purge` |
 | Named pipe `\\.\pipe\socketguard` | Windows | process exit |
 | UI storage: webview profile of `com.socketguard.desktop`, localStorage `socketguard.columns` | per user | the UI's "Remove SocketGuard" flow clears the signed-in user's own storage. **Gap:** the profiles of other users on the machine cannot be removed by an elevated system command; they stay under each user's profile (paths below) |
 

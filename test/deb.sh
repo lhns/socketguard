@@ -9,7 +9,7 @@
 set -euo pipefail
 deb="$(readlink -f "$1")"; next="$(readlink -f "$2")"
 here="$(cd "$(dirname "$0")/.." && pwd)"
-fp="$here/deploy/ci/footprint-check.sh"
+fp="bash $here/deploy/ci/footprint-check.sh"
 db=/var/lib/socketguard/socketguard.db
 
 step() { printf '\n== %s\n' "$*"; }
@@ -33,7 +33,7 @@ grep -q 'ExecStart=/usr/bin/socketguard-daemon' /etc/systemd/system/socketguard.
 getent group socketguard >/dev/null || fail "no group socketguard"
 test -e "$db" || fail "no database"
 systemctl is-enabled --quiet socketguard || fail "the unit is not enabled"
-sudo "$fp" expect-present --require nft-table-inet,socket
+sudo $fp expect-present --require nft-table-inet,socket
 test -f /usr/share/applications/socketguard.desktop || fail "no .desktop file"
 # A marker that only the data survives.
 sudo socketguard port-groups add 7000-7010/tcp --label upgrade-marker >/dev/null || fail "cannot create the marker port group"
@@ -49,7 +49,7 @@ pid2=$(mainpid)
 sudo socketguard port-groups list | grep -q upgrade-marker || fail "the stored state is gone after the upgrade"
 sudo nft list table inet socketguard >/dev/null || fail "the rules are gone after the upgrade"
 dpkg-query -W -f='${Version}\n' socketguard
-sudo "$fp" expect-present --require nft-table-inet,socket
+sudo $fp expect-present --require nft-table-inet,socket
 
 step "remove (data kept)"
 sudo apt-get remove -y socketguard
@@ -57,9 +57,9 @@ systemctl is-active --quiet socketguard && fail "the service still runs after re
 test -e /etc/systemd/system/socketguard.service && fail "the unit file is still there"
 sudo nft list table inet socketguard >/dev/null 2>&1 && fail "the nft table is still there after remove"
 test -e "$db" || fail "remove deleted the database"
-sudo "$fp" expect-absent --allow-data
+sudo $fp expect-absent --allow-data
 
 step "purge"
 sudo apt-get purge -y socketguard
-sudo "$fp" expect-absent
+sudo $fp expect-absent
 echo OK
