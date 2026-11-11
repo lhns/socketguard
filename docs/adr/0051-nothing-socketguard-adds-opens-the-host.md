@@ -23,7 +23,7 @@ ADR 0026 closes the whole Yggdrasil interface once the network is managed. Netwo
 **Invariant.** A network that SocketGuard adds, installs or manages never makes the host reachable outside SocketGuard's rules, at any moment, including before the network is usable and after a failure.
 
 - **Close first.** The block for a network is in place before anything that could open it runs. Setup adds the block as its first step and installs or starts software only after the ruleset with that block has been applied and verified. If any later step fails, the block stays.
-- **Block by address range, not only by interface.** The Yggdrasil block also matches the overlay's address space (`200::/7`) as destination on any interface, so it holds while the adapter does not exist, is renamed or is recreated. The interface rule stays in addition.
+- **Block by address, not only by interface.** The block for a Yggdrasil network also matches that node's own address and routed subnet as destination on any interface, so it holds while the adapter does not exist, is renamed or is recreated. The addresses are remembered once known. The interface rule stays in addition. Only the managed node's addresses are blocked: a node the user runs outside SocketGuard is not touched.
 - **Pending networks.** A network can exist in SocketGuard before its software runs. It is Down and already closed.
 - **Leaving is explicit about exposure.** Turning SocketGuard off, removing such a network or uninstalling says which networks stay reachable without it and offers to stop the services SocketGuard started (from the setup log). Removing a network keeps its block until the user confirms.
 - **Boot.** Where rules do not survive a reboot, the service starts before the network comes up (systemd `Before=network-pre.target`; the launchd daemon loads the anchor at load). Where that cannot be guaranteed, it is listed in `docs/footprint.md` as an open gap, not hidden.
@@ -33,5 +33,5 @@ ADR 0026 closes the whole Yggdrasil interface once the network is managed. Netwo
 
 - Installing Yggdrasil through SocketGuard never exposes the host, even if setup is interrupted.
 - Software installed by hand before it is added in SocketGuard is outside this guarantee until it is added; the network cards say so.
-- The address-range block also closes Yggdrasil traffic on a host where the user runs a node SocketGuard does not manage, once any Yggdrasil network is added. That is intended.
+- A node SocketGuard has never seen has no address to block yet; it is closed by its interface rule, or SocketGuard refuses to start it. A node SocketGuard creates itself has its address known before it starts.
 - Tor needs no block: it exposes nothing inbound until SocketGuard publishes a service.
