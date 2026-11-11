@@ -15,7 +15,7 @@ real runner and checks the host from outside with `deploy/ci/footprint-check.*`;
 
 An upgrade is never an uninstall: `uninstall` and `--disable` do not run on one, in any package.
 The deb and the rpm tell them apart by the maintainer-script argument (`remove` / `$1 = 0`), the
-MSI by `REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE`.
+MSI by `REMOVE AND NOT UPGRADINGPRODUCTCODE` (the one feature can only be removed whole).
 
 `service install` restarts a daemon that is already running (systemd `restart`, launchd
 `kickstart -k`), so the process after an upgrade is the new binary. The Windows installer stops the

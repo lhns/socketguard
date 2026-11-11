@@ -40,6 +40,9 @@ jobs:
         shell: bash
         run: bash ./build.sh
       - uses: ./.github/actions/setup-wix
+      # SIGN (not done, docs/packaging.md): import WINDOWS_SIGNING_CERT_PFX and sign the three
+      # target\release\*.exe here with `signtool sign /fd sha256 /tr <timestamp url> /td sha256`,
+      # then sign the MSIs after the next step the same way.
       - name: Build the MSIs (this version, and the next patch for the upgrade test)
         shell: bash
         run: |

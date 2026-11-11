@@ -124,6 +124,13 @@ function Save-Wfp([string]$Tag) {
   foreach ($w in @(@('filters', "wfp-filters-$Tag.xml"), @('state', "wfp-state-$Tag.xml"), @('netevents', "wfp-netevents-$Tag.xml"))) {
     try { & netsh wfp show $w[0] file=(Join-Path $Out $w[1]) 2>&1 | Out-Null } catch { Write-Host "netsh wfp show $($w[0]) failed: $_" }
   }
+  # The engine option FWPM_ENGINE_COLLECT_NET_EVENTS: what netsh can say about it, and what the
+  # daemon recorded about the value it found (the install record).
+  foreach ($o in @('?', 'optionsfor=netevents', 'optionsfor=engine')) {
+    try { "== netsh wfp show options $o`n" + ((& netsh wfp show options $o 2>&1) | Out-String) | Out-File -Append (Join-Path $Out "wfp-options-$Tag.txt") } catch {}
+  }
+  $log = Join-Path $DataDir 'setup-log.json'
+  if (Test-Path $log) { Copy-Item $log (Join-Path $Out "setup-log-$Tag.json") -ErrorAction SilentlyContinue }
 }
 
 function Wait-Until([scriptblock]$Cond, [int]$Seconds, [string]$What) {
@@ -250,6 +257,7 @@ function Invoke-FirewallExercise {
 
 Section 'install'
 if (Test-Path $InstallDir) { Fail "$InstallDir exists already; this test needs a clean machine" }
+Save-Wfp 'before'
 Invoke-Msi @('/i', $Msi, "ALLOWUSER=$User") 'install'
 
 Section 'after install'

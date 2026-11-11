@@ -35,7 +35,8 @@ wait_answers() { for _ in $(seq 1 60); do sudo /usr/local/bin/socketguard status
 daemon_pid() { sudo launchctl print "system/$label" | awk '/^[[:space:]]*pid = /{print $3; exit}'; }
 
 cp /etc/pf.conf "${RUNNER_TEMP:-/tmp}/pf.conf.before"
-pf_enabled_before=$(sudo pfctl -s info 2>&1 | head -1 || true)
+pf_state() { sudo pfctl -s info 2>&1 | awk '/^Status:/ {print $2}'; }
+pf_before=$(pf_state)
 
 step "install"
 sudo installer -pkg "$pkg" -target / -verbose
@@ -63,7 +64,9 @@ sudo /usr/local/bin/socketguard port-groups list | grep -q upgrade-marker || fai
 step "uninstall --purge"
 sudo /usr/local/bin/socketguard-daemon uninstall --purge --yes
 diff -u "${RUNNER_TEMP:-/tmp}/pf.conf.before" /etc/pf.conf || fail "/etc/pf.conf is not what it was before the install"
-echo "pf before: $pf_enabled_before"; sudo pfctl -s info 2>&1 | head -1 || true
+pf_after=$(pf_state)
+echo "pf before: $pf_before, after: $pf_after"
+[ "$pf_before" = "$pf_after" ] || fail "pf was $pf_before before the install and is $pf_after after the purge"
 
 step "the files a pkg cannot remove"
 sudo $fp expect-absent

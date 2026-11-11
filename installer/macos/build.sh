@@ -61,9 +61,17 @@ codesign --force --deep --sign - "$app"
 
 cp -R installer/macos/scripts "$work/scripts"
 chmod +x "$work/scripts/"*
+# A bundle is "relocatable" by default: an upgrade then updates the app wherever Launch Services
+# finds a copy of it (a build directory, a moved app) instead of /Applications.
+pkgbuild --analyze --root "$root" "$work/components.plist"
+i=0
+while /usr/libexec/PlistBuddy -c "Print :$i" "$work/components.plist" >/dev/null 2>&1; do
+    /usr/libexec/PlistBuddy -c "Set :$i:BundleIsRelocatable false" "$work/components.plist"
+    i=$((i + 1))
+done
 pkgbuild --root "$root" --identifier de.lhns.socketguard --version "$version" \
-    --install-location / --scripts "$work/scripts" --ownership recommended \
-    "$work/component.pkg"
+    --install-location / --scripts "$work/scripts" --component-plist "$work/components.plist" \
+    --ownership recommended "$work/component.pkg"
 # SIGN: productbuild --sign "$APPLE_INSTALLER_IDENTITY" (Developer ID Installer), then
 #   xcrun notarytool submit ... --wait && xcrun stapler staple
 productbuild --package "$work/component.pkg" "$out/SocketGuard-$version-$(uname -m).pkg"
