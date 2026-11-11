@@ -46,6 +46,15 @@ impl Named for socketguard_core::Tag {
     }
 }
 
+impl Named for socketguard_core::SocketGroup {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn name(&self) -> &str {
+        &self.label
+    }
+}
+
 impl Named for PeerGroup {
     fn id(&self) -> &str {
         &self.id

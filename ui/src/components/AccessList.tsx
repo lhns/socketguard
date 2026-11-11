@@ -2,7 +2,6 @@ import { useEffect, useRef } from "react";
 import type { AccessEntry } from "../access";
 import { sameSubject } from "../access";
 import type { Network, Subject } from "../api";
-import { portLabel } from "../lib";
 import { useNav } from "../nav";
 import { ReachBadge } from "../reach";
 
@@ -25,7 +24,7 @@ interface Props {
   unit?: string;
 }
 
-const nameOf = (e: AccessEntry) => `${e.name}${e.port ? ` ${portLabel(e.port)}` : ""}`;
+const nameOf = (e: AccessEntry) => `${e.name}${e.scope.kind !== "all" ? ` ${e.scopeText}` : ""}`;
 
 /** Access in either direction: the name, port, network, how well the subject is identified and
  * where it comes from. A direct entry can be revoked; one that comes through a tag or a group
@@ -59,7 +58,7 @@ export default function AccessList({ entries, direction, networks, onRevoke, hig
               ) : (
                 <span className="access-name">{e.name}</span>
               )}
-              {e.port && <span className="badge access-port mono" title="Only this port">{portLabel(e.port)}</span>}
+              {e.scope.kind !== "all" && <span className="badge access-port mono" title="Only these ports">{e.scopeText}</span>}
               {e.networkId && e.subject?.kind !== "anyone" && <span className="muted">on {netName(e.networkId)}</span>}
               {e.of !== undefined && e.of > 1 && (
                 <span className={`badge ${e.have === e.of ? "reach reach-ok" : "reach reach-warn"}`}>

@@ -7,7 +7,7 @@ use socketguard_core::config::{
 use socketguard_core::ListeningSocket;
 use socketguard_core::{
     ActivityKind, ActivityQuery, AddressMode, App, CredentialKind, NetworkStatus, NewCredential,
-    NewGrant, PortRef, PortSet, Protocol, Reach, Subject, Target,
+    NewGrant, PortRef, Protocol, Reach, Scope, Subject, Target,
 };
 use socketguard_daemon::api::DaemonEvent;
 use socketguard_daemon::engine::{Engine, EngineError, GrantFilter, ProtectHostError};
@@ -140,7 +140,7 @@ impl Harness {
                 &self.state,
                 &NewGrant {
                     target: Target::App(app_id.into()),
-                    port: None,
+                    scope: Scope::All,
                     network_id: None,
                     subject,
                     confirm_open: true,
@@ -253,7 +253,7 @@ async fn discovery_creates_a_pending_app_with_an_address_on_every_network() {
     assert_eq!(app.ports.len(), 1);
     assert!((app.ports[0].port, app.ports[0].listening) == (80, true));
     assert_eq!(app.addresses.len(), 3);
-    assert!(app.addresses.iter().all(|a| a.ports == PortSet::All));
+    assert!(app.addresses.iter().all(|a| a.scope == Scope::All));
     let nets: Vec<_> = app
         .addresses
         .iter()
@@ -391,7 +391,7 @@ async fn a_revoked_grant_cuts_its_established_connections() {
     h.reconcile().await;
     let revoked = h.fw.revoked();
     assert_eq!(revoked.len(), 1, "{revoked:?}");
-    assert_eq!(revoked[0].port, 80);
+    assert_eq!(revoked[0].ports.start, 80);
     assert_eq!(revoked[0].src, Some("2001:db8::7/128".parse().unwrap()));
 }
 
@@ -511,12 +511,9 @@ async fn per_port_mode_gives_each_port_its_own_address() {
 
     let app = h.app().await;
     assert_eq!(app.addresses.len(), 2);
-    let mut served: Vec<_> = app.addresses.iter().map(|a| a.ports.clone()).collect();
+    let mut served: Vec<_> = app.addresses.iter().map(|a| a.scope.clone()).collect();
     served.sort_by_key(|p| format!("{p:?}"));
-    assert_eq!(
-        served,
-        [PortSet::Only(vec![tcp(443)]), PortSet::Only(vec![tcp(80)])]
-    );
+    assert_eq!(served, [Scope::port(tcp(443)), Scope::port(tcp(80))]);
     assert_eq!(net_adds(&h).len(), 2);
 
     // A port that appears later gets its own address; the others stay.
@@ -535,7 +532,7 @@ async fn per_port_mode_gives_each_port_its_own_address() {
     assert!(app
         .addresses
         .iter()
-        .any(|a| a.ports == PortSet::Only(vec![tcp(8080)])));
+        .any(|a| a.scope == Scope::port(tcp(8080))));
 
     // Switching back affects new apps and ports only.
     h.engine()
@@ -581,48 +578,57 @@ async fn split_and_merge() {
     let split = h
         .engine()
         .await
-        .split(&h.state, &app.id, "ygg", tcp(443))
+        .split(&h.state, &app.id, "ygg", Scope::port(tcp(443)))
         .await
         .unwrap();
-    assert_eq!(split.ports, PortSet::Only(vec![tcp(443)]));
+    assert_eq!(split.scope, Scope::port(tcp(443)));
     assert!(drain(&mut events).contains(&DaemonEvent::AppsChanged));
     let split_ip = split.locator.ipv6().unwrap();
     assert!(h.net.addresses("ygg0").contains(&split_ip));
     assert_eq!(h.app().await.addresses.len(), 2);
 
-    // The "all" address no longer serves 443; the new one serves only 443.
+    // Addresses overlap: the "all" address keeps serving 443, the new one serves only 443.
     let rs = h.last_ruleset();
     let by_dst = |ip: Ipv6Addr| -> Vec<u16> {
-        rs.rules
+        let mut v: Vec<u16> = rs
+            .rules
             .iter()
             .filter(|r| r.dst == IpAddr::V6(ip))
-            .map(|r| r.port)
-            .collect()
+            .map(|r| r.ports.start)
+            .collect();
+        v.sort();
+        v
     };
-    assert_eq!(by_dst(all_addr.locator.ipv6().unwrap()), [80]);
+    assert_eq!(by_dst(all_addr.locator.ipv6().unwrap()), [80, 443]);
     assert_eq!(by_dst(split_ip), [443]);
 
     // Splitting again, or an unknown port, is refused.
     let e = h
         .engine()
         .await
-        .split(&h.state, &app.id, "ygg", tcp(443))
+        .split(&h.state, &app.id, "ygg", Scope::port(tcp(443)))
         .await;
     assert!(matches!(e, Err(EngineError::Conflict(_))), "{e:?}");
     let e = h
         .engine()
         .await
-        .split(&h.state, &app.id, "ygg", tcp(1))
+        .split(&h.state, &app.id, "ygg", Scope::port(tcp(1)))
         .await;
     assert!(matches!(e, Err(EngineError::Invalid(_))));
     let e = h
         .engine()
         .await
-        .split(&h.state, &app.id, "nope", tcp(80))
+        .split(&h.state, &app.id, "nope", Scope::port(tcp(80)))
         .await;
     assert!(matches!(e, Err(EngineError::NotFound(_))));
+    let e = h
+        .engine()
+        .await
+        .split(&h.state, &app.id, "ygg", Scope::All)
+        .await;
+    assert!(matches!(e, Err(EngineError::Invalid(_))));
 
-    // Merge them back: one address, serving everything; the other leaves the interface.
+    // Merge: the app's all-ports address stays, the narrower one leaves the interface.
     let merged = h
         .engine()
         .await
@@ -635,12 +641,12 @@ async fn split_and_merge() {
         .await
         .unwrap();
     assert_eq!(merged.id, all_addr.id);
-    assert_eq!(merged.ports, PortSet::All);
+    assert_eq!(merged.scope, Scope::All);
     let app = h.app().await;
     assert_eq!(app.addresses.len(), 1);
     assert!(!h.net.addresses("ygg0").contains(&split_ip));
     let rs = h.last_ruleset();
-    let mut ports: Vec<u16> = rs.rules.iter().map(|r| r.port).collect();
+    let mut ports: Vec<u16> = rs.rules.iter().map(|r| r.ports.start).collect();
     ports.sort();
     assert_eq!(ports, [80, 443]);
     assert!(rs
@@ -648,13 +654,64 @@ async fn split_and_merge() {
         .iter()
         .all(|r| r.dst == all_addr.locator.ipv6().map(IpAddr::V6).unwrap()));
 
-    // Merging needs two distinct addresses.
+    // Merging needs at least one address, each listed once.
+    let e = h.engine().await.merge(&h.state, &app.id, "ygg", &[]).await;
+    assert!(matches!(e, Err(EngineError::Invalid(_))));
     let e = h
         .engine()
         .await
-        .merge(&h.state, &app.id, "ygg", std::slice::from_ref(&all_addr.id))
+        .merge(
+            &h.state,
+            &app.id,
+            "ygg",
+            &[all_addr.id.clone(), all_addr.id.clone()],
+        )
         .await;
     assert!(matches!(e, Err(EngineError::Invalid(_))));
+}
+
+#[tokio::test]
+async fn merge_creates_the_all_address_when_the_app_has_only_port_addresses() {
+    let h = Harness::new(
+        vec![ygg_net()],
+        vec![
+            listener("nginx", 80, Protocol::Tcp),
+            listener("nginx", 443, Protocol::Tcp),
+        ],
+    )
+    .await;
+    h.reconcile().await;
+    let app = h.app().await;
+    h.grant(&app.id, Subject::Anyone).await;
+    let all_addr = app.addresses[0].clone();
+    let split = h
+        .engine()
+        .await
+        .split(&h.state, &app.id, "ygg", Scope::port(tcp(443)))
+        .await
+        .unwrap();
+    // Take the all-ports address away by merging it out... it is the one a merge keeps, so
+    // delete it directly to get an app with port addresses only.
+    h.state.db.delete_address(&all_addr.id).await.unwrap();
+    assert_eq!(h.app().await.addresses.len(), 1);
+    let merged = h
+        .engine()
+        .await
+        .merge(&h.state, &app.id, "ygg", std::slice::from_ref(&split.id))
+        .await
+        .unwrap();
+    assert_eq!(merged.scope, Scope::All);
+    let app = h.app().await;
+    assert_eq!(
+        app.addresses.len(),
+        1,
+        "the port address went, an all-ports one came"
+    );
+    assert_eq!(app.addresses[0].id, merged.id);
+    assert!(h
+        .net
+        .addresses("ygg0")
+        .contains(&merged.locator.ipv6().unwrap()));
 }
 
 #[tokio::test]
@@ -715,7 +772,7 @@ async fn a_grant_to_a_yggdrasil_key_peer_gives_a_rule_with_iif() {
     let r = &rs.rules[0];
     assert_eq!(r.iif.as_deref(), Some("ygg0"));
     assert_eq!(r.dst, IpAddr::V6(Harness::addr_on(&app, "ygg")));
-    assert_eq!(r.port, 80);
+    assert_eq!(r.ports.start, 80);
     assert_eq!(r.sources, Sources::Nets(vec![KEY_ADDR.parse().unwrap()]));
     assert!(r.id.starts_with(&format!(
         "a:{}:80:tcp:{}",
@@ -823,7 +880,7 @@ async fn a_grant_to_anyone_needs_confirmation_and_local_grants_are_rejected() {
     let app = h.app().await;
     let grant = |subject, network: Option<&str>, confirm| NewGrant {
         target: Target::App(app.id.clone()),
-        port: None,
+        scope: Scope::All,
         network_id: network.map(str::to_string),
         subject,
         confirm_open: confirm,
@@ -881,7 +938,7 @@ async fn a_grant_to_anyone_needs_confirmation_and_local_grants_are_rejected() {
         .create_grant(
             &h.state,
             &NewGrant {
-                port: Some(tcp(9)),
+                scope: Scope::port(tcp(9)),
                 ..grant(Subject::Anyone, None, true)
             },
         )
@@ -1356,7 +1413,7 @@ async fn adding_and_removing_a_network() {
             &h.state,
             &NewGrant {
                 target: Target::App(app.id.clone()),
-                port: None,
+                scope: Scope::All,
                 network_id: Some("ygg".into()),
                 subject: Subject::Anyone,
                 confirm_open: true,
@@ -1557,7 +1614,7 @@ async fn local_on_a_non_loopback_interface_takes_grants_like_a_lan() {
             &h.state,
             &NewGrant {
                 target: Target::App(app.id.clone()),
-                port: None,
+                scope: Scope::All,
                 network_id: Some("local".into()),
                 subject: Subject::Anyone,
                 confirm_open: true,
@@ -2113,7 +2170,7 @@ async fn identical_requests_racing_create_one_grant_peer_and_group() {
 
     let req = NewGrant {
         target: Target::App(app.id.clone()),
-        port: None,
+        scope: Scope::All,
         network_id: None,
         subject: Subject::Anyone,
         confirm_open: true,
@@ -2144,7 +2201,7 @@ async fn a_failed_apply_still_records_the_change_and_announces_it() {
             s,
             &NewGrant {
                 target: Target::App(app.id.clone()),
-                port: None,
+                scope: Scope::All,
                 network_id: None,
                 subject: Subject::Anyone,
                 confirm_open: true,
@@ -2227,7 +2284,7 @@ async fn ipv4_peer_reach_follows_the_listener_and_protect_host() {
     let rs = h.last_ruleset();
     let v4: Vec<_> = rs.rules.iter().filter(|r| r.dst == Dst::HostV4).collect();
     assert_eq!(v4.len(), 1);
-    assert_eq!(v4[0].port, 80);
+    assert_eq!(v4[0].ports.start, 80);
     assert_eq!(v4[0].iif.as_deref(), Some("eth0"));
     assert_eq!(
         v4[0].sources,
@@ -2254,7 +2311,7 @@ async fn a_segment_grant_is_limited_to_the_networks_prefix() {
             &h.state,
             &NewGrant {
                 target: Target::App(app.id.clone()),
-                port: None,
+                scope: Scope::All,
                 network_id: Some("lan".into()),
                 subject: Subject::Anyone,
                 confirm_open: true,

@@ -10,8 +10,8 @@ use socketguard_core::api_types::{
 };
 use socketguard_core::{
     AccessOrigin, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Locator, Network,
-    NetworkKind, NetworkStatus, ParsedCredential, Peer, PeerGroup, PortSet, Reach, Settings,
-    Subject, Tag, Target,
+    NetworkKind, NetworkStatus, ParsedCredential, Peer, PeerGroup, Reach, Scope, Settings,
+    SocketGroup, Subject, Tag, Target,
 };
 use std::collections::HashMap;
 
@@ -22,12 +22,14 @@ pub struct Names {
     pub peers: HashMap<String, String>,
     pub groups: HashMap<String, String>,
     pub tags: HashMap<String, String>,
+    pub socket_groups: HashMap<String, String>,
 }
 
 impl Names {
     pub fn new(apps: &[App], peers: &[Peer], groups: &[PeerGroup]) -> Self {
         Self {
             tags: HashMap::new(),
+            socket_groups: HashMap::new(),
             apps: apps
                 .iter()
                 .map(|a| (a.id.clone(), a.name.clone()))
@@ -52,8 +54,25 @@ impl Names {
         self
     }
 
+    /// The names of `groups` (socket groups) too.
+    pub fn with_socket_groups(mut self, groups: &[SocketGroup]) -> Self {
+        self.socket_groups = groups
+            .iter()
+            .map(|g| (g.id.clone(), g.label.clone()))
+            .collect();
+        self
+    }
+
     pub fn app(&self, id: &str) -> String {
         label(&self.apps, id)
+    }
+
+    /// A scope for people: `All sockets`, `80/tcp`, `group <label>`.
+    pub fn scope(&self, s: &Scope) -> String {
+        match s {
+            Scope::Group { id } => format!("group {}", label(&self.socket_groups, id)),
+            other => other.describe(&[]),
+        }
     }
 
     pub fn tag(&self, id: &str) -> String {
@@ -171,17 +190,6 @@ fn kind_label(k: NetworkKind) -> &'static str {
     }
 }
 
-fn port_set(p: &PortSet) -> String {
-    match p {
-        PortSet::All => "all".to_string(),
-        PortSet::Only(ports) => ports
-            .iter()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .join(", "),
-    }
-}
-
 pub fn locator(l: &Locator) -> String {
     match l {
         Locator::Ipv6 { addr } => addr.to_string(),
@@ -220,11 +228,9 @@ fn reach_summary(g: &GrantView) -> String {
         .join(", ")
 }
 
-fn grant_scope(g: &GrantView) -> (String, String) {
+fn grant_scope(g: &GrantView, names: &Names) -> (String, String) {
     (
-        g.grant
-            .port
-            .map_or("all ports".to_string(), |p| p.to_string()),
+        names.scope(&g.grant.scope),
         g.grant
             .network_id
             .clone()
@@ -338,7 +344,7 @@ pub fn apps(apps: &[App]) -> String {
     out
 }
 
-fn addresses_table(addrs: &[Address]) -> String {
+fn addresses_table(addrs: &[Address], groups: &[SocketGroup]) -> String {
     table(
         &["ID", "NETWORK", "ADDRESS", "PORTS"],
         addrs
@@ -348,7 +354,53 @@ fn addresses_table(addrs: &[Address]) -> String {
                     short(&a.id).to_string(),
                     a.network_id.clone(),
                     locator(&a.locator),
-                    port_set(&a.ports),
+                    a.scope.describe(groups),
+                ]
+            })
+            .collect(),
+    )
+}
+
+fn socket_groups_table(groups: &[SocketGroup]) -> String {
+    table(
+        &["ID", "LABEL", "PORTS", "APPS"],
+        groups
+            .iter()
+            .map(|g| {
+                vec![
+                    short(&g.id).to_string(),
+                    g.label.clone(),
+                    socketguard_core::ranges_text(&g.ports),
+                    g.apps.len().to_string(),
+                ]
+            })
+            .collect(),
+    )
+}
+
+/// The socket groups as a table.
+pub fn socket_groups(groups: &[SocketGroup], names: &Names) -> String {
+    if groups.is_empty() {
+        return "no socket groups".to_string();
+    }
+    table(
+        &["ID", "LABEL", "PORTS", "APPS"],
+        groups
+            .iter()
+            .map(|g| {
+                vec![
+                    short(&g.id).to_string(),
+                    g.label.clone(),
+                    socketguard_core::ranges_text(&g.ports),
+                    if g.apps.is_empty() {
+                        "-".to_string()
+                    } else {
+                        g.apps
+                            .iter()
+                            .map(|a| names.app(a))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    },
                 ]
             })
             .collect(),
@@ -369,7 +421,7 @@ pub fn grants(grants: &[GrantView], names: &Names, with_app: bool) -> String {
         grants
             .iter()
             .map(|g| {
-                let (port, net) = grant_scope(g);
+                let (port, net) = grant_scope(g, names);
                 let mut row = vec![short(&g.grant.id).to_string()];
                 if with_app {
                     row.push(names.target(&g.grant.target));
@@ -432,21 +484,23 @@ pub fn app_detail(d: &AppDetail, names: &Names) -> String {
     let addrs = if app.addresses.is_empty() {
         "none".to_string()
     } else {
-        addresses_table(&app.addresses)
+        addresses_table(&app.addresses, &d.socket_groups)
     };
-    let mut parts = vec![
-        head,
-        section("Ports", ports),
-        section("Addresses", addrs),
-        section(
-            "Who can reach it",
-            if d.grants.is_empty() {
-                "nobody (closed)".to_string()
-            } else {
-                grants(&d.grants, names, false)
-            },
-        ),
-    ];
+    let mut parts = vec![head, section("Ports", ports), section("Addresses", addrs)];
+    if !d.socket_groups.is_empty() {
+        parts.push(section(
+            "Socket groups",
+            socket_groups_table(&d.socket_groups),
+        ));
+    }
+    parts.push(section(
+        "Who can reach it",
+        if d.grants.is_empty() {
+            "nobody (closed)".to_string()
+        } else {
+            grants(&d.grants, names, false)
+        },
+    ));
     let via_tags: Vec<_> = d
         .access
         .iter()
@@ -465,7 +519,7 @@ pub fn app_detail(d: &AppDetail, names: &Names) -> String {
                     .map(|(tag_id, a)| {
                         vec![
                             names.tag(tag_id),
-                            a.port.map_or("all ports".to_string(), |p| p.to_string()),
+                            names.scope(&a.scope),
                             a.network_id.clone().unwrap_or_else(|| "all".to_string()),
                             match (&a.subject, &a.network_id) {
                                 (Subject::Anyone, Some(n)) => format!("everyone on {n} (segment)"),
@@ -508,36 +562,19 @@ pub fn share_lines(app: &App, network: Option<&str>) -> Vec<String> {
         if network.is_some_and(|n| n != a.network_id) {
             continue;
         }
-        let ports: Vec<u16> = match &a.ports {
-            PortSet::All => {
-                // Ports that another address of the same network claims are not here.
-                let claimed: Vec<_> = app
-                    .addresses
-                    .iter()
-                    .filter(|o| o.network_id == a.network_id)
-                    .filter_map(|o| match &o.ports {
-                        PortSet::Only(p) => Some(p.clone()),
-                        PortSet::All => None,
-                    })
-                    .flatten()
-                    .collect();
-                app.ports
-                    .iter()
-                    .filter(|p| {
-                        !claimed
-                            .iter()
-                            .any(|c| c.port == p.port && c.proto == p.proto)
-                    })
-                    .filter(|p| p.proto == socketguard_core::Protocol::Tcp)
-                    .map(|p| p.port)
-                    .collect()
-            }
-            PortSet::Only(ps) => ps
-                .iter()
-                .filter(|p| p.proto == socketguard_core::Protocol::Tcp)
-                .map(|p| p.port)
-                .collect(),
-        };
+        // The ports the address serves among the app's detected ones; a socket group's
+        // ranges are not known here.
+        let ports: Vec<u16> = socketguard_core::scope_ports(
+            app,
+            &a.scope,
+            &[],
+            &socketguard_core::PortRangeSet::new(),
+        )
+        .total()
+        .ports()
+        .filter(|p| p.proto == socketguard_core::Protocol::Tcp)
+        .map(|p| p.port)
+        .collect();
         let host = match &a.locator {
             Locator::Ipv6 { addr } => format!("[{addr}]"),
             Locator::Onion { hostname } => {
@@ -760,6 +797,7 @@ fn change_line(c: &Change) -> String {
         ChangeItem::Grant => "grant",
         ChangeItem::Tag => "tag",
         ChangeItem::TagMember => "tag member",
+        ChangeItem::SocketGroup => "socket group",
         ChangeItem::App => "app",
     };
     let mut line = format!("{sign} {item} {}", c.name);
@@ -805,9 +843,14 @@ fn tag_members(t: &Tag, names: &Names) -> String {
     }
     t.members
         .iter()
-        .map(|m| match m.port {
-            Some(p) => format!("{}:{p}", names.app(&m.app_id)),
-            None => names.app(&m.app_id),
+        .map(|m| match &m.scope {
+            Scope::All => names.app(&m.app_id),
+            Scope::Group { id } => format!(
+                "{}:socket-group={}",
+                names.app(&m.app_id),
+                label(&names.socket_groups, id)
+            ),
+            Scope::Port { port, proto } => format!("{}:{port}/{proto}", names.app(&m.app_id)),
         })
         .collect::<Vec<_>>()
         .join(", ")

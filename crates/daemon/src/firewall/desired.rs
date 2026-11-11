@@ -16,7 +16,7 @@
 
 use anyhow::{bail, Result};
 use ipnet::IpNet;
-use socketguard_core::{valid_interface_name, Protocol};
+use socketguard_core::{valid_interface_name, PortRange, PortRangeSet, Protocol};
 use std::net::IpAddr;
 use std::time::SystemTime;
 
@@ -167,8 +167,8 @@ pub struct Rule {
     /// identity is only guaranteed by that interface (Yggdrasil `200::/7`, WireGuard).
     pub iif: Option<String>,
     pub dst: Dst,
-    pub port: u16,
-    pub proto: Protocol,
+    /// The destination ports with the protocol; a single port is a range of one.
+    pub ports: PortRange,
     pub sources: Sources,
 }
 
@@ -208,59 +208,60 @@ pub type DropSink = Box<dyn Fn(DropEvent) + Send + Sync>;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Revocation {
     pub dst: Dst,
-    pub port: u16,
-    pub proto: Protocol,
+    pub ports: PortRange,
     /// The revoked source network; None when every source of the destination is revoked
     /// (an Anyone rule that is gone or was narrowed to some sources).
     pub src: Option<IpNet>,
 }
 
-/// What `old` allowed that `new` does not, by (destination, port, protocol) and source.
+/// What `old` allowed that `new` does not, by destination, ports, protocol and source.
 /// Interface bindings are ignored: a flow that stays allowed from the same source is not
-/// cut when only its binding moved.
+/// cut when only its binding moved. A range that is split or shrunk (another app started
+/// listening in it) revokes only the ports that dropped out, not the whole range.
 pub fn revocations(old: &DesiredRuleset, new: &DesiredRuleset) -> Vec<Revocation> {
-    type Key = (Dst, u16, Protocol);
-    #[derive(Default)]
-    struct Allowed {
-        any: bool,
-        nets: Vec<IpNet>,
-    }
-    fn collect(rs: &DesiredRuleset) -> std::collections::BTreeMap<Key, Allowed> {
-        let mut m: std::collections::BTreeMap<Key, Allowed> = Default::default();
-        for r in &rs.rules {
-            let e = m.entry((r.dst, r.port, r.proto)).or_default();
-            match &r.sources {
-                Sources::Any => e.any = true,
-                Sources::Nets(n) => e.nets.extend(n.iter().copied()),
-            }
-        }
-        m
-    }
-    let new = collect(new);
+    // Whether `rule` still lets `src` (None: everyone) in.
+    let allows = |rule: &Rule, src: Option<&IpNet>| match (&rule.sources, src) {
+        (Sources::Any, _) => true,
+        (Sources::Nets(nets), Some(src)) => nets.iter().any(|n| n.contains(src)),
+        (Sources::Nets(_), None) => false,
+    };
     let mut out = Vec::new();
-    for (key, was) in collect(old) {
-        let (dst, port, proto) = key;
-        let now = new.get(&key);
-        if now.is_some_and(|n| n.any) {
-            continue;
-        }
-        let revoke = |src| Revocation {
-            dst,
-            port,
-            proto,
-            src,
+    for r in &old.rules {
+        let srcs: Vec<Option<IpNet>> = match &r.sources {
+            Sources::Any => vec![None],
+            Sources::Nets(nets) => nets.iter().copied().map(Some).collect(),
         };
-        let nets = now.map(|n| n.nets.as_slice()).unwrap_or(&[]);
-        if was.any {
-            out.push(revoke(None));
-            continue;
-        }
-        for net in &was.nets {
-            if !nets.iter().any(|n| n.contains(net)) {
-                out.push(revoke(Some(*net)));
-            }
+        for src in srcs {
+            let still = PortRangeSet::from_ranges(
+                new.rules
+                    .iter()
+                    .filter(|n| n.dst == r.dst && n.ports.proto == r.ports.proto)
+                    .filter(|n| allows(n, src.as_ref()))
+                    .map(|n| n.ports),
+            );
+            let gone = PortRangeSet::from_ranges([r.ports]).subtract(&still);
+            out.extend(gone.ranges().into_iter().map(|ports| Revocation {
+                dst: r.dst,
+                ports,
+                src,
+            }));
         }
     }
+    // Revoking everyone from a destination port makes revoking one source of it redundant.
+    let everyone: Vec<(Dst, PortRange)> = out
+        .iter()
+        .filter(|r| r.src.is_none())
+        .map(|r| (r.dst, r.ports))
+        .collect();
+    out.retain(|r| {
+        r.src.is_none()
+            || !everyone.iter().any(|(dst, p)| {
+                *dst == r.dst
+                    && p.proto == r.ports.proto
+                    && p.start <= r.ports.start
+                    && r.ports.end <= p.end
+            })
+    });
     out.sort();
     out.dedup();
     out
@@ -269,14 +270,17 @@ pub fn revocations(old: &DesiredRuleset, new: &DesiredRuleset) -> Vec<Revocation
 #[cfg(test)]
 mod tests {
     use super::*;
+    use socketguard_core::PortRef;
 
     fn rule(id: &str, sources: Sources) -> Rule {
         Rule {
             id: id.into(),
             iif: None,
             dst: Dst::Addr("fd00::9".parse().unwrap()),
-            port: 80,
-            proto: Protocol::Tcp,
+            ports: PortRange::single(PortRef {
+                port: 80,
+                proto: Protocol::Tcp,
+            }),
             sources,
         }
     }
@@ -305,7 +309,7 @@ mod tests {
         let old = rs(vec![rule("a", nets(&["fd00::1/128", "fd00::2/128"]))]);
         let r = revocations(&old, &rs(vec![]));
         assert_eq!(r.len(), 2);
-        assert!(r.iter().all(|x| x.port == 80 && x.src.is_some()));
+        assert!(r.iter().all(|x| x.ports.start == 80 && x.src.is_some()));
         let r = revocations(&old, &rs(vec![rule("b", nets(&["fd00::2/128"]))]));
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].src, Some("fd00::1/128".parse().unwrap()));
@@ -353,6 +357,55 @@ mod tests {
         a.iif = Some("eth0".into());
         b.iif = Some("eth1".into());
         assert!(revocations(&rs(vec![a]), &rs(vec![b])).is_empty());
+    }
+
+    fn range_rule(id: &str, start: u16, end: u16, sources: Sources) -> Rule {
+        let mut r = rule(id, sources);
+        r.ports = PortRange::new(start, end, Protocol::Tcp).unwrap();
+        r
+    }
+
+    #[test]
+    fn a_range_that_is_split_revokes_only_the_ports_that_dropped_out() {
+        let old = rs(vec![range_rule("a", 50000, 51000, Sources::Any)]);
+        let new = rs(vec![
+            range_rule("a1", 50000, 50002, Sources::Any),
+            range_rule("a2", 50004, 51000, Sources::Any),
+        ]);
+        let r = revocations(&old, &new);
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            (r[0].ports.start, r[0].ports.end, r[0].src),
+            (50003, 50003, None)
+        );
+        // Unchanged or grown: nothing.
+        assert!(revocations(&old, &old).is_empty());
+        assert!(revocations(&new, &old).is_empty());
+        // Gone entirely: the whole range.
+        let r = revocations(&old, &rs(vec![]));
+        assert_eq!((r[0].ports.start, r[0].ports.end), (50000, 51000));
+    }
+
+    #[test]
+    fn a_source_kept_by_another_range_rule_is_not_revoked() {
+        let old = rs(vec![range_rule("a", 100, 200, nets(&["fd00::1/128"]))]);
+        // The range now comes as two rules, one of them with a wider net.
+        let new = rs(vec![
+            range_rule("b", 100, 150, nets(&["fd00::/64"])),
+            range_rule("c", 151, 200, nets(&["fd00::1/128"])),
+        ]);
+        assert!(revocations(&old, &new).is_empty());
+        let shrunk = rs(vec![range_rule("b", 100, 150, nets(&["fd00::/64"]))]);
+        let r = revocations(&old, &shrunk);
+        assert_eq!((r[0].ports.start, r[0].ports.end), (151, 200));
+        // An Anyone revocation covers the single-source ones.
+        let old = rs(vec![
+            range_rule("x", 100, 200, Sources::Any),
+            range_rule("y", 100, 200, nets(&["fd00::1/128"])),
+        ]);
+        let r = revocations(&old, &rs(vec![]));
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].src, None);
     }
 
     #[test]

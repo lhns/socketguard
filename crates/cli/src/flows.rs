@@ -54,7 +54,7 @@ async fn grant_to(
 ) -> Result<bool> {
     let mut req = NewGrant {
         target: socketguard_core::Target::App(app.id.clone()),
-        port,
+        scope: port.map_or(socketguard_core::Scope::All, socketguard_core::Scope::port),
         network_id: None,
         subject,
         confirm_open: false,

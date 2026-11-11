@@ -19,17 +19,40 @@ pub fn parse_port(s: &str) -> Result<PortRef> {
     Ok(PortRef { port, proto })
 }
 
-/// `nginx`, `nginx:80`, `nginx:53/udp`. The text after the last `:` is a port only if it
-/// parses as one, so app names with a colon still work.
-pub fn parse_target(s: &str) -> (String, Option<PortRef>) {
+/// Which sockets of a target, by name as typed (a socket group by label).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeSpec {
+    All,
+    Port(PortRef),
+    Group(String),
+}
+
+/// The marker of a socket group in `<app>:socket-group=<label>`.
+pub const SOCKET_GROUP_MARKER: &str = ":socket-group=";
+
+/// `nginx`, `nginx:80`, `nginx:53/udp`, `nginx:socket-group=passive`. The text after the
+/// last `:` is a port only if it parses as one, so app names with a colon still work; the
+/// socket group marker is recognised anywhere, so group labels may contain colons too.
+pub fn parse_target(s: &str) -> (String, ScopeSpec) {
+    if let Some(at) = s.rfind(SOCKET_GROUP_MARKER) {
+        let label = &s[at + SOCKET_GROUP_MARKER.len()..];
+        if at > 0 && !label.is_empty() {
+            return (s[..at].to_string(), ScopeSpec::Group(label.to_string()));
+        }
+    }
     if let Some((app, port)) = s.rsplit_once(':') {
         if !app.is_empty() {
             if let Ok(p) = parse_port(port) {
-                return (app.to_string(), Some(p));
+                return (app.to_string(), ScopeSpec::Port(p));
             }
         }
     }
-    (s.to_string(), None)
+    (s.to_string(), ScopeSpec::All)
+}
+
+/// `80/tcp`, `50000-51000/udp`, repeated: the ports of a socket group, normalized.
+pub fn parse_ranges(items: &[String]) -> Result<Vec<socketguard_core::PortRange>> {
+    socketguard_core::parse_ranges(items).map_err(|e| anyhow!(e))
 }
 
 /// What a grant covers, by name as typed.
@@ -40,7 +63,7 @@ pub enum TargetSpec {
 }
 
 /// [`parse_target`] that also takes `tag:<label>[:port[/proto]]`.
-pub fn parse_target_spec(s: &str) -> (TargetSpec, Option<PortRef>) {
+pub fn parse_target_spec(s: &str) -> (TargetSpec, ScopeSpec) {
     match s.strip_prefix("tag:") {
         Some(rest) => {
             let (label, port) = parse_target(rest);
@@ -138,26 +161,76 @@ mod tests {
 
     #[test]
     fn targets() {
-        assert_eq!(parse_target("nginx"), ("nginx".into(), None));
-        assert_eq!(parse_target("nginx:8080").1.unwrap().port, 8080);
-        assert_eq!(parse_target("dns:53/udp").1.unwrap().proto, Protocol::Udp);
+        assert_eq!(parse_target("nginx"), ("nginx".into(), ScopeSpec::All));
+        assert_eq!(
+            parse_target("nginx:8080").1,
+            ScopeSpec::Port(PortRef {
+                port: 8080,
+                proto: Protocol::Tcp
+            })
+        );
+        assert!(matches!(
+            parse_target("dns:53/udp").1,
+            ScopeSpec::Port(p) if p.proto == Protocol::Udp
+        ));
         // Not a port: the whole text is the app.
         assert_eq!(
             parse_target("node:server.js"),
-            ("node:server.js".into(), None)
+            ("node:server.js".into(), ScopeSpec::All)
         );
-        assert_eq!(parse_target(":80"), (":80".into(), None));
+        assert_eq!(parse_target(":80"), (":80".into(), ScopeSpec::All));
+    }
+
+    #[test]
+    fn socket_group_targets() {
+        assert_eq!(
+            parse_target("ftpd:socket-group=passive"),
+            ("ftpd".into(), ScopeSpec::Group("passive".into()))
+        );
+        // An app name with a colon, and a label with one.
+        assert_eq!(
+            parse_target("node:server.js:socket-group=a:b"),
+            ("node:server.js".into(), ScopeSpec::Group("a:b".into()))
+        );
+        // No label or no app: not a group.
+        assert_eq!(
+            parse_target("ftpd:socket-group="),
+            ("ftpd:socket-group=".into(), ScopeSpec::All)
+        );
+        assert_eq!(
+            parse_target(":socket-group=x"),
+            (":socket-group=x".into(), ScopeSpec::All)
+        );
+        assert_eq!(
+            parse_target_spec("tag:dev:socket-group=passive"),
+            (
+                TargetSpec::Tag("dev".into()),
+                ScopeSpec::Group("passive".into())
+            )
+        );
+    }
+
+    #[test]
+    fn port_ranges_of_a_socket_group() {
+        let r =
+            parse_ranges(&["443/tcp".into(), "50000-51000/tcp".into(), "80/tcp".into()]).unwrap();
+        assert_eq!(
+            r.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+            ["80/tcp", "443/tcp", "50000-51000/tcp"]
+        );
+        assert!(parse_ranges(&["80".into()]).is_err());
+        assert!(parse_ranges(&["9-5/tcp".into()]).is_err());
     }
 
     #[test]
     fn tag_targets() {
         assert_eq!(
             parse_target_spec("tag:dev"),
-            (TargetSpec::Tag("dev".into()), None)
+            (TargetSpec::Tag("dev".into()), ScopeSpec::All)
         );
         let (t, p) = parse_target_spec("tag:dev:53/udp");
         assert_eq!(t, TargetSpec::Tag("dev".into()));
-        assert_eq!(p.unwrap().proto, Protocol::Udp);
+        assert!(matches!(p, ScopeSpec::Port(p) if p.proto == Protocol::Udp));
         assert_eq!(
             parse_target_spec("nginx:80").0,
             TargetSpec::App("nginx".into())

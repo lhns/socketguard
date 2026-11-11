@@ -1,19 +1,21 @@
-//! Tags (ADR 0043): named sets of apps (or single ports of apps) that grants can target,
+//! Tags (ADR 0043, 0047): named sets of apps (or scopes of apps) that grants can target,
 //! and the expansion of a grant on a tag into what it covers per app.
 
 use crate::config::glob_match;
-use crate::model::{App, AppId, Grant, GrantId, NetworkId, PortRef, Subject, TagId, Target};
+use crate::model::{App, AppId, Grant, GrantId, NetworkId, Subject, TagId, Target};
+use crate::scope::{
+    raw_scope_ports, scope_ports, PortRange, PortRangeSet, Scope, ScopePorts, SocketGroup,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// One member of a tag: a whole app, or one port of it.
+/// One member of a tag: an app with a scope (all of it, one port, or one socket group).
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TagMember {
     pub app_id: AppId,
-    /// None = every port of the app.
     #[serde(default)]
-    pub port: Option<PortRef>,
+    pub scope: Scope,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -48,7 +50,7 @@ impl Tag {
                     && !self
                         .members
                         .iter()
-                        .any(|m| m.app_id == a.id && m.port.is_none())
+                        .any(|m| m.app_id == a.id && m.scope.is_all())
             })
             .collect()
     }
@@ -75,69 +77,101 @@ pub enum AccessOrigin {
     Group { group_id: String },
 }
 
-/// One access an app has: a grant narrowed to this app (by a tag member's port) with the
-/// reason it applies.
+/// One access an app has: a grant with the reason it applies and the ports it covers on
+/// this app (for a tag grant, the grant's scope narrowed by the members' scopes).
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectiveAccess {
     pub grant_id: GrantId,
-    /// None = every port of the app.
-    pub port: Option<PortRef>,
+    /// The grant's own scope.
+    pub scope: Scope,
+    /// What the grant covers on this app now: detected ports, explicit ports and the
+    /// ranges of socket groups, merged.
+    pub ports: Vec<PortRange>,
     pub network_id: Option<NetworkId>,
     pub subject: Subject,
     pub origin: AccessOrigin,
 }
 
-/// The ports of `app_id` that `grant` covers, as the grant's port narrowed by each member:
-/// `[None]` = every port; empty = not covered. Both a member port and the grant port set
-/// and different covers nothing through that member.
-pub fn covered_ports(grant: &Grant, tags: &[Tag], app_id: &str) -> Vec<Option<PortRef>> {
+/// The ports of `app` that `grant` covers, or None when it does not apply to the app:
+///
+/// - a grant on the app covers the ports of its scope on the app,
+/// - a grant on a tag covers, for each member of the app, the member's ports narrowed to
+///   the grant's own scope (which needs no attachment), merged over the members. None if
+///   the app is no member, or if neither side is `All` and the two leave nothing.
+///
+/// `foreign` are the ports other apps listen on, see [`scope_ports`].
+pub fn covered_ports(
+    grant: &Grant,
+    tags: &[Tag],
+    app: &App,
+    groups: &[SocketGroup],
+    foreign: &PortRangeSet,
+) -> Option<ScopePorts> {
     match &grant.target {
-        Target::App(a) if a == app_id => vec![grant.port],
-        Target::App(_) => vec![],
+        Target::App(a) if *a == app.id => Some(scope_ports(app, &grant.scope, groups, foreign)),
+        Target::App(_) => None,
         Target::Tag(tag_id) => {
-            let Some(tag) = tags.iter().find(|t| &t.id == tag_id) else {
-                return vec![];
-            };
-            let mut ports: Vec<PortRef> = Vec::new();
-            for m in tag.members.iter().filter(|m| m.app_id == app_id) {
-                match (m.port, grant.port) {
-                    (None, None) => return vec![None],
-                    (Some(p), None) | (None, Some(p)) => ports.push(p),
-                    (Some(a), Some(b)) if a == b => ports.push(a),
-                    (Some(_), Some(_)) => {}
-                }
+            let tag = tags.iter().find(|t| &t.id == tag_id)?;
+            let raw = raw_scope_ports(&grant.scope, groups);
+            let members: Vec<&TagMember> =
+                tag.members.iter().filter(|m| m.app_id == app.id).collect();
+            if members.is_empty() {
+                return None;
             }
-            ports.sort();
-            ports.dedup();
-            ports.into_iter().map(Some).collect()
+            let covered = members.iter().fold(ScopePorts::empty(), |acc, m| {
+                acc.union(&scope_ports(app, &m.scope, groups, foreign).intersect(&raw))
+            });
+            let open = grant.scope.is_all() || members.iter().any(|m| m.scope.is_all());
+            (!covered.is_empty() || open).then_some(covered)
         }
     }
 }
 
-/// The grants that apply to `app_id`, with tag grants expanded: each result is a grant on
-/// the app itself (same id, subject and network) whose port is narrowed as in
-/// [`covered_ports`]. The ruleset and the networks work on these.
-pub fn grants_for_app(grants: &[Grant], tags: &[Tag], app_id: &str) -> Vec<Grant> {
+/// A grant that applies to one app: the grant itself, re-targeted at the app (same id,
+/// subject and network), and the ports it covers there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppGrant {
+    pub grant: Grant,
+    pub ports: ScopePorts,
+}
+
+/// The grants that apply to `app`, with tag grants expanded and the covered ports worked
+/// out as in [`covered_ports`]. Grants that cover nothing are left out. The ruleset and the
+/// networks work on these.
+pub fn grants_for_app(
+    grants: &[Grant],
+    tags: &[Tag],
+    app: &App,
+    groups: &[SocketGroup],
+    foreign: &PortRangeSet,
+) -> Vec<AppGrant> {
     grants
         .iter()
-        .flat_map(|g| {
-            covered_ports(g, tags, app_id)
-                .into_iter()
-                .map(|port| Grant {
-                    target: Target::App(app_id.to_string()),
-                    port,
+        .filter_map(|g| {
+            let ports = covered_ports(g, tags, app, groups, foreign)?;
+            (!ports.is_empty()).then(|| AppGrant {
+                grant: Grant {
+                    target: Target::App(app.id.clone()),
                     ..g.clone()
-                })
+                },
+                ports,
+            })
         })
         .collect()
 }
 
-/// [`grants_for_app`] with the origin of each access.
-pub fn effective_access(grants: &[Grant], tags: &[Tag], app_id: &str) -> Vec<EffectiveAccess> {
+/// The accesses of `app` with their origin, for display.
+pub fn effective_access(
+    grants: &[Grant],
+    tags: &[Tag],
+    app: &App,
+    groups: &[SocketGroup],
+) -> Vec<EffectiveAccess> {
+    let none = PortRangeSet::new();
     grants
         .iter()
-        .flat_map(|g| {
+        .filter_map(|g| {
             let origin = match (&g.target, &g.subject) {
                 (Target::Tag(t), _) => AccessOrigin::Tag { tag_id: t.clone() },
                 (Target::App(_), Subject::Group(gid)) => AccessOrigin::Group {
@@ -145,15 +179,15 @@ pub fn effective_access(grants: &[Grant], tags: &[Tag], app_id: &str) -> Vec<Eff
                 },
                 (Target::App(_), _) => AccessOrigin::Direct,
             };
-            covered_ports(g, tags, app_id)
-                .into_iter()
-                .map(move |port| EffectiveAccess {
-                    grant_id: g.id.clone(),
-                    port,
-                    network_id: g.network_id.clone(),
-                    subject: g.subject.clone(),
-                    origin: origin.clone(),
-                })
+            let ports = covered_ports(g, tags, app, groups, &none)?;
+            Some(EffectiveAccess {
+                grant_id: g.id.clone(),
+                scope: g.scope.clone(),
+                ports: ports.ranges(),
+                network_id: g.network_id.clone(),
+                subject: g.subject.clone(),
+                origin,
+            })
         })
         .collect()
 }
@@ -161,6 +195,8 @@ pub fn effective_access(grants: &[Grant], tags: &[Tag], app_id: &str) -> Vec<Eff
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::PortRef;
+    use crate::scope::tests::{app_with, group};
     use crate::types::Protocol;
 
     fn p(port: u16) -> PortRef {
@@ -181,82 +217,194 @@ mod tests {
         }
     }
 
-    fn member(app: &str, port: Option<PortRef>) -> TagMember {
+    fn member(app: &str, scope: Scope) -> TagMember {
         TagMember {
             app_id: app.into(),
-            port,
+            scope,
         }
     }
 
-    fn grant(target: Target, port: Option<PortRef>, subject: Subject) -> Grant {
+    fn grant(target: Target, scope: Scope, subject: Subject) -> Grant {
         Grant {
             id: "g".into(),
             target,
-            port,
+            scope,
             network_id: None,
             subject,
             created_at: Utc::now(),
         }
     }
 
-    #[test]
-    fn a_tag_grant_covers_each_member_narrowed_by_both_ports() {
-        let tags = [tag(vec![
-            member("a", None),
-            member("b", Some(p(80))),
-            member("c", Some(p(80))),
-        ])];
-        let g = grant(Target::Tag("t".into()), None, Subject::Anyone);
-        assert_eq!(covered_ports(&g, &tags, "a"), [None]);
-        assert_eq!(covered_ports(&g, &tags, "b"), [Some(p(80))]);
-        assert!(covered_ports(&g, &tags, "nobody").is_empty());
+    fn texts(c: Option<ScopePorts>) -> Vec<String> {
+        c.map(|c| c.ranges().iter().map(|r| r.to_string()).collect())
+            .unwrap_or_default()
+    }
 
-        let g = grant(Target::Tag("t".into()), Some(p(443)), Subject::Anyone);
-        assert_eq!(covered_ports(&g, &tags, "a"), [Some(p(443))]);
+    fn none() -> PortRangeSet {
+        PortRangeSet::new()
+    }
+
+    #[test]
+    fn a_tag_grant_covers_each_member_narrowed_by_both_scopes() {
+        let a = app_with("a", &[(22, true), (80, true), (443, true)]);
+        let b = app_with("b", &[(80, true)]);
+        let nobody = app_with("nobody", &[(80, true)]);
+        let tags = [tag(vec![
+            member("a", Scope::All),
+            member("b", Scope::port(p(80))),
+            member("c", Scope::port(p(80))),
+        ])];
+        let g = grant(Target::Tag("t".into()), Scope::All, Subject::Anyone);
+        assert_eq!(
+            texts(covered_ports(&g, &tags, &a, &[], &none())),
+            ["22/tcp", "80/tcp", "443/tcp"]
+        );
+        assert_eq!(
+            texts(covered_ports(&g, &tags, &b, &[], &none())),
+            ["80/tcp"]
+        );
+        assert!(covered_ports(&g, &tags, &nobody, &[], &none()).is_none());
+
+        let g = grant(
+            Target::Tag("t".into()),
+            Scope::port(p(443)),
+            Subject::Anyone,
+        );
+        assert_eq!(
+            texts(covered_ports(&g, &tags, &a, &[], &none())),
+            ["443/tcp"]
+        );
         assert!(
-            covered_ports(&g, &tags, "b").is_empty(),
+            covered_ports(&g, &tags, &b, &[], &none()).is_none(),
             "both set and different: nothing"
         );
-        let g = grant(Target::Tag("t".into()), Some(p(80)), Subject::Anyone);
-        assert_eq!(covered_ports(&g, &tags, "b"), [Some(p(80))]);
+        let g = grant(Target::Tag("t".into()), Scope::port(p(80)), Subject::Anyone);
+        assert_eq!(
+            texts(covered_ports(&g, &tags, &b, &[], &none())),
+            ["80/tcp"]
+        );
     }
 
     #[test]
     fn several_members_of_one_app_merge() {
+        let a = app_with("a", &[(80, true), (22, true), (25, true)]);
         let tags = [tag(vec![
-            member("a", Some(p(80))),
-            member("a", Some(p(22))),
-            member("a", Some(p(80))),
+            member("a", Scope::port(p(80))),
+            member("a", Scope::port(p(22))),
+            member("a", Scope::port(p(80))),
         ])];
-        let g = grant(Target::Tag("t".into()), None, Subject::Anyone);
-        assert_eq!(covered_ports(&g, &tags, "a"), [Some(p(22)), Some(p(80))]);
-        let tags = [tag(vec![member("a", Some(p(80))), member("a", None)])];
-        assert_eq!(covered_ports(&g, &tags, "a"), [None]);
+        let g = grant(Target::Tag("t".into()), Scope::All, Subject::Anyone);
+        assert_eq!(
+            texts(covered_ports(&g, &tags, &a, &[], &none())),
+            ["22/tcp", "80/tcp"]
+        );
+        let tags = [tag(vec![
+            member("a", Scope::port(p(80))),
+            member("a", Scope::All),
+        ])];
+        assert_eq!(
+            texts(covered_ports(&g, &tags, &a, &[], &none())),
+            ["22/tcp", "25/tcp", "80/tcp"]
+        );
+    }
+
+    #[test]
+    fn groups_narrow_and_widen_tag_grants() {
+        let a = app_with("a", &[(21, true)]);
+        let groups = [
+            group("passive", &["50000-50100/tcp"], &["a"]),
+            group("wide", &["50050-60000/tcp"], &[]),
+        ];
+        // A member by group, a grant for everything: the group's ranges.
+        let tags = [tag(vec![member("a", Scope::group("passive"))])];
+        let g = grant(Target::Tag("t".into()), Scope::All, Subject::Anyone);
+        assert_eq!(
+            texts(covered_ports(&g, &tags, &a, &groups, &none())),
+            ["50000-50100/tcp"]
+        );
+        // Member group intersected with the grant's group (which needs no attachment).
+        let g = grant(
+            Target::Tag("t".into()),
+            Scope::group("wide"),
+            Subject::Anyone,
+        );
+        assert_eq!(
+            texts(covered_ports(&g, &tags, &a, &groups, &none())),
+            ["50050-50100/tcp"]
+        );
+        // A whole-app member and a grant for a group the app does not have: only what the
+        // app has inside it (here the attached group's overlap).
+        let tags = [tag(vec![member("a", Scope::All)])];
+        assert_eq!(
+            texts(covered_ports(&g, &tags, &a, &groups, &none())),
+            ["50050-50100/tcp"]
+        );
+        let other = [group("far", &["60000-61000/tcp"], &[])];
+        let g_far = grant(
+            Target::Tag("t".into()),
+            Scope::group("far"),
+            Subject::Anyone,
+        );
+        assert!(covered_ports(&g_far, &tags, &a, &other, &none())
+            .unwrap()
+            .is_empty());
+        // A grant for an attached group on a whole-app member: the whole group.
+        let g = grant(
+            Target::Tag("t".into()),
+            Scope::group("passive"),
+            Subject::Anyone,
+        );
+        assert_eq!(
+            texts(covered_ports(&g, &tags, &a, &groups, &none())),
+            ["50000-50100/tcp"]
+        );
+        // A whole-app member with a port grant inside the attached group's range.
+        let g = grant(
+            Target::Tag("t".into()),
+            Scope::port(p(50010)),
+            Subject::Anyone,
+        );
+        assert_eq!(
+            texts(covered_ports(&g, &tags, &a, &groups, &none())),
+            ["50010/tcp"]
+        );
+        // A direct grant on an app by an unattached group covers nothing.
+        let g = grant(
+            Target::App("a".into()),
+            Scope::group("wide"),
+            Subject::Anyone,
+        );
+        assert!(covered_ports(&g, &tags, &a, &groups, &none())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn app_grants_and_origins() {
-        let tags = [tag(vec![member("a", None)])];
+        let a = app_with("a", &[(1, true), (2, true)]);
+        let tags = [tag(vec![member("a", Scope::All)])];
         let grants = [
             grant(
                 Target::App("a".into()),
-                Some(p(1)),
+                Scope::port(p(1)),
                 Subject::Peer("x".into()),
             ),
-            grant(Target::App("a".into()), None, Subject::Group("grp".into())),
-            grant(Target::App("b".into()), None, Subject::Anyone),
-            grant(Target::Tag("t".into()), None, Subject::Anyone),
-            grant(Target::Tag("gone".into()), None, Subject::Anyone),
+            grant(
+                Target::App("a".into()),
+                Scope::All,
+                Subject::Group("grp".into()),
+            ),
+            grant(Target::App("b".into()), Scope::All, Subject::Anyone),
+            grant(Target::Tag("t".into()), Scope::All, Subject::Anyone),
+            grant(Target::Tag("gone".into()), Scope::All, Subject::Anyone),
         ];
-        let narrowed = grants_for_app(&grants, &tags, "a");
+        let narrowed = grants_for_app(&grants, &tags, &a, &[], &none());
         assert_eq!(narrowed.len(), 3);
         assert!(narrowed
             .iter()
-            .all(|g| g.target == Target::App("a".to_string())));
-        let origins: Vec<_> = effective_access(&grants, &tags, "a")
-            .into_iter()
-            .map(|e| e.origin)
-            .collect();
+            .all(|g| g.grant.target == Target::App("a".to_string())));
+        let access = effective_access(&grants, &tags, &a, &[]);
+        let origins: Vec<_> = access.iter().map(|e| e.origin.clone()).collect();
         assert_eq!(
             origins,
             [
@@ -267,6 +415,18 @@ mod tests {
                 AccessOrigin::Tag { tag_id: "t".into() }
             ]
         );
+        assert_eq!(access[0].scope, Scope::port(p(1)));
+        assert_eq!(access[0].ports.len(), 1);
+        assert_eq!(access[2].ports[0].to_string(), "1-2/tcp");
+    }
+
+    #[test]
+    fn grants_that_cover_nothing_are_not_enforced() {
+        let a = app_with("a", &[]);
+        let grants = [grant(Target::App("a".into()), Scope::All, Subject::Anyone)];
+        assert!(grants_for_app(&grants, &[], &a, &[], &none()).is_empty());
+        // ... but are still listed as an access.
+        assert_eq!(effective_access(&grants, &[], &a, &[]).len(), 1);
     }
 
     #[test]

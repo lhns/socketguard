@@ -7,7 +7,7 @@ use axum::http::{Method, StatusCode};
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig, DaemonConfig, TorAuth};
 use socketguard_core::{
     CredentialKind, ListeningSocket, Locator, NetworkKind, NetworkStatus, NewCredential, NewGrant,
-    Protocol, Subject, Target,
+    Protocol, Scope, Subject, Target,
 };
 use socketguard_daemon::api;
 use socketguard_daemon::engine::{ActiveBackend, Engine};
@@ -135,7 +135,7 @@ impl Harness {
                 &self.state,
                 &NewGrant {
                     target: Target::App(app.id),
-                    port: None,
+                    scope: Scope::All,
                     network_id: None,
                     subject,
                     confirm_open: true,

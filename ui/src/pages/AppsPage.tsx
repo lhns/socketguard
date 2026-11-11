@@ -8,10 +8,10 @@ import Inspector, { InspectorEmpty } from "../components/Inspector";
 import Picker, { type PickerItem } from "../components/Picker";
 import { NewTagForm, TagInspector, TagsInspector } from "../components/TagInspector";
 import { useColumns } from "../columns";
-import { errorText, portLabel } from "../lib";
+import { errorText, portLabel, sameScope, scopeKey, scopeLabel, scopeOfPort } from "../lib";
 import { buildColumns, buildRows, cellOf, type Cell, type Col, type Ctx, type Row as MatrixRow } from "../matrix";
 import type { FocusMessage } from "../nav";
-import { useApps, useGrants, useGroups, useNetworks, usePeers, useTags } from "../queries";
+import { useApps, useGrants, useGroups, useNetworks, usePeers, useSocketGroups, useTags } from "../queries";
 
 interface AppRow extends ListRow {
   m: MatrixRow;
@@ -26,6 +26,7 @@ const toRow = (m: MatrixRow): AppRow => ({ key: m.key, kind: m.kind, selectable:
 export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage }) {
   const apps = useApps();
   const tags = useTags();
+  const socketGroupList = useSocketGroups().data ?? [];
   const grants = useGrants();
   const peers = usePeers();
   const groups = useGroups();
@@ -142,12 +143,12 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
           const t = tagList.find((x) => x.id === r.m.target.id);
           return <span className="muted">{t && t.patterns.length > 0 ? `matches ${t.patterns.join(", ")}` : ""}</span>;
         }
-        const mine = membershipsOf(r.m.target.id, tagList).filter((m) => (r.m.kind === "app" ? true : m.port !== null && r.m.port !== null && portLabel(m.port) === portLabel(r.m.port)));
+        const mine = membershipsOf(r.m.target.id, tagList).filter((m) => (r.m.kind === "app" ? true : m.scope.kind === "port" && r.m.port !== null && sameScope(m.scope, scopeOfPort(r.m.port))));
         return (
           <>
             {mine.map((m) => (
-              <button key={`${m.tag.id}-${m.port ? portLabel(m.port) : "*"}`} className="tag-pill" title="Show only this tag" onClick={() => setTagFilter(m.tag.id)}>
-                {m.tag.label}{m.port && r.m.kind === "app" ? ` ${portLabel(m.port)}` : ""}
+              <button key={`${m.tag.id}-${scopeKey(m.scope)}`} className="tag-pill" title="Show only this tag" onClick={() => setTagFilter(m.tag.id)}>
+                {m.tag.label}{m.scope.kind !== "all" && r.m.kind === "app" ? ` ${scopeLabel(m.scope, socketGroupList)}` : ""}
               </button>
             ))}
           </>

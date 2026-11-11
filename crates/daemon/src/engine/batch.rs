@@ -6,6 +6,7 @@
 //! against the real constraints and rolls back.
 
 use super::mutations::Catalog;
+use super::socket_groups::GroupPlan;
 use super::*;
 use crate::api::DaemonEvent;
 use crate::state::{NewActivity, Write};
@@ -15,8 +16,8 @@ use socketguard_core::api_types::{
     BatchChange, Change, ChangeItem, ChangeKind, ChangeOp, ChangesRequest, ChangesResponse,
 };
 use socketguard_core::{
-    new_id, ActivityKind, Credential, Grant, GrantReach, NewGrant, Peer, PeerGroup, Reach, Subject,
-    TagMember, Target,
+    new_id, ActivityKind, Address, Credential, Grant, GrantReach, NewGrant, Peer, PeerGroup, Reach,
+    Scope, SocketGroup, Subject, TagMember, Target,
 };
 use std::collections::BTreeMap;
 
@@ -32,6 +33,8 @@ struct Plan {
     protected: Vec<String>,
     /// Some operation gives someone access they did not have.
     changes_reach: bool,
+    /// Addresses that go with a socket group the batch detaches or deletes.
+    removed: Vec<Address>,
 }
 
 impl Plan {
@@ -85,6 +88,66 @@ impl Plan {
     fn grant_reach(&self, grant: &Grant) -> Vec<GrantReach> {
         Engine::reach_of(grant, &self.cat, &self.networks, &self.protected)
     }
+
+    /// A scope whose socket group may be a `ref` of an earlier operation.
+    fn resolve_scope(&self, scope: &Scope) -> Result<Scope, EngineError> {
+        Ok(match scope {
+            Scope::Group { id } => Scope::Group {
+                id: self.resolve(id)?,
+            },
+            other => other.clone(),
+        })
+    }
+
+    /// Add the outcome of a socket group operation: its writes, the addresses that leave, and
+    /// who can now reach more (the grants that cover more ports than before).
+    fn push_group_plan(
+        &mut self,
+        gp: GroupPlan,
+        kind: ChangeKind,
+        name: String,
+        group: &SocketGroup,
+        activity: NewActivity,
+    ) {
+        let reach: Vec<GrantReach> = gp
+            .widened
+            .iter()
+            .flat_map(|g| self.grant_reach(g))
+            .collect();
+        self.changes_reach |= lets_in(&reach);
+        let who: Vec<String> = gp
+            .widened
+            .iter()
+            .map(|g| match &g.subject {
+                Subject::Anyone => "Anyone".to_string(),
+                Subject::Peer(id) => self
+                    .cat
+                    .peer(id)
+                    .map_or_else(|| id.clone(), |p| p.label.clone()),
+                Subject::Group(id) => self
+                    .cat
+                    .group(id)
+                    .map_or_else(|| id.clone(), |g| format!("group {}", g.label)),
+            })
+            .collect();
+        self.changes.push(BatchChange {
+            change: Change {
+                kind,
+                item: ChangeItem::SocketGroup,
+                name,
+                detail: (!who.is_empty()).then(|| format!("reachable by {}", who.join(", "))),
+                opens_to_anyone: gp.opens_to_anyone(),
+            },
+            id: Some(group.id.clone()),
+            reach,
+        });
+        self.activities.push(activity);
+        self.writes.extend(gp.writes);
+        self.removed.extend(gp.removed);
+        self.event(DaemonEvent::SocketGroupsChanged);
+        self.event(DaemonEvent::GrantsChanged);
+        self.event(DaemonEvent::AppsChanged);
+    }
 }
 
 /// Does any network let the subject in? ("not reachable" everywhere opens nothing.)
@@ -122,6 +185,7 @@ impl Engine {
             networks: self.networks(),
             protected: self.protected_interfaces(state).await?,
             changes_reach: false,
+            removed: Vec::new(),
         };
         for (i, op) in req.ops.iter().enumerate() {
             self.plan_op(state, &mut plan, op)
@@ -147,12 +211,22 @@ impl Engine {
         if plan.writes.is_empty() {
             return Ok(response(&plan));
         }
+        // Addresses of a socket group that goes or is detached leave their interfaces and
+        // networks first (retiring, so they stay denied until really gone).
+        if !plan.removed.is_empty() {
+            self.retire_addresses(state, &plan.removed).await?;
+            self.remove_app_locators(state, &plan.removed).await;
+        }
         state
             .db
             .apply_writes(&plan.writes)
             .await
             .map_err(|e| Self::conflict_or_internal(e, "a change of this batch"))?;
-        let applied = self.apply_firewall(state).await;
+        let applied = if plan.removed.is_empty() {
+            self.apply_firewall(state).await
+        } else {
+            self.apply_and_ensure(state).await
+        };
         if let Err(e) = state.db.insert_activity(&plan.activities).await {
             warn!("Could not record activity: {e}");
         }
@@ -303,9 +377,125 @@ impl Engine {
                 plan.writes.push(Write::InsertTag(tag));
                 plan.event(DaemonEvent::TagsChanged);
             }
+            ChangeOp::CreateSocketGroup {
+                ref_,
+                label,
+                ports,
+                apps,
+                confirm_open,
+            } => {
+                let (group, gp) = self.plan_create_group(
+                    &mut plan.cat,
+                    new_id(),
+                    label,
+                    ports,
+                    apps,
+                    *confirm_open,
+                )?;
+                plan.define_ref(ref_, &group.id)?;
+                let activity = NewActivity::new(
+                    ActivityKind::SocketGroupAdded,
+                    format!("Added socket group {}", group.label),
+                );
+                plan.push_group_plan(
+                    gp,
+                    ChangeKind::Create,
+                    group.label.clone(),
+                    &group,
+                    activity,
+                );
+            }
+            ChangeOp::UpdateSocketGroup {
+                group_id,
+                label,
+                ports,
+                confirm_open,
+            } => {
+                let id = plan.resolve(group_id)?;
+                let (group, gp) = self.plan_update_group(
+                    &mut plan.cat,
+                    &id,
+                    label.as_deref(),
+                    ports.as_deref(),
+                    *confirm_open,
+                )?;
+                let activity = NewActivity::new(
+                    ActivityKind::SocketGroupChanged,
+                    format!("Changed socket group {}", group.label),
+                );
+                plan.push_group_plan(
+                    gp,
+                    ChangeKind::Update,
+                    group.label.clone(),
+                    &group,
+                    activity,
+                );
+            }
+            ChangeOp::DeleteSocketGroup { group_id } => {
+                let id = plan.resolve(group_id)?;
+                let (group, gp) = self.plan_delete_group(&mut plan.cat, &id)?;
+                let activity = NewActivity::new(
+                    ActivityKind::SocketGroupRemoved,
+                    format!("Removed socket group {}", group.label),
+                );
+                plan.push_group_plan(
+                    gp,
+                    ChangeKind::Delete,
+                    group.label.clone(),
+                    &group,
+                    activity,
+                );
+            }
+            ChangeOp::AttachSocketGroup {
+                group_id,
+                app_id,
+                confirm_open,
+            } => {
+                let id = plan.resolve(group_id)?;
+                let (group, gp) =
+                    self.plan_attach_group(&mut plan.cat, &id, app_id, *confirm_open)?;
+                if !gp.writes.is_empty() {
+                    let app = plan
+                        .cat
+                        .app(app_id)
+                        .map_or(app_id.clone(), |a| a.name.clone());
+                    let activity = NewActivity::new(
+                        ActivityKind::SocketGroupChanged,
+                        format!("Attached socket group {} to {app}", group.label),
+                    )
+                    .app(app_id);
+                    plan.push_group_plan(
+                        gp,
+                        ChangeKind::Update,
+                        format!("{} attached to {app}", group.label),
+                        &group,
+                        activity,
+                    );
+                }
+            }
+            ChangeOp::DetachSocketGroup { group_id, app_id } => {
+                let id = plan.resolve(group_id)?;
+                let (group, gp) = self.plan_detach_group(&mut plan.cat, &id, app_id)?;
+                let app = plan
+                    .cat
+                    .app(app_id)
+                    .map_or(app_id.clone(), |a| a.name.clone());
+                let activity = NewActivity::new(
+                    ActivityKind::SocketGroupChanged,
+                    format!("Detached socket group {} from {app}", group.label),
+                )
+                .app(app_id);
+                plan.push_group_plan(
+                    gp,
+                    ChangeKind::Update,
+                    format!("{} detached from {app}", group.label),
+                    &group,
+                    activity,
+                );
+            }
             ChangeOp::AddGrant {
                 target,
-                port,
+                scope,
                 network_id,
                 subject,
                 confirm_open,
@@ -321,7 +511,7 @@ impl Engine {
                 };
                 let req = NewGrant {
                     target,
-                    port: *port,
+                    scope: plan.resolve_scope(scope)?,
                     network_id: network_id.clone(),
                     subject,
                     confirm_open: *confirm_open,
@@ -330,7 +520,7 @@ impl Engine {
                 let grant = Grant {
                     id: new_id(),
                     target: req.target,
-                    port: req.port,
+                    scope: req.scope,
                     network_id: req.network_id,
                     subject: req.subject,
                     created_at: Utc::now(),
@@ -347,7 +537,11 @@ impl Engine {
                             "{} to {}{}",
                             info.subject_label,
                             info.target_name,
-                            port.map(|p| format!(" {p}")).unwrap_or_default()
+                            if grant.scope.is_all() {
+                                String::new()
+                            } else {
+                                format!(" {}", grant.scope.describe(&plan.cat.socket_groups))
+                            }
                         ),
                         detail: grant.network_id.as_ref().map(|n| format!("on {n}")),
                         opens_to_anyone: grant.subject == Subject::Anyone,
@@ -388,26 +582,20 @@ impl Engine {
             ChangeOp::AddTagMember {
                 tag_id,
                 app_id,
-                port,
+                scope,
                 confirm_open,
             } => {
+                let scope = plan.resolve_scope(scope)?;
                 let tag_id = plan.resolve(tag_id)?;
                 let app = plan
                     .cat
                     .app(app_id)
                     .ok_or_else(|| EngineError::NotFound(format!("app {app_id}")))?
                     .clone();
-                if let Some(p) = port {
-                    if !app.has_port(*p) {
-                        return Err(EngineError::Invalid(format!(
-                            "{} has no port {p}",
-                            app.name
-                        )));
-                    }
-                }
+                Self::check_scope_on_app(&plan.cat, &app, &scope)?;
                 let member = TagMember {
                     app_id: app.id.clone(),
-                    port: *port,
+                    scope: scope.clone(),
                 };
                 let tag = plan
                     .cat
@@ -480,7 +668,7 @@ impl Engine {
                 plan.writes.push(Write::AddTagMember {
                     tag_id,
                     app_id: app.id,
-                    port: *port,
+                    scope,
                 });
                 plan.event(DaemonEvent::TagsChanged);
                 plan.event(DaemonEvent::GrantsChanged);
@@ -488,8 +676,9 @@ impl Engine {
             ChangeOp::RemoveTagMember {
                 tag_id,
                 app_id,
-                port,
+                scope,
             } => {
+                let scope = plan.resolve_scope(scope)?;
                 let tag_id = plan.resolve(tag_id)?;
                 let tag = plan
                     .cat
@@ -501,18 +690,18 @@ impl Engine {
                 if !tag
                     .members
                     .iter()
-                    .any(|m| m.app_id == *app_id && m.port == *port)
+                    .any(|m| m.app_id == *app_id && m.scope == scope)
                 {
                     return Err(EngineError::NotFound(format!(
                         "membership of app {app_id} in tag {}",
                         tag.label
                     )));
                 }
-                let exclude = Self::removal_excludes(state, &tag, app_id, *port).await?;
+                let exclude = Self::removal_excludes(state, &tag, app_id, &scope).await?;
                 let live = plan.cat.tags.iter_mut().find(|t| t.id == tag_id);
                 if let Some(live) = live {
                     live.members
-                        .retain(|m| !(m.app_id == *app_id && m.port == *port));
+                        .retain(|m| !(m.app_id == *app_id && m.scope == scope));
                     if exclude {
                         live.excluded.push(app_id.clone());
                     }
@@ -533,7 +722,7 @@ impl Engine {
                 plan.writes.push(Write::RemoveTagMember {
                     tag_id,
                     app_id: app_id.clone(),
-                    port: *port,
+                    scope,
                     exclude,
                 });
                 plan.event(DaemonEvent::TagsChanged);

@@ -3,6 +3,7 @@ source: crates/cli/tests/render.rs
 expression: toml_text
 ---
 version = 1
+socket_groups = []
 
 [settings]
 address_mode = "per_port"
@@ -26,7 +27,8 @@ network = "ygg"
 id = "5c0d"
 name = "nginx"
 
-[grants.port]
+[grants.scope]
+kind = "port"
 port = 80
 proto = "tcp"
 
@@ -39,3 +41,6 @@ subject = "anyone"
 [grants.app]
 id = "5c0d"
 name = "nginx"
+
+[grants.scope]
+kind = "all"

@@ -16,8 +16,8 @@ function Harness({ ops, undo }: { ops: ChangeOp[]; undo?: ChangeOp[] }) {
   );
 }
 
-const grantOp: ChangeOp = { op: "add_grant", target: { kind: "app", id: "a1" }, subject: { kind: "peer", id: "p1" }, confirm_open: false };
-const anyoneOp: ChangeOp = { op: "add_grant", target: { kind: "app", id: "a1" }, subject: { kind: "anyone" }, confirm_open: false };
+const grantOp: ChangeOp = { op: "add_grant", target: { kind: "app", id: "a1" }, scope: { kind: "all" }, subject: { kind: "peer", id: "p1" }, confirm_open: false };
+const anyoneOp: ChangeOp = { op: "add_grant", target: { kind: "app", id: "a1" }, scope: { kind: "all" }, subject: { kind: "anyone" }, confirm_open: false };
 const created: BatchChange = { kind: "create", item: "grant", name: "alice to nginx", opens_to_anyone: false, reach: [{ network_id: "n-ygg", reach: "verified" }] };
 
 const requests = (d: ReturnType<typeof mockDaemon>) => d.calls.filter((c) => c.cmd === "changes").map((c) => c.args.req as ChangesRequest);
@@ -96,7 +96,7 @@ describe("the commit rule", () => {
       },
     });
     const user = userEvent.setup();
-    renderWithProviders(<Harness ops={[{ op: "add_tag_member", tag_id: "t1", app_id: "a1", confirm_open: false }]} />);
+    renderWithProviders(<Harness ops={[{ op: "add_tag_member", tag_id: "t1", app_id: "a1", scope: { kind: "all" }, confirm_open: false }]} />);
     await user.click(screen.getByRole("button", { name: "go" }));
     await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Open it" }));
     expect(await screen.findByText("Did it")).toBeInTheDocument();
@@ -107,13 +107,13 @@ describe("the commit rule", () => {
   it("an edit that only closes applies at once and the toast can undo it with the inverse batch", async () => {
     const d = mockDaemon({ changes: (a) => batch(a.req as ChangesRequest, false) });
     const user = userEvent.setup();
-    const g = grantView({ id: "g1", port: { port: 80, proto: "tcp" }, network_id: "n-lan" });
-    const inverse: ChangeOp = { op: "add_grant", target: g.target, port: g.port!, network_id: "n-lan", subject: g.subject, confirm_open: false };
+    const g = grantView({ id: "g1", scope: { kind: "port", port: 80, proto: "tcp" }, network_id: "n-lan" });
+    const inverse: ChangeOp = { op: "add_grant", target: g.target, scope: g.scope, network_id: "n-lan", subject: g.subject, confirm_open: false };
     renderWithProviders(<Harness ops={[{ op: "remove_grant", grant_id: "g1" }]} undo={[inverse]} />);
     await user.click(screen.getByRole("button", { name: "go" }));
     await user.click(await screen.findByRole("button", { name: "Undo" }));
     await waitFor(() => expect(requests(d)).toHaveLength(3));
-    expect(requests(d)[2]).toMatchObject({ dry_run: false, ops: [{ op: "add_grant", network_id: "n-lan", port: { port: 80 }, confirm_open: true }] });
+    expect(requests(d)[2]).toMatchObject({ dry_run: false, ops: [{ op: "add_grant", network_id: "n-lan", scope: { port: 80 }, confirm_open: true }] });
     expect(await screen.findByText("Undone")).toBeInTheDocument();
   });
 

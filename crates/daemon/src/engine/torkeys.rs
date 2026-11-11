@@ -9,7 +9,8 @@ use crate::state::NewActivity;
 use crate::AppState;
 use socketguard_core::api_types::{ShareResponse, TorKeyResponse, TorShare};
 use socketguard_core::{
-    grants_for_app, new_id, ActivityKind, Credential, CredentialKind, Locator, NetworkKind, Subject,
+    grants_for_app, new_id, ActivityKind, Credential, CredentialKind, Locator, NetworkKind,
+    PortRangeSet, Subject,
 };
 
 impl Engine {
@@ -67,7 +68,13 @@ impl Engine {
             .ok_or_else(|| EngineError::NotFound(format!("app {app_id}")))?;
         let keys = state.db.tor_client_keys().await?;
         let networks = self.networks();
-        let grants = grants_for_app(&cat.grants, &cat.tags, app_id);
+        let grants = grants_for_app(
+            &cat.grants,
+            &cat.tags,
+            app,
+            &cat.socket_groups,
+            &PortRangeSet::new(),
+        );
         let mut tor: Vec<TorShare> = Vec::new();
         for address in &app.addresses {
             let Locator::Onion { hostname } = &address.locator else {
@@ -79,7 +86,7 @@ impl Engine {
             {
                 continue;
             }
-            for grant in grants.iter().filter(|g| {
+            for grant in grants.iter().map(|g| &g.grant).filter(|g| {
                 g.network_id
                     .as_deref()
                     .is_none_or(|n| n == address.network_id)

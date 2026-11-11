@@ -41,6 +41,7 @@ export const usePeers = () => useQuery({ queryKey: ["peers"], queryFn: api.listP
 export const useGroups = () => useQuery({ queryKey: ["groups"], queryFn: api.listGroups });
 export const useGrants = () => useQuery({ queryKey: ["grants"], queryFn: api.listGrants });
 export const useTags = () => useQuery({ queryKey: ["tags"], queryFn: api.listTags });
+export const useSocketGroups = () => useQuery({ queryKey: ["socketGroups"], queryFn: api.listSocketGroups });
 export const useNetworks = () => useQuery({ queryKey: ["networks"], queryFn: api.listNetworks });
 export const useSettings = () => useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
 export const useShare = (appId: string | null) =>
@@ -182,11 +183,12 @@ export const EVENT_INVALIDATIONS: Record<string, string[][]> = {
   peers_changed: [["peers"], ["groups"], ["grants"], ["app"], ["share"]],
   grants_changed: [["grants"], ["apps"], ["app"], ["share"]],
   tags_changed: [["tags"], ["grants"], ["app"]],
+  socket_groups_changed: [["socketGroups"], ["grants"], ["apps"], ["app"]],
   networks_changed: [["networks"], ["status"], ["app"]],
   settings_changed: [["settings"], ["status"]],
   activity: [["activity"]],
   daemon_disconnected: [["status"]],
-  daemon_connected: [["status"], ["apps"], ["app"], ["peers"], ["groups"], ["grants"], ["tags"], ["networks"], ["settings"], ["activity"]],
+  daemon_connected: [["status"], ["apps"], ["app"], ["peers"], ["groups"], ["grants"], ["tags"], ["socketGroups"], ["networks"], ["settings"], ["activity"]],
 };
 
 let subscribed = false;

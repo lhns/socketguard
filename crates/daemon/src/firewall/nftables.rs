@@ -7,6 +7,7 @@ use super::{
 };
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
+use socketguard_core::PortRange;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::net::IpAddr;
@@ -65,8 +66,8 @@ fn rule_line(r: &Rule) -> String {
     let _ = write!(
         s,
         "{} dport {} counter name \"{}\" accept",
-        r.proto,
-        r.port,
+        r.ports.proto,
+        r.ports.port_text(),
         counter_name(&r.id)
     );
     s
@@ -181,7 +182,8 @@ fn run_nft(args: &[&str], stdin: Option<&str>) -> Result<std::process::Output> {
 }
 
 /// `conntrack` arguments selecting the flows to a revoked destination: the original
-/// direction's destination, protocol and port.
+/// direction's destination, protocol and, for a single port, the port. `conntrack` takes no
+/// port range, so for a range [`flush_conntrack`] lists the flows and deletes them by port.
 fn conntrack_selector(r: &Revocation) -> Vec<String> {
     let mut a = vec![
         "-f".to_string(),
@@ -190,12 +192,10 @@ fn conntrack_selector(r: &Revocation) -> Vec<String> {
     if let Some(dst) = r.dst.addr() {
         a.extend(["-d".to_string(), dst.to_string()]);
     }
-    a.extend([
-        "-p".to_string(),
-        r.proto.to_string(),
-        "--dport".to_string(),
-        r.port.to_string(),
-    ]);
+    a.extend(["-p".to_string(), r.ports.proto.to_string()]);
+    if r.ports.is_single() {
+        a.extend(["--dport".to_string(), r.ports.start.to_string()]);
+    }
     a
 }
 
@@ -210,11 +210,20 @@ fn conntrack_args(verb: &str, r: &Revocation, src: Option<IpAddr>) -> Vec<String
 
 /// The original source addresses in `conntrack -L` output (the first `src=` of a line).
 fn parse_conntrack_sources(out: &str) -> Vec<IpAddr> {
+    parse_conntrack_flows(out)
+        .into_iter()
+        .map(|(s, _)| s)
+        .collect()
+}
+
+/// The original source address and destination port of each flow in `conntrack -L` output
+/// (the first `src=` and `dport=` of a line).
+fn parse_conntrack_flows(out: &str) -> Vec<(IpAddr, Option<u16>)> {
     out.lines()
         .filter_map(|l| {
-            l.split_whitespace()
-                .find_map(|t| t.strip_prefix("src="))
-                .and_then(|a| a.parse().ok())
+            let find = |key: &str| l.split_whitespace().find_map(|t| t.strip_prefix(key));
+            let src = find("src=")?.parse().ok()?;
+            Some((src, find("dport=").and_then(|p| p.parse().ok())))
         })
         .collect()
 }
@@ -229,6 +238,9 @@ fn run_conntrack(args: &[String]) -> std::io::Result<std::process::Output> {
 /// Delete the flows a revocation names. `conntrack -D` takes no network for the source,
 /// so a net is resolved through a listing first. Returns false when the tool is missing.
 fn flush_conntrack(r: &Revocation) -> bool {
+    if !r.ports.is_single() {
+        return flush_conntrack_range(r);
+    }
     let mut sources: Vec<Option<IpAddr>> = Vec::new();
     match r.src {
         None => sources.push(None),
@@ -248,6 +260,42 @@ fn flush_conntrack(r: &Revocation) -> bool {
     for src in sources {
         match run_conntrack(&conntrack_args("-D", r, src)) {
             Ok(_) => {} // a non-zero exit only means no flow matched
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(e) => warn!("conntrack delete failed: {e}"),
+        }
+    }
+    true
+}
+
+/// [`flush_conntrack`] for a port range: list the flows to the destination and delete the
+/// ones inside the range from the revoked source, one by one.
+fn flush_conntrack_range(r: &Revocation) -> bool {
+    let out = match run_conntrack(&conntrack_args("-L", r, None)) {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(e) => {
+            warn!("conntrack listing failed: {e}");
+            return true;
+        }
+    };
+    let mut flows = parse_conntrack_flows(&String::from_utf8_lossy(&out.stdout));
+    flows.retain(|(src, port)| {
+        port.is_some_and(|p| (r.ports.start..=r.ports.end).contains(&p))
+            && r.src.is_none_or(|net| net.contains(src))
+    });
+    flows.sort();
+    flows.dedup();
+    for (src, port) in flows {
+        let single = Revocation {
+            ports: PortRange {
+                start: port.unwrap_or_default(),
+                end: port.unwrap_or_default(),
+                proto: r.ports.proto,
+            },
+            ..r.clone()
+        };
+        match run_conntrack(&conntrack_args("-D", &single, Some(src))) {
+            Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
             Err(e) => warn!("conntrack delete failed: {e}"),
         }
@@ -367,7 +415,7 @@ fn parse_counters(json: &str, names: &HashMap<String, String>) -> Result<Vec<Cou
 mod tests {
     use super::*;
     use crate::firewall::golden_ruleset;
-    use socketguard_core::Protocol;
+    use socketguard_core::{PortRef, Protocol};
 
     #[test]
     fn golden_render() {
@@ -429,8 +477,10 @@ mod tests {
     fn revocation(src: Option<&str>) -> Revocation {
         Revocation {
             dst: Dst::Addr("fd00::9".parse().unwrap()),
-            port: 80,
-            proto: Protocol::Tcp,
+            ports: PortRange::single(PortRef {
+                port: 80,
+                proto: Protocol::Tcp,
+            }),
             src: src.map(|s| s.parse().unwrap()),
         }
     }
@@ -439,8 +489,10 @@ mod tests {
     fn conntrack_selects_host_ipv4_flows_without_a_destination() {
         let r = Revocation {
             dst: Dst::HostV4,
-            port: 22,
-            proto: Protocol::Tcp,
+            ports: PortRange::single(PortRef {
+                port: 22,
+                proto: Protocol::Tcp,
+            }),
             src: None,
         };
         assert_eq!(
@@ -459,6 +511,45 @@ mod tests {
         assert_eq!(
             conntrack_args("-D", &revocation(None), None).join(" "),
             "-D -f ipv6 -d fd00::9 -p tcp --dport 80"
+        );
+    }
+
+    #[test]
+    fn port_ranges_render_as_nft_ranges() {
+        let rule = |ports: &str| Rule {
+            id: "r".into(),
+            iif: Some("eth0".into()),
+            dst: Dst::Addr("fd00::9".parse().unwrap()),
+            ports: ports.parse().unwrap(),
+            sources: Sources::Any,
+        };
+        let line = rule_line(&rule("50000-51000/tcp"));
+        assert!(
+            line.starts_with("iifname \"eth0\" ip6 daddr fd00::9 tcp dport 50000-51000 counter"),
+            "{line}"
+        );
+        assert!(rule_line(&rule("80/udp")).contains(" udp dport 80 counter"));
+        let rs = DesiredRuleset {
+            scopes: vec![],
+            rules: vec![rule("1000-2000/udp")],
+        };
+        assert!(render(&rs).contains("udp dport 1000-2000 counter name"));
+    }
+
+    #[test]
+    fn conntrack_lists_a_range_instead_of_naming_a_port() {
+        let r = Revocation {
+            ports: "50000-51000/tcp".parse().unwrap(),
+            ..revocation(None)
+        };
+        assert_eq!(
+            conntrack_args("-L", &r, None).join(" "),
+            "-L -f ipv6 -d fd00::9 -p tcp"
+        );
+        let out = "tcp 6 431999 ESTABLISHED src=fd00::1 dst=fd00::9 sport=5000 dport=50500 src=fd00::9 dst=fd00::1 sport=50500 dport=5000 [ASSURED]\n";
+        assert_eq!(
+            parse_conntrack_flows(out),
+            vec![("fd00::1".parse::<IpAddr>().unwrap(), Some(50500))]
         );
     }
 
@@ -519,8 +610,10 @@ mod tests {
             id: "x".into(),
             iif: None,
             dst: Dst::Addr("10.0.0.1".parse().unwrap()),
-            port: 53,
-            proto: Protocol::Udp,
+            ports: PortRange::single(PortRef {
+                port: 53,
+                proto: Protocol::Udp,
+            }),
             sources: Sources::Any,
         };
         assert_eq!(

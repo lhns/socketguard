@@ -17,13 +17,13 @@ use serde::Serialize;
 use socketguard_client::{ApiEvent, Client, Error as ApiError, GrantQuery, Saved};
 use socketguard_core::api_types::{
     error_code, ApplyRequest, ChangeOp, ChangesRequest, Enforcement, LockoutRiskInfo, MergeRequest,
-    NewGroup, NewNetwork, NewPeer, NewTag, ProtectHostRequest, ProtectHostResponse, SplitRequest,
-    UpdateSettings, UpdateTag,
+    NewGroup, NewNetwork, NewPeer, NewSocketGroup, NewTag, ProtectHostRequest, ProtectHostResponse,
+    SplitRequest, UpdateSettings, UpdateSocketGroup, UpdateTag,
 };
 use socketguard_core::config::TorAuth;
 use socketguard_core::{
     ActivityKind, ActivityQuery, ActivityRecord, App, BackendConfig, CredentialKind, GrantView,
-    NewCredential, NewGrant, Peer, PeerGroup, PortRef, Subject, Tag, TagMember, Target,
+    NewCredential, NewGrant, Peer, PeerGroup, Scope, SocketGroup, Subject, Tag, TagMember, Target,
 };
 
 /// What every command needs: the client and the output mode.
@@ -50,6 +50,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Peers(cmd) => peers(&c, cmd).await,
         Command::Groups(cmd) => groups(&c, cmd).await,
         Command::Tags(cmd) => tags(&c, cmd).await,
+        Command::SocketGroups(cmd) => socket_groups(&c, cmd).await,
         Command::Grant(a) => grant(&c, a).await,
         Command::Revoke(a) => revoke(&c, a).await,
         Command::Grants(a) => grants(&c, a).await,
@@ -160,7 +161,26 @@ impl Ctx {
             &self.client.list_peers().await?,
             &self.client.list_groups().await?,
         )
-        .with_tags(&self.client.list_tags().await?))
+        .with_tags(&self.client.list_tags().await?)
+        .with_socket_groups(&self.client.list_socket_groups().await?))
+    }
+
+    async fn socket_group(&self, query: &str) -> Result<SocketGroup> {
+        Ok(resolve(
+            "socket group",
+            &self.client.list_socket_groups().await?,
+            query,
+        )?
+        .clone())
+    }
+
+    /// A scope as typed, with a socket group resolved by label.
+    async fn scope(&self, spec: &parse::ScopeSpec) -> Result<Scope> {
+        Ok(match spec {
+            parse::ScopeSpec::All => Scope::All,
+            parse::ScopeSpec::Port(p) => Scope::port(*p),
+            parse::ScopeSpec::Group(label) => Scope::group(self.socket_group(label).await?.id),
+        })
     }
 
     async fn subject(&self, spec: &SubjectSpec) -> Result<Subject> {
@@ -434,25 +454,46 @@ async fn apps(c: &Ctx, cmd: AppsCmd) -> Result<()> {
                 ),
             )
         }
-        AppsCmd::Split { app, network, port } => {
+        AppsCmd::Split {
+            app,
+            network,
+            port,
+            socket_group,
+        } => {
             let app = c.app(&app).await?;
-            let port = parse::parse_port(&port)?;
-            let saved = c
-                .client
-                .split_app(
-                    &app.id,
-                    &SplitRequest {
-                        network_id: network,
-                        port: port.port,
-                        proto: port.proto,
-                    },
-                )
-                .await?;
+            let (req, what) = match (port, socket_group) {
+                (Some(port), None) => {
+                    let port = parse::parse_port(&port)?;
+                    (
+                        SplitRequest {
+                            network_id: network,
+                            port: Some(port.port),
+                            proto: Some(port.proto),
+                            group: None,
+                        },
+                        port.to_string(),
+                    )
+                }
+                (None, Some(label)) => {
+                    let g = c.socket_group(&label).await?;
+                    (
+                        SplitRequest {
+                            network_id: network,
+                            port: None,
+                            proto: None,
+                            group: Some(g.id),
+                        },
+                        format!("socket group {}", g.label),
+                    )
+                }
+                _ => bail!("give a port, or --socket-group <label>"),
+            };
+            let saved = c.client.split_app(&app.id, &req).await?;
             c.warn_pending(&saved.enforcement);
             let a = saved.value;
             c.print(&a, || {
                 format!(
-                    "{port} of {} now has its own address {}",
+                    "{what} of {} now also has its own address {}",
                     app.name,
                     render::locator(&a.locator)
                 )
@@ -696,14 +737,14 @@ fn member_ids(all: &[Peer], queries: &[String]) -> Result<Vec<String>> {
 
 // ─── Tags ────────────────────────────────────────────────────────────────────
 
-/// `<app>[:port[/proto]]` texts as tag members.
+/// `<app>[:port[/proto]]` or `<app>:socket-group=<label>` texts as tag members.
 async fn tag_members(c: &Ctx, texts: &[String]) -> Result<Vec<TagMember>> {
     let mut out = Vec::new();
     for t in texts {
-        let (app, port) = parse::parse_target(t);
+        let (app, scope) = parse::parse_target(t);
         out.push(TagMember {
             app_id: c.app(&app).await?.id,
-            port,
+            scope: c.scope(&scope).await?,
         });
     }
     Ok(out)
@@ -831,7 +872,7 @@ async fn tags(c: &Ctx, cmd: TagsCmd) -> Result<()> {
             for m in tag_members(c, &members).await? {
                 let saved = c
                     .client
-                    .remove_tag_member(&tag.id, &m.app_id, m.port)
+                    .remove_tag_member(&tag.id, &m.app_id, &m.scope)
                     .await?;
                 c.warn_pending(&saved.enforcement);
                 last = saved.value;
@@ -842,13 +883,132 @@ async fn tags(c: &Ctx, cmd: TagsCmd) -> Result<()> {
     }
 }
 
+// ─── Socket groups ───────────────────────────────────────────────────────────
+
+fn confirm_group_open(group: &str) -> Result<()> {
+    prompt::Stdin.confirm_or_yes(
+        false,
+        &format!("This opens apps to anyone through socket group {group}. Continue?"),
+        &format!(
+            "socket group {group} would open an app to anyone, because a grant to anyone covers it; repeat with --yes to confirm"
+        ),
+    )
+}
+
+async fn socket_groups(c: &Ctx, cmd: SocketGroupsCmd) -> Result<()> {
+    match cmd {
+        SocketGroupsCmd::List => {
+            let g = c.client.list_socket_groups().await?;
+            let names = c.names().await?;
+            c.print(&g, || render::socket_groups(&g, &names))
+        }
+        SocketGroupsCmd::Add {
+            label,
+            ports,
+            apps,
+            yes,
+        } => {
+            let ports = parse::parse_ranges(&ports)?;
+            let mut app_ids = Vec::new();
+            for a in &apps {
+                app_ids.push(c.app(a).await?.id);
+            }
+            let mut req = NewSocketGroup {
+                label: label.clone(),
+                ports,
+                apps: app_ids,
+                confirm_open: yes,
+            };
+            let saved = match c.client.create_socket_group(&req).await {
+                Err(e) if e.is_confirmation_required() => {
+                    confirm_group_open(&label)?;
+                    req.confirm_open = true;
+                    c.client.create_socket_group(&req).await?
+                }
+                other => other?,
+            };
+            c.warn_pending(&saved.enforcement);
+            let g = saved.value;
+            let names = c.names().await?;
+            c.print(&g, || {
+                render::socket_groups(std::slice::from_ref(&g), &names)
+            })
+        }
+        SocketGroupsCmd::Set {
+            group,
+            label,
+            ports,
+            yes,
+        } => {
+            let g = c.socket_group(&group).await?;
+            let mut req = UpdateSocketGroup {
+                label,
+                ports: if ports.is_empty() {
+                    None
+                } else {
+                    Some(parse::parse_ranges(&ports)?)
+                },
+                confirm_open: yes,
+            };
+            if req.label.is_none() && req.ports.is_none() {
+                bail!("give --label and/or --port");
+            }
+            let saved = match c.client.update_socket_group(&g.id, &req).await {
+                Err(e) if e.is_confirmation_required() => {
+                    confirm_group_open(&g.label)?;
+                    req.confirm_open = true;
+                    c.client.update_socket_group(&g.id, &req).await?
+                }
+                other => other?,
+            };
+            c.warn_pending(&saved.enforcement);
+            let g = saved.value;
+            let names = c.names().await?;
+            c.print(&g, || {
+                render::socket_groups(std::slice::from_ref(&g), &names)
+            })
+        }
+        SocketGroupsCmd::Rm { group } => {
+            let g = c.socket_group(&group).await?;
+            let saved = c.client.delete_socket_group(&g.id).await?;
+            c.done_saved(saved, format!("removed socket group {}", g.label))
+        }
+        SocketGroupsCmd::Attach { group, app, yes } => {
+            let g = c.socket_group(&group).await?;
+            let app = c.app(&app).await?;
+            let saved = match c.client.attach_socket_group(&g.id, &app.id, yes).await {
+                Err(e) if e.is_confirmation_required() => {
+                    confirm_group_open(&g.label)?;
+                    c.client.attach_socket_group(&g.id, &app.id, true).await?
+                }
+                other => other?,
+            };
+            c.warn_pending(&saved.enforcement);
+            let g = saved.value;
+            c.print(&g, || {
+                format!("socket group {} attached to {}", g.label, app.name)
+            })
+        }
+        SocketGroupsCmd::Detach { group, app } => {
+            let g = c.socket_group(&group).await?;
+            let app = c.app(&app).await?;
+            let saved = c.client.detach_socket_group(&g.id, &app.id).await?;
+            c.warn_pending(&saved.enforcement);
+            let g = saved.value;
+            c.print(&g, || {
+                format!("socket group {} detached from {}", g.label, app.name)
+            })
+        }
+    }
+}
+
 // ─── Grants ──────────────────────────────────────────────────────────────────
 
 /// What a `grant` or `revoke` names, resolved: targets with their own port, subjects and
 /// networks. Every combination is one grant.
 struct GrantSpec {
-    /// Target, its port, and how the user spelled it (for questions).
-    targets: Vec<(Target, Option<PortRef>, String)>,
+    /// Target, its scope, and how the user spelled it (for questions).
+    targets: Vec<(Target, Scope, String)>,
     subjects: Vec<Subject>,
     networks: Vec<Option<String>>,
 }
@@ -856,12 +1016,12 @@ struct GrantSpec {
 impl GrantSpec {
     fn ops(&self, confirm_open: bool) -> Vec<ChangeOp> {
         let mut ops = Vec::new();
-        for (target, port, _) in &self.targets {
+        for (target, scope, _) in &self.targets {
             for network_id in &self.networks {
                 for subject in &self.subjects {
                     ops.push(ChangeOp::AddGrant {
                         target: target.clone(),
-                        port: *port,
+                        scope: scope.clone(),
                         network_id: network_id.clone(),
                         subject: subject.clone(),
                         confirm_open,
@@ -893,41 +1053,44 @@ impl Ctx {
         })
     }
 
-    /// The targets named by positional/`--app`/`--tag` texts, crossed with `--port` for
-    /// those that carry no port of their own.
+    /// The targets named by positional/`--app`/`--tag` texts, crossed with `--port` and
+    /// `--socket-group` for those that carry no scope of their own.
     async fn targets(
         &self,
         targets: &[String],
         tags: &[String],
         ports: &[String],
-    ) -> Result<Vec<(Target, Option<PortRef>, String)>> {
-        let extra: Vec<Option<PortRef>> = if ports.is_empty() {
-            vec![None]
-        } else {
-            ports
-                .iter()
-                .map(|p| parse::parse_port(p).map(Some))
-                .collect::<Result<_>>()?
-        };
-        let mut specs: Vec<(TargetSpec, Option<PortRef>, String)> = Vec::new();
+        socket_groups: &[String],
+    ) -> Result<Vec<(Target, Scope, String)>> {
+        let mut extra: Vec<parse::ScopeSpec> = Vec::new();
+        for p in ports {
+            extra.push(parse::ScopeSpec::Port(parse::parse_port(p)?));
+        }
+        for g in socket_groups {
+            extra.push(parse::ScopeSpec::Group(g.clone()));
+        }
+        if extra.is_empty() {
+            extra.push(parse::ScopeSpec::All);
+        }
+        let mut specs: Vec<(TargetSpec, parse::ScopeSpec, String)> = Vec::new();
         for t in targets {
-            let (spec, port) = parse::parse_target_spec(t);
-            specs.push((spec, port, t.clone()));
+            let (spec, scope) = parse::parse_target_spec(t);
+            specs.push((spec, scope, t.clone()));
         }
         for t in tags {
-            let (label, port) = parse::parse_target(t);
-            specs.push((TargetSpec::Tag(label), port, format!("tag:{t}")));
+            let (label, scope) = parse::parse_target(t);
+            specs.push((TargetSpec::Tag(label), scope, format!("tag:{t}")));
         }
         let mut out = Vec::new();
         for (spec, own, text) in specs {
             let target = self.target(&spec).await?;
-            let ports = if own.is_some() {
+            let scopes = if own != parse::ScopeSpec::All {
                 vec![own]
             } else {
                 extra.clone()
             };
-            for port in ports {
-                out.push((target.clone(), port, text.clone()));
+            for scope in scopes {
+                out.push((target.clone(), self.scope(&scope).await?, text.clone()));
             }
         }
         Ok(out)
@@ -938,6 +1101,7 @@ impl Ctx {
         targets: &[String],
         tags: &[String],
         ports: &[String],
+        socket_groups: &[String],
         to: &[String],
         networks: &[String],
     ) -> Result<GrantSpec> {
@@ -946,7 +1110,7 @@ impl Ctx {
             subjects.push(self.subject(&parse::parse_subject(s)).await?);
         }
         Ok(GrantSpec {
-            targets: self.targets(targets, tags, ports).await?,
+            targets: self.targets(targets, tags, ports, socket_groups).await?,
             subjects,
             networks: if networks.is_empty() {
                 vec![None]
@@ -958,12 +1122,22 @@ impl Ctx {
 }
 
 /// Whether `grant`/`revoke` got the flag form (several targets, subjects or ports).
-fn uses_flags(apps: &[String], tags: &[String], ports: &[String], to: &[String]) -> bool {
-    !(apps.is_empty() && tags.is_empty() && ports.is_empty() && to.is_empty())
+fn uses_flags(
+    apps: &[String],
+    tags: &[String],
+    ports: &[String],
+    socket_groups: &[String],
+    to: &[String],
+) -> bool {
+    !(apps.is_empty()
+        && tags.is_empty()
+        && ports.is_empty()
+        && socket_groups.is_empty()
+        && to.is_empty())
 }
 
 async fn grant(c: &Ctx, a: GrantArgs) -> Result<()> {
-    let flags = uses_flags(&a.apps, &a.tags, &a.ports, &a.to);
+    let flags = uses_flags(&a.apps, &a.tags, &a.ports, &a.socket_groups, &a.to);
     let (targets, to) = match (&a.target, &a.subject) {
         (Some(t), Some(s)) if !flags => (vec![t.clone()], vec![s.clone()]),
         (None, None) if flags => (a.apps.clone(), a.to.clone()),
@@ -979,7 +1153,14 @@ async fn grant(c: &Ctx, a: GrantArgs) -> Result<()> {
         bail!("--to and at least one of --app or --tag are needed");
     }
     let spec = c
-        .grant_spec(&targets, &a.tags, &a.ports, &to, &a.networks)
+        .grant_spec(
+            &targets,
+            &a.tags,
+            &a.ports,
+            &a.socket_groups,
+            &to,
+            &a.networks,
+        )
         .await?;
     // One grant by the positional form keeps the single-grant route and its answer.
     if !flags && spec.networks.len() == 1 && !a.dry_run {
@@ -1022,10 +1203,10 @@ async fn grant(c: &Ctx, a: GrantArgs) -> Result<()> {
 
 /// The positional `grant <target> <subject>`: one grant.
 async fn grant_one(c: &Ctx, a: &GrantArgs, spec: GrantSpec) -> Result<()> {
-    let (target, port, text) = spec.targets[0].clone();
+    let (target, scope, text) = spec.targets[0].clone();
     let mut req = NewGrant {
         target,
-        port,
+        scope,
         network_id: spec.networks[0].clone(),
         subject: spec.subjects[0].clone(),
         confirm_open: a.yes,
@@ -1055,18 +1236,18 @@ async fn grant_one(c: &Ctx, a: &GrantArgs, spec: GrantSpec) -> Result<()> {
     })
 }
 
-/// Grants for `app` and `port` to `subject`; with no `network`, on any network.
+/// Grants for `app` and `scope` to `subject`; with no `network`, on any network.
 pub fn find_grants<'a>(
     grants: &'a [GrantView],
     app_id: &str,
-    port: Option<PortRef>,
+    scope: &Scope,
     subject: &Subject,
     network: Option<&str>,
 ) -> Vec<&'a GrantView> {
     find_target_grants(
         grants,
         &Target::App(app_id.to_string()),
-        port,
+        scope,
         subject,
         network,
     )
@@ -1076,7 +1257,7 @@ pub fn find_grants<'a>(
 pub fn find_target_grants<'a>(
     grants: &'a [GrantView],
     target: &Target,
-    port: Option<PortRef>,
+    scope: &Scope,
     subject: &Subject,
     network: Option<&str>,
 ) -> Vec<&'a GrantView> {
@@ -1084,7 +1265,7 @@ pub fn find_target_grants<'a>(
         .iter()
         .filter(|g| {
             g.grant.target == *target
-                && g.grant.port == port
+                && g.grant.scope == *scope
                 && g.grant.subject == *subject
                 && network.is_none_or(|n| g.grant.network_id.as_deref() == Some(n))
         })
@@ -1093,7 +1274,7 @@ pub fn find_target_grants<'a>(
 
 async fn revoke(c: &Ctx, a: RevokeArgs) -> Result<()> {
     let all = c.client.list_grants(&GrantQuery::default()).await?;
-    let flags = uses_flags(&a.apps, &a.tags, &a.ports, &a.to);
+    let flags = uses_flags(&a.apps, &a.tags, &a.ports, &a.socket_groups, &a.to);
     if flags {
         if a.target.is_some() || a.subject.is_some() {
             bail!("give either <target> <subject> or the --app/--tag/--to flags, not both");
@@ -1113,11 +1294,12 @@ async fn revoke(c: &Ctx, a: RevokeArgs) -> Result<()> {
             resolve("grant", &ids, target)?.clone()
         }
         Some(subject) => {
-            let (spec, port) = parse::parse_target_spec(target);
+            let (spec, scope) = parse::parse_target_spec(target);
+            let scope = c.scope(&scope).await?;
             let wanted = c.target(&spec).await?;
             let subject = c.subject(&parse::parse_subject(subject)).await?;
             let network = a.networks.first().map(String::as_str);
-            let found = find_target_grants(&all, &wanted, port, &subject, network);
+            let found = find_target_grants(&all, &wanted, &scope, &subject, network);
             match found.as_slice() {
                 [one] => one.grant.id.clone(),
                 [] => bail!("no such grant; see `socketguard grants`"),
@@ -1142,19 +1324,21 @@ async fn revoke(c: &Ctx, a: RevokeArgs) -> Result<()> {
 
 /// `revoke --app ... --to ...`: every grant the combinations name, in one batch.
 async fn revoke_many(c: &Ctx, a: &RevokeArgs, all: &[GrantView]) -> Result<()> {
-    let spec = c.grant_spec(&[], &a.tags, &a.ports, &a.to, &[]).await?;
+    let spec = c
+        .grant_spec(&[], &a.tags, &a.ports, &a.socket_groups, &a.to, &[])
+        .await?;
     // `--app` goes through the same spelling as the positional target.
-    let mut targets = c.targets(&a.apps, &[], &a.ports).await?;
+    let mut targets = c.targets(&a.apps, &[], &a.ports, &a.socket_groups).await?;
     targets.extend(spec.targets);
     let mut ids: Vec<String> = Vec::new();
-    for (target, port, text) in &targets {
+    for (target, scope, text) in &targets {
         for subject in &spec.subjects {
             let found: Vec<&GrantView> = if a.networks.is_empty() {
-                find_target_grants(all, target, *port, subject, None)
+                find_target_grants(all, target, scope, subject, None)
             } else {
                 a.networks
                     .iter()
-                    .flat_map(|n| find_target_grants(all, target, *port, subject, Some(n)))
+                    .flat_map(|n| find_target_grants(all, target, scope, subject, Some(n)))
                     .collect()
             };
             if found.is_empty() {

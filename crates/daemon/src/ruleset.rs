@@ -8,9 +8,10 @@
 use crate::firewall::{DesiredRuleset, Dst, Families, Rule, Scope, ScopeKind, ScopeMatch, Sources};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use socketguard_core::{
-    app_identity, credential_source, grants_for_app, valid_interface_name, App, AppPort,
-    Credential, Grant, ListeningSocket, Network, NetworkKind, Peer, PeerGroup, PortRef, PortSet,
-    Protocol, Subject, Tag,
+    app_identity, credential_source, foreign_listening, grants_for_app, scope_ports,
+    valid_interface_name, App, AppPort, Credential, Grant, ListeningSocket, Network, NetworkKind,
+    Peer, PeerGroup, PortRange, PortRangeSet, PortRef, Protocol, ScopePorts, SocketGroup, Subject,
+    Tag,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
@@ -27,6 +28,8 @@ pub struct Snapshot {
     pub grants: Vec<Grant>,
     /// Tags, to expand the grants that target them (ADR 0043).
     pub tags: Vec<Tag>,
+    /// Socket groups, for the ports of the scopes that name them (ADR 0047).
+    pub socket_groups: Vec<SocketGroup>,
     /// Interfaces under whole-host protection.
     pub protect_host: Vec<String>,
     /// The IPv4 subnets of the protected interfaces that carry IPv4 (others are absent).
@@ -40,29 +43,23 @@ fn sorted_unique<T: Ord>(v: impl IntoIterator<Item = T>) -> Vec<T> {
     v.into_iter().collect::<BTreeSet<_>>().into_iter().collect()
 }
 
-/// The ports an address serves: its `Only` list, or for `All` every app port that no
-/// `Only` address on the same network claims.
-pub(crate) fn served_ports(app: &App, address: &socketguard_core::Address) -> BTreeSet<PortRef> {
-    match &address.ports {
-        PortSet::Only(list) => list.iter().copied().collect(),
-        PortSet::All => {
-            let claimed: BTreeSet<PortRef> = app
-                .addresses
-                .iter()
-                .filter(|a| a.network_id == address.network_id)
-                .filter_map(|a| match &a.ports {
-                    PortSet::Only(list) => Some(list.iter().copied()),
-                    PortSet::All => None,
-                })
-                .flatten()
-                .collect();
-            app.ports
-                .iter()
-                .map(AppPort::port_ref)
-                .filter(|p| !claimed.contains(p))
-                .collect()
-        }
+impl Snapshot {
+    /// The ports other apps listen on, for the exclusion rule (ADR 0047): an address never
+    /// serves a port that another app has and this one does not.
+    pub(crate) fn foreign_ports(&self, app: &App) -> PortRangeSet {
+        foreign_listening(&self.apps, &app.id)
     }
+}
+
+/// The destination ports to write rules for: every detected or explicit port on its own
+/// (stable rule ids, one rule per port) and every group range as one range.
+pub(crate) fn rule_ranges(ports: &ScopePorts) -> Vec<PortRange> {
+    ports
+        .fixed
+        .ports()
+        .map(PortRange::single)
+        .chain(ports.ranged.ranges())
+        .collect()
 }
 
 /// The credentials of a grant's peers (all members of a group); empty for Anyone.
@@ -128,6 +125,7 @@ fn host_ipv4_rules(
     rules: &mut BTreeMap<String, Rule>,
 ) {
     for app in &snap.apps {
+        let foreign = snap.foreign_ports(app);
         let v4_ports: BTreeSet<PortRef> = app
             .ports
             .iter()
@@ -137,7 +135,8 @@ fn host_ipv4_rules(
         if v4_ports.is_empty() {
             continue;
         }
-        for grant in &grants_for_app(&snap.grants, &snap.tags, &app.id) {
+        for ag in &grants_for_app(&snap.grants, &snap.tags, app, &snap.socket_groups, &foreign) {
+            let grant = &ag.grant;
             let scoped = grant
                 .network_id
                 .as_deref()
@@ -168,10 +167,7 @@ fn host_ipv4_rules(
                     _ if peer_nets.is_empty() => continue,
                     _ => Sources::Nets(IpNet::aggregate(&peer_nets)),
                 };
-                for port in v4_ports
-                    .iter()
-                    .filter(|p| grant.port.is_none_or(|gp| gp == **p))
-                {
+                for port in v4_ports.iter().filter(|p| ag.ports.contains(**p)) {
                     let id = format!(
                         "v4:{}:{}:{}:{iface}:{}",
                         port.port, port.proto, grant.id, app.id
@@ -182,8 +178,7 @@ fn host_ipv4_rules(
                             id,
                             iif: Some(iface.clone()),
                             dst: Dst::HostV4,
-                            port: port.port,
-                            proto: port.proto,
+                            ports: PortRange::single(*port),
                             sources: sources.clone(),
                         },
                     );
@@ -227,7 +222,9 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
     let mut managed: BTreeSet<IpAddr> = snap.owned.iter().copied().collect();
 
     for app in &snap.apps {
-        let app_grants = grants_for_app(&snap.grants, &snap.tags, &app.id);
+        let foreign = snap.foreign_ports(app);
+        let app_grants =
+            grants_for_app(&snap.grants, &snap.tags, app, &snap.socket_groups, &foreign);
         for address in &app.addresses {
             let Some(addr) = address.locator.ipv6() else {
                 continue; // not an IP locator: enforced elsewhere (ADR 0037)
@@ -251,12 +248,14 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
                 }
                 None => None,
             };
-            let served = served_ports(app, address);
-            for grant in app_grants.iter().filter(|g| {
-                g.network_id
+            let served = scope_ports(app, &address.scope, &snap.socket_groups, &foreign);
+            for app_grant in app_grants.iter().filter(|g| {
+                g.grant
+                    .network_id
                     .as_deref()
                     .is_none_or(|n| n == address.network_id)
             }) {
+                let grant = &app_grant.grant;
                 let creds = subject_credentials(&snap.groups, &peers, &grant.subject);
                 // Sources per interface binding; the same for every port of this grant.
                 let mut bound: BTreeMap<Option<String>, Vec<IpNet>> = BTreeMap::new();
@@ -279,12 +278,14 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
                         bound.entry(iif.clone()).or_default().push(net);
                     }
                 }
-                for port in served
-                    .iter()
-                    .filter(|p| grant.port.is_none_or(|gp| gp == **p))
-                {
-                    let base =
-                        format!("a:{}:{}:{}:{}", address.id, port.port, port.proto, grant.id);
+                for ports in rule_ranges(&served.intersect(&app_grant.ports)) {
+                    let base = format!(
+                        "a:{}:{}:{}:{}",
+                        address.id,
+                        ports.port_text(),
+                        ports.proto,
+                        grant.id
+                    );
                     let mut push = |id: String, iif: Option<String>, sources: Sources| {
                         rules.insert(
                             id.clone(),
@@ -292,8 +293,7 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
                                 id,
                                 iif,
                                 dst: Dst::Addr(dst),
-                                port: port.port,
-                                proto: port.proto,
+                                ports,
                                 sources,
                             },
                         );
@@ -486,9 +486,10 @@ pub fn check_protect_host(
         }
         let app_id = app_identity(l).id;
         let allowed = ruleset.rules.iter().any(|r| {
-            r.port == l.port
-                && r.proto == l.protocol
-                && on_protected(&r.iif)
+            r.ports.contains(PortRef {
+                port: l.port,
+                proto: l.protocol,
+            }) && on_protected(&r.iif)
                 && match r.dst {
                     Dst::Addr(dst) => {
                         (ip.is_unspecified() || dst == ip)
@@ -535,7 +536,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use socketguard_core::{
-        Address, AppPort, CredentialKind, Locator, NetworkStatus, Reach, Target,
+        Address, AppPort, CredentialKind, Locator, NetworkStatus, Reach, Scope, SocketGroup, Target,
     };
 
     const KEY: &str = "ba83a2e554a8a087cebdb3f053468cd3ff915b5dd94bf11b7a5fc2e36f13158b";
@@ -575,12 +576,12 @@ mod tests {
         network("ygg", NetworkKind::Yggdrasil, "ygg0", Some("300:1:2:3::"))
     }
 
-    fn address(id: &str, app: &str, net: &str, addr: &str, ports: PortSet) -> Address {
+    fn address(id: &str, app: &str, net: &str, addr: &str, scope: Scope) -> Address {
         Address {
             id: id.into(),
             app_id: app.into(),
             network_id: net.into(),
-            ports,
+            scope,
             locator: Locator::Ipv6 {
                 addr: addr.parse().unwrap(),
             },
@@ -637,7 +638,7 @@ mod tests {
         Grant {
             id: id.into(),
             target: Target::App(app.into()),
-            port: None,
+            scope: Scope::All,
             network_id: None,
             subject,
             created_at: Utc::now(),
@@ -651,9 +652,9 @@ mod tests {
                 "web",
                 &[8080],
                 vec![
-                    address("al", "web", "local", "fd00::1", PortSet::All),
-                    address("an", "web", "lan", "2001:db8:1:2::100", PortSet::All),
-                    address("ay", "web", "ygg", "300:1:2:3::100", PortSet::All),
+                    address("al", "web", "local", "fd00::1", Scope::All),
+                    address("an", "web", "lan", "2001:db8:1:2::100", Scope::All),
+                    address("ay", "web", "ygg", "300:1:2:3::100", Scope::All),
                 ],
             )],
             networks: vec![local(), lan(), ygg()],
@@ -822,7 +823,7 @@ mod tests {
         ];
         s.grants = vec![
             Grant {
-                port: Some(tcp(9090)),
+                scope: Scope::port(tcp(9090)),
                 network_id: Some("ygg".into()),
                 ..grant("narrow", "web", Subject::Anyone)
             },
@@ -831,12 +832,12 @@ mod tests {
         let rs = build(&s);
         assert_eq!(ids(&rs), ["a:ay:9090:tcp:narrow:ygg0"]);
         // A grant for a port the address does not serve gives no rule.
-        s.grants[0].port = Some(tcp(1));
+        s.grants[0].scope = Scope::port(tcp(1));
         assert!(build(&s).rules.is_empty());
     }
 
     #[test]
-    fn all_excludes_ports_claimed_by_an_only_address() {
+    fn an_all_address_also_serves_the_ports_that_have_their_own_address() {
         let mut s = base();
         s.apps[0].ports = vec![
             app("x", &[80], vec![]).ports[0].clone(),
@@ -847,7 +848,7 @@ mod tests {
             "web",
             "ygg",
             "300:1:2:3::200",
-            PortSet::Only(vec![tcp(443)]),
+            Scope::port(tcp(443)),
         ));
         s.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
@@ -855,20 +856,195 @@ mod tests {
             .rules
             .iter()
             .filter(|r| r.dst == ip("300:1:2:3::100") || r.dst == ip("300:1:2:3::200"))
-            .map(|r| (r.dst.addr().unwrap().to_string(), r.port))
+            .map(|r| (r.dst.addr().unwrap().to_string(), r.ports.start))
             .collect();
         ygg_rules.sort();
         assert_eq!(
             ygg_rules,
             [
                 ("300:1:2:3::100".to_string(), 80),
+                ("300:1:2:3::100".to_string(), 443),
                 ("300:1:2:3::200".to_string(), 443)
             ]
         );
-        // The Only address serves its port even before the app listens on it.
+        // A port address serves its port even before the app listens on it, and a grant
+        // for that port covers it.
         s.apps[0].ports.clear();
+        s.grants = vec![Grant {
+            scope: Scope::port(tcp(443)),
+            ..grant("g", "web", Subject::Anyone)
+        }];
         let rs = build(&s);
         assert!(rs.rules.iter().any(|r| r.id == "a:ay2:443:tcp:g:ygg0"));
+    }
+
+    fn group(id: &str, ranges: &[&str], apps: &[&str]) -> SocketGroup {
+        SocketGroup {
+            id: id.into(),
+            label: id.into(),
+            ports: socketguard_core::parse_ranges(ranges).unwrap(),
+            apps: apps.iter().map(|a| a.to_string()).collect(),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn rule_ports(rs: &DesiredRuleset, address: &str) -> Vec<String> {
+        let prefix = format!("a:{address}:");
+        let mut v: Vec<String> = rs
+            .rules
+            .iter()
+            .filter(|r| r.id.starts_with(&prefix))
+            .map(|r| r.ports.to_string())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn a_socket_group_range_is_a_range_rule_before_anything_listens() {
+        let mut s = base();
+        s.apps[0].ports.clear();
+        s.socket_groups = vec![group("passive", &["50000-51000/tcp", "21/tcp"], &["web"])];
+        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        let rs = build(&s);
+        assert_eq!(rule_ports(&rs, "ay"), ["21/tcp", "50000-51000/tcp"]);
+        assert!(rs
+            .rules
+            .iter()
+            .any(|r| r.id == "a:ay:50000-51000:tcp:g:ygg0"
+                && r.ports == "50000-51000/tcp".parse().unwrap()));
+        // A single-port range keeps the id of a plain port.
+        assert!(rs.rules.iter().any(|r| r.id == "a:ay:21:tcp:g:ygg0"));
+        // Not attached to the app: no ports from it.
+        s.socket_groups[0].apps.clear();
+        assert!(build(&s).rules.is_empty());
+    }
+
+    #[test]
+    fn ranges_leave_out_ports_another_app_listens_on() {
+        let mut s = base();
+        s.apps[0].ports = app("x", &[50005], vec![]).ports;
+        s.apps.push(app("other", &[50003], vec![]));
+        s.socket_groups = vec![group("passive", &["50000-50010/tcp"], &["web"])];
+        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        let rs = build(&s);
+        // 50003 is the other app's; 50005 is web's own and stays (as a port of its own).
+        assert_eq!(
+            rule_ports(&rs, "ay"),
+            [
+                "50000-50002/tcp",
+                "50004/tcp",
+                "50005/tcp",
+                "50006-50010/tcp"
+            ]
+        );
+        // The one exclusion rule holds for a named port too: 50003 is the other app's.
+        s.apps[0].addresses.push(address(
+            "ap",
+            "web",
+            "ygg",
+            "300:1:2:3::400",
+            Scope::port(tcp(50003)),
+        ));
+        let mut explicit = s.clone();
+        explicit.grants = vec![Grant {
+            id: "gp".into(),
+            scope: Scope::port(tcp(50003)),
+            ..grant("gp", "web", Subject::Anyone)
+        }];
+        assert!(rule_ports(&build(&explicit), "ap").is_empty());
+        assert!(rule_ports(&build(&explicit), "ay").is_empty());
+        // Once the other app lets go of it, the port address serves it again.
+        explicit.apps[1].ports[0].listening = false;
+        assert_eq!(rule_ports(&build(&explicit), "ap"), ["50003/tcp"]);
+        // The other app's port going quiet frees the range again.
+        s.apps[1].ports[0].listening = false;
+        assert_eq!(
+            rule_ports(&build(&s), "ay"),
+            ["50000-50004/tcp", "50005/tcp", "50006-50010/tcp"]
+        );
+    }
+
+    #[test]
+    fn a_port_address_stops_serving_a_port_another_app_took_over() {
+        // A had an address and a grant for 9000; it stopped listening there and B started.
+        let mut s = base();
+        s.apps[0].ports = app("x", &[8080], vec![]).ports;
+        s.apps[0].addresses = vec![address(
+            "ap",
+            "web",
+            "ygg",
+            "300:1:2:3::500",
+            Scope::port(tcp(9000)),
+        )];
+        s.grants = vec![Grant {
+            scope: Scope::port(tcp(9000)),
+            ..grant("g", "web", Subject::Anyone)
+        }];
+        assert_eq!(
+            rule_ports(&build(&s), "ap"),
+            ["9000/tcp"],
+            "nobody else has it"
+        );
+        s.apps.push(app("other", &[9000], vec![]));
+        assert!(rule_ports(&build(&s), "ap").is_empty());
+        // Detected on its own app too, it stays.
+        s.apps[0]
+            .ports
+            .push(app("x", &[9000], vec![]).ports[0].clone());
+        assert_eq!(rule_ports(&build(&s), "ap"), ["9000/tcp"]);
+    }
+
+    #[test]
+    fn a_group_address_serves_only_its_group_and_a_group_grant_only_its_ranges() {
+        let mut s = base();
+        s.apps[0].ports = app("x", &[8080], vec![]).ports;
+        s.socket_groups = vec![group("passive", &["50000-50010/tcp"], &["web"])];
+        s.apps[0].addresses = vec![address(
+            "ag",
+            "web",
+            "ygg",
+            "300:1:2:3::300",
+            Scope::group("passive"),
+        )];
+        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        // The group address serves the group's range, not the detected 8080.
+        assert_eq!(rule_ports(&build(&s), "ag"), ["50000-50010/tcp"]);
+        // A grant for the group on an All address covers the range only.
+        s.apps[0].addresses = vec![address("ay", "web", "ygg", "300:1:2:3::100", Scope::All)];
+        s.grants = vec![Grant {
+            scope: Scope::group("passive"),
+            ..grant("g", "web", Subject::Anyone)
+        }];
+        assert_eq!(rule_ports(&build(&s), "ay"), ["50000-50010/tcp"]);
+    }
+
+    #[test]
+    fn a_tag_grant_by_group_meets_the_members_scope() {
+        let mut s = base();
+        s.apps[0].ports = app("x", &[8080], vec![]).ports;
+        s.socket_groups = vec![
+            group("passive", &["50000-50010/tcp"], &["web"]),
+            group("wide", &["50005-60000/tcp"], &[]),
+        ];
+        s.tags = vec![socketguard_core::Tag {
+            id: "t".into(),
+            label: "t".into(),
+            patterns: vec![],
+            members: vec![socketguard_core::TagMember {
+                app_id: "web".into(),
+                scope: Scope::group("passive"),
+            }],
+            excluded: vec![],
+            created_at: Utc::now(),
+        }];
+        s.grants = vec![Grant {
+            target: Target::Tag("t".into()),
+            scope: Scope::group("wide"),
+            ..grant("g", "web", Subject::Anyone)
+        }];
+        // The member's range narrowed to the grant's group.
+        assert_eq!(rule_ports(&build(&s), "ay"), ["50005-50010/tcp"]);
     }
 
     #[test]
@@ -897,7 +1073,7 @@ mod tests {
             locator: Locator::Onion {
                 hostname: "x.onion".into(),
             },
-            ..address("ao", "web", "tor", "::1", PortSet::All)
+            ..address("ao", "web", "tor", "::1", Scope::All)
         });
         s.grants = vec![grant("g", "web", Subject::Anyone)];
         assert_eq!(build(&s).rules.len(), 2);
@@ -1013,9 +1189,9 @@ mod tests {
         s.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
         s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
         let rs = build(&s);
-        let ports: Vec<_> = v4_rules(&rs).iter().map(|r| r.port).collect();
+        let ports: Vec<_> = v4_rules(&rs).iter().map(|r| r.ports.start).collect();
         assert_eq!(ports, [9090], "an IPv6-only port gets no IPv4 rule");
-        s.grants[0].port = Some(tcp(8080));
+        s.grants[0].scope = Scope::port(tcp(8080));
         assert!(v4_rules(&build(&s)).is_empty());
     }
 
@@ -1312,7 +1488,7 @@ mod tests {
     fn sshd_snap(grants: Vec<Grant>) -> Snapshot {
         let id = app_identity(&listener("sshd", 22, "::")).id;
         let mut a = app(&id, &[22], vec![]);
-        a.addresses = vec![address("ad", &id, "lan", "2001:db8:1:2::22", PortSet::All)];
+        a.addresses = vec![address("ad", &id, "lan", "2001:db8:1:2::22", Scope::All)];
         Snapshot {
             apps: vec![a],
             networks: vec![lan()],
@@ -1400,7 +1576,7 @@ mod tests {
     fn lockout_rule_bound_to_another_interface_does_not_help() {
         let id = app_identity(&listener("sshd", 22, "::")).id;
         let mut a = app(&id, &[22], vec![]);
-        a.addresses = vec![address("ad", &id, "ygg", "300:1:2:3::22", PortSet::All)];
+        a.addresses = vec![address("ad", &id, "ygg", "300:1:2:3::22", Scope::All)];
         let s = Snapshot {
             apps: vec![a],
             networks: vec![ygg()],

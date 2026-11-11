@@ -5,9 +5,10 @@
 use crate::config::BackendConfig;
 use crate::model::{
     AddressId, AddressMode, AppId, Credential, CredentialKind, GrantId, Network, NetworkId,
-    NewCredential, PeerId, PortRef, Settings, Subject, TagId, Target,
+    NewCredential, PeerId, Settings, Subject, TagId, Target,
 };
 use crate::reach::GrantReach;
+use crate::scope::{PortRange, Scope, SocketGroupId};
 use crate::tags::TagMember;
 use crate::types::Protocol;
 use serde::{Deserialize, Serialize};
@@ -122,8 +123,17 @@ pub struct ReviewRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SplitRequest {
     pub network_id: String,
-    pub port: u16,
-    pub proto: Protocol,
+    /// The port to serve on its own address, with `proto`; or a socket group by id in
+    /// `group`. Exactly one of the two.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub port: Option<u16>,
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub proto: Option<Protocol>,
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub group: Option<SocketGroupId>,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -228,6 +238,8 @@ pub struct ExportDocument {
     pub settings: Settings,
     pub peers: Vec<ExportPeer>,
     pub groups: Vec<ExportGroup>,
+    #[serde(default)]
+    pub socket_groups: Vec<ExportSocketGroup>,
     pub grants: Vec<ExportGrant>,
 }
 
@@ -265,11 +277,35 @@ pub struct ExportAppRef {
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportSocketGroup {
+    pub label: String,
+    pub ports: Vec<PortRange>,
+    /// The apps it is attached to; an app that does not exist here makes the document invalid.
+    pub apps: Vec<ExportAppRef>,
+}
+
+/// A scope by label, as the document names a socket group.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExportScope {
+    #[default]
+    All,
+    Port {
+        port: u16,
+        proto: Protocol,
+    },
+    Group {
+        label: String,
+    },
+}
+
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportGrant {
     pub app: ExportAppRef,
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub port: Option<PortRef>,
+    pub scope: ExportScope,
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub network: Option<String>,
@@ -314,6 +350,7 @@ pub enum ChangeItem {
     Grant,
     Tag,
     TagMember,
+    SocketGroup,
     App,
 }
 
@@ -381,17 +418,16 @@ pub struct UpdateTag {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewTagMember {
     pub app_id: AppId,
-    /// None = every port of the app.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub port: Option<PortRef>,
+    pub scope: Scope,
     /// Needed when the tag has a grant to Anyone, which would open the app.
     #[serde(default)]
     pub confirm_open: bool,
 }
 
-/// Query of `DELETE /api/tags/{id}/members/{app_id}`: without `port` the whole-app
-/// membership goes, with it the membership of that port.
+/// Query of `DELETE /api/tags/{id}/members/{app_id}`: without `port` and `group` the
+/// All-sockets membership goes, with `port` (and `proto`) the membership of that port, with
+/// `group` (a socket group id) the membership by that group.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberQuery {
@@ -401,6 +437,65 @@ pub struct MemberQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub proto: Option<Protocol>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub group: Option<SocketGroupId>,
+}
+
+impl MemberQuery {
+    /// The scope the query names.
+    pub fn scope(&self) -> Result<Scope, String> {
+        match (self.port, self.proto, &self.group) {
+            (None, None, None) => Ok(Scope::All),
+            (Some(port), proto, None) => Ok(Scope::Port {
+                port,
+                proto: proto.unwrap_or(Protocol::Tcp),
+            }),
+            (None, None, Some(id)) => Ok(Scope::Group { id: id.clone() }),
+            _ => Err("give a port with its proto, or a group, not both".to_string()),
+        }
+    }
+}
+
+// ─── Socket groups ───────────────────────────────────────────────────────────
+
+/// Body of `POST /api/socket-groups`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewSocketGroup {
+    pub label: String,
+    pub ports: Vec<PortRange>,
+    /// Apps to attach it to right away.
+    #[serde(default)]
+    pub apps: Vec<AppId>,
+    /// Needed when attaching would open an app to Anyone.
+    #[serde(default)]
+    pub confirm_open: bool,
+}
+
+/// Body of `PUT /api/socket-groups/{id}`. Absent fields stay as they are. New ports take
+/// effect everywhere the group is used.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateSocketGroup {
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub label: Option<String>,
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub ports: Option<Vec<PortRange>>,
+    /// Needed when new ports would open an app to Anyone.
+    #[serde(default)]
+    pub confirm_open: bool,
+}
+
+/// Body of `PUT /api/socket-groups/{id}/apps/{app_id}`. Attaching a group to an app widens
+/// what the grants covering the app's All sockets cover; where that reaches Anyone it needs `confirm_open`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachSocketGroup {
+    #[serde(default)]
+    pub confirm_open: bool,
 }
 
 // ─── Batch changes ───────────────────────────────────────────────────────────
@@ -440,11 +535,50 @@ pub enum ChangeOp {
         #[serde(default)]
         patterns: Vec<String>,
     },
+    CreateSocketGroup {
+        #[serde(rename = "ref", default)]
+        #[cfg_attr(feature = "ts", ts(optional, rename = "ref"))]
+        ref_: Option<String>,
+        label: String,
+        ports: Vec<PortRange>,
+        /// Apps to attach it to right away.
+        #[serde(default)]
+        apps: Vec<AppId>,
+        /// Needed when attaching would open an app to Anyone.
+        #[serde(default)]
+        confirm_open: bool,
+    },
+    UpdateSocketGroup {
+        group_id: SocketGroupId,
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        label: Option<String>,
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        ports: Option<Vec<PortRange>>,
+        /// Needed when new ports would open an app to Anyone.
+        #[serde(default)]
+        confirm_open: bool,
+    },
+    DeleteSocketGroup {
+        group_id: SocketGroupId,
+    },
+    AttachSocketGroup {
+        group_id: SocketGroupId,
+        app_id: AppId,
+        /// Needed when the app or a tag it is in has a grant to Anyone that would cover
+        /// the group's ports.
+        #[serde(default)]
+        confirm_open: bool,
+    },
+    DetachSocketGroup {
+        group_id: SocketGroupId,
+        app_id: AppId,
+    },
     AddGrant {
         target: Target,
         #[serde(default)]
-        #[cfg_attr(feature = "ts", ts(optional))]
-        port: Option<PortRef>,
+        scope: Scope,
         #[serde(default)]
         #[cfg_attr(feature = "ts", ts(optional))]
         network_id: Option<NetworkId>,
@@ -460,8 +594,7 @@ pub enum ChangeOp {
         tag_id: TagId,
         app_id: AppId,
         #[serde(default)]
-        #[cfg_attr(feature = "ts", ts(optional))]
-        port: Option<PortRef>,
+        scope: Scope,
         /// Needed when the tag has a grant to Anyone, which would open the app.
         #[serde(default)]
         confirm_open: bool,
@@ -470,8 +603,7 @@ pub enum ChangeOp {
         tag_id: TagId,
         app_id: AppId,
         #[serde(default)]
-        #[cfg_attr(feature = "ts", ts(optional))]
-        port: Option<PortRef>,
+        scope: Scope,
     },
     Review {
         app_id: AppId,
@@ -560,6 +692,7 @@ pub mod event_name {
     pub const PEERS_CHANGED: &str = "peers_changed";
     pub const GRANTS_CHANGED: &str = "grants_changed";
     pub const TAGS_CHANGED: &str = "tags_changed";
+    pub const SOCKET_GROUPS_CHANGED: &str = "socket_groups_changed";
     pub const NETWORKS_CHANGED: &str = "networks_changed";
     pub const SETTINGS_CHANGED: &str = "settings_changed";
     pub const ACTIVITY: &str = "activity";
@@ -576,6 +709,7 @@ pub enum ApiEvent {
     PeersChanged,
     GrantsChanged,
     TagsChanged,
+    SocketGroupsChanged,
     NetworksChanged,
     SettingsChanged,
     Activity,
@@ -595,6 +729,7 @@ impl ApiEvent {
             ApiEvent::PeersChanged => event_name::PEERS_CHANGED,
             ApiEvent::GrantsChanged => event_name::GRANTS_CHANGED,
             ApiEvent::TagsChanged => event_name::TAGS_CHANGED,
+            ApiEvent::SocketGroupsChanged => event_name::SOCKET_GROUPS_CHANGED,
             ApiEvent::NetworksChanged => event_name::NETWORKS_CHANGED,
             ApiEvent::SettingsChanged => event_name::SETTINGS_CHANGED,
             ApiEvent::Activity => event_name::ACTIVITY,
@@ -611,6 +746,7 @@ impl ApiEvent {
             PEERS_CHANGED => ApiEvent::PeersChanged,
             GRANTS_CHANGED => ApiEvent::GrantsChanged,
             TAGS_CHANGED => ApiEvent::TagsChanged,
+            SOCKET_GROUPS_CHANGED => ApiEvent::SocketGroupsChanged,
             NETWORKS_CHANGED => ApiEvent::NetworksChanged,
             SETTINGS_CHANGED => ApiEvent::SettingsChanged,
             ACTIVITY => ApiEvent::Activity,

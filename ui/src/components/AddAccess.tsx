@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeOp, NewCredential, PortRef, Subject, Target } from "../api";
 import { useCommit } from "../commit";
-import { CREDENTIAL_PLACEHOLDER, portLabel, samePort, subjectLabel, targetLabel } from "../lib";
+import { CREDENTIAL_PLACEHOLDER, portLabel, portOfScope, samePort, scopeOfPort, subjectLabel, targetLabel } from "../lib";
 import { useApps, useGroups, useList, useNetworks, useParsedCredentials, usePeers, useTags } from "../queries";
 import { CREDENTIAL_INFO } from "../reach";
 import CommitPreview from "./CommitPreview";
@@ -70,7 +70,7 @@ export default function AddAccess({ fixed, port, onDone }: Props) {
     };
     for (const t of targets) {
       if (t.kind === "app") addApp(t.id, null);
-      else for (const m of tags.find((x) => x.id === t.id)?.members ?? []) addApp(m.app_id, m.port);
+      else for (const m of tags.find((x) => x.id === t.id)?.members ?? []) addApp(m.app_id, portOfScope(m.scope));
     }
     return [...out.values()].sort((a, b) => a.port - b.port || a.proto.localeCompare(b.proto));
   }, [targets, apps, tags]);
@@ -151,7 +151,7 @@ export default function AddAccess({ fixed, port, onDone }: Props) {
             out.push({
               op: "add_grant",
               target,
-              ...(port ? { port } : {}),
+              scope: scopeOfPort(port ?? null),
               ...(network_id ? { network_id } : {}),
               subject,
               confirm_open: false,

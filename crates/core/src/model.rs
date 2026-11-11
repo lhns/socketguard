@@ -4,6 +4,7 @@
 //! [`crate::identity`] (app identity).
 
 use crate::reach::GrantReach;
+use crate::scope::{Scope, SocketGroup};
 use crate::types::{AddrFamily, Protocol};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -91,23 +92,14 @@ impl std::fmt::Display for PortRef {
     }
 }
 
-/// Which of an app's ports an address serves.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PortSet {
-    /// Every app port not claimed by an `Only` address on the same network.
-    All,
-    Only(Vec<PortRef>),
-}
-
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Address {
     pub id: AddressId,
     pub app_id: AppId,
     pub network_id: NetworkId,
-    pub ports: PortSet,
+    /// Which sockets of the app this address serves; addresses overlap (ADR 0047).
+    pub scope: Scope,
     pub locator: Locator,
     pub created_at: DateTime<Utc>,
 }
@@ -310,8 +302,9 @@ pub struct Grant {
     pub id: GrantId,
     /// One app, or every member of a tag.
     pub target: Target,
-    /// None = every port of the app.
-    pub port: Option<PortRef>,
+    /// Which sockets of the app (or of each member) the grant covers.
+    #[serde(default)]
+    pub scope: Scope,
     /// None = every network on which grants apply.
     pub network_id: Option<NetworkId>,
     pub subject: Subject,
@@ -338,9 +331,12 @@ pub struct AppDetail {
     /// Everything that gives the app access, tag grants included, each with its origin.
     #[serde(default)]
     pub access: Vec<crate::tags::EffectiveAccess>,
-    /// The tags the app is a member of (as a whole or one port).
+    /// The tags the app is a member of (as a whole or by scope).
     #[serde(default)]
     pub tags: Vec<TagId>,
+    /// The socket groups attached to the app.
+    #[serde(default)]
+    pub socket_groups: Vec<SocketGroup>,
     /// Packets and bytes the firewall allowed in, per network and grant subject, as of
     /// the last reconcile pass. Empty where the platform has no counters.
     #[serde(default)]
@@ -367,7 +363,7 @@ pub struct AppCounter {
 pub struct NewGrant {
     pub target: Target,
     #[serde(default)]
-    pub port: Option<PortRef>,
+    pub scope: Scope,
     #[serde(default)]
     pub network_id: Option<NetworkId>,
     pub subject: Subject,
@@ -444,13 +440,16 @@ pub enum ActivityKind {
     TagAdded,
     TagChanged,
     TagRemoved,
+    SocketGroupAdded,
+    SocketGroupChanged,
+    SocketGroupRemoved,
     ProtectHostChanged,
     Blocked,
     RemoteAdminExposed,
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 16] = [
+    pub const ALL: [ActivityKind; 19] = [
         ActivityKind::AppDiscovered,
         ActivityKind::AppRemoved,
         ActivityKind::GrantAdded,
@@ -464,6 +463,9 @@ impl ActivityKind {
         ActivityKind::TagAdded,
         ActivityKind::TagChanged,
         ActivityKind::TagRemoved,
+        ActivityKind::SocketGroupAdded,
+        ActivityKind::SocketGroupChanged,
+        ActivityKind::SocketGroupRemoved,
         ActivityKind::ProtectHostChanged,
         ActivityKind::Blocked,
         ActivityKind::RemoteAdminExposed,
@@ -484,6 +486,9 @@ impl ActivityKind {
             ActivityKind::TagAdded => "tag_added",
             ActivityKind::TagChanged => "tag_changed",
             ActivityKind::TagRemoved => "tag_removed",
+            ActivityKind::SocketGroupAdded => "socket_group_added",
+            ActivityKind::SocketGroupChanged => "socket_group_changed",
+            ActivityKind::SocketGroupRemoved => "socket_group_removed",
             ActivityKind::ProtectHostChanged => "protect_host_changed",
             ActivityKind::Blocked => "blocked",
             ActivityKind::RemoteAdminExposed => "remote_admin_exposed",

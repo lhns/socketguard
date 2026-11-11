@@ -13,13 +13,15 @@ use tauri::Emitter;
 use serde::Serialize;
 use socketguard_client::{Client, Error as ClientError, GrantQuery, Saved};
 use socketguard_core::api_types::{
-    ApplyRequest, ApplyResponse, ChangesRequest, ChangesResponse, Enforcement, ExportDocument,
-    MergeRequest, NewGroup, NewNetwork, NewPeer, NewTag, ProtectHostRequest, ProtectHostResponse,
-    ShareResponse, SplitRequest, StatusResponse, TorKeyResponse, UpdateSettings, UpdateTag,
+    ApplyRequest, ApplyResponse, AttachSocketGroup, ChangesRequest, ChangesResponse, Enforcement,
+    ExportDocument, MergeRequest, NewGroup, NewNetwork, NewPeer, NewSocketGroup, NewTag,
+    ProtectHostRequest, ProtectHostResponse, ShareResponse, SplitRequest, StatusResponse,
+    TorKeyResponse, UpdateSettings, UpdateSocketGroup, UpdateTag,
 };
 use socketguard_core::{
     ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
-    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, PortRef, Settings, Tag, TagMember,
+    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, Scope, Settings, SocketGroup, Tag,
+    TagMember,
 };
 
 /// Error shape the frontend branches on. API errors keep the daemon's code
@@ -276,15 +278,55 @@ async fn add_tag_member(tag_id: String, member: TagMember, confirm_open: bool) -
 }
 
 #[tauri::command]
-async fn remove_tag_member(
-    tag_id: String,
-    app_id: String,
-    port: Option<PortRef>,
-) -> DoneResult<Tag> {
+async fn remove_tag_member(tag_id: String, app_id: String, scope: Scope) -> DoneResult<Tag> {
     Ok(client()
-        .remove_tag_member(&tag_id, &app_id, port)
+        .remove_tag_member(&tag_id, &app_id, &scope)
         .await?
         .into())
+}
+
+// ─── Socket groups ───────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn list_socket_groups() -> CmdResult<Vec<SocketGroup>> {
+    Ok(client().list_socket_groups().await?)
+}
+
+#[tauri::command]
+async fn create_socket_group(req: NewSocketGroup) -> DoneResult<SocketGroup> {
+    Ok(client().create_socket_group(&req).await?.into())
+}
+
+#[tauri::command]
+async fn get_socket_group(id: String) -> CmdResult<SocketGroup> {
+    Ok(client().get_socket_group(&id).await?)
+}
+
+#[tauri::command]
+async fn update_socket_group(id: String, req: UpdateSocketGroup) -> DoneResult<SocketGroup> {
+    Ok(client().update_socket_group(&id, &req).await?.into())
+}
+
+#[tauri::command]
+async fn delete_socket_group(id: String) -> DoneResult<()> {
+    Ok(client().delete_socket_group(&id).await?.into())
+}
+
+#[tauri::command]
+async fn attach_socket_group(
+    id: String,
+    app_id: String,
+    req: AttachSocketGroup,
+) -> DoneResult<SocketGroup> {
+    Ok(client()
+        .attach_socket_group(&id, &app_id, req.confirm_open)
+        .await?
+        .into())
+}
+
+#[tauri::command]
+async fn detach_socket_group(id: String, app_id: String) -> DoneResult<SocketGroup> {
+    Ok(client().detach_socket_group(&id, &app_id).await?.into())
 }
 
 // ─── Networks and settings ───────────────────────────────────────────────
@@ -467,6 +509,13 @@ fn main() {
             delete_tag,
             add_tag_member,
             remove_tag_member,
+            list_socket_groups,
+            create_socket_group,
+            get_socket_group,
+            update_socket_group,
+            delete_socket_group,
+            attach_socket_group,
+            detach_socket_group,
             list_networks,
             add_network,
             delete_network,

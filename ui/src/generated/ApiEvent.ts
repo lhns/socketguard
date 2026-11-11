@@ -3,4 +3,4 @@
 /**
  * A parsed server-sent event.
  */
-export type ApiEvent = { "event": "apps_changed" } | { "event": "app_discovered", "data": string } | { "event": "peers_changed" } | { "event": "grants_changed" } | { "event": "tags_changed" } | { "event": "networks_changed" } | { "event": "settings_changed" } | { "event": "activity" } | { "event": "unknown", "data": { name: string, data: string, } };
+export type ApiEvent = { "event": "apps_changed" } | { "event": "app_discovered", "data": string } | { "event": "peers_changed" } | { "event": "grants_changed" } | { "event": "tags_changed" } | { "event": "socket_groups_changed" } | { "event": "networks_changed" } | { "event": "settings_changed" } | { "event": "activity" } | { "event": "unknown", "data": { name: string, data: string, } };

@@ -15,13 +15,13 @@ pub mod tor_client_key;
 pub mod tor_control;
 
 use crate::iface::InterfaceManager;
-use crate::ruleset::{served_ports, subject_credentials, Snapshot};
+use crate::ruleset::{subject_credentials, Snapshot};
 use anyhow::Result;
 use ip::{IpNetwork, Ipv6Backend, Prefix};
 use socketguard_core::config::BackendConfig;
 use socketguard_core::{
     Address, AddressId, AppId, Credential, CredentialKind, Locator, Network as NetworkInfo,
-    NetworkKind, NetworkStatus, PortRef, PortSet, Subject,
+    NetworkKind, NetworkStatus, PortRangeSet, PortRef, Scope, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv6Addr};
@@ -47,7 +47,7 @@ pub struct Capabilities {
 pub struct LocatorRequest {
     pub app_id: AppId,
     pub address_id: AddressId,
-    pub ports: PortSet,
+    pub scope: Scope,
 }
 
 /// A new locator, with the secret (the onion service key) that must be stored with it.
@@ -85,8 +85,8 @@ pub struct EnforcedAddress {
 
 #[derive(Debug, Clone)]
 pub struct EnforcedGrant {
-    /// None = every port.
-    pub port: Option<PortRef>,
+    /// The ports of the app the grant covers.
+    pub ports: PortRangeSet,
     pub subject: EnforcedSubject,
 }
 
@@ -206,23 +206,37 @@ pub fn enforcement_for(
         snap.peers.iter().map(|p| (p.id.as_str(), p)).collect();
     let mut addresses = Vec::new();
     for app in &snap.apps {
-        let listening: Vec<PortRef> = app
-            .ports
-            .iter()
-            .filter(|p| p.listening)
-            .map(|p| p.port_ref())
-            .collect();
-        for address in app.addresses.iter().filter(|a| a.network_id == network.id) {
-            let ports: Vec<PortRef> = served_ports(app, address)
-                .into_iter()
-                .filter(|p| listening.contains(p))
-                .collect();
-            let grants = socketguard_core::grants_for_app(&snap.grants, &snap.tags, &app.id)
+        let listening = PortRangeSet::from_ports(
+            app.ports
                 .iter()
-                .filter(|g| g.network_id.as_deref().is_none_or(|n| n == network.id))
+                .filter(|p| p.listening)
+                .map(|p| p.port_ref()),
+        );
+        // The exclusion rule of the firewall does not matter here: only ports the app
+        // itself listens on are published, and those always stay.
+        let none = PortRangeSet::new();
+        let app_grants = socketguard_core::grants_for_app(
+            &snap.grants,
+            &snap.tags,
+            app,
+            &snap.socket_groups,
+            &none,
+        );
+        for address in app.addresses.iter().filter(|a| a.network_id == network.id) {
+            let served =
+                socketguard_core::scope_ports(app, &address.scope, &snap.socket_groups, &none);
+            let ports: Vec<PortRef> = served.total().intersect(&listening).ports().collect();
+            let grants = app_grants
+                .iter()
+                .filter(|g| {
+                    g.grant
+                        .network_id
+                        .as_deref()
+                        .is_none_or(|n| n == network.id)
+                })
                 .map(|g| EnforcedGrant {
-                    port: g.port,
-                    subject: match &g.subject {
+                    ports: g.ports.total(),
+                    subject: match &g.grant.subject {
                         Subject::Anyone => EnforcedSubject::Anyone,
                         s => EnforcedSubject::Credentials(
                             subject_credentials(&snap.groups, &peers, s)
@@ -269,6 +283,82 @@ mod tests {
             prefix: None,
             vlan_id: None,
         }
+    }
+
+    /// An address of a socket group publishes only the group's ports that listen now, even
+    /// though the group's ranges are granted whole (ADR 0047).
+    #[test]
+    fn a_group_address_on_tor_publishes_only_listening_ports() {
+        use chrono::Utc;
+        use socketguard_core::{
+            parse_ranges, App, AppPort, Grant, Locator, Protocol, SocketGroup, Target,
+        };
+        let now = Utc::now();
+        let port = |p: u16, listening| AppPort {
+            port: p,
+            proto: Protocol::Tcp,
+            listening,
+            last_seen: now,
+            family: Default::default(),
+        };
+        let group = SocketGroup {
+            id: "sg".into(),
+            label: "passive".into(),
+            ports: parse_ranges(&["50000-50010/tcp"]).unwrap(),
+            apps: vec!["a".into()],
+            created_at: now,
+        };
+        let app = App {
+            id: "a".into(),
+            name: "ftpd".into(),
+            process_name: "ftpd".into(),
+            exe_path: None,
+            interpreter_arg: None,
+            identity_note: None,
+            reviewed: true,
+            system: false,
+            first_seen: now,
+            last_seen: now,
+            // 80 is outside the group; 50003 listens, 50004 was seen but is quiet.
+            ports: vec![port(80, true), port(50003, true), port(50004, false)],
+            addresses: vec![Address {
+                id: "ad".into(),
+                app_id: "a".into(),
+                network_id: "n".into(),
+                scope: Scope::group("sg"),
+                locator: Locator::Onion {
+                    hostname: "abc.onion".into(),
+                },
+                created_at: now,
+            }],
+        };
+        let snap = Snapshot {
+            apps: vec![app],
+            socket_groups: vec![group],
+            grants: vec![Grant {
+                id: "g".into(),
+                target: Target::App("a".into()),
+                scope: Scope::All,
+                network_id: None,
+                subject: Subject::Anyone,
+                created_at: now,
+            }],
+            ..Snapshot::default()
+        };
+        let secrets = HashMap::from([("ad".to_string(), "ED25519-V3:secret".to_string())]);
+        let enforcement =
+            enforcement_for(&info(NetworkKind::Tor), &snap, &secrets, &HashMap::new());
+        let addr = &enforcement.addresses[0];
+        let published: Vec<u16> = addr.ports.iter().map(|p| p.port).collect();
+        assert_eq!(
+            published,
+            [50003],
+            "the quiet port and the ones outside the group are not published"
+        );
+        let plan = tor::plan(addr);
+        let spec = plan.spec.expect("published");
+        assert_eq!(spec.ports.len(), 1);
+        assert_eq!(spec.ports[0].0, 50003);
     }
 
     /// Whatever a network declares as verified must be Verified in core's reach table.

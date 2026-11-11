@@ -24,7 +24,7 @@ const gLan = grantView({ id: "g-lan", target: { kind: "app", id: "a2" }, subject
 const gTag = grantView({ id: "g-tag", target: { kind: "tag", id: "t1" }, subject: { kind: "peer", id: "p2" } });
 
 const access = (g: GrantView, origin: EffectiveAccess["origin"] = { kind: "direct" }): EffectiveAccess => ({
-  grant_id: g.id, port: g.port, network_id: g.network_id, subject: g.subject, origin,
+  grant_id: g.id, scope: g.scope, ports: g.scope.kind === "port" ? [{ start: g.scope.port, end: g.scope.port, proto: g.scope.proto }] : [{ start: 8080, end: 8080, proto: "tcp" }], network_id: g.network_id, subject: g.subject, origin,
 });
 
 const requests = (d: ReturnType<typeof mockDaemon>) => d.calls.filter((c) => c.cmd === "changes").map((c) => c.args.req as ChangesRequest);
@@ -171,7 +171,7 @@ describe("Inspector: one app", () => {
   });
 
   it("lists whole-app access before the access of single ports", async () => {
-    const onlyPort = grantView({ id: "g-80", target: { kind: "app", id: "a1" }, port: { port: 80, proto: "tcp" }, subject: { kind: "peer", id: "p2" } });
+    const onlyPort = grantView({ id: "g-80", target: { kind: "app", id: "a1" }, scope: { kind: "port", port: 80, proto: "tcp" }, subject: { kind: "peer", id: "p2" } });
     setup({
       get_app: () => detail(nginx, { grants: [gAlice, onlyPort], access: [access(onlyPort), access(gAlice)] }),
       list_grants: () => [gAlice, onlyPort],
@@ -190,9 +190,9 @@ describe("Inspector: one app", () => {
     const two = {
       ...nginx,
       addresses: [
-        { id: "x1", app_id: "a1", network_id: "n-ygg", ports: "all" as const, locator: { kind: "ipv6" as const, addr: "302::1" }, created_at: "t" },
-        { id: "x2", app_id: "a1", network_id: "n-ygg", ports: { only: [{ port: 443, proto: "tcp" as const }] }, locator: { kind: "ipv6" as const, addr: "302::2" }, created_at: "t" },
-        { id: "x3", app_id: "a1", network_id: "n-lan", ports: "all" as const, locator: { kind: "ipv6" as const, addr: "fd00::1" }, created_at: "t" },
+        { id: "x1", app_id: "a1", network_id: "n-ygg", scope: { kind: "all" as const }, locator: { kind: "ipv6" as const, addr: "302::1" }, created_at: "t" },
+        { id: "x2", app_id: "a1", network_id: "n-ygg", scope: { kind: "port" as const, port: 443, proto: "tcp" as const }, locator: { kind: "ipv6" as const, addr: "302::2" }, created_at: "t" },
+        { id: "x3", app_id: "a1", network_id: "n-lan", scope: { kind: "all" as const }, locator: { kind: "ipv6" as const, addr: "fd00::1" }, created_at: "t" },
       ],
     };
     const d = setup({
@@ -224,7 +224,7 @@ describe("Inspector: one app", () => {
     await user.click(screen.getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(applied(d)).toHaveLength(2));
     expect(applied(d)[1]).toEqual([
-      { op: "add_grant", target: { kind: "app", id: "a1" }, subject: { kind: "peer", id: "p1" }, confirm_open: true },
+      { op: "add_grant", target: { kind: "app", id: "a1" }, scope: { kind: "all" }, subject: { kind: "peer", id: "p1" }, confirm_open: true },
     ]);
   });
 
@@ -273,7 +273,7 @@ describe("Add access", () => {
     expect(applied(d)).toEqual([]);
     await user.click(within(review).getByRole("button", { name: "Apply" }));
     await waitFor(() => expect(applied(d)).toEqual([[
-      { op: "add_grant", target: { kind: "app", id: "a3" }, subject: { kind: "peer", id: "p1" }, confirm_open: false },
+      { op: "add_grant", target: { kind: "app", id: "a3" }, scope: { kind: "all" }, subject: { kind: "peer", id: "p1" }, confirm_open: false },
     ]]));
   });
 
@@ -330,7 +330,7 @@ describe("Add access", () => {
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0]).toEqual([
-      { op: "add_grant", target: { kind: "app", id: "a1" }, port: { port: 443, proto: "tcp" }, network_id: "n-lan", subject: { kind: "peer", id: "p2" }, confirm_open: false },
+      { op: "add_grant", target: { kind: "app", id: "a1" }, scope: { kind: "port", port: 443, proto: "tcp" }, network_id: "n-lan", subject: { kind: "peer", id: "p2" }, confirm_open: false },
     ]);
   });
 });
@@ -361,7 +361,7 @@ describe("Tags", () => {
     await user.click(await findTagRow("web"));
     await user.click(await within(inspector()).findByRole("button", { name: "Add or remove members" }));
     await user.click(screen.getByRole("checkbox", { name: "redis-server" }));
-    await waitFor(() => expect(applied(d)).toEqual([[{ op: "remove_tag_member", tag_id: "t1", app_id: "a2" }]]));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "remove_tag_member", tag_id: "t1", app_id: "a2", scope: { kind: "all" } }]]));
     expect(await screen.findByRole("button", { name: "Undo" })).toBeInTheDocument();
 
     await user.click(within(inspector()).getByRole("button", { name: "Add or remove members" }));
@@ -371,7 +371,7 @@ describe("Tags", () => {
     expect(applied(d)).toHaveLength(1);
     await user.click(within(review).getByRole("button", { name: "Apply" }));
     await waitFor(() => expect(applied(d)).toHaveLength(2));
-    expect(applied(d)[1]).toEqual([{ op: "add_tag_member", tag_id: "t1", app_id: "a3", confirm_open: false }]);
+    expect(applied(d)[1]).toEqual([{ op: "add_tag_member", tag_id: "t1", app_id: "a3", scope: { kind: "all" }, confirm_open: false }]);
   });
 
   it("saving patterns that would open apps to anyone asks first", async () => {
@@ -456,7 +456,7 @@ describe("Inspector: several apps", () => {
     expect(box.indeterminate).toBe(true);
     await user.click(box);
     // The tag has grants, so the batch is first checked; with no change in reach it applies.
-    await waitFor(() => expect(applied(d)).toEqual([[{ op: "add_tag_member", tag_id: "t1", app_id: "a3", confirm_open: false }]]));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "add_tag_member", tag_id: "t1", app_id: "a3", scope: { kind: "all" }, confirm_open: false }]]));
   });
 
   it("a name that is no tag yet is created and applied to every selected app", async () => {
@@ -469,9 +469,9 @@ describe("Inspector: several apps", () => {
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0]).toEqual([
       { op: "create_tag", ref: "$tag", label: "prod", patterns: [] },
-      { op: "add_tag_member", tag_id: "$tag", app_id: "a1", confirm_open: false },
-      { op: "add_tag_member", tag_id: "$tag", app_id: "a2", confirm_open: false },
-      { op: "add_tag_member", tag_id: "$tag", app_id: "a3", confirm_open: false },
+      { op: "add_tag_member", tag_id: "$tag", app_id: "a1", scope: { kind: "all" }, confirm_open: false },
+      { op: "add_tag_member", tag_id: "$tag", app_id: "a2", scope: { kind: "all" }, confirm_open: false },
+      { op: "add_tag_member", tag_id: "$tag", app_id: "a3", scope: { kind: "all" }, confirm_open: false },
     ]);
   });
 
@@ -701,7 +701,7 @@ describe("Add access: what to open", () => {
     await user.click(chips.getByRole("button", { name: "443/tcp" }));
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
-    expect(applied(d)[0].map((o) => (o as { port: unknown }).port)).toEqual([{ port: 80, proto: "tcp" }, { port: 443, proto: "tcp" }]);
+    expect(applied(d)[0].map((o) => (o as { scope: unknown }).scope)).toEqual([{ kind: "port", port: 80, proto: "tcp" }, { kind: "port", port: 443, proto: "tcp" }]);
   });
 
   it("a port row has its own Add access with that port chosen", async () => {
@@ -719,7 +719,7 @@ describe("Add access: what to open", () => {
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0]).toEqual([
-      { op: "add_grant", target: { kind: "app", id: "a1" }, port: { port: 443, proto: "tcp" }, subject: { kind: "peer", id: "p2" }, confirm_open: false },
+      { op: "add_grant", target: { kind: "app", id: "a1" }, scope: { kind: "port", port: 443, proto: "tcp" }, subject: { kind: "peer", id: "p2" }, confirm_open: false },
     ]);
     // Cancel closes it again.
     await user.click(within(inspector()).getByRole("button", { name: "Add access to 80/tcp" }));
@@ -755,7 +755,7 @@ describe("Add access: what to open", () => {
 describe("Tag and close controls", () => {
   it("an app has a + pill after its tags, and each port row has the same one with the port's tags", async () => {
     const portTag = mkTag("t3", "frontend", []);
-    portTag.members = [{ app_id: "a1", port: { port: 443, proto: "tcp" } }];
+    portTag.members = [{ app_id: "a1", scope: { kind: "port", port: 443, proto: "tcp" } }];
     setup({}, [web, data, portTag]);
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);

@@ -11,6 +11,7 @@
 mod protect;
 mod schema;
 mod settings;
+mod socket_groups;
 mod tags;
 #[cfg(windows)]
 mod winacl;
@@ -27,7 +28,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use socketguard_core::{
     ActivityKind, ActivityQuery, ActivityRecord, AddrFamily, Address, App, AppPort, Credential,
-    CredentialKind, Grant, Locator, Peer, PeerGroup, PortRef, PortSet, Protocol, Subject, Target,
+    CredentialKind, Grant, Locator, Peer, PeerGroup, PortRef, Protocol, Scope, Subject, Target,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
@@ -348,27 +349,6 @@ impl Database {
         Ok(())
     }
 
-    /// Insert a new address and shrink the `Only` set of the address its port came from,
-    /// in one transaction: a crash between the two would leave the port on both.
-    pub async fn split_address(
-        &self,
-        new: &Address,
-        secret: Option<&str>,
-        shrink: Option<(&str, &PortSet)>,
-    ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        insert_address_in(&mut tx, new, secret).await?;
-        if let Some((id, ports)) = shrink {
-            sqlx::query("UPDATE addresses SET ports = ? WHERE id = ?")
-                .bind(encode_ports(ports)?)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
     /// The onion service keys by address id.
     pub async fn onion_keys(&self) -> Result<HashMap<String, String>> {
         Ok(
@@ -411,15 +391,6 @@ impl Database {
             out.entry(a.app_id.clone()).or_default().push(a);
         }
         Ok(out)
-    }
-
-    pub async fn update_address_ports(&self, id: &str, ports: &PortSet) -> Result<bool> {
-        let r = sqlx::query("UPDATE addresses SET ports = ? WHERE id = ?")
-            .bind(encode_ports(ports)?)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(r.rows_affected() > 0)
     }
 
     pub async fn update_address_ipv6(&self, id: &str, addr: Ipv6Addr) -> Result<bool> {
@@ -944,11 +915,11 @@ impl NewActivity {
     }
 }
 
-const ADDRESS_SELECT: &str = "SELECT id, app_id, network_id, ports, locator_kind, locator, \
-     created_at FROM addresses";
+const ADDRESS_SELECT: &str = "SELECT id, app_id, network_id, port, proto, socket_group, \
+     locator_kind, locator, created_at FROM addresses";
 
-const GRANT_SELECT: &str = "SELECT id, target_kind, target_id, port, proto, network_id, \
-     subject_kind, subject_id, created_at FROM grants";
+const GRANT_SELECT: &str = "SELECT id, target_kind, target_id, port, proto, socket_group, \
+     network_id, subject_kind, subject_id, created_at FROM grants";
 
 type Tx<'a> = sqlx::Transaction<'a, sqlx::Sqlite>;
 
@@ -975,15 +946,17 @@ async fn insert_grant_in(tx: &mut Tx<'_>, g: &Grant) -> Result<()> {
         Target::App(id) => ("app", id),
         Target::Tag(id) => ("tag", id),
     };
+    let (port, proto, group) = scope_columns(&g.scope);
     sqlx::query(
-        "INSERT INTO grants (id, target_kind, target_id, port, proto, network_id, subject_kind, \
-         subject_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO grants (id, target_kind, target_id, port, proto, socket_group, network_id, \
+         subject_kind, subject_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&g.id)
     .bind(target_kind)
     .bind(target_id)
-    .bind(g.port.map(|p| p.port))
-    .bind(g.port.map(|p| p.proto.to_string()))
+    .bind(port)
+    .bind(proto)
+    .bind(group)
     .bind(&g.network_id)
     .bind(kind)
     .bind(subject_id)
@@ -1002,14 +975,17 @@ async fn insert_address_in(
         Locator::Ipv6 { addr } => ("ipv6", addr.to_string()),
         Locator::Onion { hostname } => ("onion", hostname.clone()),
     };
+    let (port, proto, group) = scope_columns(&a.scope);
     sqlx::query(
-        "INSERT INTO addresses (id, app_id, network_id, ports, locator_kind, locator, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO addresses (id, app_id, network_id, port, proto, socket_group, locator_kind, \
+         locator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&a.id)
     .bind(&a.app_id)
     .bind(&a.network_id)
-    .bind(encode_ports(&a.ports)?)
+    .bind(port)
+    .bind(proto)
+    .bind(group)
     .bind(kind)
     .bind(locator)
     .bind(ts(a.created_at))
@@ -1043,19 +1019,30 @@ async fn insert_credential(
     Ok(())
 }
 
-fn encode_ports(p: &PortSet) -> Result<String> {
-    Ok(match p {
-        PortSet::All => "all".to_string(),
-        PortSet::Only(list) => serde_json::to_string(list)?,
-    })
+/// A scope as the `port`, `proto` and `socket_group` columns of grants, tag members and
+/// addresses: all NULL = every socket, a port with its protocol, or a socket group id.
+pub(super) fn scope_columns(s: &Scope) -> (Option<i64>, Option<String>, Option<&str>) {
+    match s {
+        Scope::All => (None, None, None),
+        Scope::Port { port, proto } => (Some(i64::from(*port)), Some(proto.to_string()), None),
+        Scope::Group { id } => (None, None, Some(id)),
+    }
 }
 
-fn decode_ports(s: &str) -> Result<PortSet> {
-    if s == "all" {
-        Ok(PortSet::All)
-    } else {
-        Ok(PortSet::Only(serde_json::from_str(s)?))
-    }
+pub(super) fn scope_from_columns(
+    port: Option<i64>,
+    proto: Option<String>,
+    group: Option<String>,
+) -> Result<Scope> {
+    Ok(match (port, proto, group) {
+        (None, None, None) => Scope::All,
+        (Some(p), Some(pr), None) => Scope::Port {
+            port: to_port(p)?,
+            proto: pr.parse().map_err(anyhow::Error::msg)?,
+        },
+        (None, None, Some(id)) => Scope::Group { id },
+        _ => bail!("inconsistent scope columns"),
+    })
 }
 
 fn address_from_row(r: sqlx::sqlite::SqliteRow) -> Result<Address> {
@@ -1071,22 +1058,14 @@ fn address_from_row(r: sqlx::sqlite::SqliteRow) -> Result<Address> {
         id: r.get("id"),
         app_id: r.get("app_id"),
         network_id: r.get("network_id"),
-        ports: decode_ports(r.get("ports"))?,
+        scope: scope_from_columns(r.get("port"), r.get("proto"), r.get("socket_group"))?,
         locator,
         created_at: parse_ts(r.get("created_at"))?,
     })
 }
 
 fn grant_from_row(r: sqlx::sqlite::SqliteRow) -> Result<Grant> {
-    let port: Option<i64> = r.get("port");
-    let proto: Option<String> = r.get("proto");
-    let port = match (port, proto) {
-        (Some(p), Some(pr)) => Some(PortRef {
-            port: to_port(p)?,
-            proto: pr.parse().map_err(anyhow::Error::msg)?,
-        }),
-        _ => None,
-    };
+    let scope = scope_from_columns(r.get("port"), r.get("proto"), r.get("socket_group"))?;
     let subject_id: Option<String> = r.get("subject_id");
     let subject = match (r.get::<String, _>("subject_kind").as_str(), subject_id) {
         ("peer", Some(id)) => Subject::Peer(id),
@@ -1103,7 +1082,7 @@ fn grant_from_row(r: sqlx::sqlite::SqliteRow) -> Result<Grant> {
     Ok(Grant {
         id: r.get("id"),
         target,
-        port,
+        scope,
         network_id: r.get("network_id"),
         subject,
         created_at: parse_ts(r.get("created_at"))?,
@@ -1171,7 +1150,7 @@ mod test_util {
             id: new_id(),
             app_id: app_id.into(),
             network_id: net.into(),
-            ports: PortSet::All,
+            scope: Scope::All,
             locator: Locator::Ipv6 {
                 addr: a.parse().unwrap(),
             },
@@ -1201,10 +1180,10 @@ mod test_util {
         Grant {
             id: new_id(),
             target: Target::App(app_id.into()),
-            port: Some(PortRef {
+            scope: Scope::Port {
                 port: 80,
                 proto: Protocol::Tcp,
-            }),
+            },
             network_id: None,
             subject,
             created_at: now(),
@@ -1291,22 +1270,21 @@ mod tests {
         let db = db().await;
         db.insert_app(&app("a1")).await.unwrap();
         let mut a = address("a1", "ygg", "300:1:2:3::5");
-        a.ports = PortSet::Only(vec![PortRef {
+        a.scope = Scope::Port {
             port: 8080,
             proto: Protocol::Tcp,
-        }]);
+        };
         db.insert_address(&a).await.unwrap();
         assert_eq!(db.get_address(&a.id).await.unwrap().unwrap(), {
             let mut b = a.clone();
             b.created_at = db.get_address(&a.id).await.unwrap().unwrap().created_at;
             b
         });
-        db.update_address_ports(&a.id, &PortSet::All).await.unwrap();
         db.update_address_ipv6(&a.id, "300:9::5".parse().unwrap())
             .await
             .unwrap();
         let got = db.get_address(&a.id).await.unwrap().unwrap();
-        assert_eq!(got.ports, PortSet::All);
+        assert_eq!(got.scope, a.scope);
         assert_eq!(got.locator.ipv6(), Some("300:9::5".parse().unwrap()));
         assert_eq!(db.get_app("a1").await.unwrap().unwrap().addresses.len(), 1);
     }
@@ -1339,35 +1317,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn split_address_is_all_or_nothing() {
+    async fn address_scopes_roundtrip() {
         let db = db().await;
         db.insert_app(&app("a1")).await.unwrap();
-        let p = |port| PortRef {
-            port,
-            proto: Protocol::Tcp,
-        };
-        let mut old = address("a1", "n", "fd00::1");
-        old.ports = PortSet::Only(vec![p(80), p(81)]);
-        db.insert_address(&old).await.unwrap();
-
-        // The new address cannot be stored (unknown app): the old one keeps both ports.
-        let mut bad = address("nope", "n", "fd00::2");
-        bad.ports = PortSet::Only(vec![p(81)]);
-        let rest = PortSet::Only(vec![p(80)]);
-        assert!(db
-            .split_address(&bad, None, Some((&old.id, &rest)))
-            .await
-            .is_err());
-        let kept = db.get_address(&old.id).await.unwrap().unwrap();
-        assert_eq!(kept.ports, PortSet::Only(vec![p(80), p(81)]));
-
-        let mut good = address("a1", "n", "fd00::2");
-        good.ports = PortSet::Only(vec![p(81)]);
-        db.split_address(&good, None, Some((&old.id, &rest)))
-            .await
-            .unwrap();
-        assert_eq!(db.get_address(&old.id).await.unwrap().unwrap().ports, rest);
-        assert!(db.get_address(&good.id).await.unwrap().is_some());
+        let scopes = [
+            Scope::All,
+            Scope::Port {
+                port: 53,
+                proto: Protocol::Udp,
+            },
+            Scope::Group { id: "sg1".into() },
+        ];
+        for (i, scope) in scopes.iter().enumerate() {
+            let mut a = address("a1", "n", &format!("fd00::{}", i + 1));
+            a.scope = scope.clone();
+            db.insert_address(&a).await.unwrap();
+            assert_eq!(&db.get_address(&a.id).await.unwrap().unwrap().scope, scope);
+        }
     }
 
     #[tokio::test]
@@ -1710,11 +1676,17 @@ mod tests {
         g.network_id = Some("ygg".into());
         db.insert_grant(&g).await.unwrap();
         let mut whole = grant("a1", Subject::Anyone);
-        whole.port = None;
+        whole.scope = Scope::All;
         db.insert_grant(&whole).await.unwrap();
         let got = db.get_grant(&g.id).await.unwrap().unwrap();
-        assert_eq!((got.port, got.network_id.as_deref()), (g.port, Some("ygg")));
-        assert_eq!(db.get_grant(&whole.id).await.unwrap().unwrap().port, None);
+        assert_eq!(
+            (got.scope, got.network_id.as_deref()),
+            (g.scope, Some("ygg"))
+        );
+        assert_eq!(
+            db.get_grant(&whole.id).await.unwrap().unwrap().scope,
+            Scope::All
+        );
 
         let removed = db.delete_addresses_by_network("ygg").await.unwrap();
         assert_eq!(removed.len(), 1);

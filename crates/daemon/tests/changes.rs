@@ -122,18 +122,18 @@ async fn member_port_and_grant_port_narrow_each_other() {
     let peer = d.ygg_peer("alice").await;
     let (_, tag) = d.post("/api/tags", json!({"label": "web"})).await;
     let tag_id = id(&tag);
-    let p80 = json!({"port": 80, "proto": "tcp"});
-    let p81 = json!({"port": 81, "proto": "tcp"});
+    let p80 = json!({"kind": "port", "port": 80, "proto": "tcp"});
+    let p81 = json!({"kind": "port", "port": 81, "proto": "tcp"});
     d.post(
         &format!("/api/tags/{tag_id}/members"),
-        json!({"app_id": app_id, "port": p80}),
+        json!({"app_id": app_id, "scope": p80}),
     )
     .await;
     // A member port the app does not have is refused.
     let (s, _) = d
         .post(
             &format!("/api/tags/{tag_id}/members"),
-            json!({"app_id": app_id, "port": p81}),
+            json!({"app_id": app_id, "scope": p81}),
         )
         .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
@@ -146,19 +146,23 @@ async fn member_port_and_grant_port_narrow_each_other() {
         )
         .await;
     let (_, access) = d.get(&format!("/api/apps/{app_id}")).await;
-    assert_eq!(access["access"][0]["port"], p80, "the member port narrows");
+    assert_eq!(
+        access["access"][0]["ports"],
+        json!([{"start": 80, "end": 80, "proto": "tcp"}]),
+        "the member port narrows"
+    );
 
     // Same port on the grant: still port 80. A different port: nothing.
     let (_, same) = d
         .post(
             "/api/grants",
-            json!({"target": tag_target(&tag_id), "port": p80, "subject": subject}),
+            json!({"target": tag_target(&tag_id), "scope": p80, "subject": subject}),
         )
         .await;
     let (_, other) = d
         .post(
             "/api/grants",
-            json!({"target": tag_target(&tag_id), "port": p81, "subject": subject}),
+            json!({"target": tag_target(&tag_id), "scope": p81, "subject": subject}),
         )
         .await;
     let rules = rule_ids(&d);
@@ -253,7 +257,10 @@ async fn patterns_add_matching_apps_now_and_new_ones_later_but_not_excluded_ones
         .await;
     let tag_id = id(&tag);
     assert_eq!(tag["patterns"], json!(["ngi*"]));
-    assert_eq!(tag["members"], json!([{"app_id": app_id, "port": null}]));
+    assert_eq!(
+        tag["members"],
+        json!([{"app_id": app_id, "scope": {"kind": "all"}}])
+    );
 
     // A grant on the tag, then a new matching listener starts: covered from its first
     // reconcile, with no request in between.
@@ -323,7 +330,7 @@ async fn a_batch_is_one_transaction_and_one_firewall_update() {
                 {"op": "add_grant", "target": tag_target("$dev"),
                  "subject": {"kind": "peer", "id": "$alice"}},
                 {"op": "add_grant", "target": app_target(&app_id), "network_id": "ygg",
-                 "port": {"port": 80, "proto": "tcp"},
+                 "scope": {"kind": "port", "port": 80, "proto": "tcp"},
                  "subject": {"kind": "peer", "id": "$alice"}},
                 {"op": "review", "app_id": app_id, "reviewed": true}
             ]}),
@@ -682,7 +689,10 @@ async fn new_patterns_that_add_apps_to_an_open_tag_need_confirm_open() {
 
     let (s, body) = patch(json!({"patterns": ["ngi*"], "confirm_open": true})).await;
     assert_eq!(s, StatusCode::OK, "{body}");
-    assert_eq!(body["members"], json!([{"app_id": app_id, "port": null}]));
+    assert_eq!(
+        body["members"],
+        json!([{"app_id": app_id, "scope": {"kind": "all"}}])
+    );
 }
 
 #[tokio::test]

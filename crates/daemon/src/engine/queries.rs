@@ -5,7 +5,7 @@ use crate::ruleset;
 use crate::AppState;
 use socketguard_core::{
     covered_ports, effective_access, grant_reach, ActivityQuery, ActivityRecord, App, AppDetail,
-    Credential, GrantView, Peer, PeerGroup, Settings, Subject, Target, V4Context,
+    Credential, GrantView, Peer, PeerGroup, PortRangeSet, Settings, Subject, Target, V4Context,
 };
 use std::collections::HashMap;
 
@@ -40,9 +40,15 @@ impl Engine {
             .await?;
         let all_grants = state.db.list_grants().await?;
         let tags = state.db.list_tags().await?;
+        let socket_groups = state.db.list_socket_groups().await?;
         Ok(AppDetail {
             counters: self.metrics.app_counters(&app.id),
-            access: effective_access(&all_grants, &tags, &app.id),
+            access: effective_access(&all_grants, &tags, &app, &socket_groups),
+            socket_groups: socket_groups
+                .iter()
+                .filter(|g| g.is_attached_to(&app.id))
+                .cloned()
+                .collect(),
             tags: tags
                 .iter()
                 .filter(|t| t.members.iter().any(|m| m.app_id == app.id))
@@ -153,12 +159,14 @@ impl Engine {
                 .collect();
         // IPv4 credentials depend on whether the granted ports listen on IPv4 and on
         // whether protect-host filters the interface (ADR 0044).
+        let none = PortRangeSet::new();
         let app_listens_v4 = cat.apps.iter().any(|a| {
-            let covered = covered_ports(grant, &cat.tags, &a.id);
-            a.ports
-                .iter()
-                .filter(|p| covered.iter().any(|c| c.is_none_or(|c| c == p.port_ref())))
-                .any(|p| p.listening && p.family.has_v4())
+            covered_ports(grant, &cat.tags, a, &cat.socket_groups, &none).is_some_and(|covered| {
+                a.ports
+                    .iter()
+                    .filter(|p| covered.contains(p.port_ref()))
+                    .any(|p| p.listening && p.family.has_v4())
+            })
         });
         grant_reach(
             &grant.subject,

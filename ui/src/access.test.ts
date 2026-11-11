@@ -9,22 +9,22 @@ const web = mkTag("t1", "web", ["a1", "a2"]);
 const ctx: NameCtx = { apps: [mkApp("a1", "nginx", [80, 443]), mkApp("a2", "redis", [6379])], tags: [web], peers: [alice], groups: [team], networks };
 
 const direct = grantView({ id: "g-direct", subject: { kind: "peer", id: "p1" } });
-const port80 = grantView({ id: "g-80", port: { port: 80, proto: "tcp" }, subject: { kind: "peer", id: "p1" } });
+const port80 = grantView({ id: "g-80", scope: { kind: "port", port: 80, proto: "tcp" }, subject: { kind: "peer", id: "p1" } });
 const viaTag = grantView({ id: "g-tag", target: { kind: "tag", id: "t1" }, subject: { kind: "anyone" }, network_id: "n-lan" });
 const toGroup = grantView({ id: "g-team", target: { kind: "app", id: "a2" }, subject: { kind: "group", id: "g1" } });
 
 describe("appEntries", () => {
   const access: EffectiveAccess[] = [
-    { grant_id: "g-80", port: { port: 80, proto: "tcp" }, network_id: null, subject: { kind: "peer", id: "p1" }, origin: { kind: "direct" } },
-    { grant_id: "g-tag", port: null, network_id: "n-lan", subject: { kind: "anyone" }, origin: { kind: "tag", tag_id: "t1" } },
+    { grant_id: "g-80", scope: { kind: "port", port: 80, proto: "tcp" }, ports: [{ start: 80, end: 80, proto: "tcp" }], network_id: null, subject: { kind: "peer", id: "p1" }, origin: { kind: "direct" } },
+    { grant_id: "g-tag", scope: { kind: "all" }, ports: [{ start: 80, end: 80, proto: "tcp" }, { start: 443, end: 443, proto: "tcp" }], network_id: "n-lan", subject: { kind: "anyone" }, origin: { kind: "tag", tag_id: "t1" } },
     // The same grant reaching the app through two ports of a tag member is one entry per port.
-    { grant_id: "g-tag", port: null, network_id: "n-lan", subject: { kind: "anyone" }, origin: { kind: "tag", tag_id: "t1" } },
-    { grant_id: "g-direct", port: null, network_id: null, subject: { kind: "peer", id: "p1" }, origin: { kind: "direct" } },
+    { grant_id: "g-tag", scope: { kind: "all" }, ports: [{ start: 80, end: 80, proto: "tcp" }, { start: 443, end: 443, proto: "tcp" }], network_id: "n-lan", subject: { kind: "anyone" }, origin: { kind: "tag", tag_id: "t1" } },
+    { grant_id: "g-direct", scope: { kind: "all" }, ports: [{ start: 80, end: 80, proto: "tcp" }, { start: 443, end: 443, proto: "tcp" }], network_id: null, subject: { kind: "peer", id: "p1" }, origin: { kind: "direct" } },
   ];
 
   it("lists each access once, whole-app access first and per-port extras after", () => {
-    const entries = appEntries(access, [direct, port80, viaTag], ctx);
-    expect(entries.map((e) => [e.name, e.port?.port ?? null])).toEqual([
+    const entries = appEntries("a1", access, [direct, port80, viaTag], ctx);
+    expect(entries.map((e) => [e.name, e.scope.kind === "port" ? e.scope.port : null])).toEqual([
       ["alice", null],
       ["Everyone on LAN", null],
       ["alice", 80],
@@ -32,16 +32,16 @@ describe("appEntries", () => {
   });
 
   it("a direct grant can be revoked; one through a tag links to the tag", () => {
-    const entries = appEntries(access, [direct, port80, viaTag], ctx);
+    const entries = appEntries("a1", access, [direct, port80, viaTag], ctx);
     const lan = entries.find((e) => e.name === "Everyone on LAN")!;
     expect(lan.origin).toEqual({ kind: "tag", id: "t1", label: "web" });
     expect(lan.grants).toEqual([]);
-    expect(entries.find((e) => e.port === null && e.name === "alice")!.grants.map((g) => g.id)).toEqual(["g-direct"]);
+    expect(entries.find((e) => e.scope.kind === "all" && e.name === "alice")!.grants.map((g) => g.id)).toEqual(["g-direct"]);
   });
 
   it("a grant on the app to a group is direct, so it can be revoked there", () => {
     const [entry] = appEntries(
-      [{ grant_id: "g-team", port: null, network_id: null, subject: { kind: "group", id: "g1" }, origin: { kind: "group", group_id: "g1" } }],
+      "a2", [{ grant_id: "g-team", scope: { kind: "all" }, ports: [{ start: 80, end: 80, proto: "tcp" }, { start: 443, end: 443, proto: "tcp" }], network_id: null, subject: { kind: "group", id: "g1" }, origin: { kind: "group", group_id: "g1" } }],
       [toGroup], ctx,
     );
     expect(entry.name).toBe("group team");

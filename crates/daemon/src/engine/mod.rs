@@ -20,12 +20,14 @@ mod enforce;
 mod firewall;
 mod mutations;
 mod queries;
+mod socket_groups;
 mod tags;
 mod torkeys;
 
 use addresses::disable_all;
 pub use addresses::plan_addresses;
 use enforce::disable_networks;
+pub use socket_groups::clean_ranges;
 
 use crate::api::DaemonEvent;
 use crate::firewall::{DesiredRuleset, DropEvent, Firewall};

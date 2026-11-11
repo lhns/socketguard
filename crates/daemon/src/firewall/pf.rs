@@ -35,11 +35,16 @@ fn rule_line(r: &Rule) -> String {
         Dst::Addr(a) => a.to_string(),
         Dst::HostV4 => "any".to_string(),
     };
+    // pf spells a range `50000:51000`.
+    let ports = if r.ports.is_single() {
+        r.ports.start.to_string()
+    } else {
+        format!("{}:{}", r.ports.start, r.ports.end)
+    };
     format!(
-        "pass in quick{on} {} proto {} from {from} to {to} port {} keep state",
+        "pass in quick{on} {} proto {} from {from} to {to} port {ports} keep state",
         inet(&r.dst),
-        r.proto,
-        r.port
+        r.ports.proto,
     )
 }
 
@@ -245,8 +250,10 @@ mod tests {
         use socketguard_core::Protocol;
         let r = |src: Option<&str>, dst: &str| Revocation {
             dst: Dst::Addr(dst.parse().unwrap()),
-            port: 80,
-            proto: Protocol::Tcp,
+            ports: socketguard_core::PortRange::single(socketguard_core::PortRef {
+                port: 80,
+                proto: Protocol::Tcp,
+            }),
             src: src.map(|s| s.parse().unwrap()),
         };
         let cmds = kill_commands(&[
@@ -264,6 +271,23 @@ mod tests {
                 "-k fd00::1/128 -k fd00::9",
             ]
         );
+    }
+
+    #[test]
+    fn port_ranges_render_as_pf_ranges() {
+        let rule = |ports: &str| Rule {
+            id: "r".into(),
+            iif: Some("en0".into()),
+            dst: Dst::Addr("fd00::9".parse().unwrap()),
+            ports: ports.parse().unwrap(),
+            sources: Sources::Any,
+        };
+        assert_eq!(
+            rule_line(&rule("50000-51000/tcp")),
+            "pass in quick on en0 inet6 proto tcp from any to fd00::9 port 50000:51000 keep state"
+        );
+        assert!(rule_line(&rule("53/udp"))
+            .ends_with("proto udp from any to fd00::9 port 53 keep state"));
     }
 
     #[test]

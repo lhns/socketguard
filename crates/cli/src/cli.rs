@@ -38,6 +38,10 @@ pub enum Command {
     /// Manage tags: named sets of apps (or ports) that grants can target
     #[command(subcommand)]
     Tags(TagsCmd),
+    /// Manage socket groups: named sets of ports and port ranges, attached to apps and then
+    /// usable as a scope (`<app>:socket-group=<label>`, `--socket-group <label>`)
+    #[command(subcommand)]
+    SocketGroups(SocketGroupsCmd),
     /// Manage peer groups
     #[command(subcommand)]
     Groups(GroupsCmd),
@@ -101,15 +105,20 @@ pub enum AppsCmd {
     },
     /// Forget an app, its addresses and grants (it reappears as pending if it listens again)
     Rm { app: String },
-    /// Give one port its own address on a network
+    /// Add an address for one port or one socket group of the app on a network (the app's
+    /// own address keeps serving it too)
     Split {
         app: String,
         #[arg(long)]
         network: String,
         /// <port>[/tcp|/udp]
-        port: String,
+        port: Option<String>,
+        /// A socket group (label) attached to the app, instead of a port
+        #[arg(long = "socket-group", value_name = "LABEL")]
+        socket_group: Option<String>,
     },
-    /// Merge addresses of one network into the first listed
+    /// Fold the listed addresses into the app's address for all sockets on a network: it is
+    /// created if missing, and the listed narrower addresses go
     Merge {
         app: String,
         #[arg(long)]
@@ -235,8 +244,52 @@ pub enum TagsCmd {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum SocketGroupsCmd {
+    /// List socket groups
+    List,
+    /// Create a socket group from ports (`80/tcp`) and ranges (`50000-51000/tcp`)
+    Add {
+        label: String,
+        #[arg(required = true, value_name = "PORTS")]
+        ports: Vec<String>,
+        /// Attach it to this app right away (repeatable)
+        #[arg(long = "app", value_name = "APP")]
+        apps: Vec<String>,
+        /// Confirm without asking when attaching opens an app to anyone
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Rename a socket group and/or replace its ports (they take effect wherever it is used)
+    Set {
+        group: String,
+        /// The new label
+        #[arg(long = "label")]
+        label: Option<String>,
+        /// The new ports, `80/tcp` or `50000-51000/tcp` (repeatable; replaces the old ones)
+        #[arg(long = "port", value_name = "PORTS")]
+        ports: Vec<String>,
+        /// Confirm without asking when the new ports open an app to anyone
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Delete a socket group; refused while a grant or tag member uses it
+    Rm { group: String },
+    /// Attach a socket group to an app
+    Attach {
+        group: String,
+        app: String,
+        /// Confirm without asking when this opens the app to anyone
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Detach a socket group from an app; refused while a grant or tag member uses it there
+    Detach { group: String, app: String },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum TagMembersCmd {
-    /// Add apps (or one port of an app): <app>[:port[/proto]]
+    /// Add apps (or one port or socket group of an app): <app>[:port[/proto]] or
+    /// <app>:socket-group=<label>
     Add {
         tag: String,
         #[arg(required = true)]
@@ -269,6 +322,9 @@ pub struct GrantArgs {
     /// Limit the apps and tags to this port, `<port>[/proto]` (repeatable)
     #[arg(long = "port", value_name = "PORT")]
     pub ports: Vec<String>,
+    /// Limit the apps and tags to this socket group, by label (repeatable)
+    #[arg(long = "socket-group", value_name = "LABEL")]
+    pub socket_groups: Vec<String>,
     /// A peer label, group:<label> or anyone (repeatable)
     #[arg(long = "to", value_name = "SUBJECT")]
     pub to: Vec<String>,
@@ -297,6 +353,9 @@ pub struct RevokeArgs {
     /// Limit the apps and tags to this port, `<port>[/proto]` (repeatable)
     #[arg(long = "port", value_name = "PORT")]
     pub ports: Vec<String>,
+    /// Limit the apps and tags to this socket group, by label (repeatable)
+    #[arg(long = "socket-group", value_name = "LABEL")]
+    pub socket_groups: Vec<String>,
     /// A peer label, group:<label> or anyone (repeatable)
     #[arg(long = "to", value_name = "SUBJECT")]
     pub to: Vec<String>,
@@ -547,6 +606,61 @@ mod tests {
             panic!()
         };
         assert!(r.subject.is_none());
+    }
+
+    #[test]
+    fn socket_group_commands_and_flags_parse() {
+        let c = parse(&[
+            "socket-groups",
+            "add",
+            "passive",
+            "21/tcp",
+            "50000-51000/tcp",
+            "--app",
+            "ftpd",
+        ])
+        .unwrap();
+        let Command::SocketGroups(SocketGroupsCmd::Add {
+            label, ports, apps, ..
+        }) = c.command
+        else {
+            panic!()
+        };
+        assert_eq!(label, "passive");
+        assert_eq!(ports, ["21/tcp", "50000-51000/tcp"]);
+        assert_eq!(apps, ["ftpd"]);
+        assert!(parse(&["socket-groups", "attach", "passive", "ftpd", "-y"]).is_ok());
+        let c = parse(&[
+            "grant",
+            "--app",
+            "ftpd",
+            "--socket-group",
+            "passive",
+            "--to",
+            "alice",
+        ])
+        .unwrap();
+        let Command::Grant(g) = c.command else {
+            panic!()
+        };
+        assert_eq!(g.socket_groups, ["passive"]);
+        let c = parse(&[
+            "apps",
+            "split",
+            "ftpd",
+            "--network",
+            "ygg",
+            "--socket-group",
+            "passive",
+        ])
+        .unwrap();
+        let Command::Apps(AppsCmd::Split {
+            port, socket_group, ..
+        }) = c.command
+        else {
+            panic!()
+        };
+        assert_eq!((port, socket_group.as_deref()), (None, Some("passive")));
     }
 
     #[test]

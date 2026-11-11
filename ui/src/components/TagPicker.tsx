@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ChangeOp, PortRef } from "../api";
 import { useCommit } from "../commit";
-import { portLabel, samePort } from "../lib";
+import { portLabel, sameScope, scopeOfPort } from "../lib";
 import { useNav } from "../nav";
 import { useTags } from "../queries";
 import CommitPreview from "./CommitPreview";
@@ -21,10 +21,10 @@ export default function TagPicker({ appIds, port = null }: Props) {
   const tags = (useTags().data ?? []);
   const [open, setOpen] = useState(false);
   const commit = useCommit();
-  const portField = port ? { port } : {};
+  const scope = scopeOfPort(port);
 
   const has = (tagId: string, appId: string) =>
-    tags.find((t) => t.id === tagId)?.members.some((m) => m.app_id === appId && (port === null ? m.port === null : m.port !== null && samePort(m.port, port))) ?? false;
+    tags.find((t) => t.id === tagId)?.members.some((m) => m.app_id === appId && sameScope(m.scope, scope)) ?? false;
   const count = (tagId: string) => appIds.filter((a) => has(tagId, a)).length;
 
   const items: PickerItem[] = tags.map((t) => {
@@ -40,13 +40,13 @@ export default function TagPicker({ appIds, port = null }: Props) {
   const toggle = (item: PickerItem) => {
     const what = port ? ` ${portLabel(port)}` : "";
     if (item.state === "on") {
-      const ops: ChangeOp[] = appIds.map((app_id) => ({ op: "remove_tag_member", tag_id: item.id, app_id, ...portField }));
-      const undo: ChangeOp[] = appIds.map((app_id) => ({ op: "add_tag_member", tag_id: item.id, app_id, confirm_open: false, ...portField }));
+      const ops: ChangeOp[] = appIds.map((app_id) => ({ op: "remove_tag_member", tag_id: item.id, app_id, scope }));
+      const undo: ChangeOp[] = appIds.map((app_id) => ({ op: "add_tag_member", tag_id: item.id, app_id, scope, confirm_open: false }));
       void commit.runBatch(ops, `Removed from ${item.label}${what}`, undo);
     } else {
       const ops: ChangeOp[] = appIds
         .filter((a) => !has(item.id, a))
-        .map((app_id) => ({ op: "add_tag_member", tag_id: item.id, app_id, confirm_open: false, ...portField }));
+        .map((app_id) => ({ op: "add_tag_member", tag_id: item.id, app_id, scope, confirm_open: false }));
       void commit.runBatch(ops, `Added to ${item.label}${what}`);
     }
     // A review is shown below the control, so the list gets out of its way.
@@ -58,7 +58,7 @@ export default function TagPicker({ appIds, port = null }: Props) {
     pick: () => {
       const ops: ChangeOp[] = [
         { op: "create_tag", ref: "$tag", label: typed, patterns: [] },
-        ...appIds.map<ChangeOp>((app_id) => ({ op: "add_tag_member", tag_id: "$tag", app_id, confirm_open: false, ...portField })),
+        ...appIds.map<ChangeOp>((app_id) => ({ op: "add_tag_member", tag_id: "$tag", app_id, scope, confirm_open: false })),
       ];
       void commit.runBatch(ops, `Created tag ${typed}`);
       setOpen(false);

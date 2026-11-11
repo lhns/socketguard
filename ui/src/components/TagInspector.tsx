@@ -2,9 +2,9 @@ import { useId, useState } from "react";
 import { grantEntries, mergeEntries } from "../access";
 import { toDaemonError, type ChangeOp, type Tag } from "../api";
 import { useCommit, useRevoke } from "../commit";
-import { errorField, errorText, portLabel, splitOperationError } from "../lib";
+import { ALL_SCOPE, errorField, errorText, scopeKey, scopeLabel, splitOperationError } from "../lib";
 import { useNav } from "../nav";
-import { useApps, useDeleteTag, useGrants, useUpdateTag } from "../queries";
+import { useApps, useDeleteTag, useGrants, useSocketGroups, useUpdateTag } from "../queries";
 import AccessList, { type AccessHighlight } from "./AccessList";
 import AddAccess from "./AddAccess";
 import CommitPreview from "./CommitPreview";
@@ -116,10 +116,11 @@ export function TagInspector({ tag, highlight, onCollapse, onClose }: { tag: Tag
 function Members({ tag }: { tag: Tag }) {
   const nav = useNav();
   const apps = useApps().data ?? [];
+  const socketGroups = useSocketGroups().data ?? [];
   const commit = useCommit();
   const [open, setOpen] = useState(false);
   const appName = (appId: string) => apps.find((a) => a.id === appId)?.name ?? appId.slice(0, 8);
-  const whole = new Set(tag.members.filter((m) => m.port === null).map((m) => m.app_id));
+  const whole = new Set(tag.members.filter((m) => m.scope.kind === "all").map((m) => m.app_id));
   const item = (a: (typeof apps)[number], section: string): PickerItem => ({ id: a.id, label: a.name, section, state: whole.has(a.id) ? "on" : "off" });
   const items = [
     ...apps.filter((a) => !a.system).map((a) => item(a, "Apps")),
@@ -128,12 +129,12 @@ function Members({ tag }: { tag: Tag }) {
   const toggle = (it: PickerItem) => {
     if (it.state === "on") {
       void commit.runBatch(
-        [{ op: "remove_tag_member", tag_id: tag.id, app_id: it.id }],
+        [{ op: "remove_tag_member", tag_id: tag.id, app_id: it.id, scope: ALL_SCOPE }],
         `Removed ${it.label} from ${tag.label}`,
-        [{ op: "add_tag_member", tag_id: tag.id, app_id: it.id, confirm_open: false }],
+        [{ op: "add_tag_member", tag_id: tag.id, app_id: it.id, scope: ALL_SCOPE, confirm_open: false }],
       );
     } else {
-      void commit.runBatch([{ op: "add_tag_member", tag_id: tag.id, app_id: it.id, confirm_open: false } as ChangeOp], `Added ${it.label} to ${tag.label}`);
+      void commit.runBatch([{ op: "add_tag_member", tag_id: tag.id, app_id: it.id, scope: ALL_SCOPE, confirm_open: false } as ChangeOp], `Added ${it.label} to ${tag.label}`);
     }
     setOpen(false);
   };
@@ -144,9 +145,9 @@ function Members({ tag }: { tag: Tag }) {
       ) : (
         <ul className="plain-list member-list">
           {tag.members.map((m) => (
-            <li key={`${m.app_id}-${m.port ? portLabel(m.port) : "*"}`}>
+            <li key={`${m.app_id}-${scopeKey(m.scope)}`}>
               <button className="link-btn" onClick={() => nav.go("apps", { appId: m.app_id })}>{appName(m.app_id)}</button>{" "}
-              <span className="muted">{m.port ? portLabel(m.port) : "all ports"}</span>
+              <span className="muted">{scopeLabel(m.scope, socketGroups)}</span>
             </li>
           ))}
         </ul>

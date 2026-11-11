@@ -2,7 +2,7 @@ import { useState } from "react";
 import { appEntries, appEntriesFromGrants, mergeEntries } from "../access";
 import type { AppDetail, AppPort, Network, PortRef } from "../api";
 import { useCommit, useRevoke } from "../commit";
-import { errorText, formatBytes, portLabel } from "../lib";
+import { errorText, formatBytes, portLabel, scopeLabel } from "../lib";
 import {
   useActivity, useApp, useDeleteApp, useGrants, useMergeApp, useSettings, useShare, useSplitApp,
 } from "../queries";
@@ -48,7 +48,7 @@ function OneApp({ app, highlight, onCollapse, onClose }: { app: AppDetail } & Co
   const onlyLocal = app.addresses.length > 0 && app.addresses.every((a) => netById(a.network_id)?.grants_apply === false);
   const hasV4 = app.ports.some((p) => p.listening && p.family !== "v6");
   const protectsHost = (settings?.protect_host_interfaces.length ?? 0) > 0;
-  const entries = appEntries(app.access, grants, names);
+  const entries = appEntries(app.id, app.access, grants, names);
 
   return (
     <Inspector
@@ -203,8 +203,8 @@ function Addresses({ app, networks }: { app: AppDetail; networks: Network[] }) {
               {list.map((a) => (
                 <div key={a.id} className="address-row">
                   <span className="mono">{a.locator.kind === "ipv6" ? a.locator.addr : a.locator.hostname}</span>
-                  <span className="muted">{a.ports === "all" ? (list.length > 1 ? "all other ports" : "all ports") : a.ports.only.map(portLabel).join(", ")}</span>
-                  {a.ports === "all" && app.ports.length > 1 &&
+                  <span className="muted">{a.scope.kind === "all" ? (list.length > 1 ? "all other ports" : "all ports") : scopeLabel(a.scope, app.socket_groups)}</span>
+                  {a.scope.kind === "all" && app.ports.length > 1 &&
                     app.ports.map((p) => (
                       <button
                         key={portLabel(p)}

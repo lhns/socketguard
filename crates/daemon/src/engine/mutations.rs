@@ -8,7 +8,7 @@ use crate::AppState;
 use chrono::Utc;
 use socketguard_core::{
     new_id, normalize_credential, ActivityKind, AddressMode, App, Credential, CredentialKind,
-    Grant, GrantView, NewCredential, NewGrant, Peer, PeerGroup, Subject, Tag, Target,
+    Grant, GrantView, NewCredential, NewGrant, Peer, PeerGroup, SocketGroup, Subject, Tag, Target,
 };
 use std::collections::{BTreeSet, HashSet};
 
@@ -422,7 +422,7 @@ impl Engine {
         let grant = Grant {
             id: new_id(),
             target: req.target.clone(),
-            port: req.port,
+            scope: req.scope.clone(),
             network_id: req.network_id.clone(),
             subject: req.subject.clone(),
             created_at: Utc::now(),
@@ -458,6 +458,51 @@ impl Engine {
         act
     }
 
+    /// Whether `scope` can be used on `app`: a port the app has (or that one of its attached
+    /// socket groups covers), or a socket group attached to it.
+    pub(super) fn check_scope_on_app(
+        cat: &Catalog,
+        app: &App,
+        scope: &socketguard_core::Scope,
+    ) -> Result<(), EngineError> {
+        use socketguard_core::Scope;
+        match scope {
+            Scope::All => Ok(()),
+            Scope::Port { port, proto } => {
+                let p = socketguard_core::PortRef {
+                    port: *port,
+                    proto: *proto,
+                };
+                let in_group = cat
+                    .socket_groups
+                    .iter()
+                    .filter(|g| g.is_attached_to(&app.id))
+                    .any(|g| g.ports.iter().any(|r| r.contains(p)));
+                if app.has_port(p) || in_group {
+                    Ok(())
+                } else {
+                    Err(EngineError::Invalid(format!(
+                        "{} has no port {p}",
+                        app.name
+                    )))
+                }
+            }
+            Scope::Group { id } => {
+                let group = cat
+                    .socket_group(id)
+                    .ok_or_else(|| EngineError::NotFound(format!("socket group {id}")))?;
+                if group.is_attached_to(&app.id) {
+                    Ok(())
+                } else {
+                    Err(EngineError::Invalid(format!(
+                        "socket group {} is not attached to {}",
+                        group.label, app.name
+                    )))
+                }
+            }
+        }
+    }
+
     /// Check a new grant against `cat`; the labels for the activity record.
     pub(super) fn check_new_grant(
         &self,
@@ -469,22 +514,20 @@ impl Engine {
                 let app = cat
                     .app(id)
                     .ok_or_else(|| EngineError::NotFound(format!("app {id}")))?;
-                if let Some(p) = req.port {
-                    if !app.has_port(p) {
-                        return Err(EngineError::Invalid(format!(
-                            "{} has no port {p}",
-                            app.name
-                        )));
-                    }
-                }
+                Self::check_scope_on_app(cat, app, &req.scope)?;
                 app.name.clone()
             }
-            Target::Tag(id) => format!(
-                "tag {}",
-                cat.tag(id)
-                    .ok_or_else(|| EngineError::NotFound(format!("tag {id}")))?
-                    .label
-            ),
+            Target::Tag(id) => {
+                let tag = cat
+                    .tag(id)
+                    .ok_or_else(|| EngineError::NotFound(format!("tag {id}")))?;
+                // The grant's own scope needs no attachment, but the group must exist.
+                if let Some(gid) = req.scope.group_id() {
+                    cat.socket_group(gid)
+                        .ok_or_else(|| EngineError::NotFound(format!("socket group {gid}")))?;
+                }
+                format!("tag {}", tag.label)
+            }
         };
         if let Some(nid) = &req.network_id {
             let net = self
@@ -516,7 +559,7 @@ impl Engine {
         };
         if cat.grants.iter().any(|g| {
             g.target == req.target
-                && g.port == req.port
+                && g.scope == req.scope
                 && g.network_id == req.network_id
                 && g.subject == req.subject
         }) {
@@ -594,6 +637,7 @@ pub(super) struct Catalog {
     pub peers: Vec<Peer>,
     pub groups: Vec<PeerGroup>,
     pub tags: Vec<Tag>,
+    pub socket_groups: Vec<SocketGroup>,
     pub grants: Vec<Grant>,
 }
 
@@ -605,6 +649,7 @@ impl Catalog {
             peers: db.list_peers().await?,
             groups: db.list_groups().await?,
             tags: db.list_tags().await?,
+            socket_groups: db.list_socket_groups().await?,
             grants: db.list_grants().await?,
         })
     }
@@ -623,5 +668,9 @@ impl Catalog {
 
     pub fn tag(&self, id: &str) -> Option<&Tag> {
         self.tags.iter().find(|t| t.id == id)
+    }
+
+    pub fn socket_group(&self, id: &str) -> Option<&SocketGroup> {
+        self.socket_groups.iter().find(|g| g.id == id)
     }
 }

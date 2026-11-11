@@ -84,7 +84,7 @@ impl Drop for NsPair {
 use chrono::Utc;
 use socketguard_core::{
     Address, App, AppPort, Credential, CredentialKind, Grant, Locator, Network, NetworkKind,
-    NetworkStatus, Peer, PortSet, Protocol, Subject, Target,
+    NetworkStatus, Peer, Protocol, Scope, Subject, Target,
 };
 use socketguard_daemon::firewall::nftables::NftablesFirewall;
 use socketguard_daemon::firewall::{DesiredRuleset, DropEvent, Firewall};
@@ -294,7 +294,7 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
         id: id.into(),
         app_id: "web".into(),
         network_id: network.into(),
-        ports: PortSet::All,
+        scope: Scope::All,
         locator: Locator::Ipv6 {
             addr: a.parse().unwrap(),
         },
@@ -333,7 +333,7 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
             vec![Grant {
                 id: "g".into(),
                 target: Target::App("web".into()),
-                port: None,
+                scope: Scope::All,
                 network_id: None,
                 subject: Subject::Peer("b".into()),
                 created_at: now,
@@ -856,7 +856,7 @@ fn a_segment_grant_admits_its_own_prefix_and_not_the_other_segment() {
             id: "a-addr".into(),
             app_id: "web".into(),
             network_id: "lan".into(),
-            ports: PortSet::All,
+            scope: Scope::All,
             locator: Locator::Ipv6 {
                 addr: MANAGED.parse().unwrap(),
             },
@@ -866,7 +866,7 @@ fn a_segment_grant_admits_its_own_prefix_and_not_the_other_segment() {
             id: "b-addr".into(),
             app_id: "web".into(),
             network_id: "segb".into(),
-            ports: PortSet::All,
+            scope: Scope::All,
             locator: Locator::Ipv6 {
                 addr: B_ADDR.parse().unwrap(),
             },
@@ -877,7 +877,7 @@ fn a_segment_grant_admits_its_own_prefix_and_not_the_other_segment() {
     snap.grants = vec![Grant {
         id: "seg".into(),
         target: Target::App("web".into()),
-        port: None,
+        scope: Scope::All,
         network_id: Some("lan".into()),
         subject: Subject::Anyone,
         created_at: now,
@@ -1041,7 +1041,7 @@ fn a_router_cannot_deliver_another_segments_source_to_a_segment_grant() {
     snap.grants = vec![Grant {
         id: "seg".into(),
         target: Target::App("web".into()),
-        port: None,
+        scope: Scope::All,
         network_id: Some("lan".into()),
         subject: Subject::Anyone,
         created_at: now,

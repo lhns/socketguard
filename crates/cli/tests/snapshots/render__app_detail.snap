@@ -17,14 +17,14 @@ Ports
 Addresses
   ID        NETWORK  ADDRESS          PORTS
   a1b2c3d4  ygg      300:1:2:3::1     443/tcp
-  b2c3d4e5  ygg      300:1:2:3::2     all
-  c3d4e5f6  lan      2001:db8:1:2::5  all
+  b2c3d4e5  ygg      300:1:2:3::2     All sockets
+  c3d4e5f6  lan      2001:db8:1:2::5  All sockets
 
 Who can reach it
-  ID        PORT       NETWORK  WHO         REACH
-  g1111111  80/tcp     ygg      alice       ygg: verified
-  g2222222  all ports  all      group:team  ygg: whole subnet, lan: IP only
-  g3333333  443/tcp    all      anyone      ygg: open, local: not reachable
+  ID        PORT         NETWORK  WHO         REACH
+  g1111111  80/tcp       ygg      alice       ygg: verified
+  g2222222  All sockets  all      group:team  ygg: whole subnet, lan: IP only
+  g3333333  443/tcp      all      anyone      ygg: open, local: not reachable
 
 Allowed traffic
   NETWORK  WHO    PACKETS  BYTES
