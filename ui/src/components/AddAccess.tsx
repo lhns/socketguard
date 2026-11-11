@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeOp, NewCredential, PortRef, Subject, Target } from "../api";
+import type { ChangeOp, NewCredential, Scope, Subject, Target } from "../api";
 import { useCommit } from "../commit";
-import { CREDENTIAL_PLACEHOLDER, portLabel, portOfScope, samePort, scopeOfPort, subjectLabel, targetLabel } from "../lib";
-import { useApps, useGroups, useList, useNetworks, useParsedCredentials, usePeers, useTags } from "../queries";
+import { ALL_SCOPE, CREDENTIAL_PLACEHOLDER, portLabel, portOfScope, scopeKey, scopeLabel, scopeOfPort, subjectLabel, targetLabel } from "../lib";
+import { useApps, useGroups, useList, useNetworks, useParsedCredentials, usePeers, useSocketGroups, useTags } from "../queries";
 import { CREDENTIAL_INFO } from "../reach";
 import CommitPreview from "./CommitPreview";
 import Picker, { type PickerItem } from "./Picker";
@@ -17,28 +17,38 @@ type Chip =
 
 interface Props {
   fixed: FixedSide;
-  /** Open the form at once with only this port chosen (the "Add access" of a port row). */
-  port?: PortRef;
+  /** The "Add access" of a row: the form opens with only this row chosen. */
+  preselect?: Scope;
+  /** Names the row for assistive technology ("Add access to 443/tcp"). */
+  rowLabel?: string;
   /** The form was cancelled or applied. */
   onDone?: () => void;
+}
+
+/** One thing a grant can name: All ports, a port, or a port group. */
+interface Option {
+  key: string;
+  scope: Scope;
+  label: string;
+  mono: boolean;
 }
 
 const tokens = (text: string) => text.split(/[\s,]+/).filter(Boolean);
 
 /** Give access: the selection fills one side, a picker chooses the other. What to open is chosen
- * explicitly: the whole app, or some of its ports. Networks are optional. Pasting keys, addresses
+ * explicitly: All ports, some ports or some port groups. Networks are optional. Pasting keys, addresses
  * or IPs creates one peer per value on the way, named by the daemon. */
-export default function AddAccess({ fixed, port, onDone }: Props) {
+export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props) {
   const apps = useList(useApps());
   const tags = useList(useTags());
   const peers = useList(usePeers());
   const groups = useList(useGroups());
   const networks = useList(useNetworks());
+  const socketGroups = useList(useSocketGroups());
 
-  const [open, setOpen] = useState(port !== undefined);
+  const [open, setOpen] = useState(false);
   const [chips, setChips] = useState<Chip[]>([]);
-  const [whole, setWhole] = useState(false);
-  const [picked, setPicked] = useState<Set<string>>(new Set(port ? [portLabel(port)] : []));
+  const [picked, setPicked] = useState<Set<string>>(new Set());
   const [nets, setNets] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -47,7 +57,6 @@ export default function AddAccess({ fixed, port, onDone }: Props) {
   const reset = () => {
     setOpen(false);
     setChips([]);
-    setWhole(false);
     setPicked(new Set());
     setNets(new Set());
     onDone?.();
@@ -56,24 +65,39 @@ export default function AddAccess({ fixed, port, onDone }: Props) {
 
   const choosingSubjects = fixed.side === "targets";
 
-  // The targets whose ports can be chosen: the selection, or what was picked.
+  // The targets whose rows can be chosen: the selection, or what was picked.
   const targets: Target[] = useMemo(
     () => (fixed.side === "targets" ? fixed.targets : chips.flatMap((c) => (c.kind === "target" ? [c.target] : []))),
     [fixed, chips],
   );
-  const portOptions = useMemo(() => {
-    const out = new Map<string, PortRef>();
-    const addApp = (appId: string, only: PortRef | null) => {
+  // What a grant can name: All ports, the detected ports and the attached port groups of the apps
+  // (a group chip needs the group on at least one of them), and for a tag every port group.
+  const options = useMemo<Option[]>(() => {
+    const ports = new Map<string, Option>();
+    const groupIds = new Set<string>();
+    const addApp = (appId: string, only: Scope | null) => {
       for (const p of apps.find((a) => a.id === appId)?.ports ?? []) {
-        if (only === null || samePort(only, p)) out.set(portLabel(p), { port: p.port, proto: p.proto });
+        const scope = scopeOfPort(p);
+        if (only === null || only.kind === "all" || scopeKey(only) === scopeKey(scope)) {
+          ports.set(scopeKey(scope), { key: scopeKey(scope), scope, label: portLabel(p), mono: true });
+        }
       }
+      for (const g of socketGroups) if (g.apps.includes(appId)) groupIds.add(g.id);
     };
+    let anyTag = false;
     for (const t of targets) {
       if (t.kind === "app") addApp(t.id, null);
-      else if (t.kind === "tag") for (const m of tags.find((x) => x.id === t.id)?.members ?? []) addApp(m.app_id, portOfScope(m.scope));
+      else {
+        anyTag = true;
+        for (const m of tags.find((x) => x.id === t.id)?.members ?? []) addApp(m.app_id, portOfScope(m.scope) ? m.scope : null);
+      }
     }
-    return [...out.values()].sort((a, b) => a.port - b.port || a.proto.localeCompare(b.proto));
-  }, [targets, apps, tags]);
+    const sorted = [...ports.values()].sort((a, b) => (a.scope.kind === "port" && b.scope.kind === "port" ? a.scope.port - b.scope.port || a.scope.proto.localeCompare(b.scope.proto) : 0));
+    const groups = socketGroups
+      .filter((g) => anyTag || groupIds.has(g.id))
+      .map<Option>((g) => ({ key: `group:${g.id}`, scope: { kind: "group", id: g.id }, label: g.label, mono: false }));
+    return [{ key: "*", scope: ALL_SCOPE, label: scopeLabel(ALL_SCOPE), mono: false }, ...sorted, ...groups];
+  }, [targets, apps, tags, socketGroups]);
   const grantNetworks = networks.filter((n) => n.grants_apply);
 
   // ─── The picker ────────────────────────────────────────────────────────────
@@ -129,8 +153,11 @@ export default function AddAccess({ fixed, port, onDone }: Props) {
   // ─── The operations ────────────────────────────────────────────────────────
   const newPeers = chips.filter((c): c is Extract<Chip, { kind: "new" }> => c.kind === "new");
   const chosen = chips.length;
-  const portSelection: (PortRef | undefined)[] = whole ? [undefined] : portOptions.filter((p) => picked.has(portLabel(p)));
-  const ready = targets.length > 0 && chosen > 0 && (fixed.side === "targets" || fixed.subjects.length > 0) && portSelection.length > 0;
+  const scopeSelection = options.filter((o) => picked.has(o.key));
+  const ready = targets.length > 0 && chosen > 0 && (fixed.side === "targets" || fixed.subjects.length > 0) && scopeSelection.length > 0;
+  // A port group is only granted on the apps it is attached to.
+  const applies = (t: Target, s: Scope) =>
+    s.kind !== "group" || t.kind === "tag" || (socketGroups.find((g) => g.id === s.id)?.apps.includes(t.id) ?? false);
 
   const ops = useMemo<ChangeOp[]>(() => {
     if (!ready) return [];
@@ -145,13 +172,13 @@ export default function AddAccess({ fixed, port, onDone }: Props) {
         ? fixed.subjects
         : chips.flatMap((c) => (c.kind === "subject" ? [c.subject] : c.kind === "new" ? [subjectOf.get(c.key)!] : []));
     for (const target of targets) {
-      for (const port of portSelection) {
+      for (const { scope } of scopeSelection.filter((o) => applies(target, o.scope))) {
         for (const subject of subjects) {
           for (const network_id of nets.size === 0 ? [undefined] : [...nets]) {
             out.push({
               op: "add_grant",
               target,
-              scope: scopeOfPort(port ?? null),
+              scope,
               ...(network_id ? { network_id } : {}),
               subject,
               confirm_open: false,
@@ -161,9 +188,9 @@ export default function AddAccess({ fixed, port, onDone }: Props) {
       }
     }
     return out;
-    // portSelection and newPeers derive from chips, picked, whole and portOptions.
+    // scopeSelection and newPeers derive from chips, picked and options.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, fixed, chips, targets, whole, picked, portOptions, nets]);
+  }, [ready, fixed, chips, targets, picked, options, nets, socketGroups]);
 
   // A review of an earlier form is stale as soon as the form changes.
   const opsKey = JSON.stringify(ops);
@@ -177,7 +204,7 @@ export default function AddAccess({ fixed, port, onDone }: Props) {
   const grantCount = ops.filter((o) => o.op === "add_grant").length;
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (ready) void commit.runBatch(ops, `Access added (${grantCount})`);
+    if (ready && grantCount > 0) void commit.runBatch(ops, `Access added (${grantCount})`);
   };
 
   const fixedNames =
@@ -187,9 +214,17 @@ export default function AddAccess({ fixed, port, onDone }: Props) {
   const summary = fixedNames.length > 3 ? `${fixedNames.slice(0, 3).join(", ")} and ${fixedNames.length - 3} more` : fixedNames.join(", ");
 
   if (!open) {
+    const start = () => {
+      if (preselect) setPicked(new Set([scopeKey(preselect)]));
+      setOpen(true);
+    };
     return (
       <div className="add-access">
-        <button className="btn btn-primary btn-sm" onClick={() => setOpen(true)}>Add access…</button>
+        {preselect ? (
+          <button className="btn btn-sm" aria-label={rowLabel ? `Add access to ${rowLabel}` : undefined} onClick={start}>Add access</button>
+        ) : (
+          <button className="btn btn-primary btn-sm" onClick={start}>Add access…</button>
+        )}
       </div>
     );
   }
@@ -241,35 +276,24 @@ export default function AddAccess({ fixed, port, onDone }: Props) {
 
       {targets.length > 0 && (
         <div className="scope-row" role="group" aria-label="What to open">
-          <button
-            type="button"
-            className="scope-chip"
-            aria-pressed={whole}
-            onClick={() => {
-              setWhole(!whole);
-              setPicked(new Set());
-            }}
-          >
-            {targets.every((t) => t.kind === "tag") ? "Whole tag" : "Whole app"}
-          </button>
-          {portOptions.map((p) => (
+          {options.map((o) => (
             <button
-              key={portLabel(p)}
+              key={o.key}
               type="button"
-              className="scope-chip mono"
-              aria-pressed={picked.has(portLabel(p))}
+              className={`scope-chip${o.mono ? " mono" : ""}`}
+              aria-pressed={picked.has(o.key)}
               onClick={() => {
-                const next = new Set(picked);
-                if (next.has(portLabel(p))) next.delete(portLabel(p));
-                else next.add(portLabel(p));
+                // All ports covers the rest, so it and the narrower choices exclude each other.
+                const next = new Set(o.key === "*" ? [] : [...picked].filter((k) => k !== "*"));
+                if (!picked.has(o.key)) next.add(o.key);
+                else if (o.key !== "*") next.delete(o.key);
                 setPicked(next);
-                setWhole(false);
               }}
             >
-              {portLabel(p)}
+              {o.label}
             </button>
           ))}
-          {!whole && portSelection.length === 0 && <span className="hint">Choose what to open</span>}
+          {scopeSelection.length === 0 && <span className="hint">Choose what to open</span>}
         </div>
       )}
 
@@ -298,7 +322,7 @@ export default function AddAccess({ fixed, port, onDone }: Props) {
 
       {reviewing ? null : (
         <div className="actions">
-          <button type="submit" className="btn btn-primary btn-sm" disabled={!ready || commit.state.phase === "checking" || commit.state.phase === "applying"}>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={!ready || grantCount === 0 || commit.state.phase === "checking" || commit.state.phase === "applying"}>
             Add access
           </button>
           <button type="button" className="btn btn-sm" onClick={reset}>Cancel</button>

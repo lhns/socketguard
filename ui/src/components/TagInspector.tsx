@@ -1,8 +1,8 @@
 import { useId, useState } from "react";
 import { grantEntries, mergeEntries } from "../access";
-import { toDaemonError, type ChangeOp, type Tag } from "../api";
+import { toDaemonError, type Scope, type Tag } from "../api";
 import { useCommit, useRevoke } from "../commit";
-import { ALL_SCOPE, errorField, errorText, scopeKey, scopeLabel, splitOperationError } from "../lib";
+import { ALL_SCOPE, errorField, errorText, sameScope, scopeKey, scopeLabel, scopeOfPort, splitOperationError } from "../lib";
 import { useNav } from "../nav";
 import { useApps, useDeleteTag, useGrants, useSocketGroups, useUpdateTag } from "../queries";
 import AccessList, { type AccessHighlight } from "./AccessList";
@@ -112,42 +112,62 @@ export function TagInspector({ tag, highlight, onCollapse, onClose }: { tag: Tag
   );
 }
 
-/** The members of a tag: a picker for whole apps and the list of everything in it. */
+/** The members of a tag, each as `app · row`, and a picker: choose an app, then its rows. */
 function Members({ tag }: { tag: Tag }) {
   const nav = useNav();
   const apps = useApps().data ?? [];
   const socketGroups = useSocketGroups().data ?? [];
   const commit = useCommit();
   const [open, setOpen] = useState(false);
+  const [chosen, setChosen] = useState<string | null>(null);
   const appName = (appId: string) => apps.find((a) => a.id === appId)?.name ?? appId.slice(0, 8);
-  const whole = new Set(tag.members.filter((m) => m.scope.kind === "all").map((m) => m.app_id));
-  const item = (a: (typeof apps)[number], section: string): PickerItem => ({ id: a.id, label: a.name, section, state: whole.has(a.id) ? "on" : "off" });
+  const inTag = new Set(tag.members.map((m) => m.app_id));
+  const item = (a: (typeof apps)[number], section: string): PickerItem => ({ id: a.id, label: a.name, section, state: inTag.has(a.id) ? "mixed" : "off" });
   const items = [
     ...apps.filter((a) => !a.system).map((a) => item(a, "Apps")),
     ...apps.filter((a) => a.system).map((a) => item(a, "System services")),
   ];
-  const toggle = (it: PickerItem) => {
-    if (it.state === "on") {
+  const picked = apps.find((a) => a.id === chosen);
+  const rows: Scope[] = picked
+    ? [
+        ALL_SCOPE,
+        ...picked.ports.map((p) => scopeOfPort(p)),
+        ...socketGroups.filter((g) => g.apps.includes(picked.id)).map<Scope>((g) => ({ kind: "group", id: g.id })),
+      ]
+    : [];
+  const has = (appId: string, scope: Scope) => tag.members.some((m) => m.app_id === appId && sameScope(m.scope, scope));
+  const toggleRow = (appId: string, scope: Scope) => {
+    const what = `${appName(appId)} · ${scopeLabel(scope, socketGroups)}`;
+    if (has(appId, scope)) {
       void commit.runBatch(
-        [{ op: "remove_tag_member", tag_id: tag.id, app_id: it.id, scope: ALL_SCOPE }],
-        `Removed ${it.label} from ${tag.label}`,
-        [{ op: "add_tag_member", tag_id: tag.id, app_id: it.id, scope: ALL_SCOPE, confirm_open: false }],
+        [{ op: "remove_tag_member", tag_id: tag.id, app_id: appId, scope }],
+        `Removed ${what} from ${tag.label}`,
+        [{ op: "add_tag_member", tag_id: tag.id, app_id: appId, scope, confirm_open: false }],
       );
     } else {
-      void commit.runBatch([{ op: "add_tag_member", tag_id: tag.id, app_id: it.id, scope: ALL_SCOPE, confirm_open: false } as ChangeOp], `Added ${it.label} to ${tag.label}`);
+      void commit.runBatch([{ op: "add_tag_member", tag_id: tag.id, app_id: appId, scope, confirm_open: false }], `Added ${what} to ${tag.label}`);
     }
-    setOpen(false);
   };
   return (
     <>
       {tag.members.length === 0 ? (
-        <p className="muted">No members. Add apps here, or select apps and use + next to Tags in their details.</p>
+        <p className="muted">No members. Add apps here, or select apps and use + next to their tags in the details.</p>
       ) : (
         <ul className="plain-list member-list">
           {tag.members.map((m) => (
-            <li key={`${m.app_id}-${scopeKey(m.scope)}`}>
-              <button className="link-btn" onClick={() => nav.go("apps", { appId: m.app_id })}>{appName(m.app_id)}</button>{" "}
-              <span className="muted">{scopeLabel(m.scope, socketGroups)}</span>
+            <li key={`${m.app_id}-${scopeKey(m.scope)}`} className="member-item">
+              <span>
+                <button className="link-btn" onClick={() => nav.go("apps", { appId: m.app_id })}>{appName(m.app_id)}</button>
+                <span className="muted"> · {scopeLabel(m.scope, socketGroups)}</span>
+              </span>
+              <button
+                className="btn-icon"
+                aria-label={`Remove ${appName(m.app_id)} · ${scopeLabel(m.scope, socketGroups)}`}
+                title="Remove from the tag"
+                onClick={() => toggleRow(m.app_id, m.scope)}
+              >
+                ×
+              </button>
             </li>
           ))}
         </ul>
@@ -160,12 +180,26 @@ function Members({ tag }: { tag: Tag }) {
           triggerClass="tag-pill tag-pill-add"
           compactLabel="Add or remove members"
           items={items}
-          onToggle={toggle}
+          onToggle={(it) => {
+            setChosen(it.id);
+            setOpen(false);
+          }}
           open={open}
           onOpenChange={setOpen}
           placeholder="Find an app"
         />
       </div>
+      {picked && (
+        <div className="scope-row" role="group" aria-label={`Rows of ${picked.name} in ${tag.label}`}>
+          <span className="muted">{picked.name}:</span>
+          {rows.map((scope) => (
+            <button key={scopeKey(scope)} type="button" className={`scope-chip${scope.kind === "port" ? " mono" : ""}`} aria-pressed={has(picked.id, scope)} onClick={() => toggleRow(picked.id, scope)}>
+              {scopeLabel(scope, socketGroups)}
+            </button>
+          ))}
+          <button type="button" className="btn-icon" aria-label="Done choosing rows" title="Done" onClick={() => setChosen(null)}>×</button>
+        </div>
+      )}
       <CommitPreview commit={commit} title="Joining this tag lets more in" />
     </>
   );

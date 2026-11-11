@@ -38,3 +38,7 @@ Peers can be grouped, apps cannot. The old ACL and socket groups (ADRs 0018–00
 ## Amendment (2026-11-10): joining a tag that is open to anyone needs confirmation
 
 Putting an app into a tag that has a grant to Anyone opens the app, but only granting to Anyone asked for confirmation. Adding a member by hand to such a tag, and creating or changing a tag so that its patterns add existing apps, now need `confirm_open` like that grant does (409 otherwise). Apps that join through a pattern when they are first seen are not confirmed: that is the tag's standing policy.
+
+## Amendment (2026-11-11): members are rows; a tag grant can be limited to a port group
+
+Follows ADR 0047. A tag member is a row of an app: "All ports", one port, or an attached port group. Tagging an app means tagging its "All ports", and patterns add that row. A tag grant may be limited to a port or to a port group; it covers, per member, what the member's row and that limit have in common. Attaching a port group to an app whose "All ports" is a member of a granted tag counts as opening and needs confirmation when the tag is open to Anyone.

@@ -1,12 +1,13 @@
 import { useState } from "react";
-import { appEntries, appEntriesFromGrants, mergeEntries } from "../access";
-import type { AppDetail, AppPort, Network, PortRef } from "../api";
+import { appEntriesFromGrants, mergeEntries } from "../access";
+import type { AppDetail, Network } from "../api";
 import { useCommit, useRevoke } from "../commit";
-import { errorText, formatBytes, portLabel, scopeLabel } from "../lib";
+import { errorText, formatBytes, scopeLabel } from "../lib";
 import {
-  useActivity, useApp, useDeleteApp, useGrants, useReservations, useSettings, useShare,
+  useActivity, useApp, useDeleteApp, useGrants, useReservations, useShare,
 } from "../queries";
 import AccessList, { type AccessHighlight } from "./AccessList";
+import PortsSection from "./PortsSection";
 import AddAccess from "./AddAccess";
 import CommitPreview from "./CommitPreview";
 import ConfirmDialog from "./ConfirmDialog";
@@ -20,7 +21,7 @@ interface Common {
   onClose: () => void;
 }
 
-/** One app: its tags, who can reach it, its ports and addresses. */
+/** One app: its ports and port groups (with tags and access on each), its addresses. */
 export function AppInspector({ id, ...common }: { id: string } & Common) {
   const app = useApp(id);
   if (app.isLoading) return <Inspector label="App details" title="Loading…" onClose={common.onClose} />;
@@ -37,18 +38,13 @@ export function AppInspector({ id, ...common }: { id: string } & Common) {
 function OneApp({ app, highlight, onCollapse, onClose }: { app: AppDetail } & Common) {
   const toast = useToast();
   const names = useNameCtx();
-  const grants = useGrants().data ?? [];
-  const settings = useSettings().data;
   const forget = useDeleteApp();
   const review = useCommit();
-  const { revoke, commit: revokeCommit } = useRevoke();
   const [forgetting, setForgetting] = useState(false);
 
   const netById = (nid: string) => names.networks.find((n) => n.id === nid);
   const onlyLocal = app.addresses.length > 0 && app.addresses.every((a) => netById(a.network_id)?.grants_apply === false);
   const hasV4 = app.ports.some((p) => p.listening && p.family !== "v6");
-  const protectsHost = (settings?.protect_host_interfaces.length ?? 0) > 0;
-  const entries = appEntries(app.id, app.access, grants, names);
 
   return (
     <Inspector
@@ -78,40 +74,7 @@ function OneApp({ app, highlight, onCollapse, onClose }: { app: AppDetail } & Co
         </p>
       )}
 
-      <Section title="Tags">
-        <TagPicker appIds={[app.id]} />
-      </Section>
-
-      <Section title="Who can reach it">
-        {onlyLocal ? (
-          <p className="muted">This machine only. Grants do not apply on the Local network.</p>
-        ) : (
-          <>
-            {hasV4 && (
-              <p className="hint" data-testid="ipv4-status">
-                {protectsHost
-                  ? "IPv4: closed except granted IPv4 peers (protect-host is on)."
-                  : "IPv4: open to everyone (protect-host is off). Grants only limit IPv6 and the other networks."}
-              </p>
-            )}
-            <AccessList entries={entries} direction="who" networks={names.networks} onRevoke={revoke} highlight={highlight} empty="Nobody. The app is closed." />
-            <CommitPreview commit={revokeCommit} />
-            <AddAccess fixed={{ side: "targets", targets: [{ kind: "app", id: app.id }] }} />
-          </>
-        )}
-      </Section>
-
-      <Section title="Ports">
-        {app.ports.length === 0 ? (
-          <p className="muted">No ports seen.</p>
-        ) : (
-          <ul className="plain-list port-list">
-            {app.ports.map((p) => (
-              <PortRow key={portLabel(p)} app={app} port={p} />
-            ))}
-          </ul>
-        )}
-      </Section>
+      <PortsSection app={app} highlight={highlight} onlyLocal={onlyLocal} hasV4={hasV4} />
 
       <Addresses app={app} networks={names.networks} />
 
@@ -156,33 +119,8 @@ function OneApp({ app, highlight, onCollapse, onClose }: { app: AppDetail } & Co
   );
 }
 
-function PortRow({ app, port }: { app: AppDetail; port: AppPort }) {
-  const ref: PortRef = { port: port.port, proto: port.proto };
-  const [adding, setAdding] = useState(false);
-  return (
-    <li className="port-row">
-      <span className="mono port-name">{portLabel(port)}</span>
-      <span className={port.listening ? "badge reach reach-ok" : "badge reach reach-muted"}>{port.listening ? "listening" : "not listening"}</span>
-      <span className="muted" title="Which IP versions it accepts connections over">
-        {port.family === "dual" ? "IPv4+IPv6" : port.family === "v4" ? "IPv4" : "IPv6"}
-      </span>
-      <span className="port-tags">
-        <TagPicker appIds={[app.id]} port={ref} />
-      </span>
-      {!adding && (
-        <button className="btn btn-sm" aria-label={`Add access to ${portLabel(port)}`} onClick={() => setAdding(true)}>Add access</button>
-      )}
-      {adding && (
-        <div className="port-form">
-          <AddAccess fixed={{ side: "targets", targets: [{ kind: "app", id: app.id }] }} port={ref} onDone={() => setAdding(false)} />
-        </div>
-      )}
-    </li>
-  );
-}
-
-/** Each network once, with the addresses serving the app on it; an address is up while it is on its
- * interface (or published, on Tor), and belongs to a reservation or to the app's own rows. */
+/** Each network once, with the addresses serving the app on it; an address is up while it is on
+ * its interface (or published, on Tor), and belongs to a reservation or to the app's own rows. */
 function Addresses({ app, networks }: { app: AppDetail; networks: Network[] }) {
   const reservations = useReservations().data ?? [];
   if (app.addresses.length === 0) {
