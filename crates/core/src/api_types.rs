@@ -102,6 +102,22 @@ pub struct StatusResponse {
     #[serde(default)]
     pub unadopted: bool,
     pub counts: Counts,
+    /// The config file the daemon loaded (or would create) (ADR 0050).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub config_path: Option<String>,
+    /// The database in use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub db_path: Option<String>,
+    /// The Unix socket or Windows pipe the API listens on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub socket: Option<String>,
+    /// Whether SocketGuard is registered as a system service (None: could not be told).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub service_installed: Option<bool>,
 }
 
 // ─── Apps ────────────────────────────────────────────────────────────────────

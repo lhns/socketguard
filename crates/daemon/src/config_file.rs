@@ -3,12 +3,15 @@
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
 use std::path::{Path, PathBuf};
 
-/// `SOCKETGUARD_CONFIG`, else `socketguard.json` in the working directory.
+/// `SOCKETGUARD_CONFIG`, else the fixed location of this system (ADR 0050); never the
+/// working directory.
 pub fn config_path() -> PathBuf {
-    std::env::var_os("SOCKETGUARD_CONFIG")
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("socketguard.json"))
+    socketguard_core::paths::config_path()
+}
+
+/// Whether the config file is in the default place (no `SOCKETGUARD_CONFIG`).
+pub fn is_default_location(path: &Path) -> bool {
+    path == socketguard_core::paths::default_config_path()
 }
 
 /// The file's text without a leading UTF-8 BOM, which Windows tools (PowerShell 5.1's

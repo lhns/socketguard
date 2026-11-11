@@ -240,6 +240,10 @@ fn status() {
             groups: 1,
             grants: 3,
         },
+        config_path: None,
+        db_path: None,
+        socket: None,
+        service_installed: None,
     };
     insta::assert_snapshot!("status", render::status(&s));
     s.disabled = true;

@@ -301,7 +301,8 @@ pub struct DaemonConfig {
     /// Socket polling interval in seconds
     pub poll_interval_secs: u64,
 
-    /// Path to SQLite database
+    /// Path to the SQLite database: absolute, or relative to the config file's directory.
+    /// Empty: `socketguard.db` in the default state directory (ADR 0050).
     pub db_path: String,
 
     /// Log level: trace, debug, info, warn, error
@@ -489,8 +490,9 @@ fn default_poll_interval() -> u64 {
     2
 }
 
+/// Empty: the database is in the fixed place (ADR 0050); see `paths::resolve_db_path`.
 fn default_db_path() -> String {
-    "socketguard.db".to_string()
+    String::new()
 }
 
 fn default_log_level() -> String {
@@ -567,7 +569,7 @@ mod tests {
         assert_eq!(config.backends.len(), 1);
         assert_eq!(config.backends[0].backend.backend_type(), BackendType::Ula);
         assert_eq!(config.poll_interval_secs, 2);
-        assert_eq!(config.db_path, "socketguard.db");
+        assert_eq!(config.db_path, "");
         assert_eq!(config.log_level, "info");
         assert!(!config.backends[0].backend.interface().unwrap().is_empty());
     }

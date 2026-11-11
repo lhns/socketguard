@@ -418,6 +418,7 @@ async fn status(State(state): State<Shared>) -> ApiResult<Json<StatusResponse>> 
     let apps = engine.list_apps(&state, false).await?;
     let pending_apps = apps.iter().filter(|a| !a.reviewed).count() as u32;
     let addresses = state.db.list_addresses().await?.len() as u32;
+    let config = state.config.read().await;
     Ok(Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         networks: engine.networks_described(),
@@ -432,6 +433,17 @@ async fn status(State(state): State<Shared>) -> ApiResult<Json<StatusResponse>> 
             groups: engine.list_groups(&state).await?.len() as u32,
             grants: state.db.list_grants().await?.len() as u32,
         },
+        config_path: state
+            .config_path
+            .as_ref()
+            .map(|p| p.display().to_string()),
+        db_path: Some(config.db_path.clone()),
+        socket: Some(if cfg!(windows) {
+            config.api_pipe.clone()
+        } else {
+            config.api_socket.clone()
+        }),
+        service_installed: crate::service::installed_hint(),
     }))
 }
 
