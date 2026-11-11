@@ -333,6 +333,33 @@ async fn reconcile_is_idempotent() {
 }
 
 #[tokio::test]
+async fn an_unchanged_pass_writes_no_sightings() {
+    let h = Harness::new(
+        vec![local_net(), ygg_net()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    let before = h.state.db.list_apps().await.unwrap();
+    h.reconcile().await;
+    h.reconcile().await;
+    let after = h.state.db.list_apps().await.unwrap();
+    assert_eq!(after[0].last_seen, before[0].last_seen);
+    assert_eq!(after[0].ports[0].last_seen, before[0].ports[0].last_seen);
+
+    // A change is written: a port that stops listening, and one that appears.
+    h.set_sockets(vec![listener("nginx", 443, Protocol::Tcp)]);
+    h.reconcile().await;
+    let changed = h.state.db.list_apps().await.unwrap();
+    let ports: Vec<(u16, bool)> = changed[0]
+        .ports
+        .iter()
+        .map(|p| (p.port, p.listening))
+        .collect();
+    assert_eq!(ports, [(80, false), (443, true)]);
+}
+
+#[tokio::test]
 async fn a_vanished_firewall_state_is_reapplied_on_the_next_pass() {
     let h = Harness::new(
         vec![local_net(), ygg_net()],

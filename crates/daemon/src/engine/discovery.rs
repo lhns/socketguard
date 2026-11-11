@@ -15,7 +15,9 @@ use std::net::IpAddr;
 use tracing::info;
 
 /// How stale the last sighting of an unchanged app may get before a poll writes it again.
-const SIGHTING_REFRESH: chrono::Duration = chrono::Duration::seconds(60);
+/// A commit can take over a second on a protected database file, so an idle host writes
+/// nothing for minutes.
+const SIGHTING_REFRESH: chrono::Duration = chrono::Duration::minutes(5);
 
 impl Engine {
     /// Steps 1 of the reconcile: live sockets -> apps and their ports. Returns whether
