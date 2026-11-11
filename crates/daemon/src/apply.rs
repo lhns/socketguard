@@ -988,7 +988,7 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
     for g in &p.create_port_groups {
         let apps: Vec<String> = g.apps.iter().map(|a| a.id.clone()).collect();
         engine
-            .create_port_group(state, &g.label, &g.ports, &apps, true)
+            .create_port_group(state, Some(&g.label), &g.ports, &apps, true)
             .await?;
     }
     for (want, was) in &p.update_port_groups {

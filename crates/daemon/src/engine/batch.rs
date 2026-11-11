@@ -87,7 +87,16 @@ impl Plan {
     }
 
     fn grant_reach(&self, grant: &Grant) -> Vec<GrantReach> {
-        Engine::reach_of(grant, &self.cat, &self.networks, &self.protected)
+        let c = &self.cat;
+        super::queries::ReachCtx::new(
+            &c.apps,
+            &c.peers,
+            &c.groups,
+            &c.tags,
+            &c.port_groups,
+            &c.reservations,
+        )
+        .reach_of(grant, &self.networks, &self.protected)
     }
 
     /// A scope whose port group may be a `ref` of an earlier operation.
@@ -452,7 +461,7 @@ impl Engine {
                 let (group, gp) = self.plan_create_group(
                     &mut plan.cat,
                     new_id(),
-                    label,
+                    label.as_deref(),
                     ports,
                     apps,
                     *confirm_open,
@@ -671,14 +680,9 @@ impl Engine {
                     .ok_or_else(|| EngineError::NotFound(format!("tag {tag_id}")))?;
                 let is_new = !tag.members.contains(&member);
                 let tag_label = tag.label.clone();
-                // What the tag's grants let in on this app.
-                let grants: Vec<Grant> = plan
-                    .cat
-                    .grants
-                    .iter()
-                    .filter(|g| matches!(&g.target, Target::Tag(t) if *t == tag_id))
-                    .cloned()
-                    .collect();
+                // What the tag's grants, and those of a reservation that binds the tag, let in
+                // on this app.
+                let grants = plan.cat.grants_through_tag(&tag_id);
                 let opens = grants.iter().any(|g| g.subject == Subject::Anyone);
                 if is_new && opens && !confirm_open {
                     return Err(EngineError::ConfirmationRequired);

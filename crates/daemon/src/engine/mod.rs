@@ -149,6 +149,13 @@ pub struct Engine {
     alloc_failing: Mutex<HashSet<String>>,
     /// Held while addresses are created, so two mutations never create the same one.
     alloc_lock: tokio::sync::Mutex<()>,
+    /// Held for a whole reconcile pass, and by `disable` and `enable`: a pass never puts
+    /// addresses back while they are being taken away. Passes run under the engine's read
+    /// lock, so queries are not held up by them.
+    poll_lock: tokio::sync::Mutex<()>,
+    /// Held while a pass reads the known apps and writes its sightings, and while an app is
+    /// forgotten: a pass never writes ports of an app that was just deleted.
+    apps_lock: tokio::sync::Mutex<()>,
     /// Owned addresses whose removal failed (log once per outage).
     removal_failing: Mutex<HashSet<Ipv6Addr>>,
     /// The ruleset last applied successfully, to skip no-op applies.
@@ -262,6 +269,8 @@ impl Engine {
             unavailable_ifaces: Mutex::default(),
             alloc_failing: Mutex::default(),
             alloc_lock: tokio::sync::Mutex::default(),
+            poll_lock: tokio::sync::Mutex::default(),
+            apps_lock: tokio::sync::Mutex::default(),
             removal_failing: Mutex::default(),
             last_applied: Mutex::default(),
             passes_since_apply: AtomicU32::new(0),
@@ -446,6 +455,7 @@ impl Engine {
     /// Sets the `disabled` latch first, so no pass puts them back; [`Engine::enable`]
     /// clears it.
     pub async fn disable(&self, state: &AppState) -> anyhow::Result<()> {
+        let _pass = self.poll_lock.lock().await;
         state.db.set_disabled(true).await?;
         let _lock = state.firewall_lock.lock().await;
         *self.last_applied.lock().unwrap() = None;
@@ -473,6 +483,7 @@ impl Engine {
 
     /// Clear the `disabled` latch and put the rules and addresses back.
     pub async fn enable(&self, state: &AppState) -> anyhow::Result<()> {
+        let _pass = self.poll_lock.lock().await;
         state.db.set_disabled(false).await?;
         // Adopting: the next apply replaces whatever ruleset is installed.
         state.db.set_unadopted(false).await?;
@@ -484,7 +495,8 @@ impl Engine {
 
     /// Reconcile: detect sockets, upsert apps and ports, create the addresses that grants
     /// call for, apply the ruleset, put the addresses on the interfaces.
-    pub async fn reconcile(&mut self, state: &AppState) -> anyhow::Result<()> {
+    pub async fn reconcile(&self, state: &AppState) -> anyhow::Result<()> {
+        let _pass = self.poll_lock.lock().await;
         let process_filter = state.config.read().await.process_filter.clone();
 
         self.rehome_prefix_changes(state).await;
@@ -555,7 +567,7 @@ pub async fn run_loop(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>)
         };
 
         {
-            let mut engine = state.engine.write().await;
+            let engine = state.engine.read().await;
             if let Err(e) = engine.reconcile(&state).await {
                 error!("Reconciliation error: {e}");
             }

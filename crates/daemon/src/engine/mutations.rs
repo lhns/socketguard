@@ -47,7 +47,10 @@ impl Engine {
             .collect();
         self.retire_addresses(state, &addresses).await?;
         self.remove_app_locators(state, &addresses).await;
-        state.db.delete_app(id).await?;
+        {
+            let _apps = self.apps_lock.lock().await;
+            state.db.delete_app(id).await?;
+        }
         let applied = self.apply_and_ensure(state).await;
         self.sweep_owned(state).await;
         let activity = NewActivity::new(
@@ -665,6 +668,30 @@ impl Catalog {
     /// Tags and, standing in for tags, reservations: what `covered_ports` expands.
     pub fn targets(&self) -> Vec<Tag> {
         socketguard_core::grant_targets(&self.tags, &self.reservations)
+    }
+
+    /// The grants that cover the members of a tag: those on the tag itself and those on a
+    /// reservation that binds the tag (a new member becomes reachable through both).
+    pub fn grants_through_tag(&self, tag_id: &str) -> Vec<Grant> {
+        let bound: HashSet<&str> = self
+            .reservations
+            .iter()
+            .filter(|r| {
+                r.bindings.iter().any(|b| {
+                    matches!(&b.target, socketguard_core::BindingTarget::Tag { tag_id: t } if t == tag_id)
+                })
+            })
+            .map(|r| r.id.as_str())
+            .collect();
+        self.grants
+            .iter()
+            .filter(|g| match &g.target {
+                Target::Tag(t) => t == tag_id,
+                Target::Reservation(r) => bound.contains(r.as_str()),
+                Target::App(_) => false,
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn reservation(&self, id: &str) -> Option<&Reservation> {

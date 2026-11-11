@@ -2,6 +2,7 @@
 //! one (ADR 0045).
 
 use super::mutations::Catalog;
+use super::reservations::AddressIndex;
 use super::*;
 use crate::api::DaemonEvent;
 use crate::networks::tor_client_key;
@@ -76,7 +77,7 @@ impl Engine {
             &PortRangeSet::new(),
         );
         let (views, _) = self.address_views(state).await?;
-        let addresses = Self::addresses_of_app(app, &views, &cat.reservations, &cat.tags);
+        let addresses = AddressIndex::new(&views, &cat.reservations, &cat.tags).of_app(&app.id);
         let mut tor: Vec<TorShare> = Vec::new();
         for address in &addresses {
             let Locator::Onion { hostname } = &address.locator else {

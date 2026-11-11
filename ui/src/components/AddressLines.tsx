@@ -36,21 +36,30 @@ interface Props {
 }
 
 /** One line per address: network · locator (Copy) · up or closed; ports it leaves out and Tor
- * notes underneath. */
+ * notes underneath. A network that takes no grants (Local, on loopback) is "this machine only":
+ * muted, neither up nor closed, nothing to reserve. */
 export default function AddressLines({ addresses, networks, empty, onReserve }: Props) {
   if (addresses.length === 0) return empty ? <p className="muted address-empty">{empty}</p> : null;
   return (
     <ul className="plain-list address-list">
       {addresses.map((a) => {
         const net = networks.find((n) => n.id === a.network_id);
+        const local = net?.grants_apply === false;
         return (
           <li key={a.id} className="address-item">
-            <div className="address-row">
+            <div className={`address-row${local ? " muted" : ""}`}>
               <span className="address-name">{net?.name ?? a.network_id}</span>
               <span className="muted" aria-hidden="true">·</span>
               <Locator address={a} />
-              <span className={`badge reach ${a.up ? "reach-ok" : "reach-muted"}`}>{a.up ? "up" : "closed"}</span>
-              {onReserve && !a.reservation_id && (
+              {local ? (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span>this machine only</span>
+                </>
+              ) : (
+                <span className={`badge reach ${a.up ? "reach-ok" : "reach-muted"}`}>{a.up ? "up" : "closed"}</span>
+              )}
+              {onReserve && !local && !a.reservation_id && (
                 <button type="button" className="btn btn-sm address-reserve" aria-label={`Reserve ${net?.name ?? ""} address`} onClick={() => onReserve(a)}>
                   Reserve…
                 </button>

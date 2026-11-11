@@ -206,7 +206,7 @@ function BoundCard({ reservation: r, row, conflict, highlight }: { reservation: 
   );
 }
 
-/** "Add ports": a search over the rows of every app and the tags. */
+/** "Add ports": a search over the tags and the rows of every app. */
 function AddPorts({ reservation: r, open, onOpenChange, onPick }: {
   reservation: ReservationView;
   open: boolean;
@@ -225,6 +225,19 @@ function AddPorts({ reservation: r, open, onOpenChange, onPick }: {
     const boundTo = (appId: string, scope: Scope) =>
       all.find((x) => bindsRow(x.bindings, tags, appId, scope));
     const out: PickerItem[] = [];
+    for (const t of tags) {
+      const id = `tag:${t.id}`;
+      const holder = all.find((x) => x.bindings.some((b) => b.target.kind === "tag" && b.target.tag_id === t.id));
+      targets.current.set(id, { target: { kind: "tag", tag_id: t.id }, what: `tag ${t.label}` });
+      out.push({
+        id,
+        label: `tag ${t.label}`,
+        section: "Tags",
+        state: holder?.id === r.id ? "on" : "off",
+        disabled: holder !== undefined,
+        hint: holder === undefined ? `${t.members.length} ${t.members.length === 1 ? "app" : "apps"}` : holder.id === r.id ? "bound here" : `in ${holder.label}`,
+      });
+    }
     const ordered = [...apps.filter((a) => !a.system), ...apps.filter((a) => a.system)];
     for (const a of ordered) {
       const scopes = [
@@ -245,19 +258,6 @@ function AddPorts({ reservation: r, open, onOpenChange, onPick }: {
           hint: holder === undefined ? undefined : holder.id === r.id ? "bound here" : `in ${holder.label}`,
         });
       }
-    }
-    for (const t of tags) {
-      const id = `tag:${t.id}`;
-      const holder = all.find((x) => x.bindings.some((b) => b.target.kind === "tag" && b.target.tag_id === t.id));
-      targets.current.set(id, { target: { kind: "tag", tag_id: t.id }, what: `tag ${t.label}` });
-      out.push({
-        id,
-        label: `tag ${t.label}`,
-        section: "Tags",
-        state: holder?.id === r.id ? "on" : "off",
-        disabled: holder !== undefined,
-        hint: holder === undefined ? `${t.members.length} ${t.members.length === 1 ? "app" : "apps"}` : holder.id === r.id ? "bound here" : `in ${holder.label}`,
-      });
     }
     return out;
   }, [apps, tags, groups, all, r.id]);

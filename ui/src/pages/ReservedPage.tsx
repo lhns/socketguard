@@ -93,12 +93,19 @@ export default function ReservedPage({ focus = { seq: 0 } }: { focus?: FocusMess
           <span className="muted">none yet</span>
         ) : (
           <ul className="plain-list address-brief">
-            {row.r.addresses.map((a) => (
-              <li key={a.id}>
-                {networks.find((n) => n.id === a.network_id)?.name ?? a.network_id}: <span className="mono">{locatorText(a)}</span>{" "}
-                <span className={`badge reach ${a.up ? "reach-ok" : "reach-muted"}`}>{a.up ? "up" : "closed"}</span>
-              </li>
-            ))}
+            {row.r.addresses.map((a) => {
+              const net = networks.find((n) => n.id === a.network_id);
+              return (
+                <li key={a.id}>
+                  {net?.name ?? a.network_id}: <span className="mono">{locatorText(a)}</span>{" "}
+                  {net?.grants_apply === false ? (
+                    <span className="muted">this machine only</span>
+                  ) : (
+                    <span className={`badge reach ${a.up ? "reach-ok" : "reach-muted"}`}>{a.up ? "up" : "closed"}</span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         ),
     },

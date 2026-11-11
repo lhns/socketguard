@@ -184,11 +184,18 @@ impl PortRangeSet {
     }
 
     pub fn from_ranges(ranges: impl IntoIterator<Item = PortRange>) -> Self {
-        let mut s = Self::new();
+        // Normalized once, not after every range: a set of n ports is built in O(n log n).
+        let (mut tcp, mut udp) = (Vec::new(), Vec::new());
         for r in ranges {
-            s.insert(r.start, r.end, r.proto);
+            match r.proto {
+                Protocol::Tcp => tcp.push((r.start, r.end)),
+                Protocol::Udp => udp.push((r.start, r.end)),
+            }
         }
-        s
+        PortRangeSet {
+            tcp: normalize(tcp),
+            udp: normalize(udp),
+        }
     }
 
     pub fn from_ports(ports: impl IntoIterator<Item = PortRef>) -> Self {

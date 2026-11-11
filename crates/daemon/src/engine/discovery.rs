@@ -3,7 +3,7 @@
 use super::*;
 use crate::api::DaemonEvent;
 use crate::networks::{self};
-use crate::state::NewActivity;
+use crate::state::{NewActivity, Sighting, Touch};
 use crate::AppState;
 use chrono::Utc;
 use socketguard_core::config::ProcessFilter;
@@ -13,6 +13,14 @@ use socketguard_core::{
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
 use tracing::info;
+
+/// An app, its new process details (if it was seen listening) and the ports it listens on.
+type PendingSighting<'a> = (&'a AppId, Option<Touch<'a>>, Vec<(PortRef, AddrFamily)>);
+
+/// How stale the last sighting of an unchanged app may get before a poll writes it again.
+/// A commit can take over a second on a protected database file, so an idle host writes
+/// nothing for minutes.
+const SIGHTING_REFRESH: chrono::Duration = chrono::Duration::minutes(5);
 
 impl Engine {
     /// Steps 1 of the reconcile: live sockets -> apps and their ports. Returns whether
@@ -74,6 +82,7 @@ impl Engine {
         *self.binds.lock().unwrap() = binds;
 
         let db = &state.db;
+        let _apps = self.apps_lock.lock().await;
         let now = Utc::now();
         let known: HashMap<AppId, App> = db
             .list_apps()
@@ -82,10 +91,12 @@ impl Engine {
             .map(|a| (a.id.clone(), a))
             .collect();
         let mut changed = false;
+        // What goes to the database, in one transaction; nothing when nothing changed.
+        let mut writes: Vec<PendingSighting<'_>> = Vec::new();
 
         for (id, l) in &live {
             let ports: Vec<(PortRef, AddrFamily)> = l.ports.iter().map(|(p, f)| (*p, *f)).collect();
-            if !known.contains_key(id) {
+            let Some(app) = known.get(id) else {
                 info!("New app detected: {} ({id})", l.name);
                 let app = App {
                     id: id.clone(),
@@ -114,45 +125,69 @@ impl Engine {
                 .await;
                 self.emit(state, DaemonEvent::AppDiscovered(id.clone()));
                 changed = true;
-            } else {
-                db.touch_app(id, &l.process_name, l.exe_path.as_deref(), l.system, now)
-                    .await?;
-            }
-            let was_listening: BTreeSet<PortRef> = known
-                .get(id)
-                .map(|a| {
-                    a.ports
-                        .iter()
-                        .filter(|p| p.listening)
-                        .map(AppPort::port_ref)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let was_family: BTreeMap<PortRef, AddrFamily> = known
-                .get(id)
-                .map(|a| {
-                    a.ports
-                        .iter()
-                        .filter(|p| p.listening)
-                        .map(|p| (p.port_ref(), p.family))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let new_ports = db.sync_app_ports(id, &ports, now).await?;
-            if !new_ports.is_empty()
+                writes.push((id, None, ports));
+                continue;
+            };
+            let was_listening: BTreeSet<PortRef> = app
+                .ports
+                .iter()
+                .filter(|p| p.listening)
+                .map(AppPort::port_ref)
+                .collect();
+            let was_family: BTreeMap<PortRef, AddrFamily> = app
+                .ports
+                .iter()
+                .filter(|p| p.listening)
+                .map(|p| (p.port_ref(), p.family))
+                .collect();
+            let is_new_port = |p: &PortRef| !app.ports.iter().any(|k| k.port_ref() == *p);
+            let ports_changed = ports.iter().any(|(p, _)| is_new_port(p))
                 || was_listening != l.ports.keys().copied().collect::<BTreeSet<_>>()
-                || was_family != l.ports
-            {
-                changed = true;
+                || was_family != l.ports;
+            changed |= ports_changed;
+            // A sighting that changes nothing is written only now and then, to keep
+            // `last_seen` roughly current without a write on every poll.
+            let fresh = |t| now - t < SIGHTING_REFRESH;
+            let same_app = app.process_name == l.process_name
+                && app.exe_path == l.exe_path
+                && app.system == l.system
+                && fresh(app.last_seen);
+            let ports_fresh = app
+                .ports
+                .iter()
+                .filter(|p| p.listening)
+                .all(|p| fresh(p.last_seen));
+            if same_app && !ports_changed && ports_fresh {
+                continue;
             }
+            writes.push((
+                id,
+                Some(Touch {
+                    process_name: &l.process_name,
+                    exe_path: l.exe_path.as_deref(),
+                    system: l.system,
+                }),
+                ports,
+            ));
         }
 
         // Apps that stopped listening keep their records, addresses and grants.
         for (id, app) in &known {
             if !live.contains_key(id) && app.ports.iter().any(|p| p.listening) {
-                db.sync_app_ports(id, &[], now).await?;
+                writes.push((id, None, Vec::new()));
                 changed = true;
             }
+        }
+        let sightings: Vec<Sighting<'_>> = writes
+            .iter()
+            .map(|(id, touch, ports)| Sighting {
+                app_id: id,
+                touch: *touch,
+                ports,
+            })
+            .collect();
+        if !sightings.is_empty() {
+            db.record_sightings(&sightings, now).await?;
         }
         Ok(changed)
     }

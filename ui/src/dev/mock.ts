@@ -5,7 +5,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
   Address, App, AppDetail, BatchChange, ChangeOp, EffectiveAccess, GrantReach, GrantView, Network, NetworkSetup, Peer, PeerGroup, PortRange, ReservationView, Scope, PortGroup, Subject, Tag,
 } from "../api";
-import { ALL_SCOPE, sameScope } from "../lib";
+import { ALL_SCOPE, rangeLabel, sameScope } from "../lib";
 
 const T0 = "2026-01-01T00:00:00Z";
 const networks: Network[] = [
@@ -293,11 +293,12 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
       case "create_port_group": {
         const ports = op.ports as PortRange[];
         if (ports.length === 0) throw { code: "invalid", message: `operation ${out.length}: a port group needs at least one port` };
-        if (portGroups.some((x) => x.label === op.label)) throw { code: "conflict", message: `operation ${out.length}: port group ${op.label} already exists` };
-        const sg: PortGroup = { id: uid("sg"), label: op.label as string, ports, apps: [], created_at: T0 };
+        const label = (op.label as string | undefined)?.trim() || ports.map(rangeLabel).join(", ");
+        if (portGroups.some((x) => x.label === label)) throw { code: "conflict", message: `operation ${out.length}: port group ${label} already exists` };
+        const sg: PortGroup = { id: uid("sg"), label, ports, apps: [], created_at: T0 };
         if (op.ref) refs[op.ref as string] = sg.id;
         portGroups = [...portGroups, sg];
-        out.push({ kind: "create", item: "port_group", name: sg.label, detail: ports.map((r) => (r.start === r.end ? `${r.start}/${r.proto}` : `${r.start}-${r.end}/${r.proto}`)).join(", "), id: sg.id, opens_to_anyone: false });
+        out.push({ kind: "create", item: "port_group", name: sg.label, detail: ports.map(rangeLabel).join(", "), id: sg.id, opens_to_anyone: false });
         for (const appId of (op.apps as string[] | undefined) ?? []) {
           portGroups = portGroups.map((g) => (g.id === sg.id ? { ...g, apps: [...g.apps, appId] } : g));
           widenOf(appId, sg, !!op.confirm_open, "attach");
@@ -353,6 +354,7 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
         const r: ReservationView = { id: uid("r"), label, created_at: T0, bindings: [], addresses: [], conflicts: [], grants: [] };
         if (op.ref) refs[op.ref as string] = r.id;
         reservations = [...reservations, r];
+        bindings = [...bindings, ...((op.bindings as ReservationView["bindings"][number]["target"][]) ?? []).map((target) => ({ id: uid("b"), reservation_id: r.id, target }))];
         out.push({ kind: "create", item: "reservation", name: label, id: r.id, opens_to_anyone: false });
         break;
       }
@@ -485,7 +487,7 @@ export function installMock() {
         case "list_port_groups": return portGroups;
         case "get_port_group": return portGroups.find((g) => g.id === a.id);
         case "create_port_group": {
-          const g: PortGroup = { id: uid("sg"), label: a.req.label, ports: a.req.ports, apps: a.req.apps, created_at: T0 };
+          const g: PortGroup = { id: uid("sg"), label: a.req.label ?? "", ports: a.req.ports, apps: a.req.apps, created_at: T0 };
           portGroups = [...portGroups, g];
           return done(g);
         }

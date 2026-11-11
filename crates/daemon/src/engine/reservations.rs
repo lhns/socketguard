@@ -13,8 +13,8 @@ use crate::AppState;
 use chrono::Utc;
 use socketguard_core::api_types::{ChangeOp, ChangesRequest, ChangesResponse};
 use socketguard_core::{
-    grant_targets, new_id, reservation_members, Address, App, Binding, BindingTarget, Grant, Model,
-    Reservation, ReservationView, Row, Scope, Subject, Target,
+    new_id, reservation_members, Address, Binding, BindingTarget, Grant, Model, Reservation,
+    ReservationView, Row, Scope, Subject, Target,
 };
 use std::collections::HashSet;
 
@@ -572,7 +572,9 @@ impl Engine {
             .iter()
             .filter(|n| n.kind == socketguard_core::NetworkKind::Tor)
         {
-            for ea in networks::enforcement_for(net, &snap, &secrets, &binds).addresses {
+            for ea in
+                networks::enforcement_for(net, &snap, &model, &info, &secrets, &binds).addresses
+            {
                 plans.insert(ea.id.clone(), networks::tor::plan(&ea));
             }
         }
@@ -604,35 +606,6 @@ impl Engine {
         Ok((out, snap))
     }
 
-    /// The addresses that serve the rows of `app`: its automatic ones and the reservations
-    /// it has a row bound in.
-    pub(super) fn addresses_of_app(
-        app: &App,
-        views: &[Address],
-        reservations: &[Reservation],
-        tags: &[socketguard_core::Tag],
-    ) -> Vec<Address> {
-        let bound: HashSet<&str> = reservations
-            .iter()
-            .filter(|r| {
-                reservation_members(r, tags)
-                    .iter()
-                    .any(|m| m.app_id == app.id)
-            })
-            .map(|r| r.id.as_str())
-            .collect();
-        views
-            .iter()
-            .filter(|a| {
-                a.app_id.as_deref() == Some(app.id.as_str())
-                    || a.reservation_id
-                        .as_deref()
-                        .is_some_and(|r| bound.contains(r))
-            })
-            .cloned()
-            .collect()
-    }
-
     pub async fn list_addresses(&self, state: &AppState) -> Result<Vec<Address>, EngineError> {
         Ok(self.address_views(state).await?.0)
     }
@@ -643,19 +616,16 @@ impl Engine {
     ) -> Result<Vec<ReservationView>, EngineError> {
         let (views, snap) = self.address_views(state).await?;
         let model = Model::new(snap.world());
-        let cat = Catalog::load(state).await?;
-        let targets = grant_targets(&snap.tags, &snap.reservations);
-        let _ = targets;
-        let networks = self.networks();
-        let protected = self.protected_interfaces(state).await?;
+        let ctx = Self::reach_ctx(&snap);
+        let protected: Vec<String> = snap.v4_subnets.keys().cloned().collect();
         let mut out = Vec::new();
         for res in &snap.reservations {
-            let grants = cat
+            let grants = snap
                 .grants
                 .iter()
                 .filter(|g| g.target == Target::Reservation(res.id.clone()))
                 .map(|g| socketguard_core::GrantView {
-                    reach: Self::reach_of(g, &cat, &networks, &protected),
+                    reach: ctx.reach_of(g, &snap.networks, &protected),
                     grant: g.clone(),
                 })
                 .collect();
@@ -687,7 +657,7 @@ impl Engine {
 
     // ─── REST operations: one-operation batches ──────────────────────────────
 
-    async fn run_one(
+    pub(super) async fn run_one(
         &self,
         state: &AppState,
         op: ChangeOp,
@@ -833,5 +803,43 @@ impl Engine {
         )
         .await?;
         Ok(())
+    }
+}
+
+/// The addresses that serve the rows of an app: its automatic ones and those of the
+/// reservations it has a row bound in.
+pub(super) struct AddressIndex<'a> {
+    views: &'a [Address],
+    /// The reservations each app has a row bound in.
+    bound: HashMap<String, HashSet<&'a str>>,
+}
+
+impl<'a> AddressIndex<'a> {
+    pub(super) fn new(
+        views: &'a [Address],
+        reservations: &'a [Reservation],
+        tags: &[socketguard_core::Tag],
+    ) -> Self {
+        let mut bound: HashMap<String, HashSet<&str>> = HashMap::new();
+        for r in reservations {
+            for m in reservation_members(r, tags) {
+                bound.entry(m.app_id).or_default().insert(r.id.as_str());
+            }
+        }
+        Self { views, bound }
+    }
+
+    pub(super) fn of_app(&self, app_id: &str) -> Vec<Address> {
+        let bound = self.bound.get(app_id);
+        self.views
+            .iter()
+            .filter(|a| {
+                a.app_id.as_deref() == Some(app_id)
+                    || a.reservation_id
+                        .as_deref()
+                        .is_some_and(|r| bound.is_some_and(|b| b.contains(r)))
+            })
+            .cloned()
+            .collect()
     }
 }

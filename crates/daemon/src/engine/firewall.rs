@@ -20,26 +20,44 @@ impl Engine {
     /// Gather the producer's input from the DB and the active networks.
     pub(super) async fn gather_snapshot(&self, state: &AppState) -> anyhow::Result<Snapshot> {
         let db = &state.db;
-        let protect_host = db.protect_host().await?;
+        // Independent reads, so they run side by side on the pool.
+        let (
+            protect_host,
+            apps,
+            addresses,
+            reservations,
+            peers,
+            groups,
+            grants,
+            tags,
+            port_groups,
+            owned,
+        ) = tokio::try_join!(
+            db.protect_host(),
+            db.list_apps(),
+            db.list_addresses(),
+            db.list_reservations(),
+            db.list_peers(),
+            db.list_groups(),
+            db.list_grants(),
+            db.list_tags(),
+            db.list_port_groups(),
+            db.list_owned_addresses(),
+        )?;
         Ok(Snapshot {
-            apps: db.list_apps().await?,
-            addresses: db.list_addresses().await?,
-            reservations: db.list_reservations().await?,
+            apps,
+            addresses,
+            reservations,
             networks: self.networks(),
-            peers: db.list_peers().await?,
-            groups: db.list_groups().await?,
-            grants: db.list_grants().await?,
-            tags: db.list_tags().await?,
-            port_groups: db.list_port_groups().await?,
+            peers,
+            groups,
+            grants,
+            tags,
+            port_groups,
             v4_subnets: self.protected_v4_subnets(&protect_host),
             protect_host,
             // Owned addresses stay denied until they are really off their interface.
-            owned: db
-                .list_owned_addresses()
-                .await?
-                .into_iter()
-                .map(|o| IpAddr::V6(o.addr))
-                .collect(),
+            owned: owned.into_iter().map(|o| IpAddr::V6(o.addr)).collect(),
         })
     }
 
@@ -96,12 +114,12 @@ impl Engine {
         &self,
         state: &AppState,
         only_if_changed: bool,
+        snapshot: &Snapshot,
     ) -> anyhow::Result<()> {
         if state.db.disabled().await || state.db.unadopted().await? {
             return Ok(());
         }
-        let snapshot = self.gather_snapshot(state).await?;
-        let (desired, warnings) = ruleset::build_with_warnings(&snapshot);
+        let (desired, warnings) = ruleset::build_with_warnings(snapshot);
 
         let unchanged = only_if_changed
             && !self.apply_failed.load(Ordering::Relaxed)
@@ -144,7 +162,7 @@ impl Engine {
                     desired.scopes.len(),
                     desired.rules.len()
                 );
-                let keys = counter_keys(&snapshot, &desired);
+                let keys = counter_keys(snapshot, &desired);
                 // The table was replaced, so the platform's counters restarted at zero;
                 // series of rules and scopes that are gone are dropped.
                 self.metrics.counters_reset();
@@ -176,15 +194,17 @@ impl Engine {
     /// apps, addresses, peers, groups, grants or networks.
     pub async fn apply_firewall(&self, state: &AppState) -> anyhow::Result<()> {
         let _lock = state.firewall_lock.lock().await;
-        let result = self.apply_locked(state, false).await;
-        self.enforce_networks(state).await;
+        let snapshot = self.gather_snapshot(state).await?;
+        let result = self.apply_locked(state, false, &snapshot).await;
+        self.enforce_networks(state, &snapshot).await;
         result
     }
 
     pub(super) async fn apply_firewall_if_changed(&self, state: &AppState) -> anyhow::Result<()> {
         let _lock = state.firewall_lock.lock().await;
-        let result = self.apply_locked(state, true).await;
-        self.enforce_networks(state).await;
+        let snapshot = self.gather_snapshot(state).await?;
+        let result = self.apply_locked(state, true, &snapshot).await;
+        self.enforce_networks(state, &snapshot).await;
         result
     }
 

@@ -930,14 +930,14 @@ async fn port_groups(c: &Ctx, cmd: PortGroupsCmd) -> Result<()> {
                 app_ids.push(c.app(a).await?.id);
             }
             let mut req = NewPortGroup {
-                label: label.clone(),
+                label,
                 ports,
                 apps: app_ids,
                 confirm_open: yes,
             };
             let saved = match c.client.create_port_group(&req).await {
                 Err(e) if e.is_confirmation_required() => {
-                    confirm_group_open(&label)?;
+                    confirm_group_open(req.label.as_deref().unwrap_or("the new port group"))?;
                     req.confirm_open = true;
                     c.client.create_port_group(&req).await?
                 }

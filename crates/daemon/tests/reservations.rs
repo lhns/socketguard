@@ -44,7 +44,7 @@ impl Rig {
     }
 
     async fn reconcile(&self) {
-        let mut engine = self.d.state.engine.write().await;
+        let engine = self.d.state.engine.read().await;
         engine.reconcile(&self.d.state).await.unwrap();
     }
 
@@ -1009,4 +1009,144 @@ async fn reservations_with_bindings_and_grants_export_and_apply() {
     );
     let (_, again) = r.get("/api/export").await;
     assert_eq!(again["reservations"], doc["reservations"]);
+}
+
+// ─── Joining a tag or a port group that a reservation covers is a change of reach ───
+
+/// Tag `web` with sshd's All ports, bound to a reservation that has a grant to `subject`;
+/// nginx is the app that will join.
+async fn bound_tag(r: &Rig, subject: Value) -> (String, String, String) {
+    let (ssh, ng) = (r.app_id("sshd").await, r.app_id("nginx").await);
+    let (s, tag) = r
+        .post(
+            "/api/tags",
+            json!({"label": "web", "members": [{"app_id": ssh, "scope": all()}]}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{tag}");
+    let res = r
+        .create_reservation("pub", json!([{"kind": "tag", "tag_id": id(&tag)}]))
+        .await;
+    r.grant(res_target(&id(&res)), all(), subject).await;
+    (id(&tag), ng, id(&res))
+}
+
+#[tokio::test]
+async fn joining_a_tag_bound_to_a_reservation_with_an_anyone_grant_needs_confirmation() {
+    let r = Rig::new(two_apps()).await;
+    let (tag, ng, _) = bound_tag(&r, anyone()).await;
+    let member = |confirm: bool| json!({"app_id": ng, "scope": all(), "confirm_open": confirm});
+
+    let (s, b) = r
+        .post(&format!("/api/tags/{tag}/members"), member(false))
+        .await;
+    assert_eq!(
+        (s, code(&b)),
+        (StatusCode::CONFLICT, "confirmation_required")
+    );
+    let op = |confirm: bool, dry: bool| {
+        json!({"dry_run": dry, "ops": [
+            {"op": "add_tag_member", "tag_id": tag, "app_id": ng, "scope": all(), "confirm_open": confirm}
+        ]})
+    };
+    let (s, b) = r.post("/api/changes", op(false, true)).await;
+    assert_eq!(
+        (s, code(&b)),
+        (StatusCode::CONFLICT, "confirmation_required")
+    );
+
+    let (s, b) = r.post("/api/changes", op(true, true)).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["changes_reach"], true, "{b}");
+    let change = &b["changes"][0];
+    assert_eq!(change["opens_to_anyone"], true);
+    assert!(!change["reach"].as_array().unwrap().is_empty(), "{b}");
+
+    let (s, _) = r
+        .post(&format!("/api/tags/{tag}/members"), member(true))
+        .await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn joining_a_tag_bound_to_a_reservation_with_a_peer_grant_lists_the_reach() {
+    let r = Rig::new(two_apps()).await;
+    let alice = r.peer("alice").await;
+    let (tag, ng, _) = bound_tag(&r, json!({"kind": "peer", "id": alice})).await;
+    let (s, b) = r
+        .post(
+            "/api/changes",
+            json!({"dry_run": true, "ops": [
+                {"op": "add_tag_member", "tag_id": tag, "app_id": ng, "scope": all()}
+            ]}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["changes_reach"], true, "{b}");
+    assert_eq!(b["changes"][0]["opens_to_anyone"], false);
+    assert!(
+        !b["changes"][0]["reach"].as_array().unwrap().is_empty(),
+        "{b}"
+    );
+    // No confirmation is needed for a named peer.
+    let (s, _) = r
+        .post(&format!("/api/tags/{tag}/members"), json!({"app_id": ng}))
+        .await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn attaching_or_growing_a_port_group_on_a_bound_row_is_a_change_of_reach() {
+    let r = Rig::new(two_apps()).await;
+    let ssh = r.app_id("sshd").await;
+    let (s, g) = r
+        .post(
+            "/api/port-groups",
+            json!({"label": "extra", "ports": [{"start": 2200, "end": 2210, "proto": "tcp"}]}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{g}");
+    let gid = id(&g);
+    let res = r
+        .create_reservation("pub", json!([bind(&ssh, all())]))
+        .await;
+    r.grant(res_target(&id(&res)), all(), anyone()).await;
+
+    // Attaching: the reservation's grant to Anyone covers the new ports.
+    let attach = |confirm: bool, dry: bool| {
+        json!({"dry_run": dry, "ops": [
+            {"op": "attach_port_group", "group_id": gid, "app_id": ssh, "confirm_open": confirm}
+        ]})
+    };
+    let (s, b) = r.post("/api/changes", attach(false, true)).await;
+    assert_eq!(
+        (s, code(&b)),
+        (StatusCode::CONFLICT, "confirmation_required")
+    );
+    let (s, b) = r
+        .put(
+            &format!("/api/port-groups/{gid}/apps/{ssh}"),
+            json!({"confirm_open": false}),
+        )
+        .await;
+    assert_eq!(
+        (s, code(&b)),
+        (StatusCode::CONFLICT, "confirmation_required")
+    );
+    let (s, b) = r.post("/api/changes", attach(true, true)).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["changes_reach"], true, "{b}");
+    r.post("/api/changes", attach(true, false)).await;
+
+    // Growing an attached group does the same.
+    let (s, b) = r
+        .put(
+            &format!("/api/port-groups/{gid}"),
+            json!({"ports": [{"start": 2200, "end": 2300, "proto": "tcp"}]}),
+        )
+        .await;
+    assert_eq!(
+        (s, code(&b)),
+        (StatusCode::CONFLICT, "confirmation_required")
+    );
 }

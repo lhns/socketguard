@@ -28,7 +28,13 @@ impl Database {
         )
     }
 
+    /// Store a setting. A value that is already stored is not written again: a commit can
+    /// take a second on a protected database file, and callers such as the onion ledger
+    /// save on every pass.
     pub async fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        if self.get_setting(key).await?.as_deref() == Some(value) {
+            return Ok(());
+        }
         sqlx::query(
             "INSERT INTO settings (key, value) VALUES (?, ?) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",

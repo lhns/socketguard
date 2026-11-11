@@ -270,12 +270,15 @@ export function PortGroupsInspector({ groups, onCollapse, onClose }: { groups: P
   );
 }
 
-/** A port group with a name and ports; attach it to apps afterwards. */
-export function NewPortGroupForm({ onCreated, onClose }: { onCreated: (label: string) => void; onClose: () => void }) {
+/** A port group with ports and an optional name (the daemon names it after its ports); attach it
+ * to apps afterwards. */
+export function NewPortGroupForm({ onCreated, onClose }: { onCreated: () => void; onClose: () => void }) {
   const id = useId();
   const [label, setLabel] = useState("");
   const [ranges, setRanges] = useState<PortRange[]>([]);
-  const commit = useCommit(() => onCreated(label.trim()));
+  const commit = useCommit(onCreated);
+  const defaultName = ranges.map(rangeLabel).join(", ");
+  const name = label.trim() || defaultName;
   const failed = commit.state.phase === "error" ? splitOperationError(commit.state.message).text : null;
   const field = failed ? errorField({ code: "invalid", message: failed }) : null;
   return (
@@ -285,14 +288,14 @@ export function NewPortGroupForm({ onCreated, onClose }: { onCreated: (label: st
           e.preventDefault();
           if (ranges.length === 0) return;
           void commit.runBatch(
-            [{ op: "create_port_group", label: label.trim(), ports: ranges, apps: [], confirm_open: false }],
-            `Created port group ${label.trim()}`,
+            [{ op: "create_port_group", label: label.trim() || undefined, ports: ranges, apps: [], confirm_open: false }],
+            `Created port group ${name}`,
           );
         }}
       >
         <div className="form-row">
           <label htmlFor={`${id}-l`}>Port group name</label>
-          <input id={`${id}-l`} className="input" value={label} onChange={(e) => setLabel(e.target.value)} required />
+          <input id={`${id}-l`} className="input" value={label} placeholder={defaultName || "Named after its ports"} onChange={(e) => setLabel(e.target.value)} />
           {field === "label" && <span className="field-error" role="alert">{failed}</span>}
         </div>
         <div className="form-row">
@@ -302,7 +305,7 @@ export function NewPortGroupForm({ onCreated, onClose }: { onCreated: (label: st
         </div>
         {failed && field !== "label" && <div className="error-banner" role="alert">{failed}</div>}
         <div className="actions">
-          <button type="submit" className="btn btn-primary btn-sm" disabled={ranges.length === 0 || label.trim() === "" || commit.state.phase === "checking" || commit.state.phase === "applying"}>Create port group</button>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={ranges.length === 0 || commit.state.phase === "checking" || commit.state.phase === "applying"}>Create port group</button>
           <button type="button" className="btn btn-sm" onClick={onClose}>Cancel</button>
         </div>
       </form>

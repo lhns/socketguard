@@ -163,6 +163,23 @@ pub fn clean_ranges(ports: &[PortRange]) -> Result<Vec<PortRange>, EngineError> 
     Ok(normalize_ranges(ports))
 }
 
+/// The name an unnamed port group gets: its normalized ports (`80/tcp, 443/tcp`), made
+/// unique among the existing labels by a ` (2)`, ` (3)`... suffix.
+fn default_group_label(ranges: &[PortRange], taken: impl Fn(&str) -> bool) -> String {
+    let base = ranges
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut label = base.clone();
+    let mut n = 2;
+    while taken(&label) {
+        label = format!("{base} ({n})");
+        n += 1;
+    }
+    label
+}
+
 /// An unidentified app is one port (ADR 0046); it takes no port groups.
 fn check_takes_groups(app: &socketguard_core::App) -> Result<(), EngineError> {
     if app.identity_note.as_deref() == Some("unidentified") {
@@ -202,17 +219,25 @@ impl Engine {
         &self,
         cat: &mut Catalog,
         id: String,
-        label: &str,
+        label: Option<&str>,
         ports: &[PortRange],
         apps: &[AppId],
         confirm_open: bool,
     ) -> Result<(PortGroup, GroupPlan), EngineError> {
-        let label = Self::clean_label(label, "port group")?;
-        if cat.port_groups.iter().any(|g| g.label == label) {
-            return Err(EngineError::Conflict(format!(
-                "port group {label} already exists"
-            )));
-        }
+        let ranges = clean_ranges(ports)?;
+        let taken = |l: &str| cat.port_groups.iter().any(|g| g.label == l);
+        let label = match label.map(str::trim) {
+            None | Some("") => default_group_label(&ranges, taken),
+            Some(l) => {
+                let l = Self::clean_label(l, "port group")?;
+                if taken(&l) {
+                    return Err(EngineError::Conflict(format!(
+                        "port group {l} already exists"
+                    )));
+                }
+                l
+            }
+        };
         let mut attached: Vec<AppId> = Vec::new();
         for a in apps {
             check_takes_groups(
@@ -226,7 +251,7 @@ impl Engine {
         let group = PortGroup {
             id,
             label,
-            ports: clean_ranges(ports)?,
+            ports: ranges,
             apps: attached.clone(),
             created_at: Utc::now(),
         };
@@ -470,7 +495,7 @@ impl Engine {
     pub async fn create_port_group(
         &self,
         state: &AppState,
-        label: &str,
+        label: Option<&str>,
         ports: &[PortRange],
         apps: &[AppId],
         confirm_open: bool,

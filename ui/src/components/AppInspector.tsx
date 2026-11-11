@@ -32,10 +32,11 @@ export function AppInspector({ id, ...common }: { id: string } & Common) {
       </Inspector>
     );
   }
-  return <OneApp app={app.data} {...common} />;
+  return <OneApp app={app.data} partial={app.isPlaceholderData} {...common} />;
 }
 
-function OneApp({ app, highlight, onCollapse, onClose }: { app: AppDetail } & Common) {
+/** `partial`: only what the lists know; access and counters follow with the detail. */
+function OneApp({ app, partial, highlight, onCollapse, onClose }: { app: AppDetail; partial: boolean } & Common) {
   const toast = useToast();
   const names = useNameCtx();
   const forget = useDeleteApp();
@@ -80,7 +81,7 @@ function OneApp({ app, highlight, onCollapse, onClose }: { app: AppDetail } & Co
         </p>
       )}
 
-      <PortsSection app={app} highlight={highlight} onlyLocal={onlyLocal} hasV4={hasV4} />
+      <PortsSection app={app} partial={partial} highlight={highlight} onlyLocal={onlyLocal} hasV4={hasV4} />
 
       <div className="actions">
         {!app.reviewed && (
@@ -105,7 +106,7 @@ function OneApp({ app, highlight, onCollapse, onClose }: { app: AppDetail } & Co
       <CommitPreview commit={move} title={`Move everything to ${names.apps.find((a) => a.id === moveTarget.current)?.name ?? "the other app"}`} />
 
       <TorShare appId={app.id} hasOnion={app.addresses.some((a) => a.locator.kind === "onion")} />
-      <Counters app={app} />
+      {!partial && <Counters app={app} />}
 
       {forgetting && (
         <ConfirmDialog

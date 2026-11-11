@@ -6,10 +6,10 @@
 // Group membership has no batch operation, so the same steps run on a description the UI
 // builds itself: joining a group that has grants gives its members that access.
 import { useCallback, useRef, useState } from "react";
-import { toDaemonError, type BatchChange, type ChangeOp, type PeerGroup } from "./api";
+import { toDaemonError, type BatchChange, type ChangeOp, type ChangesResponse, type PeerGroup } from "./api";
 import type { AccessEntry } from "./access";
 import { confirmAll, grantInverse } from "./batch";
-import { useToast } from "./components/Toast";
+import { useToast, type ToastAction } from "./components/Toast";
 import { errorText, scopeLabel, targetLabel } from "./lib";
 import { useApps, useChanges, useGrants, useList, usePeers, useSetGroupMembers, useTags } from "./queries";
 
@@ -33,8 +33,11 @@ interface Check {
 interface Edit {
   done: string;
   check: () => Promise<Check>;
-  apply: (confirmed: boolean) => Promise<void>;
+  /** Answers the `refs` of a batch. */
+  apply: (confirmed: boolean) => Promise<ChangesResponse["refs"] | void>;
   undo?: () => Promise<void>;
+  /** A button on the success toast, from the ids the batch created (when there is no Undo). */
+  link?: (refs: ChangesResponse["refs"]) => ToastAction;
   /** Show the review even when nobody gains access (an edit that moves a lot, such as move_app). */
   alwaysReview?: boolean;
 }
@@ -56,8 +59,9 @@ export function useCommit(onDone?: () => void) {
   const finish = useCallback(
     async (edit: Edit, confirmed: boolean, seen: BatchChange[]) => {
       setState({ phase: "applying" });
+      let refs: ChangesResponse["refs"];
       try {
-        await edit.apply(confirmed);
+        refs = (await edit.apply(confirmed)) ?? {};
       } catch (e) {
         if (!confirmed && toDaemonError(e).code === "confirmation_required") {
           waiting.current = { edit, changes: seen };
@@ -82,7 +86,7 @@ export function useCommit(onDone?: () => void) {
                 );
               },
             }
-          : undefined,
+          : edit.link?.(refs),
       );
       onDone?.();
     },
@@ -107,12 +111,13 @@ export function useCommit(onDone?: () => void) {
   );
 
   /** A batch. `undo` is the inverse batch of an edit that only closes; `alwaysReview` shows the
-   * diff before applying whatever the reach. */
+   * diff before applying whatever the reach; `link` adds a button to the toast. */
   const runBatch = useCallback(
-    (ops: ChangeOp[], done: string, undo?: ChangeOp[], alwaysReview = false) =>
+    (ops: ChangeOp[], done: string, undo?: ChangeOp[], alwaysReview = false, link?: Edit["link"]) =>
       run({
         done,
         alwaysReview,
+        link,
         check: async () => {
           const r = await changes.mutateAsync({ ops: confirmAll(ops), dryRun: true });
           return {
@@ -122,7 +127,7 @@ export function useCommit(onDone?: () => void) {
           };
         },
         apply: async (confirmed) => {
-          await changes.mutateAsync({ ops: confirmed ? confirmAll(ops) : ops, dryRun: false });
+          return (await changes.mutateAsync({ ops: confirmed ? confirmAll(ops) : ops, dryRun: false })).refs;
         },
         undo: undo
           ? async () => {

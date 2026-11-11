@@ -1,18 +1,21 @@
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import type { NameCtx } from "../access";
-import { useApps, useGroups, useNetworks, usePeers, useReservations, usePortGroups, useTags } from "../queries";
+import { useApps, useGroups, useList, useNetworks, usePeers, useReservations, usePortGroups, useTags } from "../queries";
 
-/** What names apps, tags, peers, groups and networks in access lists. */
+/** What names apps, tags, peers, groups and networks in access lists. The same object while the
+ * lists are the same, so it can be a dependency. */
 export function useNameCtx(): NameCtx {
-  return {
-    apps: useApps().data ?? [],
-    tags: useTags().data ?? [],
-    peers: usePeers().data ?? [],
-    groups: useGroups().data ?? [],
-    networks: useNetworks().data ?? [],
-    portGroups: usePortGroups().data ?? [],
-    reservations: useReservations().data ?? [],
-  };
+  const apps = useList(useApps());
+  const tags = useList(useTags());
+  const peers = useList(usePeers());
+  const groups = useList(useGroups());
+  const networks = useList(useNetworks());
+  const portGroups = useList(usePortGroups());
+  const reservations = useList(useReservations());
+  return useMemo(
+    () => ({ apps, tags, peers, groups, networks, portGroups, reservations }),
+    [apps, tags, peers, groups, networks, portGroups, reservations],
+  );
 }
 
 interface Props {

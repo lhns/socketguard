@@ -4,7 +4,11 @@ import type { PortRange } from "./PortRange";
 /**
  * Body of `POST /api/port-groups`.
  */
-export type NewPortGroup = { label: string, ports: Array<PortRange>, 
+export type NewPortGroup = { 
+/**
+ * Without a name (or with a blank one) the daemon names the group after its ports.
+ */
+label?: string, ports: Array<PortRange>, 
 /**
  * Apps to attach it to right away.
  */

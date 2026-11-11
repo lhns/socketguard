@@ -70,7 +70,7 @@ impl Harness {
     }
 
     async fn reconcile(&self) {
-        let mut engine = self.state.engine.write().await;
+        let engine = self.state.engine.read().await;
         engine.reconcile(&self.state).await.unwrap();
     }
 
@@ -330,6 +330,33 @@ async fn reconcile_is_idempotent() {
     assert!(h.net_calls.lock().unwrap().is_empty());
     assert_eq!(h.app().await.addresses.len(), 2);
     assert_eq!(h.activity(ActivityKind::AppDiscovered).await.len(), 1);
+}
+
+#[tokio::test]
+async fn an_unchanged_pass_writes_no_sightings() {
+    let h = Harness::new(
+        vec![local_net(), ygg_net()],
+        vec![listener("nginx", 80, Protocol::Tcp)],
+    )
+    .await;
+    h.reconcile().await;
+    let before = h.state.db.list_apps().await.unwrap();
+    h.reconcile().await;
+    h.reconcile().await;
+    let after = h.state.db.list_apps().await.unwrap();
+    assert_eq!(after[0].last_seen, before[0].last_seen);
+    assert_eq!(after[0].ports[0].last_seen, before[0].ports[0].last_seen);
+
+    // A change is written: a port that stops listening, and one that appears.
+    h.set_sockets(vec![listener("nginx", 443, Protocol::Tcp)]);
+    h.reconcile().await;
+    let changed = h.state.db.list_apps().await.unwrap();
+    let ports: Vec<(u16, bool)> = changed[0]
+        .ports
+        .iter()
+        .map(|p| (p.port, p.listening))
+        .collect();
+    assert_eq!(ports, [(80, false), (443, true)]);
 }
 
 #[tokio::test]
