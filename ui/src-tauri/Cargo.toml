@@ -1,6 +1,6 @@
 [package]
 name = "socketguard-ui"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license = "Apache-2.0"
 
