@@ -58,6 +58,14 @@ offers for each network: the LAN interfaces, whether SocketGuard's own Tor and Y
 available in this build (`socketguard status` lists the bundled programs), and whether an
 existing node is ready to be added. A build without the bundled files only offers `--existing`.
 
+**Third-party software.** The installers ship unmodified Tor (BSD 3-clause, with libevent, OpenSSL and
+zlib), Yggdrasil (LGPLv3 with an exception for combined works; it runs as a separate process) and, on
+Windows, Wintun. Versions and checksums are pinned in `deploy/bundle/versions.toml`; the licences are
+in `third_party/licenses/` next to the daemon and in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md),
+which also links the source of the pinned Yggdrasil build. `deploy/bundle/fetch.sh` fetches and verifies
+the files (Tor against the Tor Project's signed checksums); `./build.sh --with-bundled` puts them next
+to a local build.
+
 ## Architecture
 
 ```
