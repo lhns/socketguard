@@ -567,56 +567,6 @@ impl Engine {
     }
 }
 
-/// Set the `disabled` latch, then remove the firewall rules and every SocketGuard address
-/// in the DB. Needs only the database and the network-to-interface map, so `--disable`
-/// works without an engine.
-/// Addresses of a network that is no longer configured cannot be located and are left.
-pub(super) async fn disable_all(
-    db: &Database,
-    interfaces: &HashMap<String, String>,
-    firewall: Arc<dyn Firewall>,
-    ifaces: Arc<dyn InterfaceManager>,
-) -> anyhow::Result<()> {
-    db.set_disabled(true).await?;
-    // Removing the rules answers the unadopted question too.
-    db.set_unadopted(false).await?;
-    for a in db.list_addresses().await? {
-        let Some(ip) = a.locator.ipv6() else {
-            continue;
-        };
-        match interfaces.get(&a.network_id) {
-            // Adopt addresses from before ownership was recorded.
-            Some(iface) => {
-                if let Err(e) = db.retire_address(ip, iface, Some(&a.network_id)).await {
-                    warn!("Cannot record {ip} as retiring: {e}");
-                }
-            }
-            None => warn!(
-                "Network '{}' is not configured; cannot remove {ip}",
-                a.network_id
-            ),
-        }
-    }
-    // Addresses first: removing the rules first would briefly expose them. A row stays
-    // until its address is confirmed gone, and the rules stay while any address does: it
-    // remains denied, and the disabled daemon's sweep removes the rules once the last one
-    // is gone.
-    let owned = db.list_owned_addresses().await?;
-    let failures = release_owned(db, &ifaces, owned).await;
-    if !failures.is_empty() {
-        let list: Vec<String> = failures
-            .iter()
-            .map(|(o, e)| format!("{} on {} ({e})", o.addr, o.interface))
-            .collect();
-        anyhow::bail!(
-            "could not remove {} address(es): {}; the firewall rules stay so they remain denied, and the removal is retried",
-            failures.len(),
-            list.join("; ")
-        );
-    }
-    tokio::task::spawn_blocking(move || firewall.disable()).await?
-}
-
 /// Take owned addresses off their interfaces: mark each retiring, remove it, and delete its
 /// row only when the removal is confirmed (it succeeded, or the interface no longer has
 /// the address). Returns the ones that are still there.
@@ -681,50 +631,5 @@ mod tests {
                 addr: "fd00::1".parse().unwrap(),
             },
         )
-    }
-
-    #[tokio::test]
-    async fn disable_all_skips_networks_that_are_not_configured() {
-        use crate::test_support::*;
-        let db = Database::new(":memory:").await.unwrap();
-        db.migrate().await.unwrap();
-        let now = Utc::now();
-        db.insert_app(&App {
-            id: "a".into(),
-            name: "a".into(),
-            process_name: "a".into(),
-            exe_path: None,
-            interpreter_arg: None,
-            identity_note: None,
-            system: false,
-            reviewed: false,
-            first_seen: now,
-            last_seen: now,
-            ports: vec![],
-            addresses: vec![],
-        })
-        .await
-        .unwrap();
-        for (net, ip) in [("known", "fd00::1"), ("gone", "fd00::2")] {
-            let mut a = addr(Scope::All);
-            a.network_id = net.into();
-            a.locator = Locator::Ipv6 {
-                addr: ip.parse().unwrap(),
-            };
-            db.insert_address(&a).await.unwrap();
-        }
-        let calls = Arc::new(Mutex::new(vec![]));
-        let ifaces = HashMap::from([("known".to_string(), "lo".to_string())]);
-        disable_all(
-            &db,
-            &ifaces,
-            Arc::new(MockFirewall::new(Arc::new(Mutex::new(vec![])))),
-            Arc::new(MockInterfaceManager::new(calls.clone())),
-        )
-        .await
-        .unwrap();
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert!(matches!(&calls[0], NetworkCall::RemoveAddress { iface, .. } if iface == "lo"));
     }
 }

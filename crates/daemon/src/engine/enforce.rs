@@ -360,34 +360,3 @@ impl Engine {
         }
     }
 }
-
-/// Take everything of ours off the networks that are not IP networks (the onion services
-/// leave Tor), for the `disable` latch. A network that cannot be reached is logged; its
-/// services stay until it is back and the latch is still set (enforcement is suspended).
-pub(super) async fn disable_networks(
-    db: &Database,
-    networks: Vec<(String, Arc<dyn networks::Network>)>,
-) {
-    let addresses = match db.list_addresses().await {
-        Ok(a) => a,
-        Err(e) => {
-            warn!("Could not list addresses to disable: {e}");
-            return;
-        }
-    };
-    for (id, net) in networks {
-        if net.capabilities().ip_locators {
-            continue;
-        }
-        let mine: Vec<Address> = addresses
-            .iter()
-            .filter(|a| a.network_id == id)
-            .cloned()
-            .collect();
-        match tokio::task::spawn_blocking(move || net.disable(&mine)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => warn!("Could not disable network '{id}': {e}"),
-            Err(e) => warn!("Disable task failed: {e}"),
-        }
-    }
-}

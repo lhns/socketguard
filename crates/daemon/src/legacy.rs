@@ -84,21 +84,33 @@ pub fn execute(moves: &[Move]) -> Result<()> {
     Ok(())
 }
 
-/// A moved config that named the database relative to the old working directory now
-/// resolves it against its own directory: drop the plain default name so the fixed
-/// database location applies.
-pub fn fix_moved_config(config: &Path) {
+/// A moved config that named the database relative to the old working directory would now
+/// resolve it against its own directory. The plain default name is dropped (the moved
+/// database sits at the fixed location); any other relative path becomes the absolute
+/// path it meant, so the daemon keeps using that file.
+pub fn fix_moved_config(config: &Path, old_cwd: &Path) {
     let Ok(text) = std::fs::read_to_string(config) else { return };
     let Ok(mut v) = serde_json::from_str::<serde_json::Value>(text.strip_prefix('\u{feff}').unwrap_or(&text)) else {
         return;
     };
-    let is_default_name = v.get("db_path").and_then(|d| d.as_str()) == Some(socketguard_core::paths::DB_FILE);
-    if is_default_name {
-        v.as_object_mut().unwrap().remove("db_path");
-        if let Ok(mut out) = serde_json::to_string_pretty(&v) {
-            out.push('\n');
-            let _ = std::fs::write(config, out);
-        }
+    let Some(db) = v.get("db_path").and_then(|d| d.as_str()).map(str::to_string) else {
+        return;
+    };
+    if Path::new(&db).is_absolute() || db == ":memory:" {
+        return;
+    }
+    let obj = v.as_object_mut().unwrap();
+    if db == socketguard_core::paths::DB_FILE {
+        obj.remove("db_path");
+    } else {
+        obj.insert(
+            "db_path".into(),
+            serde_json::Value::String(old_cwd.join(&db).to_string_lossy().into_owned()),
+        );
+    }
+    if let Ok(mut out) = serde_json::to_string_pretty(&v) {
+        out.push('\n');
+        let _ = std::fs::write(config, out);
     }
 }
 
@@ -110,7 +122,7 @@ pub fn migrate(cwd: &Path, config_to: &Path, db_to: &Path) -> Result<Vec<Move>> 
     }
     execute(&moves)?;
     if moves.iter().any(|m| m.to == config_to) {
-        fix_moved_config(config_to);
+        fix_moved_config(config_to, cwd);
     }
     Ok(moves)
 }

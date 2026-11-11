@@ -33,3 +33,10 @@ Accepted. Fulfils the uninstaller that ADR 0026 names as a release blocker. Chan
 - Unsigned installers show a warning on Windows and are blocked by default on macOS until signing is set up.
 - Linux and macOS installers are verified only in CI.
 - Existing hand-started installations change location once.
+
+## Amendment (2026-11-11): details settled while building it
+
+- **Install record.** The log of ADR 0048 is one list of typed, reversible entries in `crates/core/src/install_log.rs`, shared by the daemon binary and the CLI. Install adds `service_registered`, `access_group` (created or existed), `directory_created`, `pf_anchor` and `wfp_engine_option`; entries are written when the thing happens and are never overwritten by a second run.
+- **Owned directories.** When SocketGuard later runs Tor or Yggdrasil itself, the data directory it creates for that child process is recorded as `owned_directory`. `uninstall --purge` may remove such a directory as a tree, but only if its path is strictly inside the state directory; a recorded path outside it is refused and reported. A keep-data uninstall leaves it. Every other deletion is by name.
+- **Disable reports per item** (`removed`, `already absent`, `kept`, `LEFT` with the reason) and exits non-zero when anything is LEFT. `--disable` needs the database at the resolved path and refuses, changing nothing, when it is missing; a missing config file alone only produces a note. `--disable --force` removes the rules by name.
+- **Exit codes** of the daemon commands: 0 done, 1 something failed or is LEFT, 2 usage error.

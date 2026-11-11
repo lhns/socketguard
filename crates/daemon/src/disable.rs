@@ -237,10 +237,7 @@ async fn disable_non_ip(db: &Database, slots: &[NetworkSlot]) -> Report {
                 continue;
             }
         };
-        if ids.is_empty() {
-            r.absent(what);
-            continue;
-        }
+        // Called even without ids: Tor's own list of what it published is removed too.
         // The ledger ids have no address row: hand them over as addresses of this network.
         let have: BTreeSet<String> = mine
             .iter()
@@ -260,7 +257,11 @@ async fn disable_non_ip(db: &Database, slots: &[NetworkSlot]) -> Report {
                 if let Err(e) = ledger::forget(db, &ids_vec).await {
                     warn!("Could not update the Tor ledger: {e:#}");
                 }
-                r.removed(format!("{what} ({list})"));
+                if ids.is_empty() {
+                    r.absent(what);
+                } else {
+                    r.removed(format!("{what} ({list})"));
+                }
             }
             Ok(Err(e)) => r.left(what, format!("Tor did not confirm the removal ({e:#}); left: {list}")),
             Err(e) => r.left(what, format!("{e}; left: {list}")),
@@ -397,5 +398,189 @@ mod tests {
         assert!(text.contains("removed         address fd00::1"), "{text}");
         assert!(text.contains("already absent  address fd00::2"), "{text}");
         assert!(db.list_owned_addresses().await.unwrap().is_empty());
+    }
+
+    // ── the commands' decisions ──
+
+    use crate::networks::{Capabilities, LocatorRequest, NetworkEnforcement, NewLocator};
+    use socketguard_core::{NetworkKind, NetworkStatus};
+
+    /// A Tor that remembers what it was told to remove, or is unreachable.
+    struct FakeTor {
+        removed: Mutex<Vec<String>>,
+        reachable: bool,
+    }
+
+    impl Network for FakeTor {
+        fn kind(&self) -> NetworkKind {
+            NetworkKind::Tor
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities { ip_locators: false, verifies: &[], grants_apply: true, udp: false }
+        }
+        fn status(&self) -> (NetworkStatus, Option<Ipv6Addr>) {
+            (NetworkStatus::Up, None)
+        }
+        fn ensure_locator(&self, _: &LocatorRequest) -> anyhow::Result<NewLocator> {
+            unimplemented!()
+        }
+        fn remove_locator(&self, _: &Address) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn enforce(&self, _: &NetworkEnforcement) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn disable(&self, addresses: &[Address]) -> anyhow::Result<()> {
+            anyhow::ensure!(self.reachable, "cannot connect to the Tor control port");
+            for a in addresses {
+                if let Some(id) = networks::tor::service_id(&a.locator) {
+                    self.removed.lock().unwrap().push(id);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn tmp() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("sg-dis-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn no_slots(_: [u8; 5]) -> Vec<NetworkSlot> {
+        vec![]
+    }
+
+    #[tokio::test]
+    async fn without_a_database_it_refuses_names_the_paths_and_creates_nothing() {
+        let d = tmp();
+        let (cfg, dbp) = (d.join("socketguard.json"), d.join("socketguard.db"));
+        let calls = Arc::new(Mutex::new(vec![]));
+        let fw = Arc::new(MockFirewall::new(calls.clone()));
+        let err = disable_command(
+            &Target { config: &cfg, config_found: false, db: &dbp },
+            false,
+            false,
+            fw,
+            Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),
+            &HashMap::new(),
+            &no_slots,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains(&dbp.display().to_string()) && err.contains(&cfg.display().to_string()), "{err}");
+        assert!(calls.lock().unwrap().is_empty(), "no firewall call");
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0, "no file appeared");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn force_removes_the_rules_by_name_and_says_what_it_could_not_check() {
+        let d = tmp();
+        let (cfg, dbp) = (d.join("socketguard.json"), d.join("socketguard.db"));
+        let calls = Arc::new(Mutex::new(vec![]));
+        let fw = Arc::new(MockFirewall::new(calls.clone()));
+        let rep = disable_command(
+            &Target { config: &cfg, config_found: false, db: &dbp },
+            true,
+            false,
+            fw,
+            Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),
+            &HashMap::new(),
+            &no_slots,
+        )
+        .await
+        .unwrap();
+        assert!(calls.lock().unwrap().iter().any(|c| matches!(c, FirewallCall::Disable)));
+        let text = rep.render();
+        assert!(text.contains("addresses on interfaces and onion services could NOT be checked"), "{text}");
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0, "no database was created");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_invalid_tor_network_does_not_stop_the_others_and_is_reported() {
+        let db = db().await;
+        let addr: Ipv6Addr = "fd00::1".parse().unwrap();
+        db.claim_address(addr, "lo", Some("local")).await.unwrap();
+        ledger::add_owned(&db, &BTreeSet::from(["abcdefghijklmnop".to_string()])).await.unwrap();
+        let net = Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![]))));
+        net.plant_address("lo", addr);
+        let calls = Arc::new(Mutex::new(vec![]));
+        let r = disable_with_db(DisableInput {
+            db: &db,
+            interfaces: &HashMap::from([("local".to_string(), "lo".to_string())]),
+            networks: vec![NetworkSlot {
+                id: "tor".into(),
+                is_tor: true,
+                network: Err("invalid control endpoint \"nonsense\"".into()),
+            }],
+            firewall: Arc::new(MockFirewall::new(calls.clone())),
+            ifaces: net,
+        })
+        .await;
+        let text = r.render();
+        assert!(text.contains("removed         address fd00::1"), "{text}");
+        assert!(text.contains("removed         firewall rules"), "{text}");
+        assert!(text.contains("LEFT            onion services of network 'tor'"), "{text}");
+        assert!(text.contains("abcdefghijklmnop.onion") && text.contains("invalid control endpoint"), "{text}");
+        assert!(!r.complete());
+    }
+
+    #[tokio::test]
+    async fn ledger_only_onion_services_are_removed_and_forgotten() {
+        let db = db().await;
+        ledger::add_owned(&db, &BTreeSet::from(["aaaa".to_string(), "bbbb".to_string()])).await.unwrap();
+        ledger::add_tombstones(&db, &["cccc".to_string()]).await.unwrap();
+        let tor = Arc::new(FakeTor { removed: Mutex::new(vec![]), reachable: true });
+        let r = disable_with_db(DisableInput {
+            db: &db,
+            interfaces: &HashMap::new(),
+            networks: vec![NetworkSlot { id: "tor".into(), is_tor: true, network: Ok(tor.clone()) }],
+            firewall: mock_fw(),
+            ifaces: Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),
+        })
+        .await;
+        assert!(r.complete(), "{}", r.render());
+        let mut got = tor.removed.lock().unwrap().clone();
+        got.sort();
+        assert_eq!(got, ["aaaa", "bbbb", "cccc"]);
+        let l = ledger::load(&db).await.unwrap();
+        assert!(l.owned.is_empty() && l.tombstones.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_tor_leaves_the_services_listed_and_the_ledger_intact() {
+        let db = db().await;
+        ledger::add_owned(&db, &BTreeSet::from(["aaaa".to_string()])).await.unwrap();
+        let tor = Arc::new(FakeTor { removed: Mutex::new(vec![]), reachable: false });
+        let r = disable_with_db(DisableInput {
+            db: &db,
+            interfaces: &HashMap::new(),
+            networks: vec![NetworkSlot { id: "tor".into(), is_tor: true, network: Ok(tor) }],
+            firewall: mock_fw(),
+            ifaces: Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),
+        })
+        .await;
+        let text = r.render();
+        assert!(!r.complete(), "{text}");
+        assert!(text.contains("LEFT            onion services of network 'tor'") && text.contains("aaaa.onion"), "{text}");
+        assert!(!text.contains("removed         onion"), "{text}");
+        assert!(ledger::load(&db).await.unwrap().owned.contains("aaaa"));
+    }
+
+    #[tokio::test]
+    async fn ledger_ids_without_any_tor_network_are_left_not_forgotten() {
+        let db = db().await;
+        ledger::add_owned(&db, &BTreeSet::from(["aaaa".to_string()])).await.unwrap();
+        let r = disable_with_db(DisableInput {
+            db: &db,
+            interfaces: &HashMap::new(),
+            networks: vec![],
+            firewall: mock_fw(),
+            ifaces: Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),
+        })
+        .await;
+        assert!(!r.complete(), "{}", r.render());
     }
 }

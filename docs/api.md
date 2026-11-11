@@ -28,9 +28,8 @@ and members of the group (primary group or supplementary groups from the user da
 
 Let a user in:
 
-    sudo groupadd socketguard            # once, before the daemon starts
-    sudo usermod -aG socketguard alice   # alice logs in again to pick it up
-    sudo systemctl restart socketguard   # only needed if the group was created after the daemon started
+    sudo socketguard-daemon access allow alice   # creates the group if needed; alice logs in again to pick it up
+    sudo systemctl restart socketguard           # only needed if the group was created after the daemon started
 
 ### Windows
 
@@ -50,8 +49,7 @@ The daemon also gives its database file (and -wal/-shm) a protected ACL, SYSTEM 
 
 Let a user in:
 
-    net localgroup "SocketGuard Users" /add
-    net localgroup "SocketGuard Users" alice /add     (alice signs out and in again)
+    socketguard-daemon access allow alice        (as Administrator; alice signs out and in again)
 
 Restart the daemon after creating the group; it resolves the group once at startup.
 
@@ -72,7 +70,7 @@ does not cause a 202. Every error has the [error body](#errors).
 
 | Method | Path | Request | Response | Notes |
 |---|---|---|---|---|
-| GET | `/api/status` | | `StatusResponse` | version, networks, protect-host interfaces, `disabled`, `unadopted` (an existing ruleset was found with an empty database and is left alone until `enable` or `disable`), counts |
+| GET | `/api/status` | | `StatusResponse` | version, networks, protect-host interfaces, `disabled`, `unadopted` (an existing ruleset was found with an empty database and is left alone until `enable` or `disable`), counts, `config_path`, `db_path`, `socket` (where the daemon keeps its state), `service_installed` |
 | GET | `/api/events` | | SSE stream | [events](#events) |
 | GET | `/api/apps` | query `pending=true` (optional) | `App[]` | `pending=true`: only apps without a decision |
 | GET | `/api/apps/{id}` | | `AppDetail` | app with addresses (the ones serving its rows, each with `up`; none until a grant names a row), ports, grants on it (with reach), `access` (every access with its origin: direct, tag, group or reservation, and what it covers on this app: `scope` and `ports`), its `tags`, the port groups attached to it (`port_groups`) and counters |
@@ -124,7 +122,7 @@ does not cause a 202. Every error has the [error body](#errors).
 | POST | `/api/addresses/{id}/reserve` | `ReserveRequest` | `ReservationView` (201) | `{"label"}`: turns an automatic address into a reservation with that row bound, keeping the address |
 | GET | `/api/networks` | | `Network[]` | |
 | GET | `/api/networks/setup` | | `NetworkSetup` | what can be added on this host, read only (ADR 0048). `lan`: usable interfaces (no loopback or tunnels), default route first, each with `description?`, `has_ipv6_prefix`, `is_default_route`, `vlan_id?`, `already_added`. `yggdrasil`, `tor`, `local`: a `SetupState` `{state, found, missing?, install?, download_link?}`; `state` is `ready`, `not_configured`, `not_running`, `not_installed` or `added`; `found` holds what was detected (`address`, `interface`, `peers`, `yggdrasilctl`, `control`, `cookie_path`, `version`); `missing` is one plain sentence; `install` `{manager, command, link?}` is present only where a package is known to exist (winget for Yggdrasil on Windows; `tor` from apt, dnf or pacman on Linux), otherwise `download_link` names the official page. `config_path` is the absolute path of the config file the daemon saves its networks in. The daemon never installs or configures anything: that is `socketguard networks setup` |
-| POST | `/api/networks` | `NewNetwork` | `Network` (201) | a backend instance: `{"id"?, "type": "slaac", "interface": "eth0", ...}`; for `yggdrasil` the `interface` is optional: without it the interface is the one that holds the node's address, found at runtime and followed when it changes (a configured one wins). A network whose interface does not exist on the host is `down` with the reason `interface <name> does not exist`; Yggdrasil reasons are `yggdrasilctl not found`, `the Yggdrasil node is not running`, `the Yggdrasil adapter has no address`. The id `setup` is reserved; also written to the `backends` key of the config file (`SOCKETGUARD_CONFIG` or the default; created if missing), so it survives a restart |
+| POST | `/api/networks` | `NewNetwork` | `Network` (201) | a backend instance: `{"id"?, "type": "slaac", "interface": "eth0", ...}`; for `yggdrasil` the `interface` is optional: without it the interface is the one that holds the node's address, found at runtime and followed when it changes (a configured one wins). A network whose interface does not exist on the host is `down` with the reason `interface <name> does not exist`; Yggdrasil reasons are `yggdrasilctl not found`, `the Yggdrasil node is not running`, `the Yggdrasil adapter has no address`. The id `setup` is reserved; also written to the `backends` key of the config file (`SOCKETGUARD_CONFIG` or the fixed location; created if missing), so it survives a restart |
 | DELETE | `/api/networks/{id}` | | 204 | its addresses leave the interfaces first; removed from the config file as well. Query `force=true`; a Tor network whose services cannot be removed is 409 `conflict` without it |
 | GET | `/api/settings` | | `Settings` | only `protect_host_interfaces`; there is no address mode (`PUT /api/settings` is gone) |
 | PUT | `/api/settings/protect-host` | `ProtectHostRequest` | `ProtectHostResponse` | an empty list turns it off; refused with 409 `protect_host_refused` unless `force` |
