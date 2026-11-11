@@ -17,6 +17,8 @@ mod tags;
 #[cfg(windows)]
 mod winacl;
 
+#[cfg(windows)]
+pub use protect::protect_service_dir;
 pub use protect::{protect_dir, ALLOW_UNPROTECTED_DB_ENV};
 pub use schema::SCHEMA_VERSION;
 pub use settings::parse_protect_host;

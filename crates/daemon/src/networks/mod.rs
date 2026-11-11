@@ -9,10 +9,14 @@
 
 pub mod ip;
 pub mod ledger;
+pub mod managed;
 pub mod onion_key;
 pub mod tor;
 pub mod tor_client_key;
 pub mod tor_control;
+pub mod tor_managed;
+
+pub use managed::ManagedCtx;
 
 use crate::iface::InterfaceManager;
 use crate::ruleset::{subject_credentials, Snapshot};
@@ -112,6 +116,11 @@ pub trait Network: Send + Sync {
     fn node(&self) -> Option<crate::ruleset::OverlayNode> {
         None
     }
+    /// How the child process of a managed network stands (ADR 0052); None for networks
+    /// that SocketGuard does not run itself.
+    fn managed(&self) -> Option<socketguard_core::ManagedInfo> {
+        None
+    }
     /// The /64 this network allocates from, for re-homing addresses; None if it has none.
     fn current_prefix(&self) -> Result<Option<Prefix>> {
         Ok(None)
@@ -143,15 +152,20 @@ pub trait Network: Send + Sync {
 }
 
 /// Create the network for `config`.
-/// `ula_global_id` is the installation's persisted ULA global ID.
+/// `id` is the network's id (the child process of a managed network is named after it),
+/// `ula_global_id` the installation's persisted ULA global ID, `managed` what managed
+/// networks need from the daemon.
 ///
 /// Only an invalid configuration is an error. What depends on the system (a missing
-/// prefix, no DHCPv6 server, Yggdrasil or Tor not running) is not: the network is
-/// created, reports `Down` and recovers when the system does.
+/// prefix, no DHCPv6 server, Yggdrasil or Tor not running, a build without the files of a
+/// managed network) is not: the network is created, reports `Down` and recovers when the
+/// system does.
 pub fn create(
+    id: &str,
     config: &BackendConfig,
     ula_global_id: [u8; 5],
     net: Arc<dyn InterfaceManager>,
+    managed: &ManagedCtx,
 ) -> Result<Arc<dyn Network>> {
     match config {
         BackendConfig::Tor {
@@ -162,11 +176,13 @@ pub fn create(
             expect_tor_uid,
             cookie_owner,
             allow_remote_control,
-            managed,
+            managed: managed_tor,
         } => {
-            // TODO(managed): the managed Tor network (ADR 0052) is built by the next change.
-            if *managed {
-                bail!("managed networks are not available yet");
+            if *managed_tor {
+                return Ok(Arc::new(tor::TorNetwork::managed(
+                    tor_managed::ManagedTor::new(id, managed),
+                    tor::CHECK_INTERVAL,
+                )));
             }
             let opts = tor_control::AuthOptions {
                 auth: auth.clone(),
@@ -191,12 +207,12 @@ pub fn create(
         BackendConfig::Yggdrasil {
             admin_endpoint,
             interface,
-            managed,
+            managed: managed_ygg,
             peers: _,
         } => {
             // TODO(managed): the managed Yggdrasil network (ADR 0052) is built by the next
-            // change.
-            if *managed {
+            // change, from `managed` (the context) like the Tor one above.
+            if *managed_ygg {
                 bail!("managed networks are not available yet");
             }
             Ok(ip_network(

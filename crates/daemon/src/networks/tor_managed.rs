@@ -1,0 +1,597 @@
+//! The managed Tor network (ADR 0052): SocketGuard runs its own `tor` as a child process.
+//!
+//! The existing Tor backend (`tor.rs`, `tor_control.rs`) does the work over the control
+//! port; this module is what is specific to a Tor the daemon started itself: where its
+//! files live, the `torrc` it is started with, who it runs as, and how to reach and trust
+//! its control port. The control address and the cookie path are built here from the state
+//! directory, never from what Tor says about itself (ADR 0040), and the cookie is vetted
+//! against the account Tor runs as.
+
+use super::managed::ManagedCtx;
+use super::tor_control::{AuthOptions, Control, Endpoint};
+use crate::account::{self, Accounts};
+use crate::children::{ChildHealth, ChildSpec, ChildStatus, HealthCheck, RunAs, StatusHandle};
+use anyhow::{anyhow, Context, Result};
+use socketguard_core::config::TorAuth;
+use socketguard_core::{ChildState, ManagedInfo};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// The directory of the managed Tor under the state directory.
+pub const DIR: &str = "tor";
+
+/// Where the managed Tor keeps its files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TorPaths {
+    pub dir: PathBuf,
+    pub torrc: PathBuf,
+    /// Unix: the control socket.
+    pub control_socket: PathBuf,
+    /// Windows: the file Tor writes its chosen control port to.
+    pub control_port_file: PathBuf,
+    pub cookie: PathBuf,
+}
+
+impl TorPaths {
+    pub fn new(state_dir: &Path) -> Self {
+        let dir = state_dir.join(DIR);
+        Self {
+            torrc: dir.join("torrc"),
+            control_socket: dir.join("control"),
+            control_port_file: dir.join("control-port"),
+            cookie: dir.join("control_auth_cookie"),
+            dir,
+        }
+    }
+}
+
+/// Who the managed Tor runs as: the unprivileged account when it exists and the daemon may
+/// start processes as it, else the daemon's own account, saying why.
+pub fn resolve_run_as(accounts: &dyn Accounts) -> RunAs {
+    if cfg!(windows) {
+        return RunAs::LocalService;
+    }
+    let (_, root) = accounts.daemon();
+    match accounts.lookup(account::NAME) {
+        Some(ids) if root => RunAs::Account {
+            name: account::NAME.into(),
+            uid: ids.uid,
+            gid: ids.gid,
+        },
+        Some(_) => RunAs::Daemon {
+            note: Some(format!(
+                "the daemon is not running as root, so it cannot start Tor as {}",
+                account::NAME
+            )),
+        },
+        None => RunAs::Daemon {
+            note: Some(format!("{} does not exist", account::NAME)),
+        },
+    }
+}
+
+/// A path as a `torrc` argument: quoted, with forward slashes on Windows (inside quotes a
+/// backslash would be an escape).
+fn quote(path: &Path) -> String {
+    let mut s = path.display().to_string();
+    if cfg!(windows) {
+        s = s.replace('\\', "/");
+    }
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The `torrc` Tor is started with, written again at every start. No SOCKS port (nothing
+/// connects through it), a control endpoint only the daemon can reach, cookie
+/// authentication with the file at the path the daemon chose, and nothing else: no geoip
+/// files, no transports, no relay. The account is not set here: the daemon starts Tor as it.
+pub fn torrc(paths: &TorPaths, windows: bool) -> String {
+    let mut t = String::from(
+        "# Written by SocketGuard each time it starts Tor; changes made here are overwritten.\n",
+    );
+    t.push_str(&format!("DataDirectory {}\n", quote(&paths.dir)));
+    t.push_str("SocksPort 0\n");
+    if windows {
+        t.push_str("ControlPort auto\n");
+        t.push_str(&format!(
+            "ControlPortWriteToFile {}\n",
+            quote(&paths.control_port_file)
+        ));
+    } else {
+        t.push_str(&format!("ControlSocket {}\n", quote(&paths.control_socket)));
+    }
+    t.push_str("CookieAuthentication 1\n");
+    t.push_str(&format!("CookieAuthFile {}\n", quote(&paths.cookie)));
+    t.push_str("Log notice stdout\n");
+    t
+}
+
+/// `PORT=127.0.0.1:51234` in the file `ControlPortWriteToFile` produces.
+pub fn parse_port_file(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix("PORT="))
+        .map(str::to_string)
+        .filter(|a| !a.is_empty())
+}
+
+/// The managed Tor of one network: how to reach it, how to start it, how it stands.
+#[derive(Clone)]
+pub struct ManagedTor {
+    ctx: ManagedCtx,
+    status: StatusHandle,
+    paths: Result<TorPaths, String>,
+}
+
+impl ManagedTor {
+    pub fn new(id: &str, ctx: &ManagedCtx) -> Self {
+        Self {
+            status: ctx.children.handle(id),
+            paths: ctx.state_dir().map(TorPaths::new),
+            ctx: ctx.clone(),
+        }
+    }
+
+    pub fn child(&self) -> ChildStatus {
+        self.status.get()
+    }
+
+    pub fn is_up(&self) -> bool {
+        self.child().state == ChildState::Up
+    }
+
+    /// Why the network is down while the child is not `Up`; empty when it is. `detailed`
+    /// adds what changes all the time (the percent, the last log line); the short form is
+    /// stable so a repeated failure is logged once.
+    pub fn reason(&self, detailed: bool) -> String {
+        let s = self.child();
+        let or = |d: Option<String>, fallback: &str| d.unwrap_or_else(|| fallback.to_string());
+        match s.state {
+            ChildState::Up => String::new(),
+            ChildState::Stopped => "SocketGuard is turned off".into(),
+            ChildState::Waiting => or(s.detail, "waiting"),
+            ChildState::Unavailable => or(s.detail, "Tor is not available"),
+            ChildState::Starting => "Tor is starting".into(),
+            ChildState::Bootstrapping => match (detailed, s.progress) {
+                (true, Some(p)) => format!("bootstrapping {p}%"),
+                _ => "Tor is bootstrapping".into(),
+            },
+            ChildState::Exited => {
+                if detailed {
+                    or(s.detail, "Tor exited")
+                } else {
+                    "Tor exited".into()
+                }
+            }
+        }
+    }
+
+    /// The card of the network.
+    pub fn info(&self) -> ManagedInfo {
+        let s = self.child();
+        ManagedInfo {
+            state: s.state,
+            progress: s.progress,
+            detail: s.detail,
+            runs_as: s
+                .runs_as
+                .or_else(|| Some(resolve_run_as(self.ctx.accounts.as_ref()).describe())),
+            version: self.ctx.bundled.version_of("tor"),
+            address: None,
+            peers: vec![],
+            peers_connected: None,
+        }
+    }
+
+    fn paths(&self) -> Result<&TorPaths> {
+        self.paths.as_ref().map_err(|e| anyhow!("{e}"))
+    }
+
+    /// The control endpoint and how to vet and authenticate it, built from our own paths and
+    /// the account Tor runs as.
+    pub fn connect_params(&self) -> Result<(Endpoint, AuthOptions)> {
+        let paths = self.paths()?;
+        let endpoint = if cfg!(windows) {
+            let text = std::fs::read_to_string(&paths.control_port_file)
+                .context("Tor has not written its control port yet")?;
+            Endpoint::Tcp(parse_port_file(&text).context("Tor wrote no control port")?)
+        } else {
+            Endpoint::Unix(paths.control_socket.display().to_string())
+        };
+        let run_as = resolve_run_as(self.ctx.accounts.as_ref());
+        let mut opts = AuthOptions {
+            auth: TorAuth::Cookie,
+            cookie_path: Some(paths.cookie.display().to_string()),
+            cookie_dir: Some(paths.dir.display().to_string()),
+            ..AuthOptions::default()
+        };
+        if cfg!(windows) {
+            // LocalService owns the files it writes; in the fallback (the daemon's own
+            // account started Tor) its own SID does.
+            opts.cookie_owner = if self.child().runs_as.as_deref() == Some("LocalService") {
+                Some("S-1-5-19".into())
+            } else {
+                own_sid()
+            };
+        } else if cfg!(target_os = "linux") {
+            // Only Linux can tell who is on the other end of a Unix socket.
+            opts.expect_tor_uid = Some(match &run_as {
+                RunAs::Account { uid, .. } => *uid,
+                _ => self.ctx.accounts.daemon().0,
+            });
+        }
+        Ok((endpoint, opts))
+    }
+
+    /// An authenticated control connection, whatever the child's state says.
+    pub fn connect(&self) -> Result<Control> {
+        let (endpoint, opts) = self.connect_params()?;
+        Control::connect(&endpoint, &opts)
+    }
+
+    /// The child to run, or why this build cannot run one.
+    pub fn spec(&self) -> Result<ChildSpec, String> {
+        let files = self.ctx.bundled.tor()?;
+        let paths = self.paths.clone()?;
+        let run_as = resolve_run_as(self.ctx.accounts.as_ref());
+        let mut env = vec![];
+        if cfg!(target_os = "linux") {
+            // The shipped tor has no RPATH: libevent, OpenSSL and zlib sit beside it.
+            env.push((
+                "LD_LIBRARY_PATH".to_string(),
+                files.dir.display().to_string(),
+            ));
+        }
+        let prepare_paths = paths.clone();
+        let prepare_as = run_as.clone();
+        Ok(ChildSpec {
+            name: "tor".into(),
+            program: files.binary,
+            args: vec![
+                "-f".into(),
+                paths.torrc.display().to_string(),
+                // Tor ends itself when the daemon is gone, however it went.
+                "--__OwningControllerProcess".into(),
+                self.ctx.daemon_pid.to_string(),
+            ],
+            env,
+            cwd: Some(paths.dir.clone()),
+            run_as,
+            data_dir: paths.dir,
+            health: Some(Arc::new(TorHealth(self.clone()))),
+            before_start: Some(Arc::new(move || prepare(&prepare_paths, &prepare_as))),
+        })
+    }
+}
+
+#[cfg(windows)]
+fn own_sid() -> Option<String> {
+    super::tor_control::winacl::current_user_sid().ok()
+}
+
+#[cfg(not(windows))]
+fn own_sid() -> Option<String> {
+    None
+}
+
+/// Up when Tor has bootstrapped, asked over the control port.
+struct TorHealth(ManagedTor);
+
+impl HealthCheck for TorHealth {
+    fn check(&self) -> ChildHealth {
+        match self.0.connect().and_then(|mut c| c.bootstrap_progress()) {
+            Ok(p) if p >= 100 => ChildHealth::Up,
+            Ok(p) => ChildHealth::Bootstrapping(p),
+            Err(_) => ChildHealth::Starting,
+        }
+    }
+}
+
+/// Before each start: the data directory exists, is private to the account Tor runs as,
+/// holds no leftovers of an earlier run that could be mistaken for the new one, and has a
+/// fresh `torrc`.
+pub fn prepare(paths: &TorPaths, run_as: &RunAs) -> Result<(), String> {
+    let fail = |what: &str, e: &dyn std::fmt::Display| format!("{what}: {e}");
+    std::fs::create_dir_all(&paths.dir)
+        .map_err(|e| fail(&format!("cannot create {}", paths.dir.display()), &e))?;
+    crate::install::record_owned_directory_once(&paths.dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&paths.dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| fail(&format!("cannot protect {}", paths.dir.display()), &e))?;
+    }
+    #[cfg(windows)]
+    crate::state::protect_service_dir(&paths.dir)
+        .map_err(|e| fail(&format!("cannot protect {}", paths.dir.display()), &e))?;
+    // Stale endpoints and cookie: whatever answers must be the Tor started now.
+    for f in [
+        &paths.control_socket,
+        &paths.control_port_file,
+        &paths.cookie,
+    ] {
+        match std::fs::remove_file(f) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(fail(&format!("cannot remove {}", f.display()), &e)),
+        }
+    }
+    std::fs::write(&paths.torrc, torrc(paths, cfg!(windows)))
+        .map_err(|e| fail(&format!("cannot write {}", paths.torrc.display()), &e))?;
+    #[cfg(unix)]
+    if let RunAs::Account { uid, gid, .. } = run_as {
+        give_to(&paths.dir, *uid, *gid)?;
+        // The state directory is private to root (it holds the database); the account
+        // must be able to reach its own directory below it, and nothing else.
+        if let Some(parent) = paths.dir.parent() {
+            allow_traverse(parent)?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = run_as;
+    Ok(())
+}
+
+/// Let every account enter `dir` (execute, not list or read) without changing anything else.
+#[cfg(unix)]
+fn allow_traverse(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mode = meta.permissions().mode();
+    if mode & 0o001 != 0 {
+        return Ok(());
+    }
+    std::fs::set_permissions(
+        dir,
+        std::fs::Permissions::from_mode((mode & 0o7777) | 0o001),
+    )
+    .map_err(|e| format!("cannot let the Tor account enter {}: {e}", dir.display()))
+}
+
+/// Make `dir` and, when its owner differs (the account was recreated with another uid),
+/// everything inside it belong to `uid`/`gid`. Links are not followed.
+#[cfg(unix)]
+fn give_to(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    fn chown(p: &Path, uid: u32, gid: u32) -> Result<(), String> {
+        let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes())
+            .map_err(|_| format!("bad path {}", p.display()))?;
+        // SAFETY: `c` is a valid NUL-terminated path; lchown does not follow links.
+        let rc = unsafe { libc::lchown(c.as_ptr(), uid, gid) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "cannot give {} to uid {uid}: {}",
+                p.display(),
+                std::io::Error::last_os_error()
+            ))
+        }
+    }
+    fn walk(p: &Path, uid: u32, gid: u32) -> Result<(), String> {
+        chown(p, uid, gid)?;
+        let meta = std::fs::symlink_metadata(p).map_err(|e| e.to_string())?;
+        if meta.is_dir() {
+            for entry in std::fs::read_dir(p).map_err(|e| e.to_string())? {
+                walk(&entry.map_err(|e| e.to_string())?.path(), uid, gid)?;
+            }
+        }
+        Ok(())
+    }
+    let owner = std::fs::metadata(dir).map_err(|e| e.to_string())?.uid();
+    if owner == uid {
+        // Only what we just wrote needs it.
+        chown(dir, uid, gid)?;
+        chown(&dir.join("torrc"), uid, gid)
+    } else {
+        walk(dir, uid, gid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account::FakeAccounts;
+    use crate::bundled::Bundled;
+    use crate::children::Supervisor;
+
+    fn paths() -> TorPaths {
+        TorPaths::new(Path::new("/var/lib/socketguard"))
+    }
+
+    #[test]
+    fn torrc_for_unix_is_exactly_this() {
+        assert_eq!(
+            torrc(&paths(), false),
+            "# Written by SocketGuard each time it starts Tor; changes made here are overwritten.\n\
+             DataDirectory \"/var/lib/socketguard/tor\"\n\
+             SocksPort 0\n\
+             ControlSocket \"/var/lib/socketguard/tor/control\"\n\
+             CookieAuthentication 1\n\
+             CookieAuthFile \"/var/lib/socketguard/tor/control_auth_cookie\"\n\
+             Log notice stdout\n"
+        );
+    }
+
+    #[test]
+    fn torrc_for_windows_lets_tor_pick_the_port_and_say_so() {
+        let p = TorPaths::new(Path::new("C:/ProgramData/SocketGuard"));
+        let t = torrc(&p, true);
+        assert!(t.contains("ControlPort auto\n"));
+        assert!(
+            t.contains("ControlPortWriteToFile \"C:/ProgramData/SocketGuard/tor/control-port\"\n")
+        );
+        assert!(!t.contains("ControlSocket"));
+        for forbidden in ["GeoIP", "ClientTransportPlugin", "ORPort", "User "] {
+            assert!(!t.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    #[test]
+    fn the_port_file_is_parsed() {
+        assert_eq!(
+            parse_port_file("PORT=127.0.0.1:41999\n").as_deref(),
+            Some("127.0.0.1:41999")
+        );
+        assert_eq!(parse_port_file(""), None);
+        assert_eq!(parse_port_file("PORT=\n"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_account_is_used_when_it_exists_and_the_daemon_is_root() {
+        let a = FakeAccounts::present();
+        assert_eq!(
+            resolve_run_as(&a),
+            RunAs::Account {
+                name: "socketguard-net".into(),
+                uid: 990,
+                gid: 990
+            }
+        );
+        assert_eq!(resolve_run_as(&a).describe(), "socketguard-net");
+
+        let absent = resolve_run_as(&FakeAccounts::absent());
+        assert_eq!(
+            absent.describe(),
+            "the daemon's account (socketguard-net does not exist)"
+        );
+        let user = FakeAccounts {
+            root: false,
+            daemon_uid: 1000,
+            ..FakeAccounts::present()
+        };
+        assert!(resolve_run_as(&user)
+            .describe()
+            .contains("not running as root"));
+    }
+
+    fn ctx(dir: Option<PathBuf>, accounts: FakeAccounts) -> ManagedCtx {
+        let third = std::env::temp_dir().join(format!("sg-tor3p-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(third.join("tor")).unwrap();
+        let exe = if cfg!(windows) { "tor.exe" } else { "tor" };
+        std::fs::write(third.join("tor").join(exe), b"x").unwrap();
+        ManagedCtx::new(
+            Arc::new(Bundled::from_dir(third)),
+            dir,
+            Arc::new(Supervisor::system()),
+            Arc::new(accounts),
+        )
+    }
+
+    fn state_dir() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sg-tor-state-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[tokio::test]
+    async fn the_spec_has_the_command_line_environment_and_paths_of_the_adr() {
+        let d = state_dir();
+        let c = ctx(Some(d.clone()), FakeAccounts::present());
+        let spec = ManagedTor::new("tor", &c).spec().unwrap();
+        let torrc = d.join("tor").join("torrc").display().to_string();
+        assert_eq!(
+            spec.args,
+            [
+                "-f".to_string(),
+                torrc,
+                "--__OwningControllerProcess".into(),
+                std::process::id().to_string()
+            ]
+        );
+        assert_eq!(spec.data_dir, d.join("tor"));
+        assert_eq!(spec.cwd.as_deref(), Some(d.join("tor").as_path()));
+        if cfg!(target_os = "linux") {
+            let third = c.bundled.dir().unwrap().join("tor");
+            assert_eq!(
+                spec.env,
+                [("LD_LIBRARY_PATH".to_string(), third.display().to_string())]
+            );
+        }
+        assert!(spec.health.is_some() && spec.before_start.is_some());
+    }
+
+    #[tokio::test]
+    async fn without_files_or_a_state_directory_the_spec_says_why() {
+        let none = ManagedCtx::inert();
+        assert_eq!(
+            ManagedTor::new("tor", &none).spec().unwrap_err(),
+            socketguard_core::setup::NOT_INCLUDED
+        );
+        let c = ctx(None, FakeAccounts::present());
+        assert!(ManagedTor::new("tor", &c)
+            .spec()
+            .unwrap_err()
+            .contains("no state directory"));
+    }
+
+    #[tokio::test]
+    async fn the_control_endpoint_comes_from_our_paths_and_the_cookie_is_pinned() {
+        let d = state_dir();
+        let c = ctx(Some(d.clone()), FakeAccounts::present());
+        let t = ManagedTor::new("tor", &c);
+        if cfg!(windows) {
+            // Nothing written yet.
+            assert!(t.connect_params().is_err());
+            std::fs::create_dir_all(d.join("tor")).unwrap();
+            std::fs::write(d.join("tor").join("control-port"), "PORT=127.0.0.1:9999\n").unwrap();
+            let (e, o) = t.connect_params().unwrap();
+            assert_eq!(e, Endpoint::Tcp("127.0.0.1:9999".into()));
+            assert!(o.cookie_owner.is_some());
+        } else {
+            let (e, o) = t.connect_params().unwrap();
+            assert_eq!(
+                e,
+                Endpoint::Unix(d.join("tor").join("control").display().to_string())
+            );
+            assert_eq!(o.expect_tor_uid.is_some(), cfg!(target_os = "linux"));
+            if cfg!(target_os = "linux") {
+                assert_eq!(o.expect_tor_uid, Some(990), "the account's uid");
+            }
+        }
+        let (_, o) = t.connect_params().unwrap();
+        assert_eq!(o.auth, TorAuth::Cookie);
+        assert_eq!(
+            o.cookie_path.as_deref(),
+            Some(d.join("tor").join("control_auth_cookie").to_str().unwrap())
+        );
+        assert!(!o.allow_remote_control);
+    }
+
+    #[tokio::test]
+    async fn the_reasons_follow_the_child() {
+        let d = state_dir();
+        let c = ctx(Some(d), FakeAccounts::present());
+        let t = ManagedTor::new("tor", &c);
+        assert_eq!(t.reason(true), "SocketGuard is turned off");
+        assert!(!t.is_up());
+        assert_eq!(t.info().state, ChildState::Stopped);
+        assert_eq!(t.info().version, None);
+    }
+
+    #[test]
+    fn prepare_makes_a_private_directory_a_fresh_torrc_and_no_leftovers() {
+        let d = state_dir();
+        let p = TorPaths::new(&d);
+        std::fs::create_dir_all(&p.dir).unwrap();
+        for f in [&p.control_socket, &p.control_port_file, &p.cookie] {
+            std::fs::write(f, b"stale").unwrap();
+        }
+        std::fs::write(&p.torrc, b"old").unwrap();
+        prepare(&p, &RunAs::Daemon { note: None }).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p.torrc).unwrap(),
+            torrc(&p, cfg!(windows))
+        );
+        for f in [&p.control_socket, &p.control_port_file, &p.cookie] {
+            assert!(!f.exists(), "{}", f.display());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p.dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        // Twice is the same.
+        prepare(&p, &RunAs::Daemon { note: None }).unwrap();
+    }
+}

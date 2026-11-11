@@ -168,7 +168,7 @@ async fn waiting_and_unavailable_children_do_not_run_and_say_why() {
     pass(TICK).await;
     assert_eq!(sup.status("t").state, ChildState::Unavailable);
 
-    sup.set_desired("t", Desired::Run(spec(&[])));
+    sup.set_desired("t", Desired::Run(Box::new(spec(&[]))));
     pass(TICK).await;
     assert_eq!(sup.status("t").state, ChildState::Up);
     assert_eq!(sup.status("t").detail, None);

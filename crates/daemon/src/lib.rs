@@ -1,8 +1,10 @@
 pub mod access;
+pub mod account;
 pub mod api;
 pub mod apply;
 pub mod args;
 pub mod bundled;
+pub mod children;
 pub mod commands;
 pub mod config_file;
 pub mod disable;

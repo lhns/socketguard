@@ -171,8 +171,14 @@ impl Engine {
                 EngineError::Invalid(e)
             }
         })?;
-        let n = networks::create(&inst.backend, self.ula_global_id, self.ifaces.clone())
-            .map_err(|e| EngineError::Invalid(format!("cannot create network: {e}")))?;
+        let n = networks::create(
+            &inst.id,
+            &inst.backend,
+            self.ula_global_id,
+            self.ifaces.clone(),
+            &self.managed,
+        )
+        .map_err(|e| EngineError::Invalid(format!("cannot create network: {e}")))?;
         let applied = self.add_network_instance(state, &inst, n).await;
         let network = self
             .networks()
@@ -210,7 +216,9 @@ impl Engine {
         updated.validate_managed().map_err(EngineError::Invalid)?;
         let count = updated.peers().len();
         active.config.backend = updated;
-        // TODO(managed): restart the child process so that it connects to the new peers.
+        // A changed spec restarts the child so that it connects to the new peers: the
+        // Yggdrasil worker puts the peers into the spec (`networks::managed::child_wish`).
+        self.sync_children(state).await;
         let activity = NewActivity::new(
             ActivityKind::NetworkChanged,
             format!("Changed the peers of {id} ({count} now)"),
@@ -318,6 +326,8 @@ impl Engine {
         };
         // The network is live either way; a failed apply is retried by the next pass.
         let applied = self.apply_and_ensure(state).await;
+        // A managed network's child starts once its network exists and the ruleset is in.
+        self.sync_children(state).await;
         let result = self
             .commit(
                 state,
@@ -356,6 +366,9 @@ impl Engine {
             }
         };
         self.remove_locators(state, backend_id, &deleted).await;
+        // The child ends before its network disappears, so nothing of it outlives the
+        // network (a managed Tor takes its onion services with it).
+        self.stop_child(backend_id).await;
         self.backends.remove(backend_id);
         // A network added again later must not inherit this one's remembered node.
         if let Err(e) = state

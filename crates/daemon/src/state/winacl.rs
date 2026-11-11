@@ -78,11 +78,15 @@ struct Descriptor(PSECURITY_DESCRIPTOR);
 
 impl Descriptor {
     fn new() -> anyhow::Result<Self> {
+        Self::from_sddl(&sddl())
+    }
+
+    fn from_sddl(sddl: &str) -> anyhow::Result<Self> {
         let mut sd = PSECURITY_DESCRIPTOR::default();
         // SAFETY: `sd` receives a LocalAlloc'd descriptor that Drop frees.
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                &HSTRING::from(sddl()),
+                &HSTRING::from(sddl),
                 SDDL_REVISION_1,
                 &mut sd,
                 None,
@@ -134,9 +138,28 @@ pub fn create_protected(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The data directory of a managed child that runs as LocalService (ADR 0052): SYSTEM,
+/// Administrators and LocalService, inherited by what is created inside. Untested on a real
+/// service host.
+pub fn service_dir_sddl() -> String {
+    let base = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LS)";
+    match extra_principal() {
+        Some(sid) => format!("{base}(A;OICI;FA;;;{sid})"),
+        None => base.to_string(),
+    }
+}
+
 /// Replace the DACL of an existing file with the protected one.
 pub fn protect(path: &Path) -> anyhow::Result<()> {
-    let sd = Descriptor::new()?;
+    protect_with(path, Descriptor::new()?)
+}
+
+/// [`protect`] a directory for a child running as LocalService.
+pub fn protect_service_dir(path: &Path) -> anyhow::Result<()> {
+    protect_with(path, Descriptor::from_sddl(&service_dir_sddl())?)
+}
+
+fn protect_with(path: &Path, sd: Descriptor) -> anyhow::Result<()> {
     let mut present = windows::core::BOOL::default();
     let mut defaulted = windows::core::BOOL::default();
     let mut dacl: *mut ACL = std::ptr::null_mut();

@@ -169,7 +169,7 @@ impl std::fmt::Debug for ChildSpec {
 #[derive(Clone)]
 pub enum Desired {
     /// Run it, and restart it when it ends.
-    Run(ChildSpec),
+    Run(Box<ChildSpec>),
     /// Not running on purpose.
     Stopped,
     /// Held back; the sentence says until what.
@@ -321,7 +321,10 @@ impl Supervisor {
     /// Declare the child `id`: `Some(spec)` runs it (a changed spec restarts it), `None`
     /// stops it. Returns at once; [`Supervisor::wait_stopped`] waits for a stop.
     pub fn set(&self, id: &str, spec: Option<ChildSpec>) {
-        self.set_desired(id, spec.map_or(Desired::Stopped, Desired::Run));
+        self.set_desired(
+            id,
+            spec.map_or(Desired::Stopped, |s| Desired::Run(Box::new(s))),
+        );
     }
 
     /// [`Supervisor::set`] for the other wishes: held back, or unavailable.

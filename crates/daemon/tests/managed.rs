@@ -125,19 +125,21 @@ async fn complete_files_pass_the_checks_and_status_lists_them() {
     let (_, setup) = f.call(Method::GET, "/api/networks/setup", None).await;
     assert_eq!(setup["tor"]["managed"]["available"], true);
     assert_eq!(setup["tor"]["managed"]["version"], "16.0.1");
-    // Creating the network is the next step of ADR 0052; the checks above it pass.
-    let (s, e) = f
+    // The network is created; its child is not started by this engine (no state
+    // directory), and the card says so instead of failing the request.
+    let (s, n) = f
         .call(
             Method::POST,
             "/api/networks",
             Some(json!({"type": "tor", "managed": true})),
         )
         .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
-    assert!(
-        e["message"].as_str().unwrap().contains("not available yet"),
-        "{e}"
-    );
+    assert_eq!(s, StatusCode::CREATED, "{n}");
+    assert_eq!(n["kind"], "tor");
+    // (a daemon with no state directory has nowhere to keep Tor's data)
+    assert_eq!(n["managed"]["state"], "unavailable");
+    assert_eq!(n["managed"]["version"], "16.0.1");
+    assert_eq!(n["status"]["state"], "down");
 }
 
 #[tokio::test]

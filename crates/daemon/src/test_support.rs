@@ -586,7 +586,7 @@ pub async fn test_app_state_at(
 
 /// [`test_app_state_at`] with a `third_party` directory (see `Bundled::from_dir`).
 pub async fn test_app_state_with(
-    engine: crate::engine::Engine,
+    mut engine: crate::engine::Engine,
     config: DaemonConfig,
     config_path: Option<std::path::PathBuf>,
     bundled: crate::bundled::Bundled,
@@ -595,6 +595,9 @@ pub async fn test_app_state_with(
     db.migrate().await.unwrap();
 
     let (events_tx, _) = tokio::sync::broadcast::channel(64);
+    // The engine builds managed networks from the same files the API checks.
+    let bundled = Arc::new(bundled);
+    engine.set_bundled(bundled.clone());
 
     Arc::new(AppState {
         config: tokio::sync::RwLock::new(config),
@@ -602,9 +605,69 @@ pub async fn test_app_state_with(
         db,
         engine: tokio::sync::RwLock::new(engine),
         firewall_lock: tokio::sync::Mutex::new(()),
-        bundled: Arc::new(bundled),
+        bundled,
         events: events_tx,
     })
+}
+
+/// The pieces of a managed-network test: the fake processes, a state directory in a temp
+/// directory and the accounts, with the supervisor's pauses shortened to milliseconds.
+pub struct ManagedHarness {
+    pub spawner: crate::children::fake::FakeSpawner,
+    pub state_dir: std::path::PathBuf,
+    pub ctx: crate::networks::ManagedCtx,
+}
+
+impl ManagedHarness {
+    /// `third_party` has a Tor; the account `socketguard-net` exists.
+    pub fn new() -> Self {
+        Self::with(crate::account::FakeAccounts::present())
+    }
+
+    pub fn with(accounts: crate::account::FakeAccounts) -> Self {
+        let root = std::env::temp_dir().join(format!("sg-managed-{}", uuid::Uuid::new_v4()));
+        let third = root.join("third_party");
+        let tor = third.join("tor");
+        std::fs::create_dir_all(&tor).unwrap();
+        std::fs::write(
+            tor.join(if cfg!(windows) { "tor.exe" } else { "tor" }),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(third.join("VERSIONS"), "tor 16.0.1\n").unwrap();
+        let state_dir = root.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let spawner = crate::children::fake::FakeSpawner::default();
+        let ctx = crate::networks::ManagedCtx::new(
+            Arc::new(crate::bundled::Bundled::from_dir(third)),
+            Some(state_dir.clone()),
+            Arc::new(crate::children::Supervisor::new(Arc::new(spawner.clone()))),
+            Arc::new(accounts),
+        );
+        Self {
+            spawner,
+            state_dir,
+            ctx,
+        }
+    }
+
+    /// An engine over mocks with no networks that runs managed networks on this harness.
+    pub fn engine(&self) -> crate::engine::Engine {
+        let mut engine = empty_engine();
+        engine.set_managed_ctx(self.ctx.clone());
+        engine
+    }
+
+    /// A daemon state over [`ManagedHarness::engine`] that knows the same shipped files.
+    pub async fn app_state(&self, config: DaemonConfig) -> Arc<AppState> {
+        test_app_state_with(self.engine(), config, None, (*self.ctx.bundled).clone()).await
+    }
+}
+
+impl Default for ManagedHarness {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// A mock network: its config and the mock allocator behind it.
