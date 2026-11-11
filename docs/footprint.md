@@ -37,7 +37,8 @@ No routes, sysctls or registry values are changed.
 | Onion services created with `ADD_ONION … Detach` (in Tor's memory) | yes / until Tor restarts | `DEL_ONION` on disable, uninstall, forgetting an app, removing the network |
 | Services known only to the ledger (`tor_owned_services`) or tombstones | yes | `--disable` and `uninstall` remove them too. With Tor unreachable they are listed as LEFT and the command exits non-zero |
 | Onion service keys and generated client keys in the database | yes | deleted with their rows; otherwise with the database (`uninstall --purge`). The export does not contain onion private keys |
-| Yggdrasil | nothing is changed in the node or its configuration | |
+| An existing Yggdrasil or Tor node ("your own") | nothing is changed in the node or its configuration | |
+| SocketGuard's own Tor and Yggdrasil | see "Managed Tor and Yggdrasil" below | |
 
 ## Files
 
@@ -47,10 +48,9 @@ Default locations (ADR 0050): Windows `%ProgramData%\SocketGuard`, Linux `/etc/s
 |---|---|---|
 | Database `socketguard.db` (keys, ledger, settings), `-wal`, `-shm` | `db_path` | `uninstall --purge` |
 | Archived old databases `<db>.pre-v1[.N]` | next to the database | `uninstall --purge` |
-| Config `socketguard.json`, written when a network is added or removed | `SOCKETGUARD_CONFIG` or the config directory | `uninstall --purge` (with `--keep-data` the Tor entry written by `networks setup` is still removed) |
+| Config `socketguard.json`, written when a network is added or removed | `SOCKETGUARD_CONFIG` or the config directory | `uninstall --purge` |
 | Temp file `socketguard.tmp-<pid>-<uuid>` | next to the config | removed on error; left after a crash: `uninstall --purge` |
 | Install record and setup log `setup-log.json` | next to the config | `uninstall --purge`; kept (with the entries still to undo) otherwise |
-| `.socketguard.bak` backup of Tor's `torrc` | next to the `torrc` | `networks setup tor --undo`, `uninstall` |
 | Directories created by SocketGuard | the config and state directories | `uninstall`, only if the install record says SocketGuard created them and they are empty |
 | Unix socket `/run/socketguard.sock` | | graceful stop; `uninstall --purge` |
 | Named pipe `\\.\pipe\socketguard` | Windows | process exit |
@@ -58,7 +58,7 @@ Default locations (ADR 0050): Windows `%ProgramData%\SocketGuard`, Linux `/etc/s
 
 Per-user UI storage (the webview profile of `com.socketguard.desktop`; the UI's "Remove SocketGuard" flow empties the signed-in user's profile through `clear_local_ui_settings`, which leaves the empty folder): Windows `%LOCALAPPDATA%\com.socketguard.desktop\EBWebView`; Linux `~/.local/share/com.socketguard.desktop`; macOS `~/Library/WebKit/com.socketguard.desktop` and `~/Library/Caches/com.socketguard.desktop` (the Linux and macOS paths come from the webview defaults and are not verified).
 
-No log or PID files are written. Telemetry is exported only when the `OTEL_*` variables are set.
+No log files are written (children log into the daemon's log). A pid file `child.pid` is written into a child's data directory on macOS only. Telemetry is exported only when the `OTEL_*` variables are set.
 
 ## System integration
 
@@ -70,17 +70,26 @@ No log or PID files are written. Telemetry is exported only when the `OTEL_*` va
 | launchd daemon `/Library/LaunchDaemons/de.lhns.socketguard.plist` | `service install`; removed by `service uninstall` and `uninstall` |
 | Registry keys, scheduled tasks, autostart entries, environment variables | none |
 
-## Network setup (ADR 0048)
+## Managed Tor and Yggdrasil (ADR 0052)
 
-Everything `socketguard networks setup` changes is recorded in `setup-log.json` next to the config file and reversed by `socketguard networks setup <kind> --undo`, or by `socketguard-daemon uninstall` (which never uninstalls packages; it prints the command).
+SocketGuard ships Tor, Yggdrasil and (Windows) `wintun.dll` and runs them as child processes. It installs no package, starts no system service of theirs and edits no configuration of software it did not ship (`socketguard networks setup` no longer exists). A managed network adds the items below.
 
-| Item | Removal |
-|---|---|
-| Packages it installed through the package manager (never ones that were already there) | `--undo --uninstall-packages`; plain `--undo` and `uninstall` only print the command |
-| Services it started or enabled | `--undo` / `uninstall` restores the previous state; `--undo --stop-service-only` stops only the service and keeps the network and its block |
-| Lines appended to Tor's `torrc` and the one-time `.socketguard.bak` | `--undo` / `uninstall` removes exactly those lines and the backup |
-| Tor network entry in the config file | `--undo`, `uninstall`, or removing the network |
-| `setup-log.json` | `uninstall --purge` |
+| Item | System | Survives stop / reboot | Removed by |
+|---|---|---|---|
+| Child process `tor` (own data directory, no SOCKS port, control endpoint only SocketGuard reads) | all | no: it ends with the daemon (Windows job object, Linux parent-death signal, Tor's own owning-controller check; macOS: a pid file in the data directory and a check at the next start) | turning SocketGuard off, removing the network, stopping the daemon |
+| Child process `yggdrasil` (own key, own adapter) | all | same | same |
+| Tor data directory `<state dir>/tor` (state, cookie, control socket) | all | yes | kept by an uninstall that keeps data; `uninstall --purge` removes the tree (install record kind `owned_directory`, path must be inside the state directory) |
+| Yggdrasil directory `<state dir>/yggdrasil` (generated `yggdrasil.conf` with the node's private key, mode 0600, admin socket) | all | yes | same. The key is also in the database |
+| System account `socketguard-net` | Linux, macOS | yes | `service install` creates it if missing and records it; `uninstall` removes it only when it was created by SocketGuard. Without it children run as the daemon's account and `status` says so |
+| Adapter `SocketGuard` (Windows), `sgygg0` (Linux), a `utun` (macOS) | all | no: it disappears when `yggdrasil` exits | stopping the child; the footprint check lists a leftover one |
+| Wintun driver in the driver store | Windows | yes | **shared with other software.** The install record keeps whether it was present before the first managed start; `uninstall --purge` removes it only if it was absent before and the removal without force succeeds, otherwise it is reported as *kept* |
+| Shipped third-party files (`third_party/` next to the daemon, with `licenses/` and `VERSIONS`) | all | yes | the package (`uninstall`, `apt purge`, `msiexec /x`) |
+
+What privilege cannot be dropped:
+
+- **Yggdrasil on Windows** runs as the account of the daemon (the service account, LocalSystem): there is no way to drop privileges after the adapter is created. On Linux and macOS it creates the adapter as root and then drops to `socketguard-net` (`-user`).
+- **Tor** runs as `socketguard-net` (Unix) or LocalService (Windows). If the daemon is started by hand without the right to start a process as LocalService, or the account does not exist, Tor runs as the daemon's account and `status` says so.
+- The daemon itself keeps its privileges: it manages the firewall and the addresses.
 
 ## Windows of exposure (ADR 0051)
 
@@ -89,12 +98,12 @@ The invariant: a network SocketGuard adds, installs or manages never makes the h
 | Case | State | By what, or why open |
 |---|---|---|
 | Yggdrasil installed by someone else and running, before it is added | **open, by design** | Not a network SocketGuard manages yet. The network card says so ("Yggdrasil is running but not managed", `exposed` in `GET /api/networks/setup`). |
-| Between starting the node and the network being added | closed | `networks setup yggdrasil` adds the network first and starts nothing until the block is verified (`yggdrasil_block` in `GET /api/networks/setup`). It installs nothing. |
-| Setup stops half way | closed | The network and its block stay; the message says so and how to undo. Running setup again says "already a network; nothing to do": start the service by hand or undo. |
-| Network added before the node was ever seen | closed on the interface only, if the interface exists (WFP) or is named (nftables, pf) | Its address is unknown, so only the interface is closed: setup names the adapter (Windows: `Yggdrasil`) or refuses to start the service. `closed` is false with the reason until the node answers once. |
+| SocketGuard's own Yggdrasil node, before its first start | closed | The first-sight window does not apply: SocketGuard generates the key, derives the node's address and `/64` from it and stores them as the remembered node (`ygg_node:<network>`) before anything runs. The child starts only after the ruleset with `overlay:<network>:addr` and `:subnet` was applied and verified; if the apply fails the child does not start and the status says why. The adapter name is chosen by SocketGuard, so the interface rule exists too. |
+| Managed node, one other node already running on the host | closed | The child is not started (two nodes in one namespace break each other); the status says "another Yggdrasil node is running on this host". |
+| Network added before an existing node was ever seen | closed on the interface only, if the interface exists (WFP) or is named (nftables, pf) | Its address is unknown, so only the interface is closed. `closed` is false with the reason until the node answers once. |
 | Node stopped, restarted, adapter missing, renamed or recreated | closed | The node's own `/128` and `/64` are denied as destinations on any interface (`overlay:<network>:addr`, `:subnet`), remembered in the settings table (`ygg_node:<network>`) from the first time they are known. |
 | A second node, not managed by SocketGuard, on the same host | untouched | Only the managed node's addresses are denied. |
-| Network removed, "turn off", uninstall while the node keeps running | **open, by choice** | The block is removed with them. `GET /api/exposure` is shown first, with the programs that become reachable and an offer to stop the service setup started. Removing a running node's network needs `confirm_exposed` (CLI `--yes`). |
+| Network removed, "turn off", uninstall while the node keeps running | **open, by choice** | The block is removed with them. `GET /api/exposure` is shown first, with the programs that become reachable. Removing a running node's network needs `confirm_exposed` (CLI `--yes`). **Only for an existing node ("your own")**: SocketGuard's own node stops with its network, with "turn off" and with the daemon, so a managed network has no exposure on leaving. |
 | Linux: boot before the daemon applies its ruleset | partly closed | `Before=network-pre.target`, `Wants=network-pre.target` and `Before=yggdrasil.service` order the daemon first, but `Type=simple` orders on process start, not on the first apply; the rules are in force a moment later. The remembered node addresses are applied in that first ruleset. |
 | macOS: boot before the anchor is loaded | **open** | No launchd service exists yet; nothing orders the node after SocketGuard, and pf rules do not survive a reboot. |
 | Windows: boot | closed | WFP filters are persistent. |
