@@ -29,7 +29,8 @@ fi
 printf '%s\n' "$line" > "$work/line"
 # Replace the marker line with the entry (or with nothing).
 awk -v f="$work/line" '/# THIRD_PARTY/ { while ((getline l < f) > 0) if (l != "") print l; next } { print }' \
-    installer/linux/nfpm.yaml > "$work/nfpm.yaml"
+    installer/linux/nfpm.yaml |
+    sed -e "s|\${BIN_DIR}|$BIN_DIR|g" -e "s|\${VERSION}|$VERSION|g" > "$work/nfpm.yaml"
 
 for t in deb rpm; do
     nfpm package -f "$work/nfpm.yaml" -p "$t" -t "$out"

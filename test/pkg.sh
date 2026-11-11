@@ -21,6 +21,14 @@ fail() {
     echo "--- launchctl ---"; sudo launchctl print "system/$label" 2>&1 | head -40 || true
     echo "--- install log ---"; sudo tail -n 60 /var/log/install.log 2>/dev/null || true
     echo "--- pf.conf ---"; cat /etc/pf.conf || true
+    # launchd keeps the daemon's output nowhere: run it in the foreground for a few seconds.
+    echo "--- the daemon in the foreground ---"
+    sudo launchctl bootout "system/$label" 2>&1 || true
+    sudo /usr/local/bin/socketguard-daemon >/tmp/daemon-fg.log 2>&1 &
+    fgpid=$!
+    sleep 8
+    sudo kill "$fgpid" 2>/dev/null || true
+    head -60 /tmp/daemon-fg.log || true
     exit 1
 }
 wait_answers() { for _ in $(seq 1 60); do sudo /usr/local/bin/socketguard status --json >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }

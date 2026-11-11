@@ -78,10 +78,12 @@
     <Property Id="ALLOWUSER" Secure="yes" />
     <Property Id="SGUSER" Secure="yes" />
     <Property Id="ALLOWME" Secure="yes" />
-    <SetProperty Id="SGUSER" Value="[%USERNAME]" Before="CostInitialize" Sequence="ui"
-                 Condition="%USERDOMAIN ~= %COMPUTERNAME" />
-    <SetProperty Id="SGUSER" Value="[%USERDOMAIN]\[%USERNAME]" Before="CostInitialize" Sequence="ui"
-                 Condition="NOT (%USERDOMAIN ~= %COMPUTERNAME)" />
+    <CustomAction Id="SetSgUserLocal" Property="SGUSER" Value="[%USERNAME]" />
+    <CustomAction Id="SetSgUserDomain" Property="SGUSER" Value="[%USERDOMAIN]\[%USERNAME]" />
+    <InstallUISequence>
+      <Custom Action="SetSgUserLocal" Before="CostInitialize" Condition="%USERDOMAIN ~= %COMPUTERNAME" />
+      <Custom Action="SetSgUserDomain" Before="CostInitialize" Condition="NOT (%USERDOMAIN ~= %COMPUTERNAME)" />
+    </InstallUISequence>
     <SetProperty Id="ALLOWME" Value="1" Before="CostInitialize" Sequence="ui" Condition="NOT Installed" />
 
     <!-- FORCEREMOVE=1 on a removal adds the force flag and ignores a failure: the way out when the
