@@ -619,9 +619,10 @@ pub struct ManagedHarness {
 }
 
 impl ManagedHarness {
-    /// `third_party` has a Tor; the account `socketguard-net` exists.
+    /// `third_party` has a Tor; the account `socketguard-net` exists (with the ids of the
+    /// test process, so preparing Tor's directory works without root).
     pub fn new() -> Self {
-        Self::with(crate::account::FakeAccounts::present())
+        Self::with(crate::account::FakeAccounts::own())
     }
 
     pub fn with(accounts: crate::account::FakeAccounts) -> Self {

@@ -48,10 +48,20 @@ impl TorPaths {
 /// Who the managed Tor runs as: the unprivileged account when it exists and the daemon may
 /// start processes as it, else the daemon's own account, saying why.
 pub fn resolve_run_as(accounts: &dyn Accounts) -> RunAs {
-    if cfg!(windows) {
-        return RunAs::LocalService;
-    }
     let (_, root) = accounts.daemon();
+    if cfg!(windows) {
+        // Only SYSTEM may log LocalService on; decided here, before the data directory is
+        // prepared for it, so the directory and the vetting of the cookie agree.
+        return if root {
+            RunAs::LocalService
+        } else {
+            RunAs::Daemon {
+                note: Some(
+                    "the daemon is not SYSTEM, so it cannot start Tor as LocalService".into(),
+                ),
+            }
+        };
+    }
     match accounts.lookup(account::NAME) {
         Some(ids) if root => RunAs::Account {
             name: account::NAME.into(),
@@ -204,9 +214,9 @@ impl ManagedTor {
             ..AuthOptions::default()
         };
         if cfg!(windows) {
-            // LocalService owns the files it writes; in the fallback (the daemon's own
-            // account started Tor) its own SID does.
-            opts.cookie_owner = if self.child().runs_as.as_deref() == Some("LocalService") {
+            // LocalService owns the files it writes; when the daemon's own account runs
+            // Tor, that account's SID does.
+            opts.cookie_owner = if run_as == RunAs::LocalService {
                 Some("S-1-5-19".into())
             } else {
                 own_sid()
@@ -300,8 +310,16 @@ pub fn prepare(paths: &TorPaths, run_as: &RunAs) -> Result<(), String> {
             .map_err(|e| fail(&format!("cannot protect {}", paths.dir.display()), &e))?;
     }
     #[cfg(windows)]
-    crate::state::protect_service_dir(&paths.dir)
-        .map_err(|e| fail(&format!("cannot protect {}", paths.dir.display()), &e))?;
+    {
+        // SYSTEM and Administrators, and LocalService only when Tor runs as it: an ACE for
+        // an account that does not own the files would fail the vetting of the cookie.
+        crate::state::protect_service_dir(&paths.dir, *run_as == RunAs::LocalService)
+            .map_err(|e| fail(&format!("cannot protect {}", paths.dir.display()), &e))?;
+    }
+    #[cfg(unix)]
+    if let RunAs::Account { uid, gid, .. } = run_as {
+        hand_over(&paths.dir, *uid, *gid)?;
+    }
     // Stale endpoints and cookie: whatever answers must be the Tor started now.
     for f in [
         &paths.control_socket,
@@ -314,11 +332,10 @@ pub fn prepare(paths: &TorPaths, run_as: &RunAs) -> Result<(), String> {
             Err(e) => return Err(fail(&format!("cannot remove {}", f.display()), &e)),
         }
     }
-    std::fs::write(&paths.torrc, torrc(paths, cfg!(windows)))
-        .map_err(|e| fail(&format!("cannot write {}", paths.torrc.display()), &e))?;
+    write_torrc(paths)?;
     #[cfg(unix)]
     if let RunAs::Account { uid, gid, .. } = run_as {
-        give_to(&paths.dir, *uid, *gid)?;
+        chown(&paths.torrc, *uid, *gid)?;
         // The state directory is private to root (it holds the database); the account
         // must be able to reach its own directory below it, and nothing else.
         if let Some(parent) = paths.dir.parent() {
@@ -346,44 +363,66 @@ fn allow_traverse(dir: &Path) -> Result<(), String> {
     .map_err(|e| format!("cannot let the Tor account enter {}: {e}", dir.display()))
 }
 
-/// Make `dir` and, when its owner differs (the account was recreated with another uid),
-/// everything inside it belong to `uid`/`gid`. Links are not followed.
+/// `lchown` (never follows a link) `p` to `uid`/`gid`.
 #[cfg(unix)]
-fn give_to(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
-    fn chown(p: &Path, uid: u32, gid: u32) -> Result<(), String> {
-        let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes())
-            .map_err(|_| format!("bad path {}", p.display()))?;
-        // SAFETY: `c` is a valid NUL-terminated path; lchown does not follow links.
-        let rc = unsafe { libc::lchown(c.as_ptr(), uid, gid) };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(format!(
-                "cannot give {} to uid {uid}: {}",
-                p.display(),
-                std::io::Error::last_os_error()
-            ))
-        }
-    }
-    fn walk(p: &Path, uid: u32, gid: u32) -> Result<(), String> {
-        chown(p, uid, gid)?;
-        let meta = std::fs::symlink_metadata(p).map_err(|e| e.to_string())?;
-        if meta.is_dir() {
-            for entry in std::fs::read_dir(p).map_err(|e| e.to_string())? {
-                walk(&entry.map_err(|e| e.to_string())?.path(), uid, gid)?;
-            }
-        }
+fn chown(p: &Path, uid: u32, gid: u32) -> Result<(), String> {
+    let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes())
+        .map_err(|_| format!("bad path {}", p.display()))?;
+    // SAFETY: `c` is a valid NUL-terminated path; lchown does not follow links.
+    let rc = unsafe { libc::lchown(c.as_ptr(), uid, gid) };
+    if rc == 0 {
         Ok(())
-    }
-    let owner = std::fs::metadata(dir).map_err(|e| e.to_string())?.uid();
-    if owner == uid {
-        // Only what we just wrote needs it.
-        chown(dir, uid, gid)?;
-        chown(&dir.join("torrc"), uid, gid)
     } else {
-        walk(dir, uid, gid)
+        Err(format!(
+            "cannot give {} to uid {uid}: {}",
+            p.display(),
+            std::io::Error::last_os_error()
+        ))
     }
+}
+
+/// Make `dir` belong to the account. A directory of another uid (the account was recreated,
+/// or Tor ran as someone else before) holds state this account cannot use, and the daemon,
+/// running as root, must not walk a tree that an unprivileged process controls to change
+/// owners in it: its contents are removed and Tor starts afresh.
+#[cfg(unix)]
+fn hand_over(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let owner = std::fs::metadata(dir).map_err(|e| e.to_string())?.uid();
+    if owner != uid {
+        for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let removed = if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+                std::fs::remove_dir_all(entry.path())
+            } else {
+                std::fs::remove_file(entry.path())
+            };
+            removed.map_err(|e| format!("cannot clear {}: {e}", entry.path().display()))?;
+        }
+    }
+    chown(dir, uid, gid)
+}
+
+/// Create `torrc` fresh and exclusively: the directory belongs to the account Tor runs as,
+/// so a link planted there must not make the daemon write somewhere else.
+fn write_torrc(paths: &TorPaths) -> Result<(), String> {
+    use std::io::Write;
+    let fail = |e: std::io::Error| format!("cannot write {}: {e}", paths.torrc.display());
+    match std::fs::remove_file(&paths.torrc) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(fail(e)),
+    }
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o644).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut f = open.open(&paths.torrc).map_err(fail)?;
+    f.write_all(torrc(paths, cfg!(windows)).as_bytes())
+        .map_err(fail)
 }
 
 #[cfg(test)]
@@ -557,6 +596,30 @@ mod tests {
         assert!(!o.allow_remote_control);
     }
 
+    /// A daemon that is not SYSTEM runs Tor as itself: the directory is protected without
+    /// an entry for LocalService, so the cookie Tor writes passes the vetting.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn on_windows_a_daemon_that_is_not_system_vets_its_own_cookie() {
+        let d = state_dir();
+        let accounts = FakeAccounts {
+            root: false,
+            ..FakeAccounts::present()
+        };
+        let c = ctx(Some(d.clone()), accounts);
+        let t = ManagedTor::new("tor", &c);
+        let spec = t.spec().unwrap();
+        assert!(matches!(spec.run_as, RunAs::Daemon { .. }));
+        (spec.before_start.unwrap())().unwrap();
+        // Tor writes these as the account it runs as: this process.
+        let paths = TorPaths::new(&d);
+        std::fs::write(&paths.cookie, [7u8; 32]).unwrap();
+        std::fs::write(&paths.control_port_file, "PORT=127.0.0.1:1\n").unwrap();
+        let (_, opts) = t.connect_params().unwrap();
+        super::super::tor_control::read_cookie_file(&paths.cookie.display().to_string(), &opts)
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn the_reasons_follow_the_child() {
         let d = state_dir();
@@ -566,6 +629,26 @@ mod tests {
         assert!(!t.is_up());
         assert_eq!(t.info().state, ChildState::Stopped);
         assert_eq!(t.info().version, None);
+    }
+
+    /// The directory belongs to the account Tor runs as, which the daemon (root) does not
+    /// trust: a `torrc` that is a link must not make it overwrite what the link points at.
+    #[cfg(unix)]
+    #[test]
+    fn prepare_never_writes_through_a_planted_link() {
+        let d = state_dir();
+        let p = TorPaths::new(&d);
+        std::fs::create_dir_all(&p.dir).unwrap();
+        let victim = d.join("victim");
+        std::fs::write(&victim, b"precious").unwrap();
+        std::os::unix::fs::symlink(&victim, &p.torrc).unwrap();
+        std::os::unix::fs::symlink(&victim, &p.cookie).unwrap();
+        prepare(&p, &RunAs::Daemon { note: None }).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
+        let meta = std::fs::symlink_metadata(&p.torrc).unwrap();
+        assert!(meta.is_file(), "torrc is a regular file again");
+        assert!(!p.cookie.exists());
+        assert_eq!(std::fs::read_to_string(&p.torrc).unwrap(), torrc(&p, false));
     }
 
     #[test]

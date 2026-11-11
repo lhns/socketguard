@@ -66,7 +66,16 @@ impl Accounts for SystemAccounts {
         (uid, uid == 0)
     }
 
-    #[cfg(not(unix))]
+    /// Windows: the second value is whether the daemon is SYSTEM, which may start a process
+    /// as LocalService (a daemon started by hand from a user account may not).
+    #[cfg(windows)]
+    fn daemon(&self) -> (u32, bool) {
+        let system = crate::networks::tor_control::winacl::current_user_sid()
+            .is_ok_and(|sid| sid == "S-1-5-18");
+        (0, system)
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn daemon(&self) -> (u32, bool) {
         (0, false)
     }
@@ -94,6 +103,26 @@ impl FakeAccounts {
         Self {
             account: None,
             ..Self::present()
+        }
+    }
+
+    /// The account exists and has the ids of the test process itself, so giving a
+    /// directory to it works without being root; the daemon counts as root.
+    pub fn own() -> Self {
+        #[cfg(unix)]
+        // SAFETY: geteuid and getegid have no preconditions.
+        let ids = unsafe {
+            Ids {
+                uid: libc::geteuid(),
+                gid: libc::getegid(),
+            }
+        };
+        #[cfg(not(unix))]
+        let ids = Ids { uid: 990, gid: 990 };
+        Self {
+            account: Some(ids),
+            daemon_uid: ids.uid,
+            root: true,
         }
     }
 }

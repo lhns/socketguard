@@ -138,15 +138,19 @@ pub fn create_protected(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The data directory of a managed child that runs as LocalService (ADR 0052): SYSTEM,
-/// Administrators and LocalService, inherited by what is created inside. Untested on a real
-/// service host.
-pub fn service_dir_sddl() -> String {
-    let base = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LS)";
-    match extra_principal() {
-        Some(sid) => format!("{base}(A;OICI;FA;;;{sid})"),
-        None => base.to_string(),
+/// The data directory of a managed child (ADR 0052): SYSTEM and Administrators, and
+/// LocalService when the child runs as it, inherited by what is created inside (the child
+/// writes there). When neither SYSTEM nor an elevated administrator runs the daemon, its
+/// own account gets an entry too.
+pub fn service_dir_sddl(local_service: bool) -> String {
+    let mut sddl = String::from("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+    if local_service {
+        sddl.push_str("(A;OICI;FA;;;LS)");
     }
+    if let Some(sid) = extra_principal() {
+        sddl.push_str(&format!("(A;OICI;FA;;;{sid})"));
+    }
+    sddl
 }
 
 /// Replace the DACL of an existing file with the protected one.
@@ -154,9 +158,12 @@ pub fn protect(path: &Path) -> anyhow::Result<()> {
     protect_with(path, Descriptor::new()?)
 }
 
-/// [`protect`] a directory for a child running as LocalService.
-pub fn protect_service_dir(path: &Path) -> anyhow::Result<()> {
-    protect_with(path, Descriptor::from_sddl(&service_dir_sddl())?)
+/// [`protect`] the data directory of a managed child, see [`service_dir_sddl`].
+pub fn protect_service_dir(path: &Path, local_service: bool) -> anyhow::Result<()> {
+    protect_with(
+        path,
+        Descriptor::from_sddl(&service_dir_sddl(local_service))?,
+    )
 }
 
 fn protect_with(path: &Path, sd: Descriptor) -> anyhow::Result<()> {

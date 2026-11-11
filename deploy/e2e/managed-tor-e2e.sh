@@ -17,6 +17,7 @@ PORT=8080
 BOOTSTRAP_SECS=${BOOTSTRAP_SECS:-240}
 PUBLISH_SECS=${PUBLISH_SECS:-420}
 FETCH_RETRY_SECS=${FETCH_RETRY_SECS:-10}
+NODE_ARGS="--init"                     # pid 1 reaps what the daemon leaves behind when killed
 STATE=/var/lib/sg                      # the daemon's state directory; Tor's is $STATE/tor
 TP=/target/debug/third_party           # beside the daemon binary, where it looks for them
 
@@ -107,8 +108,9 @@ docker exec -i "$NODE_A" sh -c 'cat > /etc/sg.json' <<JSON
 JSON
 daemon_start
 
-tor_pid() { A pgrep -x tor | head -n1; }
-tor_gone() { ! docker exec "$NODE_A" pgrep -x tor >/dev/null; }
+# The pid of the running tor (a zombie does not count: it has ended).
+tor_pid() { docker exec "$NODE_A" sh -c "ps -eo pid=,stat=,comm= | awk '\$3 == \"tor\" && \$2 !~ /^Z/ { print \$1; exit }'" | grep .; }
+tor_gone() { ! tor_pid >/dev/null; }
 net_json() { docker exec "$NODE_A" $SG networks list --json; }
 net_up() { net_json | jq -e '.[0].kind == "tor" and .[0].status.state == "up"' >/dev/null; }
 net_reason() { net_json | jq -r '.[0] | (.status.reason // .status.state) + " [" + (.managed.state // "-") + "]"'; }
@@ -125,6 +127,11 @@ wait_up() { # wait_up SECONDS: net_up, printing each distinct reason on the way
 step "the daemon started a tor of its own" retry 60 tor_pid || exit 1
 step "tor runs as socketguard-net" sh -c "[ \"\$(docker exec $NODE_A ps -o user= -p $(tor_pid) | tr -d ' ')\" = socketguard-net ]"
 step "the status names the account and the shipped version" sh -c "docker exec $NODE_A $SG networks list --json | jq -e '.[0].managed.runs_as == \"socketguard-net\" and (.[0].managed.version | length > 0)' >/dev/null"
+FIRST_TOR="$(tor_pid)"
+setup_log_has_tor_dir() {
+  docker exec "$NODE_A" cat /etc/setup-log.json | jq -e --arg p "$STATE/tor" '[.entries[] | select(.type == "owned_directory" and .path == $p)] | length == 1' >/dev/null
+}
+step "tor's data directory is in the install record as an owned directory" setup_log_has_tor_dir
 step "tor's data directory is private to socketguard-net" sh -c "[ \"\$(docker exec $NODE_A stat -c '%U %a' $STATE/tor)\" = 'socketguard-net 700' ]"
 step "the control socket is Tor's own and the cookie is 0600" sh -c "docker exec $NODE_A sh -c 'test -S $STATE/tor/control && [ \"\$(stat -c %a $STATE/tor/control_auth_cookie)\" = 600 ]'"
 
@@ -193,6 +200,8 @@ step "a third client without the key cannot fetch it" sh -c "! docker exec $NODE
 
 # ── The daemon is killed: Tor goes with it ───────────────────────────────────
 OLD_TOR="$(tor_pid)"
+# Nothing restarted tor on the way, so the end below is the daemon's death and not a restart.
+[ "$OLD_TOR" = "$FIRST_TOR" ] && pass "the same tor ran from its first start until now" || fail "the same tor ran from its first start until now ($FIRST_TOR, now $OLD_TOR)"
 A pkill -9 -x socketguard-dae
 step "tor ends when the daemon is killed (kill -9)" retry 90 tor_gone
 step "the daemon starts again" daemon_start
@@ -213,7 +222,7 @@ step "enabled: tor is started again and the network comes back" wait_up "$BOOTST
 step "enabled: the service is published again" retry 60 one_published
 
 # ── The daemon stops ─────────────────────────────────────────────────────────
-step "stopping the daemon (SIGTERM) stops tor" sh -c "docker exec $NODE_A pkill -TERM -x socketguard-dae && true"
+step "stopping the daemon (SIGTERM) works" daemon_stop
 step "tor is gone after a normal stop" retry 30 tor_gone
 step "the data directory is kept" A test -d $STATE/tor
 step "socketguard-daemon --disable runs without a daemon" docker exec -e SOCKETGUARD_CONFIG=/etc/sg.json "$NODE_A" $DAEMON --disable

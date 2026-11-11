@@ -580,6 +580,10 @@ impl Engine {
         // Adopting: the next apply replaces whatever ruleset is installed.
         state.db.set_unadopted(false).await?;
         state.db.clear_fresh().await?;
+        // Children first, so the networks read "starting" and not "turned off" while the
+        // ruleset goes in; a child with a gate (managed Yggdrasil) stays held until the
+        // second sync, after the apply.
+        self.sync_children(state).await;
         let applied = self.apply_and_ensure(state).await;
         self.sync_children(state).await;
         self.commit(state, applied, None, &[DaemonEvent::SettingsChanged])
