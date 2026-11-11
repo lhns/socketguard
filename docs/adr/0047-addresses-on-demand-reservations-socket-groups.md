@@ -94,3 +94,4 @@ A reservation behaves like an app assembled from sockets of several apps. This r
 - **Addresses.** A reservation has one static address per network, created the first time a grant covers something it serves there and kept until the reservation is released. It is up while such a grant exists.
 - **Tor.** A grant on the reservation covers every published port, so those clients are admitted to its onion address. Clients granted only single rows are left out there, as before.
 - Reserving an automatic address creates a reservation with that row bound and that address as its address on that network.
+- **Bound rows on Tor keep their own address.** On a network that authorises per address (Tor), a bound row that a grant names still gets its automatic address, so a client granted only that row is admitted there. On IP networks a bound row has no automatic address; the firewall separates ports on the reservation's address.
