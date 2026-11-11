@@ -197,6 +197,9 @@ fetch_tor() {
         [[ -f "$x/tor/$f" ]] || die "$f not found in $(basename "$archive")"
         cp "$x/tor/$f" "$OUT/tor/$f"
     done
+    # The archive keeps its owner-only modes; Tor runs as an unprivileged account (ADR 0052)
+    # and must be able to read the libraries and run the binary.
+    chmod -R u+rwX,go+rX "$OUT/tor"
     for l in $licenses; do
         [[ -f "$x/${l#*:}" ]] || die "${l#*:} not found in $(basename "$archive")"
         put_license "${l%%:*}" "$x/${l#*:}"
