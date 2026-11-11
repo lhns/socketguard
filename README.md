@@ -112,18 +112,18 @@ socketguard grant --app web --app api --port 80 --port 443 --to alice --to group
 socketguard revoke --app web --to alice
 
 socketguard tags add dev --match 'python*' --match node   # apps matching join now and when they start
-socketguard tags members add dev web:80                    # an app, one port or a port group (web:socket-group=passive); also: members rm, show, list, patterns, rename, rm
+socketguard tags members add dev web:80                    # an app, one port or a port group (web:port-group=passive); also: members rm, show, list, patterns, rename, rm
 socketguard grant tag:dev group:team                       # covers every member, present and future
 
 # Port groups: ports and ranges that belong together (ADR 0047), attached to apps, usable as a scope
-# (the command is still `socket-groups`)
-socketguard socket-groups add passive 21/tcp 50000-51000/tcp --app ftpd   # also: list, set, rm, attach, detach
-socketguard grant ftpd:socket-group=passive alice          # or: grant --app ftpd --socket-group passive --to alice
+# (the command is still `port-groups`)
+socketguard port-groups add passive 21/tcp 50000-51000/tcp --app ftpd   # also: list, set, rm, attach, detach
+socketguard grant ftpd:port-group=passive alice          # or: grant --app ftpd --port-group passive --to alice
 
 # Addresses and reservations (ADR 0047): an address exists once a grant names its row
 socketguard addresses list                    # every address, automatic and reserved, up or not
 socketguard addresses reserve <address-id> web-public     # keep an automatic address under a name
-socketguard reservations add public-web web:80/tcp tag:dev   # targets: app[:port[/proto]|:socket-group=<label>] or tag:<label>
+socketguard reservations add public-web web:80/tcp tag:dev   # targets: app[:port[/proto]|:port-group=<label>] or tag:<label>
 socketguard reservations list                 # also: rename, bind, unbind, release (bind asks before opening to Anyone; -y)
 socketguard grant reservation:public-web alice   # covers every bound row, All ports; also --reservation <label>
 

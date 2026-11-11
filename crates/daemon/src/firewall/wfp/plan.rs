@@ -43,7 +43,7 @@ pub(crate) enum Action {
 pub(crate) enum Cond {
     LocalAddr(IpAddr),
     LocalPort(u16),
-    /// A range of local ports, both ends included (a rule over a socket group's range).
+    /// A range of local ports, both ends included (a rule over a port group's range).
     LocalPortRange(u16, u16),
     RemotePort(u16),
     Proto(u8),

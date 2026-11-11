@@ -36,11 +36,11 @@ import type { ReserveRequest } from "./generated/ReserveRequest";
 import type { PortRef } from "./generated/PortRef";
 import type { ProtectHostRequest } from "./generated/ProtectHostRequest";
 import type { ProtectHostResponse } from "./generated/ProtectHostResponse";
-import type { AttachSocketGroup } from "./generated/AttachSocketGroup";
-import type { NewSocketGroup } from "./generated/NewSocketGroup";
+import type { AttachPortGroup } from "./generated/AttachPortGroup";
+import type { NewPortGroup } from "./generated/NewPortGroup";
 import type { Scope } from "./generated/Scope";
-import type { SocketGroup } from "./generated/SocketGroup";
-import type { UpdateSocketGroup } from "./generated/UpdateSocketGroup";
+import type { PortGroup } from "./generated/PortGroup";
+import type { UpdatePortGroup } from "./generated/UpdatePortGroup";
 import type { Settings } from "./generated/Settings";
 import type { ShareResponse } from "./generated/ShareResponse";
 import type { StatusResponse } from "./generated/StatusResponse";
@@ -55,7 +55,7 @@ export type {
   ChangeOp, ChangesRequest, ChangesResponse, Credential, Enforcement, ExportDocument, GrantView,
   LockoutRiskInfo, MoveAppRequest, Network, NewBinding, NewCredential, NewGrant, NewGroup, NewNetwork, NewPeer,
   NewReservation, NewTag, ReservationView, ReserveRequest, ParsedCredential, Peer, PeerGroup, PortRef, ProtectHostRequest, ProtectHostResponse,
-  AttachSocketGroup, NewSocketGroup, Scope, SocketGroup, UpdateSocketGroup,
+  AttachPortGroup, NewPortGroup, Scope, PortGroup, UpdatePortGroup,
   Settings, ShareResponse, StatusResponse, Tag, TagMember, Target, TorKeyResponse,
   UpdateTag,
 };
@@ -167,16 +167,16 @@ export const api = {
     callSaved<Tag>("add_tag_member", { tagId, member, confirmOpen }),
   removeTagMember: (tagId: string, appId: string, scope: Scope) =>
     callSaved<Tag>("remove_tag_member", { tagId, appId, scope }),
-  listSocketGroups: () => call<SocketGroup[]>("list_socket_groups"),
-  getSocketGroup: (id: string) => call<SocketGroup>("get_socket_group", { id }),
-  createSocketGroup: (req: NewSocketGroup) => callSaved<SocketGroup>("create_socket_group", { req }),
-  updateSocketGroup: (id: string, req: UpdateSocketGroup) =>
-    callSaved<SocketGroup>("update_socket_group", { id, req }),
-  deleteSocketGroup: (id: string) => callSaved<null>("delete_socket_group", { id }),
-  attachSocketGroup: (id: string, appId: string, req: AttachSocketGroup) =>
-    callSaved<SocketGroup>("attach_socket_group", { id, appId, req }),
-  detachSocketGroup: (id: string, appId: string) =>
-    callSaved<SocketGroup>("detach_socket_group", { id, appId }),
+  listPortGroups: () => call<PortGroup[]>("list_port_groups"),
+  getPortGroup: (id: string) => call<PortGroup>("get_port_group", { id }),
+  createPortGroup: (req: NewPortGroup) => callSaved<PortGroup>("create_port_group", { req }),
+  updatePortGroup: (id: string, req: UpdatePortGroup) =>
+    callSaved<PortGroup>("update_port_group", { id, req }),
+  deletePortGroup: (id: string) => callSaved<null>("delete_port_group", { id }),
+  attachPortGroup: (id: string, appId: string, req: AttachPortGroup) =>
+    callSaved<PortGroup>("attach_port_group", { id, appId, req }),
+  detachPortGroup: (id: string, appId: string) =>
+    callSaved<PortGroup>("detach_port_group", { id, appId }),
   listNetworks: () => call<Network[]>("list_networks"),
   addNetwork: (req: NewNetwork) => call<Network>("add_network", { req }),
   deleteNetwork: (id: string, force: boolean) => call<void>("delete_network", { id, force }),

@@ -1,4 +1,4 @@
-//! The schema (v8), its migrations and the archive of pre-v1 databases.
+//! The schema (v9), its migrations and the archive of pre-v1 databases.
 
 use super::protect::protect_files;
 use super::settings::FRESH_DB_KEY;
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// Schema v1 -> v2: the service keys of onion addresses (ADR 0037).
 const MIGRATION_1_TO_2: &str = r#"
@@ -300,8 +300,22 @@ DELETE FROM settings WHERE key = 'address_mode';
 INSERT OR REPLACE INTO settings (key, value) VALUES ('classify_addresses', 'pending');
 "#;
 
+/// Schema v8 -> v9: "socket groups" are now "port groups". Tables and columns are renamed in
+/// place (SQLite rewrites foreign keys and the indexes that use the columns); the one index
+/// named after the old table is recreated. The older migrations above keep the old names.
+const MIGRATION_8_TO_9: &str = r#"
+ALTER TABLE socket_groups RENAME TO port_groups;
+ALTER TABLE socket_group_apps RENAME TO port_group_apps;
+DROP INDEX socket_group_apps_app;
+CREATE INDEX port_group_apps_app ON port_group_apps(app_id);
+ALTER TABLE grants RENAME COLUMN socket_group TO port_group;
+ALTER TABLE tag_members RENAME COLUMN socket_group TO port_group;
+ALTER TABLE addresses RENAME COLUMN socket_group TO port_group;
+ALTER TABLE reservation_bindings RENAME COLUMN socket_group TO port_group;
+"#;
+
 /// `MIGRATIONS[n]` takes the schema from v(n+1) to v(n+2).
-const MIGRATIONS: [&str; 7] = [
+const MIGRATIONS: [&str; 8] = [
     MIGRATION_1_TO_2,
     MIGRATION_2_TO_3,
     MIGRATION_3_TO_4,
@@ -309,6 +323,7 @@ const MIGRATIONS: [&str; 7] = [
     MIGRATION_5_TO_6,
     MIGRATION_6_TO_7,
     MIGRATION_7_TO_8,
+    MIGRATION_8_TO_9,
 ];
 
 const SCHEMA: &str = r#"
@@ -518,11 +533,11 @@ mod tests {
                 "peer_group_members",
                 "peer_groups",
                 "peers",
+                "port_group_apps",
+                "port_groups",
                 "reservation_bindings",
                 "reservations",
                 "settings",
-                "socket_group_apps",
-                "socket_groups",
                 "tag_exclusions",
                 "tag_members",
                 "tags",
@@ -901,7 +916,7 @@ mod tests {
             !addrs.contains_key("none"),
             "an address serving nothing is dropped"
         );
-        let groups = db.list_socket_groups().await.unwrap();
+        let groups = db.list_port_groups().await.unwrap();
         let labels: Vec<&str> = groups.iter().map(|g| g.label.as_str()).collect();
         assert_eq!(labels, ["53-54/udp", "80/tcp, 443/tcp"]);
         let web = groups
@@ -1044,6 +1059,88 @@ mod tests {
         let left = db.list_addresses().await.unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].reservation_id.as_deref(), Some("r"));
+        db.migrate().await.expect("idempotent");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn v8_database_migrates_to_v9_renaming_socket_groups_to_port_groups() {
+        let path = temp_db_path("v8-to-v9");
+        {
+            let opts = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true);
+            let mut c = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::raw_sql(SCHEMA).execute(&mut c).await.unwrap();
+            for sql in &MIGRATIONS[..7] {
+                sqlx::raw_sql(sql).execute(&mut c).await.unwrap();
+            }
+            sqlx::query("PRAGMA user_version = 8")
+                .execute(&mut c)
+                .await
+                .unwrap();
+            sqlx::raw_sql(
+                "INSERT INTO apps (id, name, process_name, reviewed, first_seen, last_seen) \
+                 VALUES ('a', 'n', 'p', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'); \
+                 INSERT INTO socket_groups (id, label, ports, created_at) VALUES \
+                 ('sg', 'web', '[{\"start\":80,\"end\":80,\"proto\":\"tcp\"}]', '2026-01-01T00:00:00Z'); \
+                 INSERT INTO socket_group_apps (group_id, app_id) VALUES ('sg', 'a'); \
+                 INSERT INTO grants (id, target_kind, target_id, port, proto, socket_group, \
+                                     network_id, subject_kind, subject_id, created_at) VALUES \
+                 ('g', 'app', 'a', NULL, NULL, 'sg', NULL, 'peer', 'p1', '2026-01-01T00:00:00Z'); \
+                 INSERT INTO tags (id, label, patterns, created_at) \
+                 VALUES ('t', 'dev', '[]', '2026-01-01T00:00:00Z'); \
+                 INSERT INTO tag_members (tag_id, app_id, port, proto, socket_group) \
+                 VALUES ('t', 'a', NULL, NULL, 'sg'); \
+                 INSERT INTO addresses (id, app_id, network_id, port, proto, socket_group, \
+                                        locator_kind, locator, created_at) VALUES \
+                 ('ad', 'a', 'ygg', NULL, NULL, 'sg', 'ipv6', '300:1::1', '2026-01-01T00:00:00Z');",
+            )
+            .execute(&mut c)
+            .await
+            .unwrap();
+        }
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        let v: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+
+        let groups = db.list_port_groups().await.unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, "sg");
+        assert_eq!(groups[0].label, "web");
+        for (table, id) in [("grants", "g"), ("addresses", "ad")] {
+            let g: Option<String> =
+                sqlx::query_scalar(&format!("SELECT port_group FROM {table} WHERE id = ?"))
+                    .bind(id)
+                    .fetch_one(&db.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(g.as_deref(), Some("sg"), "{table}");
+        }
+        let g: Option<String> =
+            sqlx::query_scalar("SELECT port_group FROM tag_members WHERE tag_id = 't'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(g.as_deref(), Some("sg"));
+        let attached: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM port_group_apps")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(attached, 1);
+        let old: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE sql LIKE '%socket_group%' OR name LIKE '%socket_group%'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(old, 0, "no table, index or column keeps the old name");
         db.migrate().await.expect("idempotent");
         drop(db);
         let _ = std::fs::remove_file(&path);

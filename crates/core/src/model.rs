@@ -4,7 +4,7 @@
 //! [`crate::identity`] (app identity).
 
 use crate::reach::GrantReach;
-use crate::scope::{PortRange, Scope, SocketGroup};
+use crate::scope::{PortGroup, PortRange, Scope};
 use crate::types::{AddrFamily, Protocol};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -443,9 +443,9 @@ pub struct AppDetail {
     /// The tags the app is a member of (as a whole or by scope).
     #[serde(default)]
     pub tags: Vec<TagId>,
-    /// The socket groups attached to the app.
+    /// The port groups attached to the app.
     #[serde(default)]
-    pub socket_groups: Vec<SocketGroup>,
+    pub port_groups: Vec<PortGroup>,
     /// Packets and bytes the firewall allowed in, per network and grant subject, as of
     /// the last reconcile pass. Empty where the platform has no counters.
     #[serde(default)]
@@ -507,9 +507,9 @@ pub enum ActivityKind {
     TagAdded,
     TagChanged,
     TagRemoved,
-    SocketGroupAdded,
-    SocketGroupChanged,
-    SocketGroupRemoved,
+    PortGroupAdded,
+    PortGroupChanged,
+    PortGroupRemoved,
     ReservationAdded,
     ReservationChanged,
     ReservationRemoved,
@@ -534,9 +534,9 @@ impl ActivityKind {
         ActivityKind::TagAdded,
         ActivityKind::TagChanged,
         ActivityKind::TagRemoved,
-        ActivityKind::SocketGroupAdded,
-        ActivityKind::SocketGroupChanged,
-        ActivityKind::SocketGroupRemoved,
+        ActivityKind::PortGroupAdded,
+        ActivityKind::PortGroupChanged,
+        ActivityKind::PortGroupRemoved,
         ActivityKind::ReservationAdded,
         ActivityKind::ReservationChanged,
         ActivityKind::ReservationRemoved,
@@ -561,9 +561,9 @@ impl ActivityKind {
             ActivityKind::TagAdded => "tag_added",
             ActivityKind::TagChanged => "tag_changed",
             ActivityKind::TagRemoved => "tag_removed",
-            ActivityKind::SocketGroupAdded => "socket_group_added",
-            ActivityKind::SocketGroupChanged => "socket_group_changed",
-            ActivityKind::SocketGroupRemoved => "socket_group_removed",
+            ActivityKind::PortGroupAdded => "port_group_added",
+            ActivityKind::PortGroupChanged => "port_group_changed",
+            ActivityKind::PortGroupRemoved => "port_group_removed",
             ActivityKind::ReservationAdded => "reservation_added",
             ActivityKind::ReservationChanged => "reservation_changed",
             ActivityKind::ReservationRemoved => "reservation_removed",

@@ -2,6 +2,6 @@
 import type { Protocol } from "./Protocol";
 
 /**
- * A scope by label, as the document names a socket group.
+ * A scope by label, as the document names a port group.
  */
 export type ExportScope = { "kind": "all" } | { "kind": "port", port: number, proto: Protocol, } | { "kind": "group", label: string, };

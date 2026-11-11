@@ -1,6 +1,6 @@
 import {
   toDaemonError, type App, type CredentialKind, type NewCredential, type ParsedCredential,
-  type Peer, type PeerGroup, type PortRange, type PortRef, type Scope, type SocketGroup, type Subject, type Tag, type Target,
+  type Peer, type PeerGroup, type PortRange, type PortRef, type Scope, type PortGroup, type Subject, type Tag, type Target,
 } from "./api";
 import { CREDENTIAL_EXAMPLES } from "./generated/credentialExamples";
 
@@ -56,7 +56,7 @@ export const sameScope = (a: Scope, b: Scope) =>
   : b.kind === "group" && a.id === b.id;
 
 /** "All ports", "80/tcp" or the port group's name (the id when the group is not in `groups`). */
-export const scopeLabel = (s: Scope, groups: SocketGroup[] = []): string =>
+export const scopeLabel = (s: Scope, groups: PortGroup[] = []): string =>
   s.kind === "all" ? "All ports"
   : s.kind === "port" ? portLabel(s)
   : groups.find((g) => g.id === s.id)?.label ?? s.id;

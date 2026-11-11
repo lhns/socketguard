@@ -4,7 +4,7 @@ import { toDaemonError, type Scope, type Tag } from "../api";
 import { useCommit, useRevoke } from "../commit";
 import { ALL_SCOPE, errorField, errorText, sameScope, scopeKey, scopeLabel, scopeOfPort, splitOperationError } from "../lib";
 import { useNav } from "../nav";
-import { useApps, useDeleteTag, useGrants, useSocketGroups, useUpdateTag } from "../queries";
+import { useApps, useDeleteTag, useGrants, usePortGroups, useUpdateTag } from "../queries";
 import AccessList, { type AccessHighlight } from "./AccessList";
 import AddAccess from "./AddAccess";
 import CommitPreview from "./CommitPreview";
@@ -116,7 +116,7 @@ export function TagInspector({ tag, highlight, onCollapse, onClose }: { tag: Tag
 function Members({ tag }: { tag: Tag }) {
   const nav = useNav();
   const apps = useApps().data ?? [];
-  const socketGroups = useSocketGroups().data ?? [];
+  const portGroups = usePortGroups().data ?? [];
   const commit = useCommit();
   const [open, setOpen] = useState(false);
   const [chosen, setChosen] = useState<string | null>(null);
@@ -132,12 +132,12 @@ function Members({ tag }: { tag: Tag }) {
     ? [
         ALL_SCOPE,
         ...picked.ports.map((p) => scopeOfPort(p)),
-        ...socketGroups.filter((g) => g.apps.includes(picked.id)).map<Scope>((g) => ({ kind: "group", id: g.id })),
+        ...portGroups.filter((g) => g.apps.includes(picked.id)).map<Scope>((g) => ({ kind: "group", id: g.id })),
       ]
     : [];
   const has = (appId: string, scope: Scope) => tag.members.some((m) => m.app_id === appId && sameScope(m.scope, scope));
   const toggleRow = (appId: string, scope: Scope) => {
-    const what = `${appName(appId)} · ${scopeLabel(scope, socketGroups)}`;
+    const what = `${appName(appId)} · ${scopeLabel(scope, portGroups)}`;
     if (has(appId, scope)) {
       void commit.runBatch(
         [{ op: "remove_tag_member", tag_id: tag.id, app_id: appId, scope }],
@@ -158,11 +158,11 @@ function Members({ tag }: { tag: Tag }) {
             <li key={`${m.app_id}-${scopeKey(m.scope)}`} className="member-item">
               <span>
                 <button className="link-btn" onClick={() => nav.go("apps", { appId: m.app_id })}>{appName(m.app_id)}</button>
-                <span className="muted"> · {scopeLabel(m.scope, socketGroups)}</span>
+                <span className="muted"> · {scopeLabel(m.scope, portGroups)}</span>
               </span>
               <button
                 className="btn-icon"
-                aria-label={`Remove ${appName(m.app_id)} · ${scopeLabel(m.scope, socketGroups)}`}
+                aria-label={`Remove ${appName(m.app_id)} · ${scopeLabel(m.scope, portGroups)}`}
                 title="Remove from the tag"
                 onClick={() => toggleRow(m.app_id, m.scope)}
               >
@@ -194,7 +194,7 @@ function Members({ tag }: { tag: Tag }) {
           <span className="muted">{picked.name}:</span>
           {rows.map((scope) => (
             <button key={scopeKey(scope)} type="button" className={`scope-chip${scope.kind === "port" ? " mono" : ""}`} aria-pressed={has(picked.id, scope)} onClick={() => toggleRow(picked.id, scope)}>
-              {scopeLabel(scope, socketGroups)}
+              {scopeLabel(scope, portGroups)}
             </button>
           ))}
           <button type="button" className="btn-icon" aria-label="Done choosing rows" title="Done" onClick={() => setChosen(null)}>×</button>

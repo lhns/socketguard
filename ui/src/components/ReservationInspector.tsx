@@ -4,7 +4,7 @@ import type { ChangeOp, ReservationView, Scope } from "../api";
 import { useCommit } from "../commit";
 import { ALL_SCOPE, errorField, errorText, scopeKey, scopeLabel, scopeOfPort, sameScope } from "../lib";
 import { boundRows, conflictText, type BoundRow } from "../reservations";
-import { useApps, useGrants, useList, useReleaseReservation, useReservations, useSocketGroups, useTags } from "../queries";
+import { useApps, useGrants, useList, useReleaseReservation, useReservations, usePortGroups, useTags } from "../queries";
 import { bindsRow } from "../matrix";
 import type { AccessHighlight } from "./AccessList";
 import AddAccess from "./AddAccess";
@@ -28,7 +28,7 @@ export function ReservationInspector({ reservation: r, highlight, onCollapse, on
   const id = useId();
   const names = useNameCtx();
   const toast = useToast();
-  const groups = useList(useSocketGroups());
+  const groups = useList(usePortGroups());
   const release = useReleaseReservation();
   const rename = useCommit(() => setRenaming(false));
   const bind = useCommit();
@@ -215,7 +215,7 @@ function AddPorts({ reservation: r, open, onOpenChange, onPick }: {
 }) {
   const apps = useList(useApps());
   const tags = useList(useTags());
-  const groups = useList(useSocketGroups());
+  const groups = useList(usePortGroups());
   const all = useList(useReservations());
   const targets = useRef(new Map<string, { target: ReservationView["bindings"][number]["target"]; what: string }>());
 

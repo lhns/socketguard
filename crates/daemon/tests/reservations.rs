@@ -442,7 +442,7 @@ async fn conflicts_are_reported_with_the_app_that_is_served() {
     let (a, b) = (r.app_id("a").await, r.app_id("b").await);
     let (s, group) = r
         .post(
-            "/api/socket-groups",
+            "/api/port-groups",
             json!({"label": "web", "ports": [
                 {"start": 80, "end": 80, "proto": "tcp"},
                 {"start": 443, "end": 443, "proto": "tcp"},
@@ -486,7 +486,7 @@ async fn excluded_ports_are_reported_on_the_address() {
     let (a, _b) = (r.app_id("a").await, r.app_id("b").await);
     let (_, group) = r
         .post(
-            "/api/socket-groups",
+            "/api/port-groups",
             json!({"label": "range", "ports": [{"start": 70, "end": 90, "proto": "tcp"}],
                    "apps": [a]}),
         )
@@ -588,7 +588,7 @@ async fn bindings_are_validated() {
     assert_eq!((s, code(&b)), (StatusCode::CONFLICT, "conflict"));
     let (_, group) = r
         .post(
-            "/api/socket-groups",
+            "/api/port-groups",
             json!({"label": "g", "ports": [{"start": 5, "end": 6, "proto": "tcp"}]}),
         )
         .await;
@@ -778,7 +778,7 @@ async fn move_app_carries_grants_tags_addresses_and_bindings() {
         .await;
     let (_, group) = r
         .post(
-            "/api/socket-groups",
+            "/api/port-groups",
             json!({"label": "extra", "ports": [{"start": 5000, "end": 5001, "proto": "tcp"}],
                    "apps": [old]}),
         )
@@ -827,7 +827,7 @@ async fn move_app_carries_grants_tags_addresses_and_bindings() {
         .unwrap()
         .is_empty());
     // The group the moved grant uses is attached to the target.
-    let (_, g) = r.get(&format!("/api/socket-groups/{}", id(&group))).await;
+    let (_, g) = r.get(&format!("/api/port-groups/{}", id(&group))).await;
     assert!(g["apps"].as_array().unwrap().contains(&json!(new)));
     // The tag membership moved.
     let (_, t) = r.get(&format!("/api/tags/{}", id(&tag))).await;

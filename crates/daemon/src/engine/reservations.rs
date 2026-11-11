@@ -1,6 +1,6 @@
 //! Reservations and moving an app (ADR 0047), and the views of addresses.
 //!
-//! Like socket groups, every change is planned against a [`Catalog`] first; the REST
+//! Like port groups, every change is planned against a [`Catalog`] first; the REST
 //! methods run the plan as a one-operation batch (`batch`), so a single call and a batch
 //! check and apply the same things. A reservation needs no locator when it is created: its
 //! addresses are created by [`Engine::ensure_addresses`] once a grant covers it.
@@ -40,7 +40,7 @@ fn row_text(cat: &Catalog, row: &Row) -> String {
     let app = cat
         .app(&row.app_id)
         .map_or(row.app_id.clone(), |a| a.name.clone());
-    format!("{app} {}", row.scope.describe(&cat.socket_groups))
+    format!("{app} {}", row.scope.describe(&cat.port_groups))
 }
 
 impl Engine {
@@ -332,7 +332,7 @@ impl Engine {
     /// Plan moving everything of app `from` to app `to`: direct grants, tag memberships,
     /// automatic addresses and reservation bindings. What `to` already has is skipped
     /// (a grant, a membership, a binding) or, for an address, replaced by the moving one.
-    /// Socket groups used by what moves are attached to `to`.
+    /// Port groups used by what moves are attached to `to`.
     pub(super) fn plan_move_app(
         &self,
         cat: &mut Catalog,
@@ -501,7 +501,7 @@ impl Engine {
                     return Err(EngineError::Conflict(format!(
                         "{} {} is already bound to another reservation",
                         to_app.name,
-                        row.scope.describe(&before.socket_groups)
+                        row.scope.describe(&before.port_groups)
                     )));
                 }
                 note_group(scope, &mut groups);
@@ -515,10 +515,10 @@ impl Engine {
             }
         }
 
-        // The socket groups that moved things use must be attached to the target.
+        // The port groups that moved things use must be attached to the target.
         for g in groups {
             let attached = cat
-                .socket_group(&g)
+                .port_group(&g)
                 .ok_or_else(|| EngineError::NotFound(format!("port group {g}")))?
                 .is_attached_to(to);
             if !attached {
@@ -528,11 +528,11 @@ impl Engine {
                         to_app.name
                     )));
                 }
-                plan.writes.push(Write::AttachSocketGroup {
+                plan.writes.push(Write::AttachPortGroup {
                     group_id: g.clone(),
                     app_id: to.to_string(),
                 });
-                if let Some(x) = cat.socket_groups.iter_mut().find(|x| x.id == g) {
+                if let Some(x) = cat.port_groups.iter_mut().find(|x| x.id == g) {
                     x.apps.push(to.to_string());
                 }
             }

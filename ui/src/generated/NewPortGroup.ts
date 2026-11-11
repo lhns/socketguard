@@ -2,9 +2,9 @@
 import type { PortRange } from "./PortRange";
 
 /**
- * Body of `POST /api/socket-groups`.
+ * Body of `POST /api/port-groups`.
  */
-export type NewSocketGroup = { label: string, ports: Array<PortRange>, 
+export type NewPortGroup = { label: string, ports: Array<PortRange>, 
 /**
  * Apps to attach it to right away.
  */

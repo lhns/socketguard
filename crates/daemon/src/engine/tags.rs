@@ -187,7 +187,7 @@ impl Engine {
         Ok(())
     }
 
-    /// Add an app (or a port or socket group of it) to a tag.
+    /// Add an app (or a port or port group of it) to a tag.
     pub async fn add_tag_member(
         &self,
         state: &AppState,
@@ -237,7 +237,7 @@ impl Engine {
         self.get_tag(state, tag_id).await
     }
 
-    /// Remove an app (or a port or socket group of it) from a tag. Removing a whole app that
+    /// Remove an app (or a port or port group of it) from a tag. Removing a whole app that
     /// the tag's patterns match is remembered, so discovery does not add it back.
     pub async fn remove_tag_member(
         &self,

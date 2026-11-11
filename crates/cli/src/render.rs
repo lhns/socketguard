@@ -11,7 +11,7 @@ use socketguard_core::api_types::{
 use socketguard_core::{
     ranges_text, AccessOrigin, ActivityRecord, Address, App, AppDetail, BindingTarget, Credential,
     GrantView, Locator, Network, NetworkKind, NetworkStatus, ParsedCredential, Peer, PeerGroup,
-    Reach, ReservationView, Scope, Settings, SocketGroup, Subject, Tag, Target,
+    PortGroup, Reach, ReservationView, Scope, Settings, Subject, Tag, Target,
 };
 use std::collections::HashMap;
 
@@ -22,7 +22,7 @@ pub struct Names {
     pub peers: HashMap<String, String>,
     pub groups: HashMap<String, String>,
     pub tags: HashMap<String, String>,
-    pub socket_groups: HashMap<String, String>,
+    pub port_groups: HashMap<String, String>,
     pub reservations: HashMap<String, String>,
 }
 
@@ -30,7 +30,7 @@ impl Names {
     pub fn new(apps: &[App], peers: &[Peer], groups: &[PeerGroup]) -> Self {
         Self {
             tags: HashMap::new(),
-            socket_groups: HashMap::new(),
+            port_groups: HashMap::new(),
             reservations: HashMap::new(),
             apps: apps
                 .iter()
@@ -66,8 +66,8 @@ impl Names {
     }
 
     /// The names of `groups` (port groups) too.
-    pub fn with_socket_groups(mut self, groups: &[SocketGroup]) -> Self {
-        self.socket_groups = groups
+    pub fn with_port_groups(mut self, groups: &[PortGroup]) -> Self {
+        self.port_groups = groups
             .iter()
             .map(|g| (g.id.clone(), g.label.clone()))
             .collect();
@@ -81,7 +81,7 @@ impl Names {
     /// A scope for people: `All ports`, `80/tcp`, `group <label>`.
     pub fn scope(&self, s: &Scope) -> String {
         match s {
-            Scope::Group { id } => format!("group {}", label(&self.socket_groups, id)),
+            Scope::Group { id } => format!("group {}", label(&self.port_groups, id)),
             other => other.describe(&[]),
         }
     }
@@ -103,14 +103,14 @@ impl Names {
         }
     }
 
-    /// An app row as typed in commands: `app`, `app:80/tcp`, `app:socket-group=<label>`.
+    /// An app row as typed in commands: `app`, `app:80/tcp`, `app:port-group=<label>`.
     pub fn row(&self, app_id: &str, scope: &Scope) -> String {
         match scope {
             Scope::All => self.app(app_id),
             Scope::Group { id } => format!(
-                "{}:socket-group={}",
+                "{}:port-group={}",
                 self.app(app_id),
-                label(&self.socket_groups, id)
+                label(&self.port_groups, id)
             ),
             Scope::Port { port, proto } => format!("{}:{port}/{proto}", self.app(app_id)),
         }
@@ -405,7 +405,7 @@ fn up_label(up: bool) -> &'static str {
 }
 
 /// What an address serves: its ports, or the reservation it belongs to.
-fn address_serves(a: &Address, groups: &[SocketGroup], names: &Names) -> String {
+fn address_serves(a: &Address, groups: &[PortGroup], names: &Names) -> String {
     match &a.reservation_id {
         Some(r) => format!("reservation {}", names.reservation(r)),
         None => a.scope.describe(groups),
@@ -438,7 +438,7 @@ fn with_lines(mut body: String, lines: Vec<String>) -> String {
     body
 }
 
-fn addresses_table(addrs: &[Address], groups: &[SocketGroup], names: &Names) -> String {
+fn addresses_table(addrs: &[Address], groups: &[PortGroup], names: &Names) -> String {
     with_lines(
         table(
             &["ID", "NETWORK", "ADDRESS", "PORTS", "STATE"],
@@ -493,7 +493,7 @@ pub fn addresses(addrs: &[Address], names: &Names) -> String {
     )
 }
 
-fn socket_groups_table(groups: &[SocketGroup]) -> String {
+fn port_groups_table(groups: &[PortGroup]) -> String {
     table(
         &["ID", "LABEL", "PORTS", "APPS"],
         groups
@@ -511,7 +511,7 @@ fn socket_groups_table(groups: &[SocketGroup]) -> String {
 }
 
 /// The port groups as a table.
-pub fn socket_groups(groups: &[SocketGroup], names: &Names) -> String {
+pub fn port_groups(groups: &[PortGroup], names: &Names) -> String {
     if groups.is_empty() {
         return "no port groups".to_string();
     }
@@ -624,14 +624,11 @@ pub fn app_detail(d: &AppDetail, names: &Names) -> String {
     let addrs = if app.addresses.is_empty() {
         "none yet: a row gets an address when a grant names it".to_string()
     } else {
-        addresses_table(&app.addresses, &d.socket_groups, names)
+        addresses_table(&app.addresses, &d.port_groups, names)
     };
     let mut parts = vec![head, section("Ports", ports), section("Addresses", addrs)];
-    if !d.socket_groups.is_empty() {
-        parts.push(section(
-            "Port groups",
-            socket_groups_table(&d.socket_groups),
-        ));
+    if !d.port_groups.is_empty() {
+        parts.push(section("Port groups", port_groups_table(&d.port_groups)));
     }
     parts.push(section(
         "Who can reach it",
@@ -711,7 +708,7 @@ pub fn share_lines(app: &App, network: Option<&str>) -> Vec<String> {
         if !a.up || network.is_some_and(|n| n != a.network_id) {
             continue;
         }
-        // The ports the address serves among the app's detected ones; a socket group's
+        // The ports the address serves among the app's detected ones; a port group's
         // ranges are not known here.
         let ports: Vec<u16> = socketguard_core::scope_ports(
             app,
@@ -946,7 +943,7 @@ fn change_line(c: &Change) -> String {
         ChangeItem::Grant => "grant",
         ChangeItem::Tag => "tag",
         ChangeItem::TagMember => "tag member",
-        ChangeItem::SocketGroup => "port group",
+        ChangeItem::PortGroup => "port group",
         ChangeItem::App => "app",
         ChangeItem::Reservation => "reservation",
         ChangeItem::Binding => "binding",

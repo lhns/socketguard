@@ -13,15 +13,15 @@ use tauri::Emitter;
 use serde::Serialize;
 use socketguard_client::{Client, Error as ClientError, GrantQuery, Saved};
 use socketguard_core::api_types::{
-    ApplyRequest, ApplyResponse, AttachSocketGroup, ChangesRequest, ChangesResponse, Enforcement,
-    ExportDocument, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewReservation,
-    NewSocketGroup, NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest, ShareResponse,
-    StatusResponse, TorKeyResponse, UpdateSocketGroup, UpdateTag,
+    ApplyRequest, ApplyResponse, AttachPortGroup, ChangesRequest, ChangesResponse, Enforcement,
+    ExportDocument, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup,
+    NewReservation, NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest, ShareResponse,
+    StatusResponse, TorKeyResponse, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::{
     ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
-    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, ReservationView, Scope, Settings,
-    SocketGroup, Tag, TagMember,
+    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, PortGroup, ReservationView, Scope,
+    Settings, Tag, TagMember,
 };
 
 /// Error shape the frontend branches on. API errors keep the daemon's code
@@ -280,48 +280,48 @@ async fn remove_tag_member(tag_id: String, app_id: String, scope: Scope) -> Done
         .into())
 }
 
-// ─── Socket groups ───────────────────────────────────────────────────────
+// ─── Port groups ───────────────────────────────────────────────────────
 
 #[tauri::command]
-async fn list_socket_groups() -> CmdResult<Vec<SocketGroup>> {
-    Ok(client().list_socket_groups().await?)
+async fn list_port_groups() -> CmdResult<Vec<PortGroup>> {
+    Ok(client().list_port_groups().await?)
 }
 
 #[tauri::command]
-async fn create_socket_group(req: NewSocketGroup) -> DoneResult<SocketGroup> {
-    Ok(client().create_socket_group(&req).await?.into())
+async fn create_port_group(req: NewPortGroup) -> DoneResult<PortGroup> {
+    Ok(client().create_port_group(&req).await?.into())
 }
 
 #[tauri::command]
-async fn get_socket_group(id: String) -> CmdResult<SocketGroup> {
-    Ok(client().get_socket_group(&id).await?)
+async fn get_port_group(id: String) -> CmdResult<PortGroup> {
+    Ok(client().get_port_group(&id).await?)
 }
 
 #[tauri::command]
-async fn update_socket_group(id: String, req: UpdateSocketGroup) -> DoneResult<SocketGroup> {
-    Ok(client().update_socket_group(&id, &req).await?.into())
+async fn update_port_group(id: String, req: UpdatePortGroup) -> DoneResult<PortGroup> {
+    Ok(client().update_port_group(&id, &req).await?.into())
 }
 
 #[tauri::command]
-async fn delete_socket_group(id: String) -> DoneResult<()> {
-    Ok(client().delete_socket_group(&id).await?.into())
+async fn delete_port_group(id: String) -> DoneResult<()> {
+    Ok(client().delete_port_group(&id).await?.into())
 }
 
 #[tauri::command]
-async fn attach_socket_group(
+async fn attach_port_group(
     id: String,
     app_id: String,
-    req: AttachSocketGroup,
-) -> DoneResult<SocketGroup> {
+    req: AttachPortGroup,
+) -> DoneResult<PortGroup> {
     Ok(client()
-        .attach_socket_group(&id, &app_id, req.confirm_open)
+        .attach_port_group(&id, &app_id, req.confirm_open)
         .await?
         .into())
 }
 
 #[tauri::command]
-async fn detach_socket_group(id: String, app_id: String) -> DoneResult<SocketGroup> {
-    Ok(client().detach_socket_group(&id, &app_id).await?.into())
+async fn detach_port_group(id: String, app_id: String) -> DoneResult<PortGroup> {
+    Ok(client().detach_port_group(&id, &app_id).await?.into())
 }
 
 // ─── Addresses and reservations ──────────────────────────────────────────
@@ -545,13 +545,13 @@ fn main() {
             delete_tag,
             add_tag_member,
             remove_tag_member,
-            list_socket_groups,
-            create_socket_group,
-            get_socket_group,
-            update_socket_group,
-            delete_socket_group,
-            attach_socket_group,
-            detach_socket_group,
+            list_port_groups,
+            create_port_group,
+            get_port_group,
+            update_port_group,
+            delete_port_group,
+            attach_port_group,
+            detach_port_group,
             list_networks,
             add_network,
             delete_network,

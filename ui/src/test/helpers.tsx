@@ -25,7 +25,7 @@ export const app1: App = {
   ],
 };
 
-export const appDetail: AppDetail = { ...app1, grants: [], access: [], tags: [], counters: [], socket_groups: [] };
+export const appDetail: AppDetail = { ...app1, grants: [], access: [], tags: [], counters: [], port_groups: [] };
 
 export const alice: Peer = {
   id: "p1", label: "alice", groups: [], created_at: "2026-01-01T00:00:00Z",
@@ -81,7 +81,7 @@ export const mkReservation = (id: string, label: string, targets: BindingTarget[
 
 export const mkGroup = (id: string, label: string, members: string[] = []): PeerGroup => ({ id, label, members, created_at: T0 });
 
-export const detail = (app: App, over: Partial<AppDetail> = {}): AppDetail => ({ ...app, grants: [], access: [], tags: [], counters: [], socket_groups: [], ...over });
+export const detail = (app: App, over: Partial<AppDetail> = {}): AppDetail => ({ ...app, grants: [], access: [], tags: [], counters: [], port_groups: [], ...over });
 
 /** A working Storage: some Node versions shadow jsdom's with a broken experimental one. */
 export function memoryStorage() {
@@ -128,7 +128,7 @@ export function mockDaemon(handlers: Handlers = {}) {
     list_groups: () => groups,
     list_grants: () => [],
     list_tags: () => noTags,
-    list_socket_groups: () => [],
+    list_port_groups: () => [],
     share_app: () => ({ tor: [] }),
     list_networks: () => networks,
     list_reservations: () => [],

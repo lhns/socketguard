@@ -27,15 +27,15 @@ pub enum ScopeSpec {
     Group(String),
 }
 
-/// The marker of a port group in `<app>:socket-group=<label>`.
-pub const SOCKET_GROUP_MARKER: &str = ":socket-group=";
+/// The marker of a port group in `<app>:port-group=<label>`.
+pub const PORT_GROUP_MARKER: &str = ":port-group=";
 
-/// `nginx`, `nginx:80`, `nginx:53/udp`, `nginx:socket-group=passive`. The text after the
+/// `nginx`, `nginx:80`, `nginx:53/udp`, `nginx:port-group=passive`. The text after the
 /// last `:` is a port only if it parses as one, so app names with a colon still work; the
 /// port group marker is recognised anywhere, so group labels may contain colons too.
 pub fn parse_target(s: &str) -> (String, ScopeSpec) {
-    if let Some(at) = s.rfind(SOCKET_GROUP_MARKER) {
-        let label = &s[at + SOCKET_GROUP_MARKER.len()..];
+    if let Some(at) = s.rfind(PORT_GROUP_MARKER) {
+        let label = &s[at + PORT_GROUP_MARKER.len()..];
         if at > 0 && !label.is_empty() {
             return (s[..at].to_string(), ScopeSpec::Group(label.to_string()));
         }
@@ -185,27 +185,27 @@ mod tests {
     }
 
     #[test]
-    fn socket_group_targets() {
+    fn port_group_targets() {
         assert_eq!(
-            parse_target("ftpd:socket-group=passive"),
+            parse_target("ftpd:port-group=passive"),
             ("ftpd".into(), ScopeSpec::Group("passive".into()))
         );
         // An app name with a colon, and a label with one.
         assert_eq!(
-            parse_target("node:server.js:socket-group=a:b"),
+            parse_target("node:server.js:port-group=a:b"),
             ("node:server.js".into(), ScopeSpec::Group("a:b".into()))
         );
         // No label or no app: not a group.
         assert_eq!(
-            parse_target("ftpd:socket-group="),
-            ("ftpd:socket-group=".into(), ScopeSpec::All)
+            parse_target("ftpd:port-group="),
+            ("ftpd:port-group=".into(), ScopeSpec::All)
         );
         assert_eq!(
-            parse_target(":socket-group=x"),
-            (":socket-group=x".into(), ScopeSpec::All)
+            parse_target(":port-group=x"),
+            (":port-group=x".into(), ScopeSpec::All)
         );
         assert_eq!(
-            parse_target_spec("tag:dev:socket-group=passive"),
+            parse_target_spec("tag:dev:port-group=passive"),
             (
                 TargetSpec::Tag("dev".into()),
                 ScopeSpec::Group("passive".into())
@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn port_ranges_of_a_socket_group() {
+    fn port_ranges_of_a_port_group() {
         let r =
             parse_ranges(&["443/tcp".into(), "50000-51000/tcp".into(), "80/tcp".into()]).unwrap();
         assert_eq!(

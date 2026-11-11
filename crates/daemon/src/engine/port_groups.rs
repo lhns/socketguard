@@ -1,4 +1,4 @@
-//! Socket groups (ADR 0047): their lifecycle and attachment to apps.
+//! Port groups (ADR 0047): their lifecycle and attachment to apps.
 //!
 //! Every change is planned against a [`Catalog`] first ([`Engine::plan_create_group`] and
 //! friends), which yields the database writes, the addresses that have to leave and the
@@ -13,11 +13,11 @@ use crate::state::{NewActivity, Write};
 use crate::AppState;
 use chrono::Utc;
 use socketguard_core::{
-    covered_ports, new_id, normalize_ranges, ActivityKind, Address, AppId, Grant, PortRange,
-    PortRangeSet, Scope, SocketGroup, Subject, Target,
+    covered_ports, new_id, normalize_ranges, ActivityKind, Address, AppId, Grant, PortGroup,
+    PortRange, PortRangeSet, Scope, Subject, Target,
 };
 
-/// What a planned change of socket groups comes to.
+/// What a planned change of port groups comes to.
 #[derive(Default)]
 pub(super) struct GroupPlan {
     pub writes: Vec<Write>,
@@ -44,7 +44,7 @@ impl Catalog {
                      cat: &Catalog,
                      grant: &Grant,
                      app: &socketguard_core::App| {
-            covered_ports(grant, targets, app, &cat.socket_groups, &none)
+            covered_ports(grant, targets, app, &cat.port_groups, &none)
                 .map(|c| c.total())
                 .unwrap_or_default()
         };
@@ -84,7 +84,7 @@ impl Catalog {
         }
     }
 
-    /// What uses socket group `group_id`, for a refusal: grants with that scope on `app_id`
+    /// What uses port group `group_id`, for a refusal: grants with that scope on `app_id`
     /// (or, with None, on any app and any tag) and tag members with that scope.
     fn group_users(&self, group_id: &str, app_id: Option<&str>) -> Vec<String> {
         let scope = Scope::group(group_id);
@@ -163,7 +163,7 @@ pub fn clean_ranges(ports: &[PortRange]) -> Result<Vec<PortRange>, EngineError> 
     Ok(normalize_ranges(ports))
 }
 
-/// An unidentified app is one port (ADR 0046); it takes no socket groups.
+/// An unidentified app is one port (ADR 0046); it takes no port groups.
 fn check_takes_groups(app: &socketguard_core::App) -> Result<(), EngineError> {
     if app.identity_note.as_deref() == Some("unidentified") {
         return Err(EngineError::Invalid(format!(
@@ -179,21 +179,18 @@ fn join(items: &[String]) -> String {
 }
 
 impl Engine {
-    pub async fn list_socket_groups(
-        &self,
-        state: &AppState,
-    ) -> Result<Vec<SocketGroup>, EngineError> {
-        Ok(state.db.list_socket_groups().await?)
+    pub async fn list_port_groups(&self, state: &AppState) -> Result<Vec<PortGroup>, EngineError> {
+        Ok(state.db.list_port_groups().await?)
     }
 
-    pub async fn get_socket_group(
+    pub async fn get_port_group(
         &self,
         state: &AppState,
         id: &str,
-    ) -> Result<SocketGroup, EngineError> {
+    ) -> Result<PortGroup, EngineError> {
         state
             .db
-            .get_socket_group(id)
+            .get_port_group(id)
             .await?
             .ok_or_else(|| EngineError::NotFound(format!("port group {id}")))
     }
@@ -209,9 +206,9 @@ impl Engine {
         ports: &[PortRange],
         apps: &[AppId],
         confirm_open: bool,
-    ) -> Result<(SocketGroup, GroupPlan), EngineError> {
+    ) -> Result<(PortGroup, GroupPlan), EngineError> {
         let label = Self::clean_label(label, "port group")?;
-        if cat.socket_groups.iter().any(|g| g.label == label) {
+        if cat.port_groups.iter().any(|g| g.label == label) {
             return Err(EngineError::Conflict(format!(
                 "port group {label} already exists"
             )));
@@ -226,7 +223,7 @@ impl Engine {
                 attached.push(a.clone());
             }
         }
-        let group = SocketGroup {
+        let group = PortGroup {
             id,
             label,
             ports: clean_ranges(ports)?,
@@ -234,9 +231,9 @@ impl Engine {
             created_at: Utc::now(),
         };
         let before = cat.clone();
-        cat.socket_groups.push(group.clone());
+        cat.port_groups.push(group.clone());
         let plan = GroupPlan {
-            writes: vec![Write::InsertSocketGroup(group.clone())],
+            writes: vec![Write::InsertPortGroup(group.clone())],
             widened: cat.widened_since(&before, &attached),
             removed: vec![],
         };
@@ -255,20 +252,16 @@ impl Engine {
         label: Option<&str>,
         ports: Option<&[PortRange]>,
         confirm_open: bool,
-    ) -> Result<(SocketGroup, GroupPlan), EngineError> {
+    ) -> Result<(PortGroup, GroupPlan), EngineError> {
         let current = cat
-            .socket_group(id)
+            .port_group(id)
             .ok_or_else(|| EngineError::NotFound(format!("port group {id}")))?
             .clone();
         let label = label
             .map(|l| Self::clean_label(l, "port group"))
             .transpose()?;
         if let Some(l) = &label {
-            if cat
-                .socket_groups
-                .iter()
-                .any(|g| g.label == *l && g.id != id)
-            {
+            if cat.port_groups.iter().any(|g| g.label == *l && g.id != id) {
                 return Err(EngineError::Conflict(format!(
                     "port group {l} already exists"
                 )));
@@ -277,7 +270,7 @@ impl Engine {
         let ports = ports.map(clean_ranges).transpose()?;
         let before = cat.clone();
         let live = cat
-            .socket_groups
+            .port_groups
             .iter_mut()
             .find(|g| g.id == id)
             .expect("checked above");
@@ -289,7 +282,7 @@ impl Engine {
         }
         let updated = live.clone();
         let plan = GroupPlan {
-            writes: vec![Write::UpdateSocketGroup {
+            writes: vec![Write::UpdatePortGroup {
                 id: id.to_string(),
                 label,
                 ports,
@@ -309,9 +302,9 @@ impl Engine {
         &self,
         cat: &mut Catalog,
         id: &str,
-    ) -> Result<(SocketGroup, GroupPlan), EngineError> {
+    ) -> Result<(PortGroup, GroupPlan), EngineError> {
         let group = cat
-            .socket_group(id)
+            .port_group(id)
             .ok_or_else(|| EngineError::NotFound(format!("port group {id}")))?
             .clone();
         let users = cat.group_users(id, None);
@@ -323,12 +316,12 @@ impl Engine {
             )));
         }
         let removed = cat.take_group_addresses(id, None);
-        cat.socket_groups.retain(|g| g.id != id);
+        cat.port_groups.retain(|g| g.id != id);
         let mut writes: Vec<Write> = removed
             .iter()
             .map(|a| Write::DeleteAddress(a.id.clone()))
             .collect();
-        writes.push(Write::DeleteSocketGroup(id.to_string()));
+        writes.push(Write::DeletePortGroup(id.to_string()));
         Ok((
             group,
             GroupPlan {
@@ -346,9 +339,9 @@ impl Engine {
         group_id: &str,
         app_id: &str,
         confirm_open: bool,
-    ) -> Result<(SocketGroup, GroupPlan), EngineError> {
+    ) -> Result<(PortGroup, GroupPlan), EngineError> {
         let group = cat
-            .socket_group(group_id)
+            .port_group(group_id)
             .ok_or_else(|| EngineError::NotFound(format!("port group {group_id}")))?
             .clone();
         check_takes_groups(
@@ -360,14 +353,14 @@ impl Engine {
         }
         let before = cat.clone();
         let live = cat
-            .socket_groups
+            .port_groups
             .iter_mut()
             .find(|g| g.id == group_id)
             .expect("checked above");
         live.apps.push(app_id.to_string());
         let attached = live.clone();
         let plan = GroupPlan {
-            writes: vec![Write::AttachSocketGroup {
+            writes: vec![Write::AttachPortGroup {
                 group_id: group_id.to_string(),
                 app_id: app_id.to_string(),
             }],
@@ -387,9 +380,9 @@ impl Engine {
         cat: &mut Catalog,
         group_id: &str,
         app_id: &str,
-    ) -> Result<(SocketGroup, GroupPlan), EngineError> {
+    ) -> Result<(PortGroup, GroupPlan), EngineError> {
         let group = cat
-            .socket_group(group_id)
+            .port_group(group_id)
             .ok_or_else(|| EngineError::NotFound(format!("port group {group_id}")))?
             .clone();
         let app_name = cat
@@ -413,7 +406,7 @@ impl Engine {
         }
         let removed = cat.take_group_addresses(group_id, Some(app_id));
         let live = cat
-            .socket_groups
+            .port_groups
             .iter_mut()
             .find(|g| g.id == group_id)
             .expect("checked above");
@@ -423,7 +416,7 @@ impl Engine {
             .iter()
             .map(|a| Write::DeleteAddress(a.id.clone()))
             .collect();
-        writes.push(Write::DetachSocketGroup {
+        writes.push(Write::DetachPortGroup {
             group_id: group_id.to_string(),
             app_id: app_id.to_string(),
         });
@@ -463,7 +456,7 @@ impl Engine {
             applied,
             Some(activity),
             &[
-                DaemonEvent::SocketGroupsChanged,
+                DaemonEvent::PortGroupsChanged,
                 DaemonEvent::GrantsChanged,
                 DaemonEvent::AppsChanged,
             ],
@@ -474,88 +467,88 @@ impl Engine {
 
     // ─── REST operations ─────────────────────────────────────────────────────
 
-    pub async fn create_socket_group(
+    pub async fn create_port_group(
         &self,
         state: &AppState,
         label: &str,
         ports: &[PortRange],
         apps: &[AppId],
         confirm_open: bool,
-    ) -> Result<SocketGroup, EngineError> {
+    ) -> Result<PortGroup, EngineError> {
         let mut cat = Catalog::load(state).await?;
         let (group, plan) =
             self.plan_create_group(&mut cat, new_id(), label, ports, apps, confirm_open)?;
         let activity = NewActivity::new(
-            ActivityKind::SocketGroupAdded,
+            ActivityKind::PortGroupAdded,
             format!("Added port group {}", group.label),
         );
         self.run_group_plan(state, plan, activity).await?;
-        self.get_socket_group(state, &group.id).await
+        self.get_port_group(state, &group.id).await
     }
 
-    pub async fn update_socket_group(
+    pub async fn update_port_group(
         &self,
         state: &AppState,
         id: &str,
         label: Option<&str>,
         ports: Option<&[PortRange]>,
         confirm_open: bool,
-    ) -> Result<SocketGroup, EngineError> {
+    ) -> Result<PortGroup, EngineError> {
         let mut cat = Catalog::load(state).await?;
         let (group, plan) = self.plan_update_group(&mut cat, id, label, ports, confirm_open)?;
         let activity = NewActivity::new(
-            ActivityKind::SocketGroupChanged,
+            ActivityKind::PortGroupChanged,
             format!("Changed port group {}", group.label),
         );
         self.run_group_plan(state, plan, activity).await?;
-        self.get_socket_group(state, id).await
+        self.get_port_group(state, id).await
     }
 
-    pub async fn delete_socket_group(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
+    pub async fn delete_port_group(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
         let mut cat = Catalog::load(state).await?;
         let (group, plan) = self.plan_delete_group(&mut cat, id)?;
         let activity = NewActivity::new(
-            ActivityKind::SocketGroupRemoved,
+            ActivityKind::PortGroupRemoved,
             format!("Removed port group {}", group.label),
         );
         self.run_group_plan(state, plan, activity).await
     }
 
-    pub async fn attach_socket_group(
+    pub async fn attach_port_group(
         &self,
         state: &AppState,
         group_id: &str,
         app_id: &str,
         confirm_open: bool,
-    ) -> Result<SocketGroup, EngineError> {
+    ) -> Result<PortGroup, EngineError> {
         let mut cat = Catalog::load(state).await?;
         let (group, plan) = self.plan_attach_group(&mut cat, group_id, app_id, confirm_open)?;
         if plan.writes.is_empty() {
             return Ok(group);
         }
         let activity = NewActivity::new(
-            ActivityKind::SocketGroupChanged,
+            ActivityKind::PortGroupChanged,
             format!("Attached port group {}", group.label),
         )
         .app(app_id);
         self.run_group_plan(state, plan, activity).await?;
-        self.get_socket_group(state, group_id).await
+        self.get_port_group(state, group_id).await
     }
 
-    pub async fn detach_socket_group(
+    pub async fn detach_port_group(
         &self,
         state: &AppState,
         group_id: &str,
         app_id: &str,
-    ) -> Result<SocketGroup, EngineError> {
+    ) -> Result<PortGroup, EngineError> {
         let mut cat = Catalog::load(state).await?;
         let (group, plan) = self.plan_detach_group(&mut cat, group_id, app_id)?;
         let activity = NewActivity::new(
-            ActivityKind::SocketGroupChanged,
+            ActivityKind::PortGroupChanged,
             format!("Detached port group {}", group.label),
         )
         .app(app_id);
         self.run_group_plan(state, plan, activity).await?;
-        self.get_socket_group(state, group_id).await
+        self.get_port_group(state, group_id).await
     }
 }

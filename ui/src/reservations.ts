@@ -1,5 +1,5 @@
 // Pure helpers over reservations: the rows they serve, how they read in a list, their conflicts.
-import type { App, GrantView, PortConflict, ReservationView, Scope, SocketGroup, Tag } from "./api";
+import type { App, GrantView, PortConflict, ReservationView, Scope, PortGroup, Tag } from "./api";
 import { rangeLabel, sameScope, scopeKey, scopeLabel } from "./lib";
 
 /** One row a reservation serves: an app with a scope, which a binding names itself or through a tag. */
@@ -17,7 +17,7 @@ export interface BoundRow {
 
 /** The rows a reservation serves: each app binding's row, each member row of a tag binding. A tag
  * without members is one entry with no app, so it can still be removed. */
-export function boundRows(r: ReservationView, apps: App[], tags: Tag[], groups: SocketGroup[]): BoundRow[] {
+export function boundRows(r: ReservationView, apps: App[], tags: Tag[], groups: PortGroup[]): BoundRow[] {
   const name = (id: string) => apps.find((a) => a.id === id)?.name ?? `app ${id.slice(0, 8)}`;
   return r.bindings.flatMap<BoundRow>((b) => {
     if (b.target.kind === "app") {
@@ -41,7 +41,7 @@ export function boundRows(r: ReservationView, apps: App[], tags: Tag[], groups: 
 }
 
 /** What a reservation serves, in a few words: `sshd 22/tcp, nginx 443/tcp` or `tag web`. */
-export function servesText(r: ReservationView, apps: App[], tags: Tag[], groups: SocketGroup[]): string {
+export function servesText(r: ReservationView, apps: App[], tags: Tag[], groups: PortGroup[]): string {
   const name = (id: string) => apps.find((a) => a.id === id)?.name ?? id.slice(0, 8);
   const parts = r.bindings.flatMap((b) => {
     if (b.target.kind === "app") return [`${name(b.target.app_id)} ${scopeLabel(b.target.scope, groups)}`];

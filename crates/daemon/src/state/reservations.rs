@@ -15,7 +15,7 @@ pub(super) async fn insert_binding_in(tx: &mut Tx<'_>, b: &Binding) -> Result<()
     };
     sqlx::query(
         "INSERT INTO reservation_bindings (id, reservation_id, app_id, port, proto, \
-         socket_group, tag_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+         port_group, tag_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&b.id)
     .bind(&b.reservation_id)
@@ -65,7 +65,7 @@ pub(super) async fn assign_address_in(
     // The address stops belonging to its app, so forgetting the app leaves it.
     let r = sqlx::query(
         "UPDATE addresses SET reservation_id = ?, app_id = NULL, port = NULL, proto = NULL, \
-         socket_group = NULL WHERE id = ?",
+         port_group = NULL WHERE id = ?",
     )
     .bind(reservation_id)
     .bind(address_id)
@@ -104,7 +104,7 @@ impl Database {
             });
         }
         let bindings = sqlx::query(
-            "SELECT id, reservation_id, app_id, port, proto, socket_group, tag_id \
+            "SELECT id, reservation_id, app_id, port, proto, port_group, tag_id \
              FROM reservation_bindings WHERE (?1 IS NULL OR reservation_id = ?1) ORDER BY rowid",
         )
         .bind(only)
@@ -115,11 +115,7 @@ impl Database {
             let target = match (r.get::<Option<String>, _>("app_id"), r.get("tag_id")) {
                 (Some(app_id), None) => BindingTarget::App {
                     app_id,
-                    scope: scope_from_columns(
-                        r.get("port"),
-                        r.get("proto"),
-                        r.get("socket_group"),
-                    )?,
+                    scope: scope_from_columns(r.get("port"), r.get("proto"), r.get("port_group"))?,
                 },
                 (None, Some(tag_id)) => BindingTarget::Tag { tag_id },
                 _ => bail!("inconsistent binding row"),

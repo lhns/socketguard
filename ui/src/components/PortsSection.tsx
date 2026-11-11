@@ -1,11 +1,11 @@
 import { useRef, useState } from "react";
 import { appEntries, type AccessEntry } from "../access";
-import type { AppDetail, AppPort, ChangeOp, PortRange, Scope, SocketGroup } from "../api";
+import type { AppDetail, AppPort, ChangeOp, PortRange, Scope, PortGroup } from "../api";
 import { useCommit, type Commit } from "../commit";
 import { ALL_SCOPE, portLabel, rangeLabel, sameScope, scopeKey, scopeLabel, scopeOfPort, withRange } from "../lib";
 import { bindsRow } from "../matrix";
 import { useNav } from "../nav";
-import { useGrants, useReservations, useSettings, useSocketGroups } from "../queries";
+import { useGrants, useReservations, useSettings, usePortGroups } from "../queries";
 import type { AccessHighlight } from "./AccessList";
 import AddAccess from "./AddAccess";
 import CommitPreview from "./CommitPreview";
@@ -22,7 +22,7 @@ interface RowDef {
   scope: Scope;
   label: string;
   port?: AppPort;
-  group?: SocketGroup;
+  group?: PortGroup;
 }
 
 /** The rows of an app: All ports, each detected port, each attached port group; also a port that
@@ -33,7 +33,7 @@ function rowsOf(app: AppDetail, entries: AccessEntry[], tagScopes: Scope[]): Row
   for (const s of [...entries.map((e) => e.row ?? e.scope), ...tagScopes]) {
     if (s.kind === "port" && !rows.some((r) => sameScope(r.scope, s))) rows.push({ key: scopeKey(s), scope: s, label: scopeLabel(s) });
   }
-  for (const g of app.socket_groups) rows.push({ key: `group:${g.id}`, scope: { kind: "group", id: g.id }, label: g.label, group: g });
+  for (const g of app.port_groups) rows.push({ key: `group:${g.id}`, scope: { kind: "group", id: g.id }, label: g.label, group: g });
   return rows;
 }
 
@@ -50,7 +50,7 @@ export default function PortsSection({ app, highlight, onlyLocal, hasV4 }: Props
   const names = useNameCtx();
   const grants = useGrants().data ?? [];
   const protectsHost = (useSettings().data?.protect_host_interfaces.length ?? 0) > 0;
-  const allGroups = useSocketGroups().data ?? [];
+  const allGroups = usePortGroups().data ?? [];
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState<string | null>(null);
   const attach = useCommit(() => setCreating(null));
@@ -69,12 +69,12 @@ export default function PortsSection({ app, highlight, onlyLocal, hasV4 }: Props
     state: g.apps.includes(app.id) ? "on" : "off",
   }));
   const toggle = (item: PickerItem) => {
-    const op = (kind: "attach_socket_group" | "detach_socket_group"): ChangeOp =>
-      kind === "attach_socket_group"
+    const op = (kind: "attach_port_group" | "detach_port_group"): ChangeOp =>
+      kind === "attach_port_group"
         ? { op: kind, group_id: item.id, app_id: app.id, confirm_open: false }
         : { op: kind, group_id: item.id, app_id: app.id };
-    if (item.state === "on") void attach.runBatch([op("detach_socket_group")], `Detached ${item.label}`, [op("attach_socket_group")]);
-    else void attach.runBatch([op("attach_socket_group")], `Attached ${item.label}`);
+    if (item.state === "on") void attach.runBatch([op("detach_port_group")], `Detached ${item.label}`, [op("attach_port_group")]);
+    else void attach.runBatch([op("attach_port_group")], `Attached ${item.label}`);
     setOpen(false);
   };
 
@@ -136,9 +136,9 @@ export default function PortsSection({ app, highlight, onlyLocal, hasV4 }: Props
             onDetach={r.group ? () => {
               const g = r.group!;
               void attach.runBatch(
-                [{ op: "detach_socket_group", group_id: g.id, app_id: app.id }],
+                [{ op: "detach_port_group", group_id: g.id, app_id: app.id }],
                 `Detached ${g.label}`,
-                [{ op: "attach_socket_group", group_id: g.id, app_id: app.id, confirm_open: false }],
+                [{ op: "attach_port_group", group_id: g.id, app_id: app.id, confirm_open: false }],
               );
             } : undefined}
           />
@@ -227,8 +227,8 @@ function NewPortGroup({ label, appId, commit, onCancel }: { label: string; appId
     e.preventDefault();
     void commit.runBatch(
       [
-        { op: "create_socket_group", ref: "$group", label, ports: ranges, apps: [], confirm_open: false },
-        { op: "attach_socket_group", group_id: "$group", app_id: appId, confirm_open: false },
+        { op: "create_port_group", ref: "$group", label, ports: ranges, apps: [], confirm_open: false },
+        { op: "attach_port_group", group_id: "$group", app_id: appId, confirm_open: false },
       ],
       `Created and attached ${label}`,
     );

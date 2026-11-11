@@ -1,8 +1,8 @@
 //! Export and apply (`GET /api/export`, `POST /api/apply`): the settings, peers, groups,
-//! socket groups, grants and reservations (with their bindings and the grants on them) as a
+//! port groups, grants and reservations (with their bindings and the grants on them) as a
 //! portable document, and a diff-then-apply of such a
-//! document over the current state. Peers, groups and socket groups match by label, grants
-//! by (app id, scope, network, subject); a grant names its socket group by label. Everything
+//! document over the current state. Peers, groups and port groups match by label, grants
+//! by (app id, scope, network, subject); a grant names its port group by label. Everything
 //! the document lacks is deleted, so the document is the whole truth. Tags are not part of
 //! it (yet).
 //!
@@ -14,12 +14,12 @@ use crate::engine::{Engine, EngineError, GrantFilter, ProtectHostError};
 use crate::AppState;
 use socketguard_core::api_types::{
     ApplyRequest, ApplyResponse, Change, ChangeItem, ChangeKind, ExportAppRef, ExportBinding,
-    ExportCredential, ExportDocument, ExportGrant, ExportGroup, ExportPeer, ExportReservation,
-    ExportReservationGrant, ExportScope, ExportSocketGroup, ExportSubject, EXPORT_VERSION,
+    ExportCredential, ExportDocument, ExportGrant, ExportGroup, ExportPeer, ExportPortGroup,
+    ExportReservation, ExportReservationGrant, ExportScope, ExportSubject, EXPORT_VERSION,
 };
 use socketguard_core::{
     normalize_credential, ranges_text, BindingTarget, NewCredential, NewGrant, Peer, PeerGroup,
-    PortRef, Scope, SocketGroup, Subject, Tag, Target,
+    PortGroup, PortRef, Scope, Subject, Tag, Target,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -79,8 +79,8 @@ pub async fn export(engine: &Engine, state: &AppState) -> Result<ExportDocument,
         .into_iter()
         .map(|a| (a.id, a.name))
         .collect();
-    let socket_groups = engine.list_socket_groups(state).await?;
-    let mut out_socket_groups: Vec<ExportSocketGroup> = socket_groups
+    let port_groups = engine.list_port_groups(state).await?;
+    let mut out_port_groups: Vec<ExportPortGroup> = port_groups
         .iter()
         .map(|g| {
             let mut attached: Vec<ExportAppRef> = g
@@ -94,14 +94,14 @@ pub async fn export(engine: &Engine, state: &AppState) -> Result<ExportDocument,
                 })
                 .collect();
             attached.sort_by(|a, b| a.id.cmp(&b.id));
-            ExportSocketGroup {
+            ExportPortGroup {
                 label: g.label.clone(),
                 ports: g.ports.clone(),
                 apps: attached,
             }
         })
         .collect();
-    out_socket_groups.sort_by(|a, b| a.label.cmp(&b.label));
+    out_port_groups.sort_by(|a, b| a.label.cmp(&b.label));
     let mut out_grants: Vec<ExportGrant> = Vec::new();
     for g in engine.list_grants(state, GrantFilter::default()).await? {
         let g = g.grant;
@@ -115,7 +115,7 @@ pub async fn export(engine: &Engine, state: &AppState) -> Result<ExportDocument,
         let Some(subject) = export_subject(&g.subject, &peers, &groups) else {
             continue;
         };
-        let Some(scope) = export_scope(&g.scope, &socket_groups) else {
+        let Some(scope) = export_scope(&g.scope, &port_groups) else {
             continue;
         };
         out_grants.push(ExportGrant {
@@ -137,7 +137,7 @@ pub async fn export(engine: &Engine, state: &AppState) -> Result<ExportDocument,
             .reservation
             .bindings
             .iter()
-            .filter_map(|b| export_binding(&b.target, &apps, &tags, &socket_groups))
+            .filter_map(|b| export_binding(&b.target, &apps, &tags, &port_groups))
             .collect();
         bindings.sort();
         let mut grants: Vec<ExportReservationGrant> = r
@@ -164,7 +164,7 @@ pub async fn export(engine: &Engine, state: &AppState) -> Result<ExportDocument,
         settings: engine.settings(state).await?,
         peers: out_peers,
         groups: out_groups,
-        socket_groups: out_socket_groups,
+        port_groups: out_port_groups,
         grants: out_grants,
         reservations: out_reservations,
     })
@@ -175,7 +175,7 @@ fn export_binding(
     t: &BindingTarget,
     apps: &HashMap<String, String>,
     tags: &[Tag],
-    groups: &[SocketGroup],
+    groups: &[PortGroup],
 ) -> Option<ExportBinding> {
     Some(match t {
         BindingTarget::App { app_id, scope } => ExportBinding::App {
@@ -199,9 +199,9 @@ fn res_grant_key(g: &ExportReservationGrant) -> ResGrantKey {
 
 type GrantKey = (String, ExportScope, Option<String>, (u8, String));
 
-/// A grant's scope as the document names it (a socket group by label); None when the group
+/// A grant's scope as the document names it (a port group by label); None when the group
 /// is gone.
-fn export_scope(s: &Scope, groups: &[SocketGroup]) -> Option<ExportScope> {
+fn export_scope(s: &Scope, groups: &[PortGroup]) -> Option<ExportScope> {
     Some(match s {
         Scope::All => ExportScope::All,
         Scope::Port { port, proto } => ExportScope::Port {
@@ -215,7 +215,7 @@ fn export_scope(s: &Scope, groups: &[SocketGroup]) -> Option<ExportScope> {
 }
 
 /// A document scope as a scope (a port group by label); an error when the group is gone.
-fn export_to_scope(s: &ExportScope, groups: &[SocketGroup]) -> Result<Scope, EngineError> {
+fn export_to_scope(s: &ExportScope, groups: &[PortGroup]) -> Result<Scope, EngineError> {
     Ok(match s {
         ExportScope::All => Scope::All,
         ExportScope::Port { port, proto } => Scope::Port {
@@ -334,14 +334,14 @@ async fn validate(
         .into_iter()
         .map(|a| (a.id.clone(), a))
         .collect();
-    // Socket groups: valid ports, attached to apps that exist.
-    let mut socket_group_apps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for g in &mut doc.socket_groups {
+    // Port groups: valid ports, attached to apps that exist.
+    let mut port_group_apps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for g in &mut doc.port_groups {
         g.label = Engine::clean_label(&g.label, "port group")?;
         g.ports = crate::engine::clean_ranges(&g.ports)?;
         g.apps.sort_by(|a, b| a.id.cmp(&b.id));
         g.apps.dedup_by(|a, b| a.id == b.id);
-        if socket_group_apps
+        if port_group_apps
             .insert(
                 g.label.clone(),
                 g.apps.iter().map(|a| a.id.clone()).collect(),
@@ -357,7 +357,7 @@ async fn validate(
             ));
         }
     }
-    doc.socket_groups.sort_by(|a, b| a.label.cmp(&b.label));
+    doc.port_groups.sort_by(|a, b| a.label.cmp(&b.label));
     let networks = engine.networks();
     let mut seen_grants = BTreeSet::new();
     for g in &doc.grants {
@@ -375,7 +375,7 @@ async fn validate(
                     proto: *proto,
                 };
                 let in_group = doc
-                    .socket_groups
+                    .port_groups
                     .iter()
                     .filter(|sg| sg.apps.iter().any(|a| a.id == app.id))
                     .any(|sg| sg.ports.iter().any(|r| r.contains(p)));
@@ -384,7 +384,7 @@ async fn validate(
                 }
             }
             ExportScope::Group { label } => {
-                if !socket_group_apps
+                if !port_group_apps
                     .get(label)
                     .is_some_and(|attached| attached.contains(&app.id))
                 {
@@ -439,7 +439,7 @@ async fn validate(
                         ));
                     };
                     if let ExportScope::Group { label } = scope {
-                        if !socket_group_apps
+                        if !port_group_apps
                             .get(label)
                             .is_some_and(|attached| attached.contains(&a.id))
                         {
@@ -500,10 +500,10 @@ async fn validate(
 #[derive(Debug, Default)]
 struct Plan {
     delete_grants: Vec<ExportGrant>,
-    delete_socket_groups: Vec<String>,
+    delete_port_groups: Vec<String>,
     /// Groups to create, and the groups to change with what they are now.
-    create_socket_groups: Vec<ExportSocketGroup>,
-    update_socket_groups: Vec<(ExportSocketGroup, ExportSocketGroup)>,
+    create_port_groups: Vec<ExportPortGroup>,
+    update_port_groups: Vec<(ExportPortGroup, ExportPortGroup)>,
     remove_credentials: Vec<(String, ExportCredential)>,
     delete_groups: Vec<String>,
     delete_peers: Vec<String>,
@@ -679,30 +679,29 @@ fn plan(current: &ExportDocument, desired: &ExportDocument) -> Plan {
         p.delete_groups.push(label.to_string());
     }
 
-    // Socket groups.
-    let cur: BTreeMap<&str, &ExportSocketGroup> = current
-        .socket_groups
+    // Port groups.
+    let cur: BTreeMap<&str, &ExportPortGroup> = current
+        .port_groups
         .iter()
         .map(|x| (x.label.as_str(), x))
         .collect();
-    let want: BTreeMap<&str, &ExportSocketGroup> = desired
-        .socket_groups
+    let want: BTreeMap<&str, &ExportPortGroup> = desired
+        .port_groups
         .iter()
         .map(|x| (x.label.as_str(), x))
         .collect();
-    let app_ids = |g: &ExportSocketGroup| -> BTreeSet<String> {
-        g.apps.iter().map(|a| a.id.clone()).collect()
-    };
+    let app_ids =
+        |g: &ExportPortGroup| -> BTreeSet<String> { g.apps.iter().map(|a| a.id.clone()).collect() };
     for (label, w) in &want {
         match cur.get(label) {
             None => {
                 sorted_changes.push(change(
                     ChangeKind::Create,
-                    ChangeItem::SocketGroup,
+                    ChangeItem::PortGroup,
                     *label,
                     Some(format!("{}; {} apps", ranges_text(&w.ports), w.apps.len())),
                 ));
-                p.create_socket_groups.push((*w).clone());
+                p.create_port_groups.push((*w).clone());
             }
             Some(c) if c.ports != w.ports || app_ids(c) != app_ids(w) => {
                 let mut parts = Vec::new();
@@ -714,11 +713,11 @@ fn plan(current: &ExportDocument, desired: &ExportDocument) -> Plan {
                 parts.extend(new.difference(&old).map(|a| format!("attach {a}")));
                 sorted_changes.push(change(
                     ChangeKind::Update,
-                    ChangeItem::SocketGroup,
+                    ChangeItem::PortGroup,
                     *label,
                     Some(parts.join(", ")),
                 ));
-                p.update_socket_groups.push(((*w).clone(), (*c).clone()));
+                p.update_port_groups.push(((*w).clone(), (*c).clone()));
             }
             Some(_) => {}
         }
@@ -726,11 +725,11 @@ fn plan(current: &ExportDocument, desired: &ExportDocument) -> Plan {
     for label in cur.keys().filter(|l| !want.contains_key(*l)) {
         sorted_changes.push(change(
             ChangeKind::Delete,
-            ChangeItem::SocketGroup,
+            ChangeItem::PortGroup,
             *label,
             None,
         ));
-        p.delete_socket_groups.push(label.to_string());
+        p.delete_port_groups.push(label.to_string());
     }
 
     // Grants: no field to update, so only creates and deletes.
@@ -896,13 +895,13 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
     let current_grants = engine.list_grants(state, GrantFilter::default()).await?;
     let peers = engine.list_peers(state).await?;
     let groups = engine.list_groups(state).await?;
-    let socket_groups = engine.list_socket_groups(state).await?;
+    let port_groups = engine.list_port_groups(state).await?;
     for g in &p.delete_grants {
         let key = grant_key(g);
         let found = current_grants.iter().find(|v| {
             let (Some(subject), Some(scope)) = (
                 export_subject(&v.grant.subject, &peers, &groups),
-                export_scope(&v.grant.scope, &socket_groups),
+                export_scope(&v.grant.scope, &port_groups),
             ) else {
                 return false;
             };
@@ -955,7 +954,7 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
             .map(|a| (a.id, a.name))
             .collect();
         let found = view.reservation.bindings.iter().find(|x| {
-            export_binding(&x.target, &apps_by_id, &tags, &socket_groups).as_ref() == Some(b)
+            export_binding(&x.target, &apps_by_id, &tags, &port_groups).as_ref() == Some(b)
         });
         if let Some(x) = found {
             engine
@@ -969,48 +968,46 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
         }
     }
 
-    // Phase 1b: socket groups. What goes (a detached or deleted group, once no grant uses
+    // Phase 1b: port groups. What goes (a detached or deleted group, once no grant uses
     // it) first, then what is new or wider, before any grant refers to it. The document
     // states the Anyone grants explicitly, so a group that widens them counts as confirmed.
-    for (want, was) in &p.update_socket_groups {
-        let Some(group) = socket_groups.iter().find(|g| g.label == want.label) else {
+    for (want, was) in &p.update_port_groups {
+        let Some(group) = port_groups.iter().find(|g| g.label == want.label) else {
             continue;
         };
         let wanted: BTreeSet<&String> = want.apps.iter().map(|a| &a.id).collect();
         for gone in was.apps.iter().filter(|a| !wanted.contains(&a.id)) {
-            engine
-                .detach_socket_group(state, &group.id, &gone.id)
-                .await?;
+            engine.detach_port_group(state, &group.id, &gone.id).await?;
         }
     }
-    for label in &p.delete_socket_groups {
-        if let Some(group) = socket_groups.iter().find(|g| g.label == *label) {
-            engine.delete_socket_group(state, &group.id).await?;
+    for label in &p.delete_port_groups {
+        if let Some(group) = port_groups.iter().find(|g| g.label == *label) {
+            engine.delete_port_group(state, &group.id).await?;
         }
     }
-    for g in &p.create_socket_groups {
+    for g in &p.create_port_groups {
         let apps: Vec<String> = g.apps.iter().map(|a| a.id.clone()).collect();
         engine
-            .create_socket_group(state, &g.label, &g.ports, &apps, true)
+            .create_port_group(state, &g.label, &g.ports, &apps, true)
             .await?;
     }
-    for (want, was) in &p.update_socket_groups {
-        let Some(group) = socket_groups.iter().find(|g| g.label == want.label) else {
+    for (want, was) in &p.update_port_groups {
+        let Some(group) = port_groups.iter().find(|g| g.label == want.label) else {
             continue;
         };
         if want.ports != was.ports {
             engine
-                .update_socket_group(state, &group.id, None, Some(&want.ports), true)
+                .update_port_group(state, &group.id, None, Some(&want.ports), true)
                 .await?;
         }
         let had: BTreeSet<&String> = was.apps.iter().map(|a| &a.id).collect();
         for added in want.apps.iter().filter(|a| !had.contains(&a.id)) {
             engine
-                .attach_socket_group(state, &group.id, &added.id, true)
+                .attach_port_group(state, &group.id, &added.id, true)
                 .await?;
         }
     }
-    let socket_groups = engine.list_socket_groups(state).await?;
+    let port_groups = engine.list_port_groups(state).await?;
 
     // Phase 2: take away what no longer belongs, so a credential can move between peers.
     for (label, c) in &p.remove_credentials {
@@ -1102,7 +1099,7 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
                             proto: *proto,
                         },
                         ExportScope::Group { label } => Scope::Group {
-                            id: socket_groups
+                            id: port_groups
                                 .iter()
                                 .find(|x| x.label == *label)
                                 .map(|x| x.id.clone())
@@ -1125,7 +1122,7 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
         Ok(match b {
             ExportBinding::App { app, scope } => BindingTarget::App {
                 app_id: app.id.clone(),
-                scope: export_to_scope(scope, &socket_groups)?,
+                scope: export_to_scope(scope, &port_groups)?,
             },
             ExportBinding::Tag { label } => BindingTarget::Tag {
                 tag_id: tags

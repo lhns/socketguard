@@ -2,6 +2,6 @@
 import type { Scope } from "./Scope";
 
 /**
- * One member of a tag: an app with a scope (all of it, one port, or one socket group).
+ * One member of a tag: an app with a scope (all of it, one port, or one port group).
  */
 export type TagMember = { app_id: string, scope: Scope, };

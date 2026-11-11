@@ -2,7 +2,7 @@
 // and the rows of an app (a port or an attached port group); columns are groups, peers, Anyone and "Everyone on <network>". Nothing is
 // edited here; edits are made in the inspector.
 import type {
-  App, GrantView, Network, Peer, PeerGroup, PortRef, ReservationView, Scope, SocketGroup, Subject, Tag, Target,
+  App, GrantView, Network, Peer, PeerGroup, PortRef, ReservationView, Scope, PortGroup, Subject, Tag, Target,
 } from "./api";
 import { coversScope, sameSubject } from "./access";
 import { ALL_SCOPE, portLabel, sameScope, scopeKey, scopeOfPort } from "./lib";
@@ -83,9 +83,9 @@ export function buildColumns(ctx: Pick<Ctx, "peers" | "groups" | "networks" | "s
 }
 
 /** The port groups attached to an app. */
-export const groupsOf = (appId: string, socketGroups: SocketGroup[]) => socketGroups.filter((g) => g.apps.includes(appId));
+export const groupsOf = (appId: string, portGroups: PortGroup[]) => portGroups.filter((g) => g.apps.includes(appId));
 
-export function buildRows(apps: App[], tags: Tag[], expanded: Set<string>, socketGroups: SocketGroup[] = []): Row[] {
+export function buildRows(apps: App[], tags: Tag[], expanded: Set<string>, portGroups: PortGroup[] = []): Row[] {
   const rows: Row[] = tags.map((t) => ({
     key: rowKey({ kind: "tag", id: t.id }, null),
     kind: "tag",
@@ -102,7 +102,7 @@ export function buildRows(apps: App[], tags: Tag[], expanded: Set<string>, socke
         const port = { port: p.port, proto: p.proto };
         rows.push({ key: rowKey(target, port), kind: "port", target, scope: scopeOfPort(port), port, label: portLabel(p), app: a });
       }
-      for (const g of groupsOf(a.id, socketGroups)) {
+      for (const g of groupsOf(a.id, portGroups)) {
         const scope: Scope = { kind: "group", id: g.id };
         rows.push({ key: subRowKey(target, scope), kind: "port", target, scope, port: null, label: g.label, app: a });
       }

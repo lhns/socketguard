@@ -3,7 +3,7 @@ source: crates/cli/tests/render.rs
 expression: toml_text
 ---
 version = 1
-socket_groups = []
+port_groups = []
 
 [settings]
 protect_host_interfaces = ["eth0"]

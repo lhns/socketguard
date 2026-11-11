@@ -1,11 +1,11 @@
 //! Tags (ADR 0043), the writes a batch of changes applies in one transaction (ADR 0045)
 //! and the Tor client keys the daemon generated.
 
+use super::port_groups::{
+    attach_in, delete_port_group_in, detach_in, insert_port_group_in, update_port_group_in,
+};
 use super::reservations::{
     assign_address_in, delete_reservation_in, insert_binding_in, insert_reservation_in,
-};
-use super::socket_groups::{
-    attach_in, delete_socket_group_in, detach_in, insert_socket_group_in, update_socket_group_in,
 };
 use super::{
     insert_address_in, insert_grant_in, insert_peer_in, parse_ts, scope_columns,
@@ -13,8 +13,8 @@ use super::{
 };
 use anyhow::Result;
 use socketguard_core::{
-    Address, App, Binding, Credential, Grant, Peer, PeerGroup, PortRange, Reservation, Scope,
-    SocketGroup, Tag, TagId, TagMember,
+    Address, App, Binding, Credential, Grant, Peer, PeerGroup, PortGroup, PortRange, Reservation,
+    Scope, Tag, TagId, TagMember,
 };
 use sqlx::Row;
 use std::collections::HashMap;
@@ -44,20 +44,20 @@ pub enum Write {
         exclude: bool,
     },
     /// The group with its attachments.
-    InsertSocketGroup(SocketGroup),
-    UpdateSocketGroup {
+    InsertPortGroup(PortGroup),
+    UpdatePortGroup {
         id: String,
         label: Option<String>,
         ports: Option<Vec<PortRange>>,
     },
     /// The attachments go with the group.
-    DeleteSocketGroup(String),
+    DeletePortGroup(String),
     /// Idempotent.
-    AttachSocketGroup {
+    AttachPortGroup {
         group_id: String,
         app_id: String,
     },
-    DetachSocketGroup {
+    DetachPortGroup {
         group_id: String,
         app_id: String,
     },
@@ -161,7 +161,7 @@ async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
             sqlx::query(
                 "DELETE FROM tag_members WHERE tag_id = ? AND app_id = ? \
                  AND COALESCE(port, -1) = ? AND COALESCE(proto, '') = ? \
-                 AND COALESCE(socket_group, '') = ?",
+                 AND COALESCE(port_group, '') = ?",
             )
             .bind(tag_id)
             .bind(app_id)
@@ -178,13 +178,13 @@ async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
                     .await?;
             }
         }
-        Write::InsertSocketGroup(g) => insert_socket_group_in(tx, g).await?,
-        Write::UpdateSocketGroup { id, label, ports } => {
-            update_socket_group_in(tx, id, label.as_deref(), ports.as_deref()).await?
+        Write::InsertPortGroup(g) => insert_port_group_in(tx, g).await?,
+        Write::UpdatePortGroup { id, label, ports } => {
+            update_port_group_in(tx, id, label.as_deref(), ports.as_deref()).await?
         }
-        Write::DeleteSocketGroup(id) => delete_socket_group_in(tx, id).await?,
-        Write::AttachSocketGroup { group_id, app_id } => attach_in(tx, group_id, app_id).await?,
-        Write::DetachSocketGroup { group_id, app_id } => detach_in(tx, group_id, app_id).await?,
+        Write::DeletePortGroup(id) => delete_port_group_in(tx, id).await?,
+        Write::AttachPortGroup { group_id, app_id } => attach_in(tx, group_id, app_id).await?,
+        Write::DetachPortGroup { group_id, app_id } => detach_in(tx, group_id, app_id).await?,
         Write::DeleteAddress(id) => {
             sqlx::query("DELETE FROM addresses WHERE id = ?")
                 .bind(id)
@@ -251,7 +251,7 @@ async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
 async fn add_member(tx: &mut Tx<'_>, tag_id: &str, app_id: &str, scope: &Scope) -> Result<()> {
     let (port, proto, group) = scope_columns(scope);
     sqlx::query(
-        "INSERT OR IGNORE INTO tag_members (tag_id, app_id, port, proto, socket_group) \
+        "INSERT OR IGNORE INTO tag_members (tag_id, app_id, port, proto, port_group) \
          VALUES (?, ?, ?, ?, ?)",
     )
     .bind(tag_id)
@@ -315,7 +315,7 @@ impl Database {
             });
         }
         let members = sqlx::query(
-            "SELECT tag_id, app_id, port, proto, socket_group FROM tag_members \
+            "SELECT tag_id, app_id, port, proto, port_group FROM tag_members \
              WHERE (?1 IS NULL OR tag_id = ?1) ORDER BY rowid",
         )
         .bind(only)
@@ -323,7 +323,7 @@ impl Database {
         .await?;
         let mut by_tag: HashMap<String, Vec<TagMember>> = HashMap::new();
         for r in members {
-            let scope = scope_from_columns(r.get("port"), r.get("proto"), r.get("socket_group"))?;
+            let scope = scope_from_columns(r.get("port"), r.get("proto"), r.get("port_group"))?;
             by_tag.entry(r.get("tag_id")).or_default().push(TagMember {
                 app_id: r.get("app_id"),
                 scope,

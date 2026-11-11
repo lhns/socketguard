@@ -7,7 +7,7 @@ import { NewReservationForm, ReservationInspector, ReservationsInspector } from 
 import { errorText } from "../lib";
 import type { FocusMessage } from "../nav";
 import { rowGrants, boundRows, servesText } from "../reservations";
-import { useApps, useGrants, useList, useNetworks, useReservations, useSocketGroups, useTags } from "../queries";
+import { useApps, useGrants, useList, useNetworks, useReservations, usePortGroups, useTags } from "../queries";
 
 interface ResRow extends ListRow {
   r: ReservationView;
@@ -21,7 +21,7 @@ export default function ReservedPage({ focus = { seq: 0 } }: { focus?: FocusMess
   const list = useList(reservations);
   const apps = useList(useApps());
   const tags = useList(useTags());
-  const groups = useList(useSocketGroups());
+  const groups = useList(usePortGroups());
   const grants = useList(useGrants());
   const networks = useList(useNetworks());
 

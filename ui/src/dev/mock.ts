@@ -3,7 +3,7 @@
 // It is not part of the production bundle.
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
-  Address, App, AppDetail, BatchChange, ChangeOp, EffectiveAccess, GrantReach, GrantView, Network, Peer, PeerGroup, PortRange, ReservationView, Scope, SocketGroup, Subject, Tag,
+  Address, App, AppDetail, BatchChange, ChangeOp, EffectiveAccess, GrantReach, GrantView, Network, Peer, PeerGroup, PortRange, ReservationView, Scope, PortGroup, Subject, Tag,
 } from "../api";
 import { ALL_SCOPE, sameScope } from "../lib";
 
@@ -79,17 +79,17 @@ let tags: Tag[] = [
   { id: "t4", label: "monitoring", patterns: ["prom*", "grafana"], excluded: [], created_at: T0, members: [{ app_id: "a8", scope: ALL_SCOPE }, { app_id: "a5", scope: { kind: "port", port: 3000, proto: "tcp" } }] },
   { id: "t5", label: "ftp", patterns: [], excluded: [], created_at: T0, members: [{ app_id: "a6", scope: { kind: "group", id: "sg1" } }] },
 ];
-let socketGroups: SocketGroup[] = [
+let portGroups: PortGroup[] = [
   { id: "sg1", label: "passive", ports: [{ start: 50000, end: 51000, proto: "tcp" }], apps: ["a6", "a5"], created_at: T0 },
   { id: "sg2", label: "dns", ports: [{ start: 53, end: 53, proto: "udp" }, { start: 5353, end: 5353, proto: "udp" }], apps: [], created_at: T0 },
 ];
-const attached = (a: App) => socketGroups.filter((g) => g.apps.includes(a.id));
+const attached = (a: App) => portGroups.filter((g) => g.apps.includes(a.id));
 /** What a scope covers on an app: all of its ports and attached groups, one port, or a group's ranges. */
 const rangesOf = (a: App, scope: Scope): PortRange[] =>
   scope.kind === "port" ? [{ start: scope.port, end: scope.port, proto: scope.proto }]
-  : scope.kind === "group" ? socketGroups.find((g) => g.id === scope.id)?.ports ?? []
+  : scope.kind === "group" ? portGroups.find((g) => g.id === scope.id)?.ports ?? []
   : [...a.ports.map((p) => ({ start: p.port, end: p.port, proto: p.proto })), ...attached(a).flatMap((g) => g.ports)];
-const scopeText = (s: Scope): string => (s.kind === "all" ? "All ports" : s.kind === "port" ? `${s.port}/${s.proto}` : socketGroups.find((g) => g.id === s.id)?.label ?? s.id);
+const scopeText = (s: Scope): string => (s.kind === "all" ? "All ports" : s.kind === "port" ? `${s.port}/${s.proto}` : portGroups.find((g) => g.id === s.id)?.label ?? s.id);
 const narrow = (grant: Scope, member: Scope): Scope => (grant.kind === "all" ? member : grant);
 
 interface G { id: string; target: GrantView["target"]; scope: Scope; network_id: string | null; subject: Subject }
@@ -175,14 +175,14 @@ function detail(a: App): AppDetail {
       }
     }
   }
-  return { ...a, grants: mine.map(view), access, tags: tags.filter((t) => t.members.some((m) => m.app_id === a.id)).map((t) => t.id), counters: [], socket_groups: attached(a) };
+  return { ...a, grants: mine.map(view), access, tags: tags.filter((t) => t.members.some((m) => m.app_id === a.id)).map((t) => t.id), counters: [], port_groups: attached(a) };
 }
 
 // ─── Batches ────────────────────────────────────────────────────────────────
 
 interface Op { op: string; [k: string]: unknown }
 function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
-  const snap = { groups: [...groups], grants: [...grants], tags: tags.map((t) => ({ ...t, members: [...t.members] })), peers: [...peers], apps: apps.map((a) => ({ ...a })), socketGroups: socketGroups.map((g) => ({ ...g, apps: [...g.apps] })), reservations: reservations.map((r) => ({ ...r })), bindings: [...bindings], addresses: apps.map((a) => [...a.addresses]) };
+  const snap = { groups: [...groups], grants: [...grants], tags: tags.map((t) => ({ ...t, members: [...t.members] })), peers: [...peers], apps: apps.map((a) => ({ ...a })), portGroups: portGroups.map((g) => ({ ...g, apps: [...g.apps] })), reservations: reservations.map((r) => ({ ...r })), bindings: [...bindings], addresses: apps.map((a) => [...a.addresses]) };
   const refs: Record<string, string> = {};
   const out: BatchChange[] = [];
   let widens = false;
@@ -193,7 +193,7 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
   const coveringAll = (appId: string): G[] =>
     grants.filter((g) => g.scope.kind === "all" && ((g.target.kind === "app" && g.target.id === appId) || (g.target.kind === "tag" && tags.find((t) => t.id === g.target.id)?.members.some((m) => m.app_id === appId && m.scope.kind === "all"))));
   /** Attaching a group or widening its ports lets more in where a grant on All ports covers the app. */
-  const widenOf = (appId: string, group: SocketGroup, confirm: boolean, what: string) => {
+  const widenOf = (appId: string, group: PortGroup, confirm: boolean, what: string) => {
     const app = apps.find((a) => a.id === appId)!;
     const cov = coveringAll(appId);
     const opens = cov.some((g) => g.subject.kind === "anyone");
@@ -201,7 +201,7 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
     const reach = cov.flatMap(reachOf);
     widens ||= reach.some((r) => r.reach !== "not_reachable");
     const who = reachWho(cov);
-    out.push({ kind: "update", item: "socket_group", name: `${what} ${group.label} on ${app.name}`, detail: who.length ? `reachable by ${who.join(", ")}` : undefined, opens_to_anyone: opens, reach });
+    out.push({ kind: "update", item: "port_group", name: `${what} ${group.label} on ${app.name}`, detail: who.length ? `reachable by ${who.join(", ")}` : undefined, opens_to_anyone: opens, reach });
   };
   /** What still uses a group on an app (all apps when `appId` is null). */
   const usersOf = (groupId: string, appId: string | null): string[] => [
@@ -257,7 +257,7 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
         widens ||= reach.some((r) => r.reach !== "not_reachable");
         const tgt = g.target.kind === "app" ? apps.find((a) => a.id === g.target.id)?.name : g.target.kind === "reservation" ? `reserved ${reservations.find((r) => r.id === g.target.id)?.label}` : `tag ${tags.find((t) => t.id === g.target.id)?.label}`;
         const who = g.subject.kind === "anyone" ? "Anyone" : g.subject.kind === "peer" ? peers.find((p) => p.id === (g.subject as { id: string }).id)?.label : `group ${groups.find((x) => x.id === (g.subject as { id: string }).id)?.label}`;
-        out.push({ kind: "create", item: "grant", name: `${who} to ${tgt}${g.scope.kind === "port" ? ` ${g.scope.port}/${g.scope.proto}` : g.scope.kind === "group" ? ` group ${socketGroups.find((x) => x.id === (g.scope as { id: string }).id)?.label}` : ""}`, detail: g.network_id ? `on ${g.network_id}` : undefined, id: g.id, opens_to_anyone: g.subject.kind === "anyone", reach });
+        out.push({ kind: "create", item: "grant", name: `${who} to ${tgt}${g.scope.kind === "port" ? ` ${g.scope.port}/${g.scope.proto}` : g.scope.kind === "group" ? ` group ${portGroups.find((x) => x.id === (g.scope as { id: string }).id)?.label}` : ""}`, detail: g.network_id ? `on ${g.network_id}` : undefined, id: g.id, opens_to_anyone: g.subject.kind === "anyone", reach });
         break;
       }
       case "remove_grant": {
@@ -290,61 +290,61 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
         out.push({ kind: "delete", item: "tag_member", name: `${op.app_id} from tag ${tag.label}`, opens_to_anyone: false });
         break;
       }
-      case "create_socket_group": {
+      case "create_port_group": {
         const ports = op.ports as PortRange[];
         if (ports.length === 0) throw { code: "invalid", message: `operation ${out.length}: a port group needs at least one port` };
-        if (socketGroups.some((x) => x.label === op.label)) throw { code: "conflict", message: `operation ${out.length}: port group ${op.label} already exists` };
-        const sg: SocketGroup = { id: uid("sg"), label: op.label as string, ports, apps: [], created_at: T0 };
+        if (portGroups.some((x) => x.label === op.label)) throw { code: "conflict", message: `operation ${out.length}: port group ${op.label} already exists` };
+        const sg: PortGroup = { id: uid("sg"), label: op.label as string, ports, apps: [], created_at: T0 };
         if (op.ref) refs[op.ref as string] = sg.id;
-        socketGroups = [...socketGroups, sg];
-        out.push({ kind: "create", item: "socket_group", name: sg.label, detail: ports.map((r) => (r.start === r.end ? `${r.start}/${r.proto}` : `${r.start}-${r.end}/${r.proto}`)).join(", "), id: sg.id, opens_to_anyone: false });
+        portGroups = [...portGroups, sg];
+        out.push({ kind: "create", item: "port_group", name: sg.label, detail: ports.map((r) => (r.start === r.end ? `${r.start}/${r.proto}` : `${r.start}-${r.end}/${r.proto}`)).join(", "), id: sg.id, opens_to_anyone: false });
         for (const appId of (op.apps as string[] | undefined) ?? []) {
-          socketGroups = socketGroups.map((g) => (g.id === sg.id ? { ...g, apps: [...g.apps, appId] } : g));
+          portGroups = portGroups.map((g) => (g.id === sg.id ? { ...g, apps: [...g.apps, appId] } : g));
           widenOf(appId, sg, !!op.confirm_open, "attach");
         }
         break;
       }
-      case "update_socket_group": {
-        const g = socketGroups.find((x) => x.id === res(op.group_id as string));
+      case "update_port_group": {
+        const g = portGroups.find((x) => x.id === res(op.group_id as string));
         if (!g) throw { code: "not_found", message: `port group ${op.group_id}` };
         const label = (op.label as string | undefined) ?? g.label;
-        if (label !== g.label && socketGroups.some((x) => x.label === label)) throw { code: "conflict", message: `operation ${out.length}: port group ${label} already exists` };
+        if (label !== g.label && portGroups.some((x) => x.label === label)) throw { code: "conflict", message: `operation ${out.length}: port group ${label} already exists` };
         const ports = (op.ports as PortRange[] | undefined) ?? g.ports;
         if (ports.length === 0) throw { code: "invalid", message: `operation ${out.length}: a port group needs at least one port` };
         const key = (r: PortRange) => `${r.start}-${r.end}/${r.proto}`;
         const added = ports.filter((r) => !g.ports.some((x) => key(x) === key(r)));
-        socketGroups = socketGroups.map((x) => (x.id === g.id ? { ...x, label, ports } : x));
-        if (label !== g.label) out.push({ kind: "update", item: "socket_group", name: `${g.label} renamed to ${label}`, opens_to_anyone: false });
+        portGroups = portGroups.map((x) => (x.id === g.id ? { ...x, label, ports } : x));
+        if (label !== g.label) out.push({ kind: "update", item: "port_group", name: `${g.label} renamed to ${label}`, opens_to_anyone: false });
         if (added.length > 0) for (const appId of g.apps) widenOf(appId, { ...g, label }, !!op.confirm_open, `add ${added.map(key).join(", ")} to`);
-        else if (ports !== g.ports) out.push({ kind: "update", item: "socket_group", name: `${label} ports`, opens_to_anyone: false });
+        else if (ports !== g.ports) out.push({ kind: "update", item: "port_group", name: `${label} ports`, opens_to_anyone: false });
         break;
       }
-      case "delete_socket_group": {
-        const g = socketGroups.find((x) => x.id === op.group_id);
+      case "delete_port_group": {
+        const g = portGroups.find((x) => x.id === op.group_id);
         if (!g) throw { code: "not_found", message: `port group ${op.group_id}` };
         const users = usersOf(g.id, null);
         if (users.length) throw { code: "conflict", message: `port group ${g.label} is used by ${users.join(", ")}` };
-        socketGroups = socketGroups.filter((x) => x.id !== g.id);
-        out.push({ kind: "delete", item: "socket_group", name: g.label, id: g.id, opens_to_anyone: false });
+        portGroups = portGroups.filter((x) => x.id !== g.id);
+        out.push({ kind: "delete", item: "port_group", name: g.label, id: g.id, opens_to_anyone: false });
         break;
       }
-      case "attach_socket_group": {
-        const g = socketGroups.find((x) => x.id === res(op.group_id as string));
+      case "attach_port_group": {
+        const g = portGroups.find((x) => x.id === res(op.group_id as string));
         if (!g) throw { code: "not_found", message: `port group ${op.group_id}` };
         if (apps.find((a) => a.id === op.app_id)?.identity_note === "unidentified") throw { code: "invalid", message: "an unidentified app takes no port groups" };
         if (!g.apps.includes(op.app_id as string)) {
-          socketGroups = socketGroups.map((x) => (x.id === g.id ? { ...x, apps: [...x.apps, op.app_id as string] } : x));
+          portGroups = portGroups.map((x) => (x.id === g.id ? { ...x, apps: [...x.apps, op.app_id as string] } : x));
           widenOf(op.app_id as string, g, !!op.confirm_open, "attach");
         }
         break;
       }
-      case "detach_socket_group": {
-        const g = socketGroups.find((x) => x.id === op.group_id);
+      case "detach_port_group": {
+        const g = portGroups.find((x) => x.id === op.group_id);
         if (!g) throw { code: "not_found", message: `port group ${op.group_id}` };
         const users = usersOf(g.id, op.app_id as string);
         if (users.length) throw { code: "conflict", message: `port group ${g.label} is used on ${apps.find((a) => a.id === op.app_id)?.name} by ${users.join(", ")}` };
-        socketGroups = socketGroups.map((x) => (x.id === g.id ? { ...x, apps: x.apps.filter((a) => a !== op.app_id) } : x));
-        out.push({ kind: "update", item: "socket_group", name: `detach ${g.label} from ${apps.find((a) => a.id === op.app_id)?.name}`, opens_to_anyone: false });
+        portGroups = portGroups.map((x) => (x.id === g.id ? { ...x, apps: x.apps.filter((a) => a !== op.app_id) } : x));
+        out.push({ kind: "update", item: "port_group", name: `detach ${g.label} from ${apps.find((a) => a.id === op.app_id)?.name}`, opens_to_anyone: false });
         break;
       }
       case "create_reservation": {
@@ -433,7 +433,7 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
     peers = snap.peers;
     groups = snap.groups;
     apps = snap.apps;
-    socketGroups = snap.socketGroups;
+    portGroups = snap.portGroups;
     reservations = snap.reservations;
     bindings = snap.bindings;
     apps = snap.apps.map((a, i) => ({ ...a, addresses: snap.addresses[i] }));
@@ -460,25 +460,25 @@ export function installMock() {
         case "list_reservations": return reservations.map(reservationView);
         case "get_reservation": return reservationView(reservations.find((r) => r.id === a.id)!);
         case "list_addresses": return [...apps.flatMap((x) => x.addresses), ...reservations.flatMap((r) => r.addresses)];
-        case "list_socket_groups": return socketGroups;
-        case "get_socket_group": return socketGroups.find((g) => g.id === a.id);
-        case "create_socket_group": {
-          const g: SocketGroup = { id: uid("sg"), label: a.req.label, ports: a.req.ports, apps: a.req.apps, created_at: T0 };
-          socketGroups = [...socketGroups, g];
+        case "list_port_groups": return portGroups;
+        case "get_port_group": return portGroups.find((g) => g.id === a.id);
+        case "create_port_group": {
+          const g: PortGroup = { id: uid("sg"), label: a.req.label, ports: a.req.ports, apps: a.req.apps, created_at: T0 };
+          portGroups = [...portGroups, g];
           return done(g);
         }
-        case "update_socket_group":
-          socketGroups = socketGroups.map((g) => (g.id === a.id ? { ...g, ...(a.req.label ? { label: a.req.label } : {}), ...(a.req.ports ? { ports: a.req.ports } : {}) } : g));
-          return done(socketGroups.find((g) => g.id === a.id));
-        case "delete_socket_group":
-          socketGroups = socketGroups.filter((g) => g.id !== a.id);
+        case "update_port_group":
+          portGroups = portGroups.map((g) => (g.id === a.id ? { ...g, ...(a.req.label ? { label: a.req.label } : {}), ...(a.req.ports ? { ports: a.req.ports } : {}) } : g));
+          return done(portGroups.find((g) => g.id === a.id));
+        case "delete_port_group":
+          portGroups = portGroups.filter((g) => g.id !== a.id);
           return done(null);
-        case "attach_socket_group":
-          socketGroups = socketGroups.map((g) => (g.id === a.id && !g.apps.includes(a.appId) ? { ...g, apps: [...g.apps, a.appId] } : g));
-          return done(socketGroups.find((g) => g.id === a.id));
-        case "detach_socket_group":
-          socketGroups = socketGroups.map((g) => (g.id === a.id ? { ...g, apps: g.apps.filter((x) => x !== a.appId) } : g));
-          return done(socketGroups.find((g) => g.id === a.id));
+        case "attach_port_group":
+          portGroups = portGroups.map((g) => (g.id === a.id && !g.apps.includes(a.appId) ? { ...g, apps: [...g.apps, a.appId] } : g));
+          return done(portGroups.find((g) => g.id === a.id));
+        case "detach_port_group":
+          portGroups = portGroups.map((g) => (g.id === a.id ? { ...g, apps: g.apps.filter((x) => x !== a.appId) } : g));
+          return done(portGroups.find((g) => g.id === a.id));
         case "list_networks": return networks;
         case "get_settings": return { protect_host_interfaces: ["eth0"] };
         case "activity": return [];

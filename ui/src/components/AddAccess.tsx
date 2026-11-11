@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeOp, NewCredential, Scope, Subject, Target } from "../api";
 import { useCommit } from "../commit";
 import { ALL_SCOPE, CREDENTIAL_PLACEHOLDER, portLabel, portOfScope, scopeKey, scopeLabel, scopeOfPort, subjectLabel, targetLabel } from "../lib";
-import { useApps, useGroups, useList, useNetworks, useParsedCredentials, usePeers, useReservations, useSocketGroups, useTags } from "../queries";
+import { useApps, useGroups, useList, useNetworks, useParsedCredentials, usePeers, useReservations, usePortGroups, useTags } from "../queries";
 import { CREDENTIAL_INFO } from "../reach";
 import CommitPreview from "./CommitPreview";
 import Picker, { type PickerItem } from "./Picker";
@@ -44,7 +44,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
   const peers = useList(usePeers());
   const groups = useList(useGroups());
   const networks = useList(useNetworks());
-  const socketGroups = useList(useSocketGroups());
+  const portGroups = useList(usePortGroups());
   const reservations = useList(useReservations());
 
   const [open, setOpen] = useState(false);
@@ -83,7 +83,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
           ports.set(scopeKey(scope), { key: scopeKey(scope), scope, label: portLabel(p), mono: true });
         }
       }
-      for (const g of socketGroups) if (g.apps.includes(appId)) groupIds.add(g.id);
+      for (const g of portGroups) if (g.apps.includes(appId)) groupIds.add(g.id);
     };
     let anyTag = false;
     for (const t of targets) {
@@ -95,11 +95,11 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
       }
     }
     const sorted = [...ports.values()].sort((a, b) => (a.scope.kind === "port" && b.scope.kind === "port" ? a.scope.port - b.scope.port || a.scope.proto.localeCompare(b.scope.proto) : 0));
-    const groups = socketGroups
+    const groups = portGroups
       .filter((g) => anyTag || groupIds.has(g.id))
       .map<Option>((g) => ({ key: `group:${g.id}`, scope: { kind: "group", id: g.id }, label: g.label, mono: false }));
     return [{ key: "*", scope: ALL_SCOPE, label: scopeLabel(ALL_SCOPE), mono: false }, ...sorted, ...groups];
-  }, [targets, apps, tags, socketGroups]);
+  }, [targets, apps, tags, portGroups]);
   const grantNetworks = networks.filter((n) => n.grants_apply);
 
   // ─── The picker ────────────────────────────────────────────────────────────
@@ -160,7 +160,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
   const ready = targets.length > 0 && chosen > 0 && (fixed.side === "targets" || fixed.subjects.length > 0) && scopeSelection.length > 0;
   // A port group is only granted on the apps it is attached to.
   const applies = (t: Target, s: Scope) =>
-    t.kind === "reservation" ? s.kind === "all" : s.kind !== "group" || t.kind === "tag" || (socketGroups.find((g) => g.id === s.id)?.apps.includes(t.id) ?? false);
+    t.kind === "reservation" ? s.kind === "all" : s.kind !== "group" || t.kind === "tag" || (portGroups.find((g) => g.id === s.id)?.apps.includes(t.id) ?? false);
 
   const ops = useMemo<ChangeOp[]>(() => {
     if (!ready) return [];
@@ -193,7 +193,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
     return out;
     // scopeSelection and newPeers derive from chips, picked and options.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, fixed, chips, targets, picked, options, nets, socketGroups]);
+  }, [ready, fixed, chips, targets, picked, options, nets, portGroups]);
 
   // A review of an earlier form is stale as soon as the form changes.
   const opsKey = JSON.stringify(ops);
