@@ -55,6 +55,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0045](0045-batch-changes-credential-parsing-tor-keys.md) | Batch Changes, One Credential Parser, Stored Tor Client Keys | Accepted |
 | [0046](0046-unidentified-sockets-and-system-flag.md) | Unidentified Sockets Become Apps; System Components Are Flagged | Accepted (amends 0027) |
 | [0047](0047-addresses-on-demand-reservations-port-groups.md) | Addresses on Demand, Reservations and Port Groups | Accepted (supersedes 0027 in part; extends 0039, 0041, 0042, 0043) |
+| [0048](0048-network-setup-detect-install-configure.md) | Networks Are Set Up by Detect, Install, Configure | Accepted (extends 0038, 0040) |
 
 ## Format
 
