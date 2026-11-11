@@ -1,3 +1,4 @@
+pub mod addressing;
 pub mod api_types;
 pub mod config;
 pub mod credential;
@@ -9,6 +10,7 @@ pub mod tags;
 pub mod types;
 pub mod yggdrasil;
 
+pub use addressing::*;
 pub use config::{valid_interface_name, BackendConfig, ProcessFilter};
 pub use credential::*;
 pub use identity::*;

@@ -304,7 +304,7 @@ pub fn ranges_text(ranges: &[PortRange]) -> String {
 
 /// Which sockets of an app a grant, a tag member or an address means.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Scope {
     /// Every socket of the app: its detected ports and its attached socket groups.
@@ -416,6 +416,14 @@ impl ScopePorts {
 
     pub fn total(&self) -> PortRangeSet {
         self.fixed.union(&self.ranged)
+    }
+
+    /// The set without the ports in `other`.
+    pub fn subtract(&self, other: &PortRangeSet) -> Self {
+        ScopePorts {
+            fixed: self.fixed.subtract(other),
+            ranged: self.ranged.subtract(other),
+        }
     }
 
     pub fn is_empty(&self) -> bool {

@@ -4,8 +4,8 @@
 
 use crate::config::BackendConfig;
 use crate::model::{
-    AddressId, AddressMode, AppId, Credential, CredentialKind, GrantId, Network, NetworkId,
-    NewCredential, PeerId, Settings, Subject, TagId, Target,
+    AppId, BindingId, BindingTarget, Credential, CredentialKind, GrantId, Network, NetworkId,
+    NewCredential, PeerId, ReservationId, Settings, Subject, TagId, Target,
 };
 use crate::reach::GrantReach;
 use crate::scope::{PortRange, Scope, SocketGroupId};
@@ -119,28 +119,15 @@ pub struct ReviewRequest {
     pub reviewed: bool,
 }
 
+/// Body of `POST /api/apps/{id}/move`: move grants, tag memberships, addresses and
+/// reservation bindings from the app in the path to `to` (ADR 0047).
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SplitRequest {
-    pub network_id: String,
-    /// The port to serve on its own address, with `proto`; or a socket group by id in
-    /// `group`. Exactly one of the two.
+pub struct MoveAppRequest {
+    pub to: AppId,
+    /// Needed when a moved grant is to Anyone, or the target gains access for Anyone.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub port: Option<u16>,
-    #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub proto: Option<Protocol>,
-    #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub group: Option<SocketGroupId>,
-}
-
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MergeRequest {
-    pub network_id: String,
-    pub address_ids: Vec<AddressId>,
+    pub confirm_open: bool,
 }
 
 // ─── Peers and groups ────────────────────────────────────────────────────────
@@ -191,15 +178,6 @@ pub struct NewNetwork {
     pub backend: BackendConfig,
 }
 
-/// Body of `PUT /api/settings`. Absent fields stay as they are.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UpdateSettings {
-    #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub address_mode: Option<AddressMode>,
-}
-
 /// Body of `PUT /api/settings/protect-host`. An empty list turns protection off.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,6 +219,8 @@ pub struct ExportDocument {
     #[serde(default)]
     pub socket_groups: Vec<ExportSocketGroup>,
     pub grants: Vec<ExportGrant>,
+    #[serde(default)]
+    pub reservations: Vec<ExportReservation>,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -268,7 +248,7 @@ pub struct ExportGroup {
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ExportAppRef {
     pub id: String,
     /// For humans; ignored on apply.
@@ -322,6 +302,42 @@ pub enum ExportSubject {
     Anyone,
 }
 
+/// What a reservation binding names in a document: an app (by identity) with a scope, or a
+/// tag by label.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExportBinding {
+    App {
+        app: ExportAppRef,
+        #[serde(default)]
+        scope: ExportScope,
+    },
+    Tag {
+        label: String,
+    },
+}
+
+/// A grant on a reservation: always on all of its rows.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportReservationGrant {
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub network: Option<String>,
+    pub subject: ExportSubject,
+}
+
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportReservation {
+    pub label: String,
+    #[serde(default)]
+    pub bindings: Vec<ExportBinding>,
+    #[serde(default)]
+    pub grants: Vec<ExportReservationGrant>,
+}
+
 /// Body of `POST /api/apply`.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,6 +368,8 @@ pub enum ChangeItem {
     TagMember,
     SocketGroup,
     App,
+    Reservation,
+    Binding,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -498,6 +516,39 @@ pub struct AttachSocketGroup {
     pub confirm_open: bool,
 }
 
+// ─── Reservations ────────────────────────────────────────────────────────────
+
+/// Body of `POST /api/reservations`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewReservation {
+    pub label: String,
+    #[serde(default)]
+    pub bindings: Vec<BindingTarget>,
+    /// Needed when the first bindings put rows under a grant to Anyone (none exist for a
+    /// new reservation, so this only matters for symmetry with `NewBinding`).
+    #[serde(default)]
+    pub confirm_open: bool,
+}
+
+/// Body of `POST /api/reservations/{id}/bindings`. Binding a row to a reservation that has
+/// a grant to Anyone opens the row, so it needs `confirm_open`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewBinding {
+    pub target: BindingTarget,
+    #[serde(default)]
+    pub confirm_open: bool,
+}
+
+/// Body of `POST /api/addresses/{id}/reserve`: turn an automatic address into a
+/// reservation with this label, keeping the address.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReserveRequest {
+    pub label: String,
+}
+
 // ─── Batch changes ───────────────────────────────────────────────────────────
 
 /// One operation of `POST /api/changes` (ADR 0045). Wherever an id goes, a `ref` of an
@@ -609,6 +660,50 @@ pub enum ChangeOp {
         app_id: AppId,
         reviewed: bool,
     },
+    CreateReservation {
+        #[serde(rename = "ref", default)]
+        #[cfg_attr(feature = "ts", ts(optional, rename = "ref"))]
+        ref_: Option<String>,
+        label: String,
+        #[serde(default)]
+        bindings: Vec<BindingTarget>,
+        #[serde(default)]
+        confirm_open: bool,
+    },
+    /// Turn an automatic address into a reservation, keeping the address.
+    ReserveAddress {
+        #[serde(rename = "ref", default)]
+        #[cfg_attr(feature = "ts", ts(optional, rename = "ref"))]
+        ref_: Option<String>,
+        address_id: String,
+        label: String,
+    },
+    RenameReservation {
+        reservation_id: ReservationId,
+        label: String,
+    },
+    AddBinding {
+        reservation_id: ReservationId,
+        target: BindingTarget,
+        /// Needed when the reservation has a grant to Anyone.
+        #[serde(default)]
+        confirm_open: bool,
+    },
+    RemoveBinding {
+        reservation_id: ReservationId,
+        binding_id: BindingId,
+    },
+    /// Delete the reservation, its addresses and the grants on it.
+    ReleaseReservation {
+        reservation_id: ReservationId,
+    },
+    /// Move grants, tag memberships, addresses and bindings from one app to another.
+    MoveApp {
+        from: AppId,
+        to: AppId,
+        #[serde(default)]
+        confirm_open: bool,
+    },
 }
 
 /// Body of `POST /api/changes`: the operations are applied in order, all or nothing, with
@@ -693,6 +788,8 @@ pub mod event_name {
     pub const GRANTS_CHANGED: &str = "grants_changed";
     pub const TAGS_CHANGED: &str = "tags_changed";
     pub const SOCKET_GROUPS_CHANGED: &str = "socket_groups_changed";
+    pub const RESERVATIONS_CHANGED: &str = "reservations_changed";
+    pub const ADDRESSES_CHANGED: &str = "addresses_changed";
     pub const NETWORKS_CHANGED: &str = "networks_changed";
     pub const SETTINGS_CHANGED: &str = "settings_changed";
     pub const ACTIVITY: &str = "activity";
@@ -710,6 +807,8 @@ pub enum ApiEvent {
     GrantsChanged,
     TagsChanged,
     SocketGroupsChanged,
+    ReservationsChanged,
+    AddressesChanged,
     NetworksChanged,
     SettingsChanged,
     Activity,
@@ -730,6 +829,8 @@ impl ApiEvent {
             ApiEvent::GrantsChanged => event_name::GRANTS_CHANGED,
             ApiEvent::TagsChanged => event_name::TAGS_CHANGED,
             ApiEvent::SocketGroupsChanged => event_name::SOCKET_GROUPS_CHANGED,
+            ApiEvent::ReservationsChanged => event_name::RESERVATIONS_CHANGED,
+            ApiEvent::AddressesChanged => event_name::ADDRESSES_CHANGED,
             ApiEvent::NetworksChanged => event_name::NETWORKS_CHANGED,
             ApiEvent::SettingsChanged => event_name::SETTINGS_CHANGED,
             ApiEvent::Activity => event_name::ACTIVITY,
@@ -747,6 +848,8 @@ impl ApiEvent {
             GRANTS_CHANGED => ApiEvent::GrantsChanged,
             TAGS_CHANGED => ApiEvent::TagsChanged,
             SOCKET_GROUPS_CHANGED => ApiEvent::SocketGroupsChanged,
+            RESERVATIONS_CHANGED => ApiEvent::ReservationsChanged,
+            ADDRESSES_CHANGED => ApiEvent::AddressesChanged,
             NETWORKS_CHANGED => ApiEvent::NetworksChanged,
             SETTINGS_CHANGED => ApiEvent::SettingsChanged,
             ACTIVITY => ApiEvent::Activity,

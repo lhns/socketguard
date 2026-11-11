@@ -54,6 +54,11 @@ impl Reach {
 pub struct GrantReach {
     pub network_id: NetworkId,
     pub reach: Reach,
+    /// Why the reach is what it is, when that needs saying (a row bound to a reservation
+    /// has no reach on Tor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub note: Option<String>,
 }
 
 fn is_ygg_subnet_host(addr: Ipv6Addr) -> bool {
@@ -206,6 +211,7 @@ pub fn grant_reach(
             None => n.grants_apply,
         })
         .map(|n| GrantReach {
+            note: None,
             network_id: n.id.clone(),
             reach: match subject {
                 Subject::Anyone if n.grants_apply => Reach::Open,
@@ -427,11 +433,13 @@ mod tests {
             vec![
                 GrantReach {
                     network_id: "lan".into(),
-                    reach: Reach::NotReachable
+                    reach: Reach::NotReachable,
+                    note: None
                 },
                 GrantReach {
                     network_id: "ygg".into(),
-                    reach: Reach::Verified
+                    reach: Reach::Verified,
+                    note: None
                 },
             ]
         );

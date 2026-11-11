@@ -2,7 +2,10 @@
 //! and the expansion of a grant on a tag into what it covers per app.
 
 use crate::config::glob_match;
-use crate::model::{App, AppId, Grant, GrantId, NetworkId, Subject, TagId, Target};
+use crate::model::{
+    App, AppId, BindingTarget, Grant, GrantId, NetworkId, Reservation, ReservationId, Subject,
+    TagId, Target,
+};
 use crate::scope::{
     raw_scope_ports, scope_ports, PortRange, PortRangeSet, Scope, ScopePorts, SocketGroup,
 };
@@ -64,6 +67,47 @@ pub fn patterns_match(patterns: &[String], process_name: &str, exe_path: Option<
         .any(|p| glob_match(p, process_name) || exe_path.is_some_and(|e| glob_match(p, e)))
 }
 
+/// The rows a reservation stands for: its bindings, a tag binding expanded into the rows of
+/// the tag's members.
+pub fn reservation_members(reservation: &Reservation, tags: &[Tag]) -> Vec<TagMember> {
+    let mut out: Vec<TagMember> = Vec::new();
+    for b in &reservation.bindings {
+        let rows: Vec<TagMember> = match &b.target {
+            BindingTarget::App { app_id, scope } => vec![TagMember {
+                app_id: app_id.clone(),
+                scope: scope.clone(),
+            }],
+            BindingTarget::Tag { tag_id } => tags
+                .iter()
+                .find(|t| &t.id == tag_id)
+                .map(|t| t.members.clone())
+                .unwrap_or_default(),
+        };
+        for r in rows {
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+    }
+    out
+}
+
+/// The tags and, standing in for tags, the reservations: a reservation is a tag whose
+/// members are the rows of its bindings, so [`covered_ports`] treats a grant on either
+/// alike. Reservation ids never collide with tag ids (both are uuids).
+pub fn grant_targets(tags: &[Tag], reservations: &[Reservation]) -> Vec<Tag> {
+    let mut out = tags.to_vec();
+    out.extend(reservations.iter().map(|r| Tag {
+        id: r.id.clone(),
+        label: r.label.clone(),
+        patterns: vec![],
+        members: reservation_members(r, tags),
+        excluded: vec![],
+        created_at: r.created_at,
+    }));
+    out
+}
+
 /// Why an effective access exists, for display.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +119,8 @@ pub enum AccessOrigin {
     Tag { tag_id: TagId },
     /// A grant on the app to a peer group.
     Group { group_id: String },
+    /// A grant on a reservation that has a row of the app bound.
+    Reservation { reservation_id: ReservationId },
 }
 
 /// One access an app has: a grant with the reason it applies and the ports it covers on
@@ -111,7 +157,7 @@ pub fn covered_ports(
     match &grant.target {
         Target::App(a) if *a == app.id => Some(scope_ports(app, &grant.scope, groups, foreign)),
         Target::App(_) => None,
-        Target::Tag(tag_id) => {
+        Target::Tag(tag_id) | Target::Reservation(tag_id) => {
             let tag = tags.iter().find(|t| &t.id == tag_id)?;
             let raw = raw_scope_ports(&grant.scope, groups);
             let members: Vec<&TagMember> =
@@ -174,6 +220,9 @@ pub fn effective_access(
         .filter_map(|g| {
             let origin = match (&g.target, &g.subject) {
                 (Target::Tag(t), _) => AccessOrigin::Tag { tag_id: t.clone() },
+                (Target::Reservation(r), _) => AccessOrigin::Reservation {
+                    reservation_id: r.clone(),
+                },
                 (Target::App(_), Subject::Group(gid)) => AccessOrigin::Group {
                     group_id: gid.clone(),
                 },
