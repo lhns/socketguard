@@ -9,7 +9,6 @@
 //! itself; the port is only asked to agree.
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use socketguard_core::api_types::NewNetwork;
 use socketguard_core::config::{BackendConfig, TorAuth};

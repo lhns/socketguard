@@ -534,9 +534,8 @@ pub mod windows_scm {
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
 
-    static RUN: std::sync::OnceLock<
-        Box<dyn Fn(tokio::sync::watch::Receiver<bool>) -> Result<()> + Send + Sync>,
-    > = std::sync::OnceLock::new();
+    type RunFn = Box<dyn Fn(tokio::sync::watch::Receiver<bool>) -> Result<()> + Send + Sync>;
+    static RUN: std::sync::OnceLock<RunFn> = std::sync::OnceLock::new();
 
     /// Hand control to the service dispatcher: `run_daemon` is called on the service thread
     /// with a receiver that turns true when the control manager asks the service to stop.

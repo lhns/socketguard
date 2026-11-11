@@ -9,7 +9,7 @@
 
 use super::*;
 use crate::api::DaemonEvent;
-use crate::firewall::{Firewall, ScopeMatch};
+use crate::firewall::ScopeMatch;
 use crate::iface::InterfaceManager;
 use crate::networks::ip::{iid_of, same_prefix64, with_prefix64};
 use crate::networks::{LocatorRequest, NewLocator};
@@ -617,19 +617,3 @@ fn locator_text(l: &Locator) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use socketguard_core::App;
-
-    fn addr(scope: Scope) -> Address {
-        Address::automatic(
-            "a",
-            scope,
-            "n",
-            Locator::Ipv6 {
-                addr: "fd00::1".parse().unwrap(),
-            },
-        )
-    }
-}

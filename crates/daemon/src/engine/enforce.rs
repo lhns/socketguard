@@ -4,7 +4,6 @@ use super::*;
 use crate::api::DaemonEvent;
 use crate::networks;
 use crate::ruleset::Snapshot;
-use crate::state::Database;
 use crate::AppState;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
 use socketguard_core::{Address, Network};

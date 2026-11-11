@@ -35,6 +35,7 @@ pub struct UninstallPaths {
 }
 
 type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+type ExportFn<'a> = Box<dyn FnMut(&Path) -> BoxFut<'a, Result<()>> + 'a>;
 
 pub struct Deps<'a> {
     pub host: &'a mut dyn Host,
@@ -46,7 +47,7 @@ pub struct Deps<'a> {
     /// `disable` (with `force`: by name when the database is missing).
     pub disable: Box<dyn FnOnce(bool) -> BoxFut<'a, Report> + 'a>,
     /// Write an export of the settings to the file.
-    pub export: Box<dyn FnMut(&Path) -> BoxFut<'a, Result<()>> + 'a>,
+    pub export: ExportFn<'a>,
 }
 
 /// Whether `p` is strictly inside `root` (compared as written; both absolute).
