@@ -101,3 +101,27 @@ Provide these repository secrets and add the marked steps (`SIGN` comments in
 | `APPLE_CERTIFICATE_P12` (base64), `APPLE_CERTIFICATE_PASSWORD` | import both identities into a temporary keychain |
 | `APPLE_NOTARY_APPLE_ID`, `APPLE_NOTARY_TEAM_ID`, `APPLE_NOTARY_PASSWORD` (app-specific) | `xcrun notarytool submit ... --wait`, `xcrun stapler staple` |
 | `GPG_SIGNING_KEY` (optional) | detached signature of the deb, rpm and `SHA256SUMS` |
+
+## What CI proves, and what it does not
+
+`packages.yml` on every push to `installers`, `redesign` and `main`, and for each release:
+
+- **MSI** (Windows runner): silent install with `ALLOWUSER`; service running; the pipe answers; the
+  group has the account; WFP provider, sublayer and filters present; a LAN network on a ULA /64
+  with a granted port range: one `FWP_MATCH_RANGE` filter and a connection from a second local
+  address to a granted port succeeds while a port outside the range is refused (`netsh wfp`
+  dumps and net events are uploaded as `msi-test-output`); upgrade (restarted daemon, same
+  database file, same stored state, no `uninstall`); removal (service, filters and group gone, data
+  kept); `uninstall --purge` with the daemon copied aside; `footprint-check.ps1` from outside after
+  each step.
+- **deb** (Ubuntu 22.04 VM with systemd): install, unit active and enabled, socket answers, nft
+  table, upgrade restarts onto the new binary and keeps the database inode and state, remove, purge.
+- **rpm**: dependency resolution, file list, scriptlets and library check in a Fedora container
+  without systemd. The service steps of the rpm are not run.
+- **pkg** (macOS runner): install, launchd daemon answering, pf anchor line, upgrade restart,
+  `uninstall --purge` restores `/etc/pf.conf`, then the manual removal.
+
+Not covered: the installer dialogs (CI installs silently; the access dialog, the WebView2 note and
+the `FORCEREMOVE` path are built but never clicked or run), a standard user elevating with an
+administrator's credentials, Windows 10, Linux distributions other than Ubuntu 22.04 and Fedora,
+Intel Macs, signing.
