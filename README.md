@@ -38,33 +38,25 @@ WireGuard (existing interfaces) and an mTLS gateway are planned; see ADR 0036/00
 
 ### Adding networks
 
+SocketGuard runs its own Tor and Yggdrasil: nothing is installed or changed on your system, and
+the programs stop when SocketGuard stops (ADR 0052). So this is the default:
+
+```bash
+socketguard networks add tor                      # SocketGuard's own Tor
+socketguard networks add yggdrasil --peer tls://host:port    # its own Yggdrasil node, --peer repeatable
+socketguard networks peers yggdrasil              # show the peers
+socketguard networks peers yggdrasil --add tls://host:port --rm tls://old:1
+```
+
+If you already run a node, add it as it is with `--existing` (the desktop app calls it "Use my
+existing one"): `socketguard networks add yggdrasil --existing`, or for Tor
+`socketguard networks add tor --existing` (with `--control` and `--password-env` if needed).
+Peers belong to SocketGuard's own Yggdrasil; an existing node keeps its own configuration.
+
 `socketguard networks detect` (and the desktop app's Settings screen) shows what this machine
-offers and how far each network is from being added: the LAN interfaces, Yggdrasil, Tor.
-
-1. **Detect.** A network that is installed and running is one click, or
-   `socketguard networks add yggdrasil` (no interface needed: it is the one that holds the node's
-   address).
-2. **Install and configure.** `sudo socketguard networks setup <yggdrasil|tor>` (an elevated
-   terminal on Windows) lists its steps, asks, and runs them. For Yggdrasil the network is added
-   first, so that SocketGuard blocks it, and the service is started only once the block is
-   verified (ADR 0051); SocketGuard does not install Yggdrasil. For Tor it installs the package
-   where one is known (`tor` from apt, dnf or pacman on Linux), starts the service, and adds `ControlPort 9051` and `CookieAuthentication 1` to the torrc only if
-   Tor has no control endpoint yet (a copy stays as `torrc.socketguard.bak`). Yggdrasil's own
-   configuration is never edited. `--dry-run` only prints the steps. The desktop app starts the
-   same command through the system's administrator prompt.
-3. **Add.** The command ends by adding the network; Tor's settings are written to the config file
-   first, which is what lets the daemon accept them (ADR 0040).
-
-Every change is recorded in `setup-log.json` next to the config file. `socketguard networks
-setup <kind> --undo` reverses them: it removes the torrc lines it added, puts the service back as
-it was and removes the network; packages are only printed unless `--uninstall-packages` is given,
-and a package that was already there is never touched.
-
-What stays manual: installing Yggdrasil (download it from its site); Tor on Windows (no package; download the Tor Expert Bundle, set it up as a
-service with a torrc that has a `DataDirectory`, then run `networks setup tor --torrc <path>`);
-and Tor on macOS, where the
-command prints the official link instead. Linux and macOS paths of `networks setup` were written
-from the projects' documentation and are not covered by an end-to-end test.
+offers for each network: the LAN interfaces, whether SocketGuard's own Tor and Yggdrasil are
+available in this build (`socketguard status` lists the bundled programs), and whether an
+existing node is ready to be added. A build without the bundled files only offers `--existing`.
 
 ## Architecture
 
@@ -227,8 +219,7 @@ as a whole on Tor: only a grant on the reservation itself admits clients to its 
 and a grant on a single bound port has no effect there (the CLI shows the reason).
 
 ```bash
-# tor with: ControlPort 9051 and CookieAuthentication 1 (or: sudo socketguard networks setup tor)
-socketguard networks add tor                    # --control 127.0.0.1:9051 [--password-env VAR | --password-stdin]
+socketguard networks add tor                    # SocketGuard's own Tor; for yours: --existing [--control 127.0.0.1:9051] [--password-env VAR | --password-stdin]
 socketguard peers add --label bob --tor-key <base32>    # the key bob's Tor client generated
 # or let the daemon generate the key pair (the private key is stored like the onion keys):
 socketguard peers add --label bob && socketguard peers tor-key bob
@@ -239,7 +230,7 @@ socketguard share myapp                         # http://<id>.onion:8080, and fo
                                                 # ClientOnionAuthDir (a file ending in .auth_private)
 ```
 
-The daemon sends your onion keys to whatever answers on the control address, so:
+With `--existing`, the daemon sends your onion keys to whatever answers on the control address, so:
 
 - Prefer a Unix control socket (`ControlSocket /run/tor/control` in torrc, then
   `--control unix:/run/tor/control`); a TCP control address must be loopback.
@@ -249,8 +240,8 @@ The daemon sends your onion keys to whatever answers on the control address, so:
 - Revoking access never fails open: if Tor is down, the removal is remembered and retried, the
   change returns HTTP 202 `enforcement: pending` (the CLI warns), and removing the network is
   refused (409) until it is confirmed, unless forced.
-- Tor networks created through the API may only use the default or config-file settings;
-  anything else belongs in the config file, which only an administrator can edit.
+- Tor networks created through the API may only be managed or use the default or config-file
+  settings; anything else belongs in the config file, which only an administrator can edit.
 
 The service keys live in the daemon's database (mode 0600 on Unix, a protected ACL on Windows).
 See [ADR 0040](docs/adr/0040-onion-service-lifecycle-consolidated.md) for the full decision
