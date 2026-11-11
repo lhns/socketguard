@@ -55,8 +55,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install tools
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq nftables iproute2 conntrack iputils-ping netcat-openbsd python3 jq
+          # The runner's package mirror sometimes fails to resolve; retry before giving up.
+          for i in 1 2 3 4 5; do
+            sudo apt-get update -qq &&
+              sudo apt-get install -y -qq nftables iproute2 conntrack iputils-ping netcat-openbsd python3 jq &&
+              break
+            [ "$i" = 5 ] && exit 1
+            sleep 30
+          done
       - name: Build the test binary
         run: |
           cargo test -p socketguard-daemon --test netns --no-run --message-format=json > build.json
