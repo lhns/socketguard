@@ -496,7 +496,7 @@ function seedFresh() {
     mk("s5", "wininit", true, [[49665, "tcp"]]),
     mk("s6", "services", true, [[49666, "tcp"]]),
   ];
-  peers = [{ id: "p1", label: "alice", groups: [], created_at: T0, credentials: [{ id: "c1", kind: "ygg_key", value: key("a"), label: null }] }];
+  peers = [{ id: "p1", label: "alice", groups: [], created_at: T0, credentials: [{ id: "c1", kind: "ip", value: "192.168.1.20", label: null }] }];
   groups = [];
   tags = [];
   portGroups = [];
