@@ -70,6 +70,17 @@ No log or PID files are written. Telemetry is exported only when the `OTEL_*` va
 | launchd daemon `/Library/LaunchDaemons/de.lhns.socketguard.plist` | `service install`; removed by `service uninstall` and `uninstall` |
 | Registry keys, scheduled tasks, autostart entries, environment variables | none |
 
+## Package files (ADR 0050, docs/packaging.md)
+
+What the installers put on a host besides the items above, and who removes it. The rule for the
+data above (kept on remove, deleted on purge) applies to every package.
+
+| Item | System | Removed by |
+|---|---|---|
+| `C:\Program Files\SocketGuard\` (three exes, `third_party\`), the folder on the system `PATH` (`Software\lhns\SocketGuard` marker keys), Start menu shortcut `SocketGuard`, Add/Remove Programs entry, Windows Installer cache | Windows | the MSI (Apps & features, `msiexec /x`); the MSI never touches the data |
+| `/usr/bin/{socketguard-daemon,socketguard,socketguard-ui}`, `/usr/share/applications/socketguard.desktop`, the icon, `/usr/share/doc/socketguard/`, `/usr/lib/socketguard/third_party/`, the dpkg or rpm database entry | Linux | `apt remove` / `dnf remove`; `apt purge` also deletes the data by name (rpm: `uninstall --purge` first) |
+| `/usr/local/bin/{socketguard-daemon,socketguard}`, `/Applications/SocketGuard.app`, `/usr/local/lib/socketguard/`, the package receipt `de.lhns.socketguard` | macOS | **gap by nature of a pkg:** `uninstall` removes everything else; these are deleted by hand and `pkgutil --forget` (documented in the README); the CI test does it and checks the rest |
+
 ## Network setup (ADR 0048)
 
 Everything `socketguard networks setup` changes is recorded in `setup-log.json` next to the config file and reversed by `socketguard networks setup <kind> --undo`, or by `socketguard-daemon uninstall` (which never uninstalls packages; it prints the command).

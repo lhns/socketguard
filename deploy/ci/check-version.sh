@@ -9,8 +9,7 @@ fail=0
 err() { echo "version mismatch: $*" >&2; fail=1; }
 
 # First `version = "x"` line inside the [workspace.package] table.
-ws=$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p}' Cargo.toml | head -n1)
-[ -n "$ws" ] || { echo "no [workspace.package] version in Cargo.toml" >&2; exit 1; }
+ws=$(bash deploy/ci/version.sh)
 
 # Only the [package] table counts (up to the next table header).
 for f in crates/*/Cargo.toml ui/src-tauri/Cargo.toml; do

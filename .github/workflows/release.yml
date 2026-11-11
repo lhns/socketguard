@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: The tag equals the workspace version
         run: |
-          ws=$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p}' Cargo.toml | head -n1)
+          ws=$(bash deploy/ci/version.sh)
           echo "workspace version: $ws"
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             [ "${GITHUB_REF_NAME#v}" = "$ws" ] || { echo "tag $GITHUB_REF_NAME does not match version $ws" >&2; exit 1; }

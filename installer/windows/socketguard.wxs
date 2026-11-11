@@ -106,7 +106,8 @@
                       Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
                       Name="pv" Type="raw" />
     </Property>
-    <SetProperty Id="WEBVIEW2_MISSING" Value="1" Before="CostInitialize" Sequence="ui"
+    <SetProperty Id="WEBVIEW2NOTE" Before="CostInitialize" Sequence="ui"
+                 Value="The Microsoft Edge WebView2 Runtime was not found. The desktop app needs it (Windows 11 has it; for Windows 10 install it from https://developer.microsoft.com/microsoft-edge/webview2/). The service and the command line work without it."
                  Condition="(NOT WEBVIEW2_MACHINE OR WEBVIEW2_MACHINE = &quot;0.0.0.0&quot;) AND (NOT WEBVIEW2_USER OR WEBVIEW2_USER = &quot;0.0.0.0&quot;)" />
 
     <!-- ===== Files ====================================================================== -->
@@ -246,10 +247,9 @@
                  Text="Let [SGUSER] manage SocketGuard without administrator rights" />
         <Control Id="AllowNote" Type="Text" X="38" Y="94" Width="317" Height="40" NoPrefix="yes"
                  Text="The account joins the group &quot;SocketGuard Users&quot;. It must sign out and in again before that applies." />
-        <Control Id="WebView2Note" Type="Text" X="20" Y="160" Width="335" Height="50" NoPrefix="yes" Hidden="yes"
-                 Text="The Microsoft Edge WebView2 Runtime was not found. The desktop app needs it (Windows 11 has it; for Windows 10 install it from https://developer.microsoft.com/microsoft-edge/webview2/). The service and the command line work without it.">
-          <Condition Action="show">WEBVIEW2_MISSING</Condition>
-        </Control>
+        <!-- Empty unless the runtime is missing (WEBVIEW2NOTE is set below). -->
+        <Control Id="WebView2Note" Type="Text" X="20" Y="160" Width="335" Height="50" NoPrefix="yes"
+                 Text="[WEBVIEW2NOTE]" />
       </Dialog>
 
       <!-- InstallDirDlg Next goes to VerifyReadyDlg at Order 4 when the folder is valid; the

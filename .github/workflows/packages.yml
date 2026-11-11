@@ -26,6 +26,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -41,8 +43,8 @@ jobs:
       - name: Build the MSIs (this version, and the next patch for the upgrade test)
         shell: bash
         run: |
-          v=$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p}' Cargo.toml | head -n1)
-          next="${v%.*}.$(( ${v##*.} + 1 ))"
+          v=$(bash deploy/ci/version.sh)
+          next=$(bash deploy/ci/version.sh --next)
           echo "version $v, next $next"
           pwsh -File installer/windows/build.ps1 -Version "$v" -BinDir target/release -Out "dist/SocketGuard-$v-x64.msi"
           pwsh -File installer/windows/build.ps1 -Version "$next" -BinDir target/release -Out "dist/next/SocketGuard-$next-x64.msi"
@@ -77,6 +79,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -96,14 +100,14 @@ jobs:
           base="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}"
           curl -fsSLO "$base/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
           curl -fsSLO "$base/checksums.txt"
-          grep "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" checksums.txt | sha256sum -c -
+          grep " nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz$" checksums.txt | sha256sum -c -
           tar -xzf "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" nfpm
           sudo install -m 0755 nfpm /usr/local/bin/nfpm
           nfpm --version
       - name: Build the packages (this version, and the next patch for the upgrade test)
         run: |
-          v=$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p}' Cargo.toml | head -n1)
-          next="${v%.*}.$(( ${v##*.} + 1 ))"
+          v=$(bash deploy/ci/version.sh)
+          next=$(bash deploy/ci/version.sh --next)
           bash installer/linux/build.sh "$v" dist
           bash installer/linux/build.sh "$next" dist/next
       - name: Self-test of the footprint check
@@ -127,6 +131,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -139,8 +145,8 @@ jobs:
         run: bash ./build.sh
       - name: Build the pkgs (this version, and the next patch for the upgrade test)
         run: |
-          v=$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p}' Cargo.toml | head -n1)
-          next="${v%.*}.$(( ${v##*.} + 1 ))"
+          v=$(bash deploy/ci/version.sh)
+          next=$(bash deploy/ci/version.sh --next)
           bash installer/macos/build.sh "$v" dist
           bash installer/macos/build.sh "$next" dist/next
       - name: Self-test of the footprint check
