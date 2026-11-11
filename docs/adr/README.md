@@ -54,7 +54,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0044](0044-ipv4-and-network-segments.md) | IPv4 and Network Segments on Protect-Host | Accepted (amends 0026, 0028) |
 | [0045](0045-batch-changes-credential-parsing-tor-keys.md) | Batch Changes, One Credential Parser, Stored Tor Client Keys | Accepted |
 | [0046](0046-unidentified-sockets-and-system-flag.md) | Unidentified Sockets Become Apps; System Components Are Flagged | Accepted (amends 0027) |
-| [0047](0047-addresses-on-demand-reservations-socket-groups.md) | Addresses on Demand, Reservations and Socket Groups | Accepted (supersedes 0027 in part) |
+| [0047](0047-addresses-on-demand-reservations-socket-groups.md) | Addresses on Demand, Reservations and Socket Groups | Accepted (supersedes 0027 in part; extends 0039, 0041, 0042, 0043) |
 
 ## Format
 

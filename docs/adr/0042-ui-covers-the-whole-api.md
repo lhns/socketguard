@@ -34,3 +34,17 @@ The first build followed the decision above and came out incoherent: three tabs 
 - **One place per operation.** Access is shown by one list in both directions (who can reach this, what this can reach) and added by one form in the inspector. Tags, groups and members are chosen in a search popover.
 - **The access matrix is read-only.** Subjects can be added as columns to the Apps table to see who reaches what; a cell opens the inspector, where the change is made. Editing in the grid duplicated the inspector and needed its own staging.
 - **One commit rule.** A change that alters who can reach something is shown first and needs one Apply; a change that alters nobody's reach, or only closes, applies at once. Modal dialogs are left for confirmations (open to anyone, deletions, turning SocketGuard off) and for secrets shown once.
+
+## Amendment (2026-11-11): rows, a Reserved tab, one way to tag and to grant
+
+Follows ADR 0047.
+
+- **Navigation:** Apps, Reserved, Peers, Activity, Settings.
+- **Rows.** Inside an app the inspector has one "Sockets" section: "All sockets", each socket, each attached socket group. Every row has the same parts: tags, who can reach it, "Add access", its address. A grant is listed once, on the row it names.
+- **Socket groups** are a section of the Apps list, like tags, with their own inspector.
+- **Reserved** looks like Apps: one entry per reservation, with its own "All sockets", its bound rows, its address per network and its port conflicts. A bound row's access is the same grant as under its app.
+- **Adding access** offers "All sockets", each socket and each socket group side by side, with nothing preselected.
+- **Tags and groups** are added from a "+" pill after the pills, the same on every row.
+- **Peers** need no name; pasted values become one peer each, optionally in a new group.
+- **Tor inside a reservation:** a grant on a single bound row is shown as not reachable on Tor before it is made.
+- The address mode setting, split and merge are gone from the UI.

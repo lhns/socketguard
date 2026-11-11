@@ -21,3 +21,7 @@ Schema v4 adds a unique index on `grants` over `(app_id, port, proto, network_id
 - A grant exists once, whatever the timing of the requests. The constraint, not the engine, is the guarantee.
 - Upgrading drops duplicate grants. They produced identical rules, so no access changes.
 - A database written by this version cannot be opened by a daemon that knows only schema v3 (it refuses a newer schema, as before).
+
+## Amendment (2026-11-11): the unique grant covers the scope and reservation targets
+
+Follows ADR 0047. A grant is unique over its target (an app, a tag or a reservation), its scope ("All sockets", a socket or a socket group), its network and its subject.
