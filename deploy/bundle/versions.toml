@@ -1,0 +1,100 @@
+# Pinned third-party files shipped with SocketGuard (ADR 0052).
+#
+# Restricted TOML read by fetch.sh with awk: section headers on their own line,
+# `key = "value"` pairs on one line, no multi-line values, no escapes.
+# Rust does not read this file; it reads the VERSIONS file fetch.sh writes.
+#
+# To update Tor: change version, the URLs, the sha256 values (copy them from the
+# signed sha256sums-signed-build.txt of the new release) and re-check `files`.
+
+# ---------------------------------------------------------------- Tor
+# Tor Expert Bundle from the Tor Browser release directory. 16.0.2 (2026-11-10)
+# only has Android bundles; 16.0.1 is the newest with desktop bundles.
+[tor]
+version = "16.0.1"
+signed_sums_url = "https://dist.torproject.org/torbrowser/16.0.1/sha256sums-signed-build.txt"
+signed_sums_asc_url = "https://dist.torproject.org/torbrowser/16.0.1/sha256sums-signed-build.txt.asc"
+# PRIMARY key fingerprint of "Tor Browser Developers (signing key)
+# <torbrowser@torproject.org>". The 16.0.1 files are signed by the signing
+# subkey 022DA248432D2A0E0F54E65E316C1FACD62D07D9 (created 2026-08-11); gpg
+# reports the primary fingerprint as the last field of the VALIDSIG status line,
+# and that is what fetch.sh compares with this pin. Subkeys rotate, the primary
+# does not.
+# Verified 2026-11-11: the key obtained via WKD (gpg --auto-key-locate wkd
+# --locate-keys torbrowser@torproject.org) has this primary and that subkey, and
+# the signature on sha256sums-signed-build.txt validates (VALIDSIG ... EF6E...8290).
+# Source: https://support.torproject.org/tbb/how-to-verify-signature/ lists
+# "Tor Browser Developers signing key (0xEF6E286DDA85EA2A4BA7DE684E2C6E8793298290)"
+# and https://keys.openpgp.org/vks/v1/by-fingerprint/EF6E286DDA85EA2A4BA7DE684E2C6E8793298290
+signing_key_fingerprint = "EF6E286DDA85EA2A4BA7DE684E2C6E8793298290"
+signing_key_url = "https://keys.openpgp.org/vks/v1/by-fingerprint/EF6E286DDA85EA2A4BA7DE684E2C6E8793298290"
+# Per target: `files` are paths under the archive's tor/ directory, laid out next
+# to the tor binary (dynamic libraries it needs); `licenses` are name:archive-path
+# pairs copied to licenses/<name>.txt.
+# No pluggable transports. geoip/geoip6 (archive data/) are not shipped: tor 0.4.9
+# starts, bootstraps to 100% and runs hidden services without them, logging only
+# at info level "Failed to open GEOIP file"; they are used for country statistics
+# and country-based node selection only (tor manual, GeoIPFile). Tested 2026-11-11
+# with a minimal torrc (DataDirectory, SocksPort 0, ControlPort auto), no warnings.
+# Linux tor also needs the system libz.so.1 (not in the bundle); macOS uses the
+# system libz and libSystem; OpenSSL is bundled as libssl/libcrypto on Linux and
+# statically linked on macOS and Windows (tor.exe is self-contained).
+
+[tor.windows-x86_64]
+url = "https://dist.torproject.org/torbrowser/16.0.1/tor-expert-bundle-windows-x86_64-16.0.1.tar.gz"
+sha256 = "9eed3c3ff1fe43df034ce360196c9ec95472560d77ff55614d0cd5120edea27b"
+files = "tor.exe"
+licenses = "tor:docs/tor.txt libevent:docs/libevent.txt openssl:docs/openssl.txt zlib:docs/zlib.txt"
+
+[tor.linux-x86_64]
+url = "https://dist.torproject.org/torbrowser/16.0.1/tor-expert-bundle-linux-x86_64-16.0.1.tar.gz"
+sha256 = "7039cb16060ab22e669852e55774d894b55f25ea8bd0ab7194d3478429a58725"
+files = "tor libcrypto.so.3 libevent-2.1.so.7 libssl.so.3"
+licenses = "tor:docs/tor.txt libevent:docs/libevent.txt openssl:docs/openssl.txt"
+
+[tor.linux-aarch64]
+url = "https://dist.torproject.org/torbrowser/16.0.1/tor-expert-bundle-linux-aarch64-16.0.1.tar.gz"
+sha256 = "67040520d44c87ccaaf5aa7df0dc1ff122eb938dbb600ae7722e8b6b75282a4b"
+files = "tor libcrypto.so.3 libevent-2.1.so.7 libssl.so.3"
+licenses = "tor:docs/tor.txt libevent:docs/libevent.txt openssl:docs/openssl.txt zlib:docs/zlib.txt"
+
+[tor.macos-x86_64]
+url = "https://dist.torproject.org/torbrowser/16.0.1/tor-expert-bundle-macos-x86_64-16.0.1.tar.gz"
+sha256 = "15464d99adc3bb4de1308260d79878336b04a1ac1aeff83e10f192de7d235946"
+files = "tor libevent-2.1.7.dylib"
+licenses = "tor:docs/tor.txt libevent:docs/libevent.txt openssl:docs/openssl.txt"
+
+[tor.macos-aarch64]
+url = "https://dist.torproject.org/torbrowser/16.0.1/tor-expert-bundle-macos-aarch64-16.0.1.tar.gz"
+sha256 = "0b7d022017c31e3f972d06465bcd7ac50feb66ac825547419a934914fe4bb156"
+files = "tor libevent-2.1.7.dylib"
+licenses = "tor:docs/tor.txt libevent:docs/libevent.txt openssl:docs/openssl.txt"
+
+# ---------------------------------------------------------------- Yggdrasil
+# Built from source (no bare binaries are published), unmodified, static.
+# v0.5.15 is a lightweight tag: `git ls-remote ... refs/tags/v0.5.15` prints the
+# commit itself (checked 2026-11-11; also the latest GitHub release).
+# `go` is the minimum from go.mod; the build uses whatever Go toolchain is
+# installed and fails if it is older.
+[yggdrasil]
+repo = "https://github.com/yggdrasil-network/yggdrasil-go"
+tag = "v0.5.15"
+commit = "2c7f050fc5398ecd8ac5f77e9bb5bd91aa2e9e35"
+go = "1.26.0"
+
+# ---------------------------------------------------------------- Wintun
+# Windows only; the DLL is shipped unmodified next to yggdrasil.exe.
+[wintun]
+version = "0.14.1"
+url = "https://www.wintun.net/builds/wintun-0.14.1.zip"
+sha256 = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
+license = "wintun/LICENSE.txt"
+license_sha256 = "183adac21e7d96c508c8fd34d394b7b6708bc81564ad1bad61ab66143a008cd2"
+
+[wintun.windows-x86_64]
+dll = "wintun/bin/amd64/wintun.dll"
+sha256 = "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce"
+
+[wintun.windows-aarch64]
+dll = "wintun/bin/arm64/wintun.dll"
+sha256 = "f7ba89005544be9d85231a9e0d5f23b2d15b3311667e2dad0debd344918a3f80"
