@@ -84,3 +84,13 @@ This settles the rules where the text above and the first amendment disagree. Wh
 - **`move_app`:** grants the target already has are skipped (ADR 0041); a socket group used by a moved grant, tag member or address is attached to the target; port scopes move as they are.
 - **Port conflicts are reported, never resolved silently.** When two bindings of a reservation claim the same port, the reservation lists the conflict (the port, the bindings, and which app is served or that the port is closed). The API returns it with the reservation and frontends show it on the reservation and on the affected rows. The same applies wherever the exclusion rule leaves a port out of an address.
 - **Port remapping is left open, for reservations only.** A binding may later carry an outside port that differs from the socket's port. Automatic addresses will always show sockets on their real ports. Nothing is built for it now; the binding is its own record so the field can be added.
+
+## Amendment (2026-11-11): a reservation is a grant target with an address per network
+
+A reservation behaves like an app assembled from sockets of several apps. This replaces "one address on one network".
+
+- **Rows.** A reservation has its bound rows and a built-in "All sockets" row that stands for all of them.
+- **Grant target.** A grant can target a reservation (`Target::Reservation`). It covers every bound row, follows the bindings as they change, and can be limited to a network like any grant. A grant on a single bound row is the ordinary grant on that app row, the same one shown under the app.
+- **Addresses.** A reservation has one static address per network, created the first time a grant covers something it serves there and kept until the reservation is released. It is up while such a grant exists.
+- **Tor.** A grant on the reservation covers every published port, so those clients are admitted to its onion address. Clients granted only single rows are left out there, as before.
+- Reserving an automatic address creates a reservation with that row bound and that address as its address on that network.
