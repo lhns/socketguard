@@ -385,8 +385,8 @@ async fn network_setup() -> CmdResult<NetworkSetup> {
 }
 
 #[tauri::command]
-async fn add_network(req: NewNetwork) -> CmdResult<Network> {
-    Ok(client().add_network(&req).await?)
+async fn add_network(req: NewNetwork) -> DoneResult<Network> {
+    Ok(client().add_network(&req).await?.into())
 }
 
 #[tauri::command]

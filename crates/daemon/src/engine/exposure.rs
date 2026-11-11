@@ -30,15 +30,24 @@ impl Engine {
     pub async fn yggdrasil_block(&self, state: &AppState) -> Option<YggdrasilBlock> {
         let (id, active) = self.yggdrasil_backend()?;
         let iface = Self::interface_in_use(active);
+        // An interface rule holds for an adapter that is not there yet on nftables and pf,
+        // not on WFP, which can only bind a filter to an adapter that exists.
+        let adapter_ok = self.firewall.blocks_absent_interfaces()
+            || iface.as_ref().is_some_and(|name| {
+                self.ifaces
+                    .list_interfaces()
+                    .is_ok_and(|l| l.iter().any(|i| &i.name == name))
+            });
         let applied = self.last_applied.lock().unwrap().clone();
         let failed = self.apply_failed.load(Ordering::Relaxed);
         let (address_blocked, interface_blocked) = match (&applied, failed) {
             (Some(rs), false) => (
                 rs.scopes.iter().any(|s| s.id == overlay_addr_scope_id(id)),
-                rs.scopes.iter().any(|s| {
-                    matches!(&s.matcher, ScopeMatch::Interface { name, .. }
-                        if Some(name) == iface.as_ref())
-                }),
+                adapter_ok
+                    && rs.scopes.iter().any(|s| {
+                        matches!(&s.matcher, ScopeMatch::Interface { name, .. }
+                            if Some(name) == iface.as_ref())
+                    }),
             ),
             _ => (false, false),
         };
@@ -48,6 +57,8 @@ impl Engine {
             Some("the last attempt to apply the firewall rules failed".to_string())
         } else if applied.is_none() {
             Some("the firewall rules are not applied yet".to_string())
+        } else if !address_blocked && !adapter_ok {
+            Some("the node's address is not known yet, and the firewall can only block an adapter that exists".to_string())
         } else if !address_blocked {
             Some("the node's address is not known yet".to_string())
         } else {
@@ -74,20 +85,25 @@ impl Engine {
             }
         }
         let apps = state.db.list_apps().await?;
-        let binds = self.binds.lock().unwrap().clone();
-        let mut listeners: Vec<ExposedListener> = binds
+        // The sockets themselves: a port also bound on loopback is still reachable on `::`.
+        let sockets = self.monitor.list_listening_sockets()?;
+        let mut listeners: Vec<ExposedListener> = sockets
             .iter()
-            .filter(|(_, ip)| matches!(ip, IpAddr::V6(a) if a.is_unspecified()))
-            .filter_map(|((app_id, port), _)| {
-                let app = apps.iter().find(|a| &a.id == app_id)?;
-                Some(ExposedListener {
-                    app: app.name.clone(),
-                    port: port.port,
-                    proto: port.proto,
-                })
+            .filter(|ls| matches!(ls.bind_address, IpAddr::V6(a) if a.is_unspecified()))
+            .map(|ls| {
+                let id = socketguard_core::app_identity(ls).id;
+                ExposedListener {
+                    app: apps
+                        .iter()
+                        .find(|a| a.id == id)
+                        .map_or_else(|| ls.process_name.clone(), |a| a.name.clone()),
+                    port: ls.port,
+                    proto: ls.protocol,
+                }
             })
             .collect();
         listeners.sort_by(|a, b| (&a.app, a.port, a.proto).cmp(&(&b.app, b.port, b.proto)));
+        listeners.dedup();
         let started = started_by_setup(state.config_path.as_deref());
         let mut ids: Vec<&String> = self
             .backends

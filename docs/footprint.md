@@ -80,8 +80,8 @@ The invariant: a network SocketGuard adds, installs or manages never makes the h
 |---|---|---|
 | Yggdrasil installed by someone else and running, before it is added | **open, by design** | Not a network SocketGuard manages yet. The network card says so ("Yggdrasil is running but not managed", `exposed` in `GET /api/networks/setup`). |
 | Between starting the node and the network being added | closed | `networks setup yggdrasil` adds the network first and starts nothing until the block is verified (`yggdrasil_block` in `GET /api/networks/setup`). It installs nothing. |
-| Setup stops half way | closed | The network and its block stay; the message says so and how to undo. |
-| Network added before the node was ever seen | closed on the interface only | Its address is unknown, so only the interface is closed: setup names the adapter (Windows: `Yggdrasil`) or refuses to start the service. `closed` is false with the reason until the node answers once. |
+| Setup stops half way | closed | The network and its block stay; the message says so and how to undo. Running setup again says "already a network; nothing to do": start the service by hand or undo. |
+| Network added before the node was ever seen | closed on the interface only, if the interface exists (WFP) or is named (nftables, pf) | Its address is unknown, so only the interface is closed: setup names the adapter (Windows: `Yggdrasil`) or refuses to start the service. `closed` is false with the reason until the node answers once. |
 | Node stopped, restarted, adapter missing, renamed or recreated | closed | The node's own `/128` and `/64` are denied as destinations on any interface (`overlay:<network>:addr`, `:subnet`), remembered in the settings table (`ygg_node:<network>`) from the first time they are known. |
 | A second node, not managed by SocketGuard, on the same host | untouched | Only the managed node's addresses are denied. |
 | Network removed, "turn off", uninstall while the node keeps running | **open, by choice** | The block is removed with them. `GET /api/exposure` is shown first, with the programs that become reachable and an offer to stop the service setup started. Removing a running node's network needs `confirm_exposed` (CLI `--yes`). |
@@ -89,7 +89,7 @@ The invariant: a network SocketGuard adds, installs or manages never makes the h
 | macOS: boot before the anchor is loaded | **open** | No launchd service exists yet; nothing orders the node after SocketGuard, and pf rules do not survive a reboot. |
 | Windows: boot | closed | WFP filters are persistent. |
 | Tor, LAN, SLAAC, DHCPv6 | nothing to close | Tor adds a control port on loopback with cookie authentication only and exposes nothing inbound before SocketGuard publishes a service. SocketGuard's own LAN addresses are denied before they are added (the ruleset covers an address before it goes on an interface). |
-| A traffic class the scopes do not match | open | A local program talking to the node's own Yggdrasil address (Windows loopback treatment) is denied like any destination in a scope. |
+| Windows: node first seen, adapter appears before the next pass | **open, short** | WFP binds filters to an adapter's LUID, so no filter exists for an adapter that does not exist. The address block covers the node once its address is known; until then (and for non-Yggdrasil traffic on that adapter) the window lasts from the adapter's creation to the next reconcile and `interfaces_changed` re-apply. `yggdrasil_block.interface_blocked` is therefore false on Windows for a missing adapter, and setup refuses to start the service on that basis. |
 
 ## Failures of the removal paths themselves
 

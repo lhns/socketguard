@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import NetworksSection from "./NetworksSection";
-import { mockDaemon, networkSetup, renderWithProviders, setupState } from "../test/helpers";
+import { mockDaemon, networkSetup, renderWithProviders, saved, setupState } from "../test/helpers";
 import type { NetworkSetup, SetupState } from "../api";
 
 const withSetup = (over: Partial<NetworkSetup>): NetworkSetup => ({ ...networkSetup, ...over });
@@ -27,7 +27,7 @@ describe("Network cards", () => {
   });
 
   it("adds a LAN with the chosen interface, as DHCPv6 when toggled", async () => {
-    const d = mockDaemon({ add_network: (a) => network("lan", "x", (a.req as { interface: string }).interface) });
+    const d = mockDaemon({ add_network: (a) => saved(network("lan", "x", (a.req as { interface: string }).interface)) });
     const user = userEvent.setup();
     renderWithProviders(<NetworksSection />);
     await user.click((await card("LAN Ethernet 2")).getByRole("button", { name: "Add Ethernet 2" }));
@@ -44,7 +44,7 @@ describe("Network cards", () => {
     const d = mockDaemon({
       network_setup: () =>
         withSetup({ yggdrasil: setupState("ready", { found: { address: "200:1::1", interface: "Yggdrasil", peers: "0" } }) }),
-      add_network: () => network("yggdrasil", "yggdrasil", "Yggdrasil"),
+      add_network: () => saved(network("yggdrasil", "yggdrasil", "Yggdrasil")),
     });
     const user = userEvent.setup();
     renderWithProviders(<NetworksSection />);
@@ -169,7 +169,7 @@ describe("Network cards", () => {
 
     const d = mockDaemon({
       network_setup: () => withSetup({ tor: setupState("ready", { found: { control: "127.0.0.1:9051" } }) }),
-      add_network: () => network("tor", "tor"),
+      add_network: () => saved(network("tor", "tor")),
     });
     const user = userEvent.setup();
     renderWithProviders(<NetworksSection />);

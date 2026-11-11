@@ -26,6 +26,8 @@ pub enum FirewallCall {
 pub struct MockFirewall {
     pub calls: Arc<Mutex<Vec<FirewallCall>>>,
     fail_apply: AtomicBool,
+    /// Interface rules hold for adapters that do not exist yet (nftables, pf; not WFP).
+    absent_ok: AtomicBool,
     /// SocketGuard's ruleset is installed (applied, or planted by a test).
     installed: AtomicBool,
     /// The next `verify` reports the installed state as gone.
@@ -41,6 +43,7 @@ impl MockFirewall {
         Self {
             calls,
             fail_apply: AtomicBool::new(false),
+            absent_ok: AtomicBool::new(true),
             installed: AtomicBool::new(false),
             drifted: AtomicBool::new(false),
             verifies: AtomicUsize::new(0),
@@ -88,6 +91,11 @@ impl MockFirewall {
         self.installed.store(installed, Ordering::Relaxed);
     }
 
+    /// Act like WFP: an interface rule cannot be made for an adapter that is not there.
+    pub fn set_blocks_absent_interfaces(&self, holds: bool) {
+        self.absent_ok.store(holds, Ordering::Relaxed);
+    }
+
     /// Make `apply` fail (the call is still recorded).
     pub fn set_failing(&self, failing: bool) {
         self.fail_apply.store(failing, Ordering::Relaxed);
@@ -108,6 +116,10 @@ pub fn applied(calls: &Mutex<Vec<FirewallCall>>) -> Vec<DesiredRuleset> {
 }
 
 impl Firewall for MockFirewall {
+    fn blocks_absent_interfaces(&self) -> bool {
+        self.absent_ok.load(Ordering::Relaxed)
+    }
+
     fn apply(&self, desired: &DesiredRuleset) -> Result<()> {
         self.calls
             .lock()
@@ -288,6 +300,7 @@ impl InterfaceManager for MockInterfaceManager {
         let mut names: Vec<String> = vec!["lo".to_string()];
         names.extend(vlans.keys().cloned());
         names.extend(self.extra.lock().unwrap().iter().cloned());
+        names.retain(|n| !self.missing_ifaces.lock().unwrap().contains(n));
         names.sort();
         Ok(names
             .into_iter()

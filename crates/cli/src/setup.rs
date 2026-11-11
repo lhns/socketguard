@@ -99,7 +99,11 @@ impl DaemonApi for socketguard_client::Client {
         Ok(self.list_networks().await?)
     }
     async fn add(&self, req: &NewNetwork) -> Result<Network> {
-        Ok(self.add_network(req).await?)
+        let saved = self.add_network(req).await?;
+        if let Some(e) = &saved.enforcement {
+            eprintln!("warning: {}", e.message);
+        }
+        Ok(saved.value)
     }
     async fn remove(&self, id: &str) -> Result<()> {
         Ok(self.delete_network(id, false, true).await?)

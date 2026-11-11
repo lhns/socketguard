@@ -17,7 +17,7 @@ use std::time::UNIX_EPOCH;
 use tracing::{debug, error, warn};
 
 /// The settings key of a Yggdrasil network's last known node addresses.
-const NODE_KEY_PREFIX: &str = "ygg_node:";
+pub(super) const NODE_KEY_PREFIX: &str = "ygg_node:";
 
 impl Engine {
     /// Gather the producer's input from the DB and the active networks.

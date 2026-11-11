@@ -201,7 +201,7 @@ export const api = {
   networkSetup: () => call<NetworkSetup>("network_setup"),
   runNetworkSetup: (kind: SetupKind, config: string) => call<SetupRun>("run_network_setup", { kind, config }),
   openDownloadPage: (url: string) => call<void>("open_download_page", { url }),
-  addNetwork: (req: NewNetwork) => call<Network>("add_network", { req }),
+  addNetwork: (req: NewNetwork) => callSaved<Network>("add_network", { req }),
   deleteNetwork: (id: string, force: boolean, confirmExposed = false) =>
     call<void>("delete_network", { id, force, confirmExposed }),
   /** What becomes reachable without the block of one network (or all of them): ADR 0051. */

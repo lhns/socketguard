@@ -535,20 +535,20 @@ mod tests {
     }
 
     #[test]
-    fn yggdrasil_is_not_installed_with_an_offer_on_windows_with_winget() {
+    fn yggdrasil_is_never_offered_a_package_even_where_winget_exists() {
         let p = Fake {
             programs: vec!["winget"],
             ..Default::default()
         };
         let (s, _) = detect_yggdrasil(&p, &Existing::default());
         assert_eq!(s.state, SetupStatus::NotInstalled);
-        let offer = s.install.unwrap();
-        assert_eq!(offer.manager, "winget");
+        assert!(s.install.is_none());
+        assert_eq!(s.missing.as_deref(), Some("Yggdrasil is not installed."));
         assert_eq!(
-            offer.command,
-            "winget install --id YggdrasilNetwork.Yggdrasil --source winget -e"
+            s.download_link.as_deref(),
+            Some(socketguard_core::setup::YGGDRASIL_DOWNLOAD)
         );
-        assert!(s.download_link.is_none());
+        assert!(!s.exposed);
     }
 
     #[test]

@@ -306,7 +306,9 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
                 }
                 backend_config(r#type, interface, admin_endpoint)?
             };
-            let n = c.client.add_network(&NewNetwork { id, backend }).await?;
+            let saved = c.client.add_network(&NewNetwork { id, backend }).await?;
+            c.warn_pending(&saved.enforcement);
+            let n = saved.value;
             c.print(&n, || {
                 format!(
                     "added network {}\n\n{}",

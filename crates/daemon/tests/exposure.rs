@@ -280,3 +280,73 @@ async fn removing_the_network_removes_its_address_scopes() {
     assert_eq!(s, StatusCode::NO_CONTENT);
     assert!(f.net_scopes().is_empty());
 }
+
+#[tokio::test]
+async fn where_an_interface_rule_needs_the_adapter_it_is_not_counted_until_the_adapter_exists() {
+    // WFP cannot make a filter for an adapter that is not there: the desired ruleset names
+    // it, but nothing is enforced, so setup must not start the service on that basis.
+    let f = Fixture::new(with_ygg(), None).await;
+    f.d.fw.set_blocks_absent_interfaces(false);
+    let (_, setup) = f.get("/api/networks/setup").await;
+    let block = &setup["yggdrasil_block"];
+    assert_eq!(block["interface_blocked"], false, "{block}");
+    assert!(
+        block["reason"]
+            .as_str()
+            .unwrap()
+            .contains("only block an adapter that exists"),
+        "{block}"
+    );
+
+    f.d.net.add_interface("ygg0");
+    let (_, setup) = f.get("/api/networks/setup").await;
+    assert_eq!(setup["yggdrasil_block"]["interface_blocked"], true);
+
+    // Where interface rules hold for absent adapters (nftables, pf) the scope counts.
+    f.d.net.set_interface_missing("ygg0", true);
+    f.d.fw.set_blocks_absent_interfaces(true);
+    let (_, setup) = f.get("/api/networks/setup").await;
+    assert_eq!(setup["yggdrasil_block"]["interface_blocked"], true);
+}
+
+#[tokio::test]
+async fn a_port_also_bound_on_loopback_is_still_listed_as_exposed() {
+    let f = Fixture::new(with_ygg(), None).await;
+    let mut local = listener("nginx", 80);
+    local.bind_address = "127.0.0.1".parse().unwrap();
+    f.d.sockets.lock().unwrap().push(local);
+    f.d.sockets.lock().unwrap().push(listener("dnsmasq", 53));
+    let (_, e) = f.get("/api/exposure?without=ygg").await;
+    assert_eq!(
+        e["networks"][0]["listeners"],
+        json!([
+            {"app": "dnsmasq", "port": 53, "proto": "tcp"},
+            {"app": "nginx", "port": 80, "proto": "tcp"}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn removing_the_network_forgets_the_remembered_node() {
+    let f = Fixture::new(with_ygg(), None).await;
+    f.d.nets["ygg"].set_node(ADDR, SUBNET);
+    f.reconcile().await;
+    assert!(f
+        .d
+        .state
+        .db
+        .get_setting("ygg_node:ygg")
+        .await
+        .unwrap()
+        .is_some());
+    let (s, _) = f.delete("/api/networks/ygg?confirm_exposed=true").await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(f
+        .d
+        .state
+        .db
+        .get_setting("ygg_node:ygg")
+        .await
+        .unwrap()
+        .is_none());
+}

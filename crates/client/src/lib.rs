@@ -636,8 +636,10 @@ impl Client {
         self.call(&routes::NETWORK_SETUP, &[], None, None).await
     }
 
-    pub async fn add_network(&self, req: &NewNetwork) -> Result<Network> {
-        self.call(&routes::ADD_NETWORK, &[], None, json(req)).await
+    /// Add a network. The answer carries `enforcement` (HTTP 202) when the firewall rules
+    /// could not be applied, i.e. the network is not closed yet (ADR 0051).
+    pub async fn add_network(&self, req: &NewNetwork) -> Result<Saved<Network>> {
+        self.call_saved(&routes::ADD_NETWORK, &[], json(req)).await
     }
 
     /// Remove a network. With `force`, a Tor network goes even if its onion services

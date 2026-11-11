@@ -46,6 +46,14 @@ impl Database {
         Ok(())
     }
 
+    pub async fn delete_setting(&self, key: &str) -> Result<()> {
+        sqlx::query("DELETE FROM settings WHERE key = ?")
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// The installation's ULA global ID (40 bits), generated and stored on first use so
     /// ULA addresses stay in the same /48 across restarts.
     pub async fn ula_global_id(&self) -> Result<[u8; 5]> {

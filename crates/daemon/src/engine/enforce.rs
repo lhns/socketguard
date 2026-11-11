@@ -311,6 +311,14 @@ impl Engine {
         };
         self.remove_locators(state, backend_id, &deleted).await;
         self.backends.remove(backend_id);
+        // A network added again later must not inherit this one's remembered node.
+        if let Err(e) = state
+            .db
+            .delete_setting(&format!("{}{backend_id}", super::firewall::NODE_KEY_PREFIX))
+            .await
+        {
+            warn!("Could not forget the node addresses of '{backend_id}': {e:#}");
+        }
         let applied = self.apply_firewall(state).await;
         self.sweep_owned(state).await;
         let _ = self

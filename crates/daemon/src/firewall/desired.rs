@@ -69,12 +69,12 @@ impl DesiredRuleset {
     }
 }
 
-/// `s` with everything but `[A-Za-z0-9 :._/-]` replaced by `_`, for ids placed in comments
+/// `s` with everything but `[A-Za-z0-9 :._-]` replaced by `_`, for ids placed in comments
 /// and log prefixes where a newline or quote would end the line or string.
 pub fn safe_text(s: &str) -> String {
     s.chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, ' ' | ':' | '.' | '_' | '-' | '/') {
+            if c.is_ascii_alphanumeric() || matches!(c, ' ' | ':' | '.' | '_' | '-') {
                 c
             } else {
                 '_'

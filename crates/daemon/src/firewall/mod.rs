@@ -55,6 +55,13 @@ pub trait Firewall: Send + Sync {
         Ok(true)
     }
 
+    /// Whether a rule on an interface that does not exist yet holds once the adapter
+    /// appears. False for WFP, which binds filters to adapter LUIDs: it cannot make one for
+    /// an adapter that is not there (ADR 0051).
+    fn blocks_absent_interfaces(&self) -> bool {
+        true
+    }
+
     /// Whether interfaces resolve differently from the last apply (WFP binds filters to
     /// interface LUIDs, which change when an adapter is recreated). Cheap; `true` makes
     /// the engine re-apply.

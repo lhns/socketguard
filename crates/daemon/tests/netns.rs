@@ -1074,6 +1074,27 @@ fn the_managed_nodes_addresses_are_denied_without_its_interface_and_others_are_l
         "ygg0",
         "nodad",
     ]);
+    // An address of the node's /64 that no app owns, so only the subnet scope can deny it.
+    ip(&[
+        "-n",
+        &fx.ns.a,
+        "addr",
+        "add",
+        "300:5a::200/128",
+        "dev",
+        "ygg0",
+        "nodad",
+    ]);
+    ip(&[
+        "-n",
+        &fx.ns.b,
+        "-6",
+        "route",
+        "add",
+        "300:5a::200/128",
+        "dev",
+        "ygg0",
+    ]);
     let node = ruleset::OverlayNode {
         address: "200:5a::1".parse().unwrap(),
         subnet: "300:5a::/64".parse().unwrap(),
@@ -1084,7 +1105,7 @@ fn the_managed_nodes_addresses_are_denied_without_its_interface_and_others_are_l
         snap.ygg_nodes = [("ygg".to_string(), node)].into();
         snap
     };
-    for dst in ["200:5a::1", "200:5a::55", MANAGED_YGG] {
+    for dst in ["200:5a::1", "200:5a::55", MANAGED_YGG, "300:5a::200"] {
         assert!(
             eventually(|| fx.reachable(dst, None)),
             "control: {dst} is reachable before any rule"
@@ -1096,7 +1117,10 @@ fn the_managed_nodes_addresses_are_denied_without_its_interface_and_others_are_l
     let rs = fx.apply(&known("tun-gone", &[]));
     assert!(rs.scopes.iter().any(|s| s.id == "overlay:ygg:addr"));
     assert!(!fx.reachable("200:5a::1", None), "the node's address");
-    assert!(!fx.reachable(MANAGED_YGG, None), "the node's subnet");
+    assert!(
+        !fx.reachable("300:5a::200", None),
+        "the node's subnet, beyond the managed addresses"
+    );
     assert!(
         fx.reachable("200:5a::55", None),
         "an address of a node SocketGuard does not manage is untouched"
