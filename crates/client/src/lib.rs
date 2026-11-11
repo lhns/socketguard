@@ -26,6 +26,7 @@ use socketguard_core::api_types::{
     ReviewRequest, SetMembers, ShareResponse, StatusResponse, TorKeyResponse, UpdateLabel,
     UpdatePortGroup, UpdateTag,
 };
+use socketguard_core::setup::NetworkSetup;
 use socketguard_core::{
     ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
     NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, PortGroup, ReservationView, Scope,
@@ -627,6 +628,11 @@ impl Client {
 
     pub async fn list_networks(&self) -> Result<Vec<Network>> {
         self.call(&routes::LIST_NETWORKS, &[], None, None).await
+    }
+
+    /// What can be added on this host and how far each kind is (ADR 0048).
+    pub async fn network_setup(&self) -> Result<NetworkSetup> {
+        self.call(&routes::NETWORK_SETUP, &[], None, None).await
     }
 
     pub async fn add_network(&self, req: &NewNetwork) -> Result<Network> {

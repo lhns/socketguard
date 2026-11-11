@@ -1204,7 +1204,7 @@ async fn adding_and_removing_a_network() {
     let inst = BackendInstanceConfig {
         id: "ygg".into(),
         backend: BackendConfig::Yggdrasil {
-            interface: "ygg0".into(),
+            interface: Some("ygg0".into()),
             admin_endpoint: None,
         },
     };

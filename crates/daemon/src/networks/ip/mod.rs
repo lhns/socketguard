@@ -57,6 +57,15 @@ pub trait Ipv6Backend: Send + Sync {
     /// Allocate an address: the current prefix plus `iid` (or a random one).
     /// Backends without a prefix ignore `iid`.
     fn allocate(&self, iid: Option<u64>) -> Result<AllocatedAddress>;
+    /// The interface this backend works out at runtime (Yggdrasil: the one holding the
+    /// node's address); None when the config names it or it cannot be found.
+    fn interface(&self) -> Option<String> {
+        None
+    }
+    /// Why the network cannot be used right now, beyond `current_prefix` failing.
+    fn problem(&self) -> Option<String> {
+        None
+    }
     /// Release an address (cleanup). Most backends hold no state per address.
     fn release_address(&self, _addr: &Ipv6Addr) -> Result<()> {
         Ok(())

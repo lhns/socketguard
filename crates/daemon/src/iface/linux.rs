@@ -59,6 +59,16 @@ impl InterfaceManager for LinuxInterfaces {
         parse_ip_addr_json(&String::from_utf8_lossy(&output.stdout))
     }
 
+    fn default_route_interface(&self) -> Option<String> {
+        ["-4", "-6"].iter().find_map(|family| {
+            let out = Command::new("ip")
+                .args([family, "-j", "route", "show", "default"])
+                .output()
+                .ok()?;
+            parse_default_route_dev(&String::from_utf8_lossy(&out.stdout))
+        })
+    }
+
     fn list_interfaces(&self) -> Result<Vec<InterfaceInfo>> {
         // `-d` adds the link info that names a VLAN and its id.
         let output = Command::new("ip")
@@ -89,6 +99,17 @@ impl InterfaceManager for LinuxInterfaces {
         }
         parse_ipv4_subnets(&String::from_utf8_lossy(&output.stdout))
     }
+}
+
+/// The `dev` of the default route with the lowest metric in `ip -j route show default`.
+fn parse_default_route_dev(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value
+        .as_array()?
+        .iter()
+        .filter_map(|r| Some((r["metric"].as_u64().unwrap_or(0), r["dev"].as_str()?)))
+        .min_by_key(|(metric, _)| *metric)
+        .map(|(_, dev)| dev.to_string())
 }
 
 /// Parse `ip -d -j link show` into interfaces with their VLAN ids.
@@ -167,6 +188,14 @@ mod tests {
         let got = parse_ip_link_json(json).unwrap();
         let got: Vec<_> = got.iter().map(|i| (i.name.as_str(), i.vlan_id)).collect();
         assert_eq!(got, [("br0", None), ("eth0", None), ("eth0.20", Some(20))]);
+    }
+
+    #[test]
+    fn parses_the_default_route_device() {
+        let json = r#"[{"dst":"default","gateway":"10.0.0.1","dev":"wlan0","metric":600},
+                       {"dst":"default","gateway":"10.0.1.1","dev":"eth0","metric":100}]"#;
+        assert_eq!(parse_default_route_dev(json).as_deref(), Some("eth0"));
+        assert_eq!(parse_default_route_dev("[]"), None);
     }
 
     #[test]

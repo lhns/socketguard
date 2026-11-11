@@ -38,7 +38,7 @@ impl Engine {
             if let (Some(ip), Some(iface)) = (a.locator.ipv6(), self.interface_of(&a.network_id)) {
                 state
                     .db
-                    .retire_address(ip, iface, Some(&a.network_id))
+                    .retire_address(ip, &iface, Some(&a.network_id))
                     .await?;
             }
         }
@@ -365,7 +365,7 @@ impl Engine {
                     continue;
                 }
             };
-            let Some(iface) = active.config.backend.interface() else {
+            let Some(iface) = Self::interface_in_use(active) else {
                 continue;
             };
             for a in addresses.iter().filter(|a| a.network_id == *network_id) {
@@ -381,7 +381,7 @@ impl Engine {
                 if owned.contains(&old) {
                     if let Err(e) = state
                         .db
-                        .retire_address(old, iface, Some(network_id.as_str()))
+                        .retire_address(old, &iface, Some(network_id.as_str()))
                         .await
                     {
                         error!("Failed to record {old} as retiring: {e}");
@@ -523,7 +523,7 @@ pub(super) async fn disable_all(
         match interfaces.get(&a.network_id) {
             // Adopt addresses from before ownership was recorded.
             Some(iface) => {
-                if let Err(e) = db.retire_address(ip, iface, Some(&a.network_id)).await {
+                if let Err(e) = db.retire_address(ip, &iface, Some(&a.network_id)).await {
                     warn!("Cannot record {ip} as retiring: {e}");
                 }
             }

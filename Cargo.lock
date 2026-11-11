@@ -4040,6 +4040,7 @@ dependencies = [
  "comfy-table",
  "futures-util",
  "insta",
+ "libc",
  "serde",
  "serde_json",
  "socketguard-client",
@@ -4048,6 +4049,7 @@ dependencies = [
  "tokio",
  "toml 0.8.2",
  "uuid",
+ "windows 0.62.2",
 ]
 
 [[package]]

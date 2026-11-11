@@ -6,6 +6,7 @@ pub mod identity;
 pub mod model;
 pub mod reach;
 pub mod scope;
+pub mod setup;
 pub mod tags;
 pub mod types;
 pub mod yggdrasil;

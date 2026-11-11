@@ -76,6 +76,7 @@ pub const CLI_ROUTES: &[CliRoute] = &[
     r("grant", "changes"),
     r("revoke", "changes"),
     r("networks list", "list_networks"),
+    r("networks detect", "network_setup"),
     r("networks add", "add_network"),
     r("init", "add_network"),
     r("networks rm", "delete_network"),

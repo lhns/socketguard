@@ -328,6 +328,65 @@ pub fn status(s: &StatusResponse) -> String {
     )
 }
 
+/// `networks detect`: what each kind of network needs.
+pub fn network_setup(s: &socketguard_core::setup::NetworkSetup) -> String {
+    use socketguard_core::setup::{SetupState, SetupStatus};
+    let state = |name: &str, st: &SetupState| {
+        let label = match st.state {
+            SetupStatus::Ready => "ready to add",
+            SetupStatus::NotConfigured => "needs setup",
+            SetupStatus::NotRunning => "not running",
+            SetupStatus::NotInstalled => "not installed",
+            SetupStatus::Added => "added",
+        };
+        let mut out = format!("{name}: {label}");
+        if let Some(m) = &st.missing {
+            out.push_str(&format!(" ({m})"));
+        }
+        for (k, v) in &st.found {
+            out.push_str(&format!("\n  {k}: {v}"));
+        }
+        if let Some(i) = &st.install {
+            out.push_str(&format!("\n  install: {}", i.command));
+        }
+        if let Some(l) = &st.download_link {
+            out.push_str(&format!("\n  download: {l}"));
+        }
+        out
+    };
+    let mut out = String::from("LAN interfaces:");
+    if s.lan.is_empty() {
+        out.push_str(" none found");
+    }
+    for l in &s.lan {
+        out.push_str(&format!(
+            "\n  {}{}{}{}{}",
+            l.interface,
+            l.description
+                .as_ref()
+                .map(|d| format!(" ({d})"))
+                .unwrap_or_default(),
+            if l.is_default_route {
+                ", default route"
+            } else {
+                ""
+            },
+            if l.has_ipv6_prefix {
+                ""
+            } else {
+                ", no IPv6 prefix announced"
+            },
+            if l.already_added { ", added" } else { "" },
+        ));
+    }
+    format!(
+        "{out}\n\n{}\n\n{}\n\n{}",
+        state("Yggdrasil", &s.yggdrasil),
+        state("Tor", &s.tor),
+        state("Local", &s.local)
+    )
+}
+
 pub fn networks(nets: &[Network]) -> String {
     if nets.is_empty() {
         return "no networks".to_string();

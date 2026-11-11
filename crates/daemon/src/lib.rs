@@ -8,6 +8,7 @@ pub mod metrics;
 pub mod monitor;
 pub mod networks;
 pub mod ruleset;
+pub mod setup;
 pub mod state;
 pub mod telemetry;
 /// Mocks and a ready-made daemon for tests (feature `test-support`); not part of the product.

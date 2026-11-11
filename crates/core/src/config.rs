@@ -13,8 +13,11 @@ pub enum BackendConfig {
         interface: String,
     },
     Yggdrasil {
-        /// Network interface (e.g. Yggdrasil TUN)
-        interface: String,
+        /// Network interface (e.g. Yggdrasil TUN). None = the interface that holds the
+        /// node's address, found at runtime (ADR 0048).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        interface: Option<String>,
         /// Yggdrasil admin socket endpoint (e.g. `unix:///var/run/yggdrasil.sock`).
         /// None = yggdrasilctl's default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -134,7 +137,7 @@ impl BackendConfig {
     pub fn interface(&self) -> Option<&str> {
         match self {
             BackendConfig::Ula { interface } => Some(interface),
-            BackendConfig::Yggdrasil { interface, .. } => Some(interface),
+            BackendConfig::Yggdrasil { interface, .. } => interface.as_deref(),
             BackendConfig::Slaac { interface, .. } => Some(interface),
             BackendConfig::Dhcpv6 { interface } => Some(interface),
             BackendConfig::Tor { .. } => None,
@@ -396,7 +399,8 @@ pub fn valid_interface_name(name: &str) -> bool {
 }
 
 /// Default Tor control port.
-const DEFAULT_TOR_CONTROL: &str = "127.0.0.1:9051";
+/// Where `socketguard networks add tor` expects Tor.
+pub const DEFAULT_TOR_CONTROL: &str = "127.0.0.1:9051";
 
 fn default_tor_control() -> String {
     DEFAULT_TOR_CONTROL.to_string()
@@ -720,7 +724,7 @@ mod tests {
         assert_eq!(ula.interface(), Some("lo"));
 
         let ygg = BackendConfig::Yggdrasil {
-            interface: "tun0".to_string(),
+            interface: Some("tun0".to_string()),
             admin_endpoint: None,
         };
         assert_eq!(ygg.interface(), Some("tun0"));
@@ -940,7 +944,7 @@ mod tests {
         );
         assert_eq!(
             BackendConfig::Yggdrasil {
-                interface: "tun0".into(),
+                interface: Some("tun0".into()),
                 admin_endpoint: None
             }
             .default_id(),

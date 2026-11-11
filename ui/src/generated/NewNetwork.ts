@@ -11,9 +11,10 @@ export type NewNetwork = { id?: string, } & ({ "type": "ula",
  */
 interface: string, } | { "type": "yggdrasil", 
 /**
- * Network interface (e.g. Yggdrasil TUN)
+ * Network interface (e.g. Yggdrasil TUN). None = the interface that holds the
+ * node's address, found at runtime (ADR 0048).
  */
-interface: string, 
+interface?: string, 
 /**
  * Yggdrasil admin socket endpoint (e.g. `unix:///var/run/yggdrasil.sock`).
  * None = yggdrasilctl's default.

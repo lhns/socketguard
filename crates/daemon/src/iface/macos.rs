@@ -71,6 +71,14 @@ impl InterfaceManager for MacosInterfaces {
             .collect())
     }
 
+    fn default_route_interface(&self) -> Option<String> {
+        let out = Command::new("route")
+            .args(["-n", "get", "default"])
+            .output()
+            .ok()?;
+        parse_route_interface(&String::from_utf8_lossy(&out.stdout))
+    }
+
     fn list_interfaces(&self) -> Result<Vec<InterfaceInfo>> {
         let output = Command::new("ifconfig")
             .args(["-l"])
@@ -116,6 +124,14 @@ impl InterfaceManager for MacosInterfaces {
 }
 
 /// Subnets from "<tab>inet 192.168.1.5 netmask 0xffffff00 broadcast ..." lines.
+/// The `interface:` line of `route -n get default`.
+fn parse_route_interface(out: &str) -> Option<String> {
+    out.lines()
+        .find_map(|l| l.trim().strip_prefix("interface:"))
+        .map(|i| i.trim().to_string())
+        .filter(|i| !i.is_empty())
+}
+
 fn parse_ifconfig_inet(out: &str) -> Vec<Ipv4Net> {
     out.lines()
         .filter_map(|l| {
@@ -134,6 +150,16 @@ fn parse_ifconfig_inet(out: &str) -> Vec<Ipv4Net> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_the_default_route_interface() {
+        let out = "   route to: default\ndestination: default\n  interface: en0\n";
+        assert_eq!(parse_route_interface(out).as_deref(), Some("en0"));
+        assert_eq!(
+            parse_route_interface("route: writing to routing socket"),
+            None
+        );
+    }
 
     #[test]
     fn parses_ifconfig_inet_lines() {

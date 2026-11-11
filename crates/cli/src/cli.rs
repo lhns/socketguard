@@ -438,6 +438,29 @@ pub struct GrantsArgs {
 pub enum NetworksCmd {
     /// List networks
     List,
+    /// What can be added on this host: LAN interfaces, Yggdrasil, Tor, and what is missing
+    Detect,
+    /// Install, start and configure Yggdrasil or Tor, then add the network. Needs
+    /// administrator rights (ADR 0048)
+    Setup {
+        #[arg(value_enum, ignore_case = true)]
+        kind: SetupTarget,
+        /// Do not ask before the steps are run
+        #[arg(long)]
+        yes: bool,
+        /// Print the steps and change nothing (needs no administrator rights)
+        #[arg(long)]
+        dry_run: bool,
+        /// The daemon's config file [default: the one the daemon reports]
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+        /// Tor: the torrc, when it is not in a standard place
+        #[arg(long, value_name = "PATH")]
+        torrc: Option<PathBuf>,
+        /// Wait for a key at the end (for a console that closes by itself)
+        #[arg(long)]
+        pause: bool,
+    },
     /// Add a network (saved to the daemon's config file)
     Add {
         #[arg(value_enum, ignore_case = true)]
@@ -473,6 +496,22 @@ pub enum NetworksCmd {
         #[arg(long)]
         force: bool,
     },
+}
+
+/// The networks `networks setup` handles.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetupTarget {
+    Yggdrasil,
+    Tor,
+}
+
+impl From<SetupTarget> for socketguard_core::setup::SetupKind {
+    fn from(t: SetupTarget) -> Self {
+        match t {
+            SetupTarget::Yggdrasil => Self::Yggdrasil,
+            SetupTarget::Tor => Self::Tor,
+        }
+    }
 }
 
 /// The kinds of network `networks add` can make.

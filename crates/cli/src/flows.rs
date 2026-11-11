@@ -167,26 +167,19 @@ pub async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
         if let Some(addr) = yggdrasil_node() {
             println!("A Yggdrasil node is running (address {addr}) but has no network here.");
             if interactive && p.confirm("Add a Yggdrasil network?") {
-                let default = if cfg!(windows) { "Yggdrasil" } else { "ygg0" };
-                let answer = p.ask(&format!("Yggdrasil tun interface [{default}]:"));
-                let interface = if answer.is_empty() {
-                    default.to_string()
-                } else {
-                    answer
-                };
                 let n = c
                     .client
                     .add_network(&NewNetwork {
                         id: None,
                         backend: BackendConfig::Yggdrasil {
-                            interface,
+                            interface: None,
                             admin_endpoint: None,
                         },
                     })
                     .await?;
                 println!("added network {}", n.id);
             } else if !interactive {
-                println!("Add it with: socketguard networks add yggdrasil --interface <tun>");
+                println!("Add it with: socketguard networks add yggdrasil");
             }
         }
     }

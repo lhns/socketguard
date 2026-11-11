@@ -102,6 +102,11 @@ pub trait Network: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     /// Current status, and the /64 the network allocates from (IP networks with one).
     fn status(&self) -> (NetworkStatus, Option<Ipv6Addr>);
+    /// The interface found at runtime (Yggdrasil without a configured one). The engine
+    /// uses it when the config names none; it is never written back to the config.
+    fn interface(&self) -> Option<String> {
+        None
+    }
     /// The /64 this network allocates from, for re-homing addresses; None if it has none.
     fn current_prefix(&self) -> Result<Option<Prefix>> {
         Ok(None)
@@ -159,28 +164,42 @@ pub fn create(
                 tor::CHECK_INTERVAL,
             )))
         }
-        BackendConfig::Ula { .. } => {
-            Ok(ip_network(config, ip::ula::UlaBackend::new(ula_global_id)))
-        }
-        BackendConfig::Yggdrasil { admin_endpoint, .. } => Ok(ip_network(
+        BackendConfig::Ula { .. } => Ok(ip_network(
+            config,
+            ip::ula::UlaBackend::new(ula_global_id),
+            net,
+        )),
+        BackendConfig::Yggdrasil {
+            admin_endpoint,
+            interface,
+        } => Ok(ip_network(
             config,
             ip::yggdrasil::YggdrasilBackend::new(Box::new(ip::yggdrasil::YggdrasilctlNode::new(
                 admin_endpoint.clone(),
-            ))),
+            )))
+            .with_host(net.clone(), interface.clone()),
+            net,
         )),
         BackendConfig::Slaac { interface, prefix } => Ok(ip_network(
             config,
-            ip::slaac::SlaacBackend::new(interface, prefix.as_deref(), net)?,
+            ip::slaac::SlaacBackend::new(interface, prefix.as_deref(), net.clone())?,
+            net,
         )),
         BackendConfig::Dhcpv6 { interface } => Ok(ip_network(
             config,
             ip::dhcpv6::Dhcpv6Backend::new(interface),
+            net,
         )),
     }
 }
 
-fn ip_network(config: &BackendConfig, backend: impl Ipv6Backend + 'static) -> Arc<dyn Network> {
-    Arc::new(IpNetwork::for_config(config, Box::new(backend)))
+/// An IP network that also reports an interface which does not exist on `net` as down.
+fn ip_network(
+    config: &BackendConfig,
+    backend: impl Ipv6Backend + 'static,
+    net: Arc<dyn InterfaceManager>,
+) -> Arc<dyn Network> {
+    Arc::new(IpNetwork::for_config(config, Box::new(backend)).with_host(net))
 }
 
 /// How specific a listener's bind address is, lower first: the Tor target prefers an

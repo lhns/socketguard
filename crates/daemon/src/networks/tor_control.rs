@@ -163,6 +163,35 @@ pub struct ProtocolInfo {
     pub version: Option<String>,
 }
 
+/// Ask the Tor control port at the loopback address `addr` for PROTOCOLINFO, which Tor
+/// answers before authentication. Detection only: nothing secret is sent or read.
+pub fn probe_protocolinfo(addr: &str, timeout: Duration) -> Result<ProtocolInfo> {
+    #[cfg(unix)]
+    if let Some(path) = addr.strip_prefix("unix:") {
+        let s = std::os::unix::net::UnixStream::connect(path)
+            .with_context(|| format!("cannot reach the Tor control socket {path}"))?;
+        s.set_read_timeout(Some(timeout))?;
+        s.set_write_timeout(Some(timeout))?;
+        let mut writer = s.try_clone()?;
+        writer.write_all(b"PROTOCOLINFO 1\r\n")?;
+        let reply = read_reply(&mut BufReader::new(s))?.ok()?;
+        return Ok(parse_protocolinfo(&reply));
+    }
+    let sock = addr
+        .to_socket_addrs()
+        .with_context(|| format!("bad Tor control address {addr}"))?
+        .find(|a| a.ip().is_loopback())
+        .with_context(|| format!("{addr} is not a loopback address"))?;
+    let s = TcpStream::connect_timeout(&sock, timeout)
+        .with_context(|| format!("cannot reach the Tor control port at {addr}"))?;
+    s.set_read_timeout(Some(timeout))?;
+    s.set_write_timeout(Some(timeout))?;
+    let mut writer = s.try_clone()?;
+    writer.write_all(b"PROTOCOLINFO 1\r\n")?;
+    let reply = read_reply(&mut BufReader::new(s))?.ok()?;
+    Ok(parse_protocolinfo(&reply))
+}
+
 /// Parse the lines of a PROTOCOLINFO reply.
 pub fn parse_protocolinfo(reply: &Reply) -> ProtocolInfo {
     let mut info = ProtocolInfo::default();

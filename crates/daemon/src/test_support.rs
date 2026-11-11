@@ -172,6 +172,7 @@ pub struct MockInterfaceManager {
     remove_failing: Arc<Mutex<bool>>,
     ipv4: Arc<Mutex<HashMap<String, Vec<Ipv4Net>>>>,
     vlans: Arc<Mutex<HashMap<String, u16>>>,
+    extra: Arc<Mutex<HashSet<String>>>,
 }
 
 impl MockInterfaceManager {
@@ -183,7 +184,13 @@ impl MockInterfaceManager {
             remove_failing: Arc::default(),
             ipv4: Arc::default(),
             vlans: Arc::default(),
+            extra: Arc::default(),
         }
+    }
+
+    /// Make `iface` show up in `list_interfaces` (only `lo` and VLANs do by default).
+    pub fn add_interface(&self, iface: &str) {
+        self.extra.lock().unwrap().insert(iface.to_string());
     }
 
     /// Give `iface` the IPv4 subnets `nets` (e.g. "192.168.1.0/24"); empty clears them.
@@ -280,6 +287,7 @@ impl InterfaceManager for MockInterfaceManager {
         let vlans = self.vlans.lock().unwrap();
         let mut names: Vec<String> = vec!["lo".to_string()];
         names.extend(vlans.keys().cloned());
+        names.extend(self.extra.lock().unwrap().iter().cloned());
         names.sort();
         Ok(names
             .into_iter()
@@ -448,6 +456,11 @@ impl MockYggdrasilNode {
         self.state.lock().unwrap().failing = failing;
     }
 
+    /// The node's own address, which the adapter should hold.
+    pub fn set_address(&self, address: &str) {
+        self.state.lock().unwrap().info.address = address.parse().unwrap();
+    }
+
     /// Number of `get_self` calls so far.
     pub fn calls(&self) -> usize {
         self.state.lock().unwrap().calls
@@ -578,7 +591,7 @@ pub fn ygg_net() -> Net {
     Net {
         id: "ygg",
         config: socketguard_core::config::BackendConfig::Yggdrasil {
-            interface: "ygg0".into(),
+            interface: Some("ygg0".into()),
             admin_endpoint: None,
         },
         mock,
