@@ -280,6 +280,65 @@ pub struct Network {
     /// show the adapter as a plain interface).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vlan_id: Option<u16>,
+    /// Set when SocketGuard runs this network's software itself (ADR 0052).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub managed: Option<ManagedInfo>,
+}
+
+/// Where the child process of a managed network stands.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildState {
+    /// Not running on purpose: SocketGuard is turned off.
+    Stopped,
+    /// Held back until something else is in order (the block is not in force, another
+    /// Yggdrasil node runs); `detail` says what.
+    Waiting,
+    Starting,
+    /// Tor only: running, building circuits.
+    Bootstrapping,
+    Up,
+    /// Ended on its own; it is restarted after a pause. `detail` has the last log line.
+    Exited,
+    /// The files of the network are not part of this build.
+    Unavailable,
+}
+
+/// A managed network: how its child process is doing.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedInfo {
+    pub state: ChildState,
+    /// Tor: bootstrap progress in percent while `bootstrapping`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub progress: Option<u8>,
+    /// One plain sentence: why it waits, or the last log line of an exited child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub detail: Option<String>,
+    /// The account the child runs as, in words (`socketguard-net`, `LocalService`, or
+    /// "the daemon's account" with the reason when it could not be dropped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub runs_as: Option<String>,
+    /// The shipped version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub version: Option<String>,
+    /// Yggdrasil: the node's own address (known from the key before the child runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub address: Option<String>,
+    /// Yggdrasil: the configured peers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<String>,
+    /// Yggdrasil: peers connected now; None when unknown (no admin endpoint, node down).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub peers_connected: Option<u32>,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -641,6 +700,7 @@ pub(crate) mod fixtures {
             status: NetworkStatus::Up,
             prefix: prefix.map(|p| p.parse().unwrap()),
             vlan_id: None,
+            managed: None,
         }
     }
 

@@ -18,7 +18,16 @@ interface?: string,
  * Yggdrasil admin socket endpoint (e.g. `unix:///var/run/yggdrasil.sock`).
  * None = yggdrasilctl's default.
  */
-admin_endpoint?: string | null, } | { "type": "slaac", 
+admin_endpoint?: string | null, 
+/**
+ * SocketGuard runs its own Yggdrasil node as a child process (ADR 0052). Excludes
+ * `interface` and `admin_endpoint`.
+ */
+managed?: boolean, 
+/**
+ * Managed only: peers to connect to, as URIs (`tls://host:port`).
+ */
+peers?: Array<string>, } | { "type": "slaac", 
 /**
  * Physical network interface connected to the router
  */
@@ -58,4 +67,9 @@ cookie_owner?: string | null,
  * Accept a control address that is not loopback (cookie auth only). Off by
  * default: whoever is on that path sees the control traffic.
  */
-allow_remote_control?: boolean, };
+allow_remote_control?: boolean, 
+/**
+ * SocketGuard runs its own Tor as a child process (ADR 0052). The control endpoint
+ * and cookie are chosen by the daemon; excludes every external field above.
+ */
+managed?: boolean, };

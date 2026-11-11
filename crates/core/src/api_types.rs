@@ -121,6 +121,9 @@ pub struct StatusResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub service_installed: Option<bool>,
+    /// The third-party files this build ships (ADR 0052); no `dir` when it has none.
+    #[serde(default)]
+    pub bundled: crate::setup::BundledInfo,
 }
 
 // ─── Apps ────────────────────────────────────────────────────────────────────
@@ -195,6 +198,14 @@ pub struct NewNetwork {
     pub id: Option<String>,
     #[serde(flatten)]
     pub backend: BackendConfig,
+}
+
+/// Body of `PUT /api/networks/{id}/peers`: the peers of a managed Yggdrasil network (the
+/// node restarts to use them).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetPeers {
+    pub peers: Vec<String>,
 }
 
 /// Body of `PUT /api/settings/protect-host`. An empty list turns protection off.

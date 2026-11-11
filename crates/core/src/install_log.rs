@@ -1,41 +1,14 @@
-//! The install record (ADR 0048, ADR 0050): what `networks setup` and the service
-//! installer found and created on the host, with what is needed to reverse each change.
+//! The install record (ADR 0050, ADR 0052): what the service installer and the managed
+//! networks found and created on the host, with what is needed to reverse each change.
 //! One file, `setup-log.json` next to the config file, shared by the daemon binary and the
 //! CLI. Removal reverses exactly this record, newest first, and nothing else.
 
-use crate::setup::SetupKind;
 use serde::{Deserialize, Serialize};
 
 /// One change, with what is needed to reverse it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Change {
-    // ── networks setup (ADR 0048) ──
-    /// A package that setup itself installed (never one that was there before).
-    PackageInstalled {
-        manager: String,
-        package: String,
-        install: String,
-        uninstall: Vec<String>,
-    },
-    /// A service setup started (it was not running) or enabled.
-    ServiceStarted {
-        service: String,
-        previous_state: String,
-        previous_enabled: Option<bool>,
-        undo: Vec<String>,
-    },
-    /// Lines appended to another program's configuration file.
-    FileEdited {
-        path: String,
-        lines: Vec<String>,
-        backup: Option<String>,
-    },
-    /// The network entry written to SocketGuard's config file.
-    ConfigEntryWritten { path: String, id: String },
-    /// The network added to the running daemon.
-    NetworkAdded { id: String },
-
     // ── service install (ADR 0050) ──
     /// The SocketGuard service was registered with the system.
     ServiceRegistered { name: String, manager: String },
@@ -60,23 +33,32 @@ pub enum Change {
     /// Windows: the WFP engine option `FWPM_ENGINE_COLLECT_NET_EVENTS` before the daemon
     /// first set it. `prior` is None when it could not be read (then it is not restored).
     WfpEngineOption { option: String, prior: Option<u32> },
+
+    // ── managed networks (ADR 0052) ──
+    /// Unix: the unprivileged system account the children run as. Removed only when
+    /// `created`.
+    UnprivilegedAccount { name: String, created: bool },
+    /// Windows: whether the Wintun driver was in the driver store before the first managed
+    /// Yggdrasil start. Purge removes it only if it was not (and nothing else uses it).
+    WintunDriver { present_before: bool },
+
+    /// An entry of an older version (network setup, ADR 0048: packages, services, torrc
+    /// lines). It is no longer written and no longer undone; uninstall reports it as kept.
+    #[serde(other)]
+    Legacy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub time: String,
-    /// The network setup this belongs to; none for the service install.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<SetupKind>,
     #[serde(flatten)]
     pub change: Change,
 }
 
 impl Entry {
-    pub fn now(kind: Option<SetupKind>, change: Change) -> Self {
+    pub fn now(change: Change) -> Self {
         Self {
             time: chrono::Utc::now().to_rfc3339(),
-            kind,
             change,
         }
     }
@@ -146,48 +128,24 @@ pub fn remove_lines(text: &str, lines: &[String]) -> String {
     parts.concat()
 }
 
-/// The config file text without the backend `id`; None if it was not there. Other keys are
-/// kept (the file is rewritten as pretty JSON).
-pub fn remove_backend_entry(text: &str, id: &str) -> Result<Option<String>, String> {
-    let mut doc: serde_json::Value =
-        serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(text))
-            .map_err(|e| format!("not JSON: {e}"))?;
-    let Some(list) = doc.get_mut("backends").and_then(|b| b.as_array_mut()) else {
-        return Ok(None);
-    };
-    let before = list.len();
-    list.retain(|b| {
-        let own = b["id"].as_str().map(str::to_string).or_else(|| {
-            serde_json::from_value::<crate::config::BackendInstanceConfig>(b.clone())
-                .ok()
-                .map(|i| i.id)
-        });
-        own.as_deref() != Some(id)
-    });
-    if list.len() == before {
-        return Ok(None);
-    }
-    let mut out = serde_json::to_string_pretty(&doc).expect("a document serialises");
-    out.push('\n');
-    Ok(Some(out))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn an_old_log_without_install_entries_still_parses() {
-        let old = r#"{"entries":[{"time":"t","kind":"tor","type":"network_added","id":"tor"}]}"#;
+    fn entries_of_the_removed_network_setup_still_parse() {
+        let old = r#"{"entries":[
+            {"time":"t","kind":"tor","type":"network_added","id":"tor"},
+            {"time":"t","kind":"yggdrasil","type":"package_installed","manager":"apt","package":"tor","install":"x","uninstall":[]},
+            {"time":"t","type":"access_group","name":"socketguard","created":true}]}"#;
         let e = parse(old).unwrap();
-        assert_eq!(e[0].kind, Some(SetupKind::Tor));
-        let text = render(&[Entry::now(
-            None,
-            Change::AccessGroup {
-                name: "socketguard".into(),
-                created: true,
-            },
-        )]);
+        assert_eq!(e.len(), 3);
+        assert_eq!(e[0].change, Change::Legacy);
+        assert_eq!(e[1].change, Change::Legacy);
+        let text = render(&[Entry::now(Change::UnprivilegedAccount {
+            name: "socketguard-net".into(),
+            created: true,
+        })]);
         assert!(!text.contains("\"kind\""));
         assert_eq!(parse(&text).unwrap().len(), 1);
     }

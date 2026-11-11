@@ -22,6 +22,13 @@ pub enum BackendConfig {
         /// None = yggdrasilctl's default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         admin_endpoint: Option<String>,
+        /// SocketGuard runs its own Yggdrasil node as a child process (ADR 0052). Excludes
+        /// `interface` and `admin_endpoint`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        managed: bool,
+        /// Managed only: peers to connect to, as URIs (`tls://host:port`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        peers: Vec<String>,
     },
     Slaac {
         /// Physical network interface connected to the router
@@ -60,6 +67,10 @@ pub enum BackendConfig {
         /// default: whoever is on that path sees the control traffic.
         #[serde(default, skip_serializing_if = "is_false")]
         allow_remote_control: bool,
+        /// SocketGuard runs its own Tor as a child process (ADR 0052). The control endpoint
+        /// and cookie are chosen by the daemon; excludes every external field above.
+        #[serde(default, skip_serializing_if = "is_false")]
+        managed: bool,
     },
 }
 
@@ -109,8 +120,147 @@ impl BackendConfig {
             expect_tor_uid: None,
             cookie_owner: None,
             allow_remote_control: false,
+            managed: false,
         }
     }
+
+    /// The managed Tor network (ADR 0052): nothing to configure.
+    pub fn managed_tor() -> Self {
+        let mut c = Self::default_tor();
+        if let BackendConfig::Tor { managed, .. } = &mut c {
+            *managed = true;
+        }
+        c
+    }
+
+    /// The managed Yggdrasil network (ADR 0052) with `peers`.
+    pub fn managed_yggdrasil(peers: Vec<String>) -> Self {
+        BackendConfig::Yggdrasil {
+            interface: None,
+            admin_endpoint: None,
+            managed: true,
+            peers,
+        }
+    }
+
+    /// SocketGuard runs this network's software itself.
+    pub fn is_managed(&self) -> bool {
+        matches!(
+            self,
+            BackendConfig::Tor { managed: true, .. }
+                | BackendConfig::Yggdrasil { managed: true, .. }
+        )
+    }
+
+    /// The peers of a managed Yggdrasil network; empty otherwise.
+    pub fn peers(&self) -> &[String] {
+        match self {
+            BackendConfig::Yggdrasil { peers, .. } => peers,
+            _ => &[],
+        }
+    }
+
+    /// Whether the settings are consistent: a managed network carries none of the external
+    /// fields, peers only make sense on a managed Yggdrasil, and every peer is a URI.
+    pub fn validate_managed(&self) -> Result<(), String> {
+        match self {
+            BackendConfig::Tor {
+                control,
+                auth,
+                cookie_path,
+                cookie_dir,
+                expect_tor_uid,
+                cookie_owner,
+                allow_remote_control,
+                managed: true,
+            } => {
+                let external = control != DEFAULT_TOR_CONTROL
+                    || *auth != TorAuth::default()
+                    || cookie_path.is_some()
+                    || cookie_dir.is_some()
+                    || expect_tor_uid.is_some()
+                    || cookie_owner.is_some()
+                    || *allow_remote_control;
+                if external {
+                    return Err("a managed Tor network takes no control, auth or cookie \
+                         settings; SocketGuard chooses them"
+                        .into());
+                }
+                Ok(())
+            }
+            BackendConfig::Yggdrasil {
+                interface,
+                admin_endpoint,
+                managed,
+                peers,
+            } => {
+                if *managed && (interface.is_some() || admin_endpoint.is_some()) {
+                    return Err("a managed Yggdrasil network takes no interface or admin \
+                         endpoint; SocketGuard chooses them"
+                        .into());
+                }
+                if !*managed && !peers.is_empty() {
+                    return Err("peers can only be set on a managed Yggdrasil network (an \
+                         existing node has its own configuration)"
+                        .into());
+                }
+                let mut seen = HashSet::new();
+                for p in peers {
+                    valid_peer_uri(p)?;
+                    if !seen.insert(p) {
+                        return Err(format!("peer {p} is listed twice"));
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The URI schemes Yggdrasil accepts for a peer.
+const PEER_SCHEMES: &[&str] = &["tcp", "tls", "quic", "ws", "wss", "socks", "sockstls"];
+
+/// Check that `uri` looks like a Yggdrasil peer (`tls://host:port`, `tcp://[::1]:1234`):
+/// a known scheme, a host and a port, and only characters that stay data when written
+/// to a configuration file.
+pub fn valid_peer_uri(uri: &str) -> Result<(), String> {
+    let bad = |why: &str| Err(format!("invalid peer {uri:?}: {why}"));
+    if uri.len() > 255 {
+        return bad("too long");
+    }
+    if !uri
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-._~:/?&=%[]@+,".contains(&b))
+    {
+        return bad("unexpected character");
+    }
+    let Some((scheme, rest)) = uri.split_once("://") else {
+        return bad("expected scheme://host:port");
+    };
+    if !PEER_SCHEMES.contains(&scheme) {
+        return bad("scheme must be one of tcp, tls, quic, ws, wss, socks, sockstls");
+    }
+    let authority = rest.split(['/', '?']).next().unwrap_or_default();
+    let authority = authority.rsplit('@').next().unwrap_or_default();
+    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
+        let Some((h, p)) = v6.split_once("]:") else {
+            return bad("expected [address]:port");
+        };
+        (h, p)
+    } else {
+        match authority.rsplit_once(':') {
+            Some(hp) => hp,
+            None => return bad("the port is missing"),
+        }
+    };
+    if host.is_empty() {
+        return bad("the host is missing");
+    }
+    if port.parse::<u16>().ok().filter(|p| *p != 0).is_none() {
+        return bad("the port must be a number from 1 to 65535");
+    }
+    Ok(())
 }
 
 impl Default for BackendConfig {
@@ -365,6 +515,9 @@ impl DaemonConfig {
                 }
                 _ => {}
             }
+            inst.backend
+                .validate_managed()
+                .map_err(|e| format!("backend '{}': {e}", inst.id))?;
             if let Some(iface) = inst.backend.interface() {
                 if iface.is_empty() {
                     return Err(format!(
@@ -729,6 +882,8 @@ mod tests {
         let ygg = BackendConfig::Yggdrasil {
             interface: Some("tun0".to_string()),
             admin_endpoint: None,
+            managed: false,
+            peers: vec![],
         };
         assert_eq!(ygg.interface(), Some("tun0"));
 
@@ -746,6 +901,7 @@ mod tests {
             expect_tor_uid: None,
             cookie_owner: None,
             allow_remote_control: false,
+            managed: false,
         };
         assert_eq!(tor.interface(), None);
         assert!(tor.is_singleton());
@@ -766,6 +922,7 @@ mod tests {
                 expect_tor_uid: None,
                 cookie_owner: None,
                 allow_remote_control: false,
+                managed: false,
             }
         );
         for auth in [
@@ -784,6 +941,7 @@ mod tests {
                     expect_tor_uid: Some(110),
                     cookie_owner: None,
                     allow_remote_control: false,
+                    managed: false,
                 },
             };
             let json = serde_json::to_string(&inst).unwrap();
@@ -823,6 +981,7 @@ mod tests {
                 expect_tor_uid: None,
                 cookie_owner: None,
                 allow_remote_control: false,
+                managed: false,
             },
         };
         assert!(!format!("{inst:?}").contains("hunter2"));
@@ -840,6 +999,7 @@ mod tests {
                 expect_tor_uid: None,
                 cookie_owner: None,
                 allow_remote_control: false,
+                managed: false,
             },
         };
         assert!(DaemonConfig::validate_backends(&[tor("tor")]).is_ok());
@@ -948,7 +1108,9 @@ mod tests {
         assert_eq!(
             BackendConfig::Yggdrasil {
                 interface: Some("tun0".into()),
-                admin_endpoint: None
+                admin_endpoint: None,
+                managed: false,
+                peers: vec![],
             }
             .default_id(),
             "yggdrasil"
@@ -968,5 +1130,68 @@ mod tests {
             .default_id(),
             "dhcpv6-eth0"
         );
+    }
+
+    #[test]
+    fn managed_networks_take_no_external_settings() {
+        let ok: BackendInstanceConfig = serde_json::from_str(
+            r#"{"type":"yggdrasil","managed":true,"peers":["tls://example.org:1234","tcp://[2001:db8::1]:9"]}"#,
+        )
+        .unwrap();
+        assert_eq!(ok.id, "yggdrasil");
+        assert!(ok.backend.is_managed());
+        assert_eq!(ok.backend.validate_managed(), Ok(()));
+        assert!(BackendConfig::managed_tor().validate_managed().is_ok());
+        assert!(BackendConfig::managed_tor().is_managed());
+        assert!(!BackendConfig::default_tor().is_managed());
+
+        let bad = |json: &str| {
+            let inst: BackendInstanceConfig = serde_json::from_str(json).unwrap();
+            DaemonConfig::validate_backends(&[inst]).unwrap_err()
+        };
+        bad(r#"{"type":"tor","managed":true,"control":"127.0.0.1:9999"}"#);
+        bad(r#"{"type":"tor","managed":true,"cookie_path":"/x"}"#);
+        bad(r#"{"type":"tor","managed":true,"auth":"none"}"#);
+        bad(r#"{"type":"yggdrasil","managed":true,"interface":"tun0"}"#);
+        bad(r#"{"type":"yggdrasil","managed":true,"admin_endpoint":"tcp://x:1"}"#);
+        // Peers belong to a managed node only.
+        bad(r#"{"type":"yggdrasil","peers":["tls://a.b:1"]}"#);
+        bad(r#"{"type":"yggdrasil","managed":true,"peers":["tls://a.b:1","tls://a.b:1"]}"#);
+    }
+
+    #[test]
+    fn peer_uris_are_checked() {
+        for ok in [
+            "tls://example.org:1234",
+            "tcp://1.2.3.4:5",
+            "tcp://[2001:db8::1]:9",
+            "quic://host.name:443?key=abcdef",
+            "ws://h:80/path",
+        ] {
+            assert_eq!(valid_peer_uri(ok), Ok(()), "{ok}");
+        }
+        for bad in [
+            "",
+            "example.org:1234",
+            "http://example.org:80",
+            "tls://example.org",
+            "tls://:1234",
+            "tls://h:0",
+            "tls://h:70000",
+            "tls://h:1 ",
+            "tls://h:1\n\"x\"",
+            "tls://h:1\",\"y",
+            "tcp://[::1]",
+        ] {
+            assert!(valid_peer_uri(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_config_without_managed_stays_external() {
+        let inst: BackendInstanceConfig = serde_json::from_str(r#"{"type":"tor"}"#).unwrap();
+        assert!(!inst.backend.is_managed());
+        let text = serde_json::to_string(&inst).unwrap();
+        assert!(!text.contains("managed"));
     }
 }
