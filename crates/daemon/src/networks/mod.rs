@@ -205,13 +205,13 @@ pub fn bind_rank(ip: &IpAddr) -> u8 {
 pub fn enforcement_for(
     network: &NetworkInfo,
     snap: &Snapshot,
+    model: &Model<'_>,
+    info: &HashMap<AddressId, socketguard_core::AddressInfo>,
     secrets: &HashMap<AddressId, String>,
     binds: &HashMap<(AppId, PortRef), IpAddr>,
 ) -> NetworkEnforcement {
     let peers: HashMap<&str, &socketguard_core::Peer> =
         snap.peers.iter().map(|p| (p.id.as_str(), p)).collect();
-    let model = Model::new(snap.world());
-    let info = model.address_info();
     let apps: HashMap<&str, &socketguard_core::App> =
         snap.apps.iter().map(|a| (a.id.as_str(), a)).collect();
     let mut addresses = Vec::new();
@@ -371,8 +371,15 @@ mod tests {
             ..Snapshot::default()
         };
         let secrets = HashMap::from([("ad".to_string(), "ED25519-V3:secret".to_string())]);
-        let enforcement =
-            enforcement_for(&info(NetworkKind::Tor), &snap, &secrets, &HashMap::new());
+        let model = Model::new(snap.world());
+        let enforcement = enforcement_for(
+            &info(NetworkKind::Tor),
+            &snap,
+            &model,
+            &model.address_info(),
+            &secrets,
+            &HashMap::new(),
+        );
         let addr = &enforcement.addresses[0];
         let published: Vec<u16> = addr.ports.iter().map(|p| p.port).collect();
         assert_eq!(

@@ -87,7 +87,16 @@ impl Plan {
     }
 
     fn grant_reach(&self, grant: &Grant) -> Vec<GrantReach> {
-        Engine::reach_of(grant, &self.cat, &self.networks, &self.protected)
+        let c = &self.cat;
+        super::queries::ReachCtx::new(
+            &c.apps,
+            &c.peers,
+            &c.groups,
+            &c.tags,
+            &c.port_groups,
+            &c.reservations,
+        )
+        .reach_of(grant, &self.networks, &self.protected)
     }
 
     /// A scope whose port group may be a `ref` of an earlier operation.

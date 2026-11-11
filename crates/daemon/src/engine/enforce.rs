@@ -3,6 +3,7 @@
 use super::*;
 use crate::api::DaemonEvent;
 use crate::networks;
+use crate::ruleset::Snapshot;
 use crate::state::Database;
 use crate::AppState;
 use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
@@ -34,7 +35,7 @@ impl Engine {
     /// failure (e.g. Tor is down) is logged, shows as the network's status and in
     /// [`Engine::enforcement_pending`] (so API mutations answer 202); the next pass
     /// retries, including removals recorded in the ledger (`networks::ledger`).
-    pub(super) async fn enforce_networks(&self, state: &AppState) {
+    pub(super) async fn enforce_networks(&self, state: &AppState, snapshot: &Snapshot) {
         if state.db.unadopted().await.unwrap_or(false) {
             return; // an unadopted ruleset: nothing is added or removed until `enable`
         }
@@ -51,20 +52,16 @@ impl Engine {
         // removal keeps being retried (e.g. Tor was down when `disable` ran). An unreadable
         // latch counts as disabled: failing closed means unpublished.
         let disabled = state.db.disabled().await;
-        let prepared = async {
-            let snapshot = self.gather_snapshot(state).await?;
-            let secrets = state.db.onion_keys().await?;
-            anyhow::Ok((snapshot, secrets))
-        }
-        .await;
-        let (snapshot, secrets) = match prepared {
-            Ok(p) => p,
+        let secrets = match state.db.onion_keys().await {
+            Ok(s) => s,
             Err(e) => {
                 warn!("Could not gather the state to enforce: {e}");
                 return;
             }
         };
         let binds = self.binds.lock().unwrap().clone();
+        let model = socketguard_core::Model::new(snapshot.world());
+        let address_info = model.address_info();
         let ledger = networks::ledger::load(&state.db).await.unwrap_or_else(|e| {
             warn!("Could not read the onion service ledger: {e:#}");
             Default::default()
@@ -73,7 +70,14 @@ impl Engine {
             let Some(info) = snapshot.networks.iter().find(|n| n.id == id) else {
                 continue;
             };
-            let mut enforcement = networks::enforcement_for(info, &snapshot, &secrets, &binds);
+            let mut enforcement = networks::enforcement_for(
+                info,
+                snapshot,
+                &model,
+                &address_info,
+                &secrets,
+                &binds,
+            );
             if disabled {
                 enforcement.addresses.clear();
             }

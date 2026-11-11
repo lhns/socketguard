@@ -47,7 +47,10 @@ impl Engine {
             .collect();
         self.retire_addresses(state, &addresses).await?;
         self.remove_app_locators(state, &addresses).await;
-        state.db.delete_app(id).await?;
+        {
+            let _apps = self.apps_lock.lock().await;
+            state.db.delete_app(id).await?;
+        }
         let applied = self.apply_and_ensure(state).await;
         self.sweep_owned(state).await;
         let activity = NewActivity::new(

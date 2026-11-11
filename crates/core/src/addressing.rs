@@ -23,7 +23,8 @@ use crate::scope::{
 };
 use crate::tags::{grant_targets, grants_for_app, reservation_members, AppGrant, Tag, TagMember};
 use crate::types::Protocol;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// A row of an app.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -93,7 +94,14 @@ pub struct Model<'a> {
     /// Tags and, standing in for tags, reservations (see [`grant_targets`]).
     pub targets: Vec<Tag>,
     apps: HashMap<&'a str, &'a App>,
-    foreign: HashMap<&'a str, PortRangeSet>,
+    // What the model works out is kept for its lifetime (a model is built per request or
+    // pass), so a question asked for every address is answered once.
+    foreign: Mutex<HashMap<&'a str, Arc<PortRangeSet>>>,
+    named: Mutex<HashMap<&'a str, Arc<BTreeSet<Row>>>>,
+    automatic: Mutex<HashMap<&'a str, Arc<BTreeSet<Row>>>>,
+    bound: OnceLock<BTreeSet<Row>>,
+    grants_of: Mutex<HashMap<String, Arc<Vec<AppGrant>>>>,
+    rows: Mutex<HashMap<(String, Scope), Arc<(ScopePorts, PortRangeSet)>>>,
 }
 
 fn listening(app: &App) -> PortRangeSet {
@@ -111,11 +119,12 @@ impl<'a> Model<'a> {
             w,
             targets: grant_targets(w.tags, w.reservations),
             apps: w.apps.iter().map(|a| (a.id.as_str(), a)).collect(),
-            foreign: w
-                .apps
-                .iter()
-                .map(|a| (a.id.as_str(), foreign_listening(w.apps, &a.id)))
-                .collect(),
+            foreign: Mutex::default(),
+            named: Mutex::default(),
+            automatic: Mutex::default(),
+            bound: OnceLock::new(),
+            grants_of: Mutex::default(),
+            rows: Mutex::default(),
         }
     }
 
@@ -123,20 +132,51 @@ impl<'a> Model<'a> {
         self.w.networks.iter().find(|n| n.id == id)
     }
 
-    fn foreign_of(&self, app_id: &str) -> PortRangeSet {
-        self.foreign.get(app_id).cloned().unwrap_or_default()
+    fn foreign_of(&self, app_id: &str) -> Arc<PortRangeSet> {
+        let Some((&id, _)) = self.apps.get_key_value(app_id) else {
+            return Arc::default();
+        };
+        self.foreign
+            .lock()
+            .unwrap()
+            .entry(id)
+            .or_insert_with(|| Arc::new(foreign_listening(self.w.apps, id)))
+            .clone()
+    }
+
+    /// What a row of `app` serves (ports other apps listen on left out), and what it names
+    /// before that exclusion. The same row has an address on each network.
+    fn row_ports(&self, app: &App, scope: &Scope) -> Arc<(ScopePorts, PortRangeSet)> {
+        let key = (app.id.clone(), scope.clone());
+        if let Some(r) = self.rows.lock().unwrap().get(&key) {
+            return r.clone();
+        }
+        let groups = self.w.port_groups;
+        let served = scope_ports(app, scope, groups, &self.foreign_of(&app.id));
+        let raw = scope_ports(app, scope, groups, &PortRangeSet::new()).total();
+        let r = Arc::new((served, raw));
+        self.rows.lock().unwrap().insert(key, r.clone());
+        r
     }
 
     /// The grants that apply to `app` (tag and reservation grants expanded), with the
     /// ports they cover on it.
-    pub fn app_grants(&self, app: &App) -> Vec<AppGrant> {
-        grants_for_app(
+    pub fn app_grants(&self, app: &App) -> Arc<Vec<AppGrant>> {
+        if let Some(g) = self.grants_of.lock().unwrap().get(&app.id) {
+            return g.clone();
+        }
+        let grants = Arc::new(grants_for_app(
             self.w.grants,
             &self.targets,
             app,
             self.w.port_groups,
             &self.foreign_of(&app.id),
-        )
+        ));
+        self.grants_of
+            .lock()
+            .unwrap()
+            .insert(app.id.clone(), grants.clone());
+        grants
     }
 
     fn usable(&self, row: &Row, network: &Network) -> bool {
@@ -161,7 +201,15 @@ impl<'a> Model<'a> {
     }
 
     /// The rows a grant that applies on `network` names.
-    pub fn named_rows(&self, network: &Network) -> BTreeSet<Row> {
+    pub fn named_rows(&self, network: &'a Network) -> BTreeSet<Row> {
+        (*self.named_cached(network)).clone()
+    }
+
+    fn named_cached(&self, network: &'a Network) -> Arc<BTreeSet<Row>> {
+        if let Some(rows) = self.named.lock().unwrap().get(network.id.as_str()) {
+            return rows.clone();
+        }
+        let tags: HashMap<&str, &Tag> = self.w.tags.iter().map(|t| (t.id.as_str(), t)).collect();
         let mut out = BTreeSet::new();
         for g in self.w.grants.iter().filter(|g| grant_applies(g, network)) {
             let rows: Vec<Row> = match &g.target {
@@ -169,57 +217,62 @@ impl<'a> Model<'a> {
                     app_id: a.clone(),
                     scope: g.scope.clone(),
                 }],
-                Target::Tag(t) => self
-                    .w
-                    .tags
-                    .iter()
-                    .find(|x| &x.id == t)
+                Target::Tag(t) => tags
+                    .get(t.as_str())
                     .map(|t| t.members.iter().map(Row::from).collect())
                     .unwrap_or_default(),
                 Target::Reservation(_) => vec![],
             };
             out.extend(rows.into_iter().filter(|r| self.usable(r, network)));
         }
-        out
+        let rows = Arc::new(out);
+        self.named
+            .lock()
+            .unwrap()
+            .insert(network.id.as_str(), rows.clone());
+        rows
     }
 
     /// The rows bound to a reservation.
-    pub fn bound_rows(&self) -> BTreeSet<Row> {
-        self.w
-            .reservations
-            .iter()
-            .flat_map(|r| reservation_members(r, self.w.tags))
-            .map(|m| Row::from(&m))
-            .collect()
+    pub fn bound_rows(&self) -> &BTreeSet<Row> {
+        self.bound.get_or_init(|| {
+            self.w
+                .reservations
+                .iter()
+                .flat_map(|r| reservation_members(r, self.w.tags))
+                .map(|m| Row::from(&m))
+                .collect()
+        })
     }
 
     /// The rows that have an automatic address on `network`, up.
-    pub fn automatic_rows(&self, network: &Network) -> BTreeSet<Row> {
-        if !network.grants_apply {
-            return self
-                .w
+    pub fn automatic_rows(&self, network: &'a Network) -> Arc<BTreeSet<Row>> {
+        if let Some(rows) = self.automatic.lock().unwrap().get(network.id.as_str()) {
+            return rows.clone();
+        }
+        let rows: BTreeSet<Row> = if !network.grants_apply {
+            self.w
                 .apps
                 .iter()
                 .map(|a| Row {
                     app_id: a.id.clone(),
                     scope: Scope::All,
                 })
-                .collect();
-        }
-        let bound = self.bound_rows();
-        self.named_rows(network)
-            .into_iter()
-            .filter(|r| !bound.contains(r))
-            .collect()
-    }
-
-    /// The reservation a row is bound to, if any.
-    pub fn reservation_of(&self, row: &Row) -> Option<&'a Reservation> {
-        self.w.reservations.iter().find(|r| {
-            reservation_members(r, self.w.tags)
+                .collect()
+        } else {
+            let bound = self.bound_rows();
+            self.named_cached(network)
                 .iter()
-                .any(|m| Row::from(m) == *row)
-        })
+                .filter(|r| !bound.contains(r))
+                .cloned()
+                .collect()
+        };
+        let rows = Arc::new(rows);
+        self.automatic
+            .lock()
+            .unwrap()
+            .insert(network.id.as_str(), rows.clone());
+        rows
     }
 
     /// What a reservation serves: for each bound row `scope_ports` with the exclusion rule;
@@ -227,8 +280,6 @@ impl<'a> Model<'a> {
     /// on it, and is closed when none or several do (ADR 0047). Conflicts are reported from
     /// the plain claims, so a resolved one still shows.
     pub fn reservation_serving(&self, res: &Reservation) -> Serving {
-        let none = PortRangeSet::new();
-        let groups = self.w.port_groups;
         // Rows, with the bindings that produce them.
         let mut rows: Vec<(Row, Vec<BindingId>)> = Vec::new();
         for b in &res.bindings {
@@ -248,8 +299,7 @@ impl<'a> Model<'a> {
             let Some(app) = self.apps.get(row.app_id.as_str()) else {
                 continue;
             };
-            let all = scope_ports(app, &row.scope, groups, &none).total();
-            let t = scope_ports(app, &row.scope, groups, &self.foreign_of(&app.id));
+            let (t, all) = self.row_ports(app, &row.scope).as_ref().clone();
             trimmed
                 .entry(app.id.clone())
                 .and_modify(|x| *x = x.union(&t))
@@ -354,8 +404,6 @@ impl<'a> Model<'a> {
 
     /// Every address with its state.
     pub fn address_info(&self) -> HashMap<AddressId, AddressInfo> {
-        let none = PortRangeSet::new();
-        let groups = self.w.port_groups;
         let mut servings: HashMap<&str, Serving> = HashMap::new();
         let mut out = HashMap::new();
         for a in self.w.addresses {
@@ -379,8 +427,7 @@ impl<'a> Model<'a> {
                 &a.app_id,
                 a.app_id.as_deref().and_then(|id| self.apps.get(id)),
             ) {
-                let served = scope_ports(app, &a.scope, groups, &self.foreign_of(&app.id));
-                let raw = scope_ports(app, &a.scope, groups, &none).total();
+                let (served, raw) = self.row_ports(app, &a.scope).as_ref().clone();
                 let up = network.is_some_and(|n| {
                     self.automatic_rows(n).contains(&Row {
                         app_id: app_id.clone(),
@@ -402,16 +449,17 @@ impl<'a> Model<'a> {
 
     /// The automatic addresses that are missing: a row and a network.
     pub fn missing_automatic(&self) -> Vec<(NetworkId, Row)> {
+        let have: HashSet<(&str, &str, &Scope)> = self
+            .w
+            .addresses
+            .iter()
+            .filter_map(|a| Some((a.network_id.as_str(), a.app_id.as_deref()?, &a.scope)))
+            .collect();
         let mut out = Vec::new();
         for n in self.w.networks {
-            for row in self.automatic_rows(n) {
-                let has = self.w.addresses.iter().any(|a| {
-                    a.network_id == n.id
-                        && a.app_id.as_deref() == Some(row.app_id.as_str())
-                        && a.scope == row.scope
-                });
-                if !has {
-                    out.push((n.id.clone(), row));
+            for row in self.automatic_rows(n).iter() {
+                if !have.contains(&(n.id.as_str(), row.app_id.as_str(), &row.scope)) {
+                    out.push((n.id.clone(), row.clone()));
                 }
             }
         }

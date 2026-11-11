@@ -44,7 +44,7 @@ impl Rig {
     }
 
     async fn reconcile(&self) {
-        let mut engine = self.d.state.engine.write().await;
+        let engine = self.d.state.engine.read().await;
         engine.reconcile(&self.d.state).await.unwrap();
     }
 

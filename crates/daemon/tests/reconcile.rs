@@ -70,7 +70,7 @@ impl Harness {
     }
 
     async fn reconcile(&self) {
-        let mut engine = self.state.engine.write().await;
+        let engine = self.state.engine.read().await;
         engine.reconcile(&self.state).await.unwrap();
     }
 

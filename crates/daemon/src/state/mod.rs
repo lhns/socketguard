@@ -65,6 +65,76 @@ pub struct Database {
     last_prune: Mutex<Option<Instant>>,
 }
 
+/// Record which ports an app listens on now: those in `live` become listening (and are
+/// created when new), every other known port stops listening. Returns the ports seen for
+/// the first time.
+async fn sync_ports_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    app_id: &str,
+    live: &[(PortRef, AddrFamily)],
+    now: DateTime<Utc>,
+) -> Result<Vec<PortRef>> {
+    let known: Vec<(i64, String)> =
+        sqlx::query_as("SELECT port, proto FROM app_ports WHERE app_id = ?")
+            .bind(app_id)
+            .fetch_all(&mut **tx)
+            .await?;
+    let known: Vec<PortRef> = known
+        .into_iter()
+        .map(|(p, pr)| {
+            Ok(PortRef {
+                port: to_port(p)?,
+                proto: pr.parse().map_err(anyhow::Error::msg)?,
+            })
+        })
+        .collect::<Result<_>>()?;
+    let mut new_ports = Vec::new();
+    for (p, family) in live {
+        if !known.contains(p) {
+            new_ports.push(*p);
+        }
+        sqlx::query(
+            "INSERT INTO app_ports (app_id, port, proto, listening, last_seen, family) \
+             VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(app_id, port, proto) \
+             DO UPDATE SET listening = 1, last_seen = excluded.last_seen, \
+             family = excluded.family",
+        )
+        .bind(app_id)
+        .bind(p.port)
+        .bind(p.proto.to_string())
+        .bind(ts(now))
+        .bind(family.as_str())
+        .execute(&mut **tx)
+        .await?;
+    }
+    for k in known.iter().filter(|k| !live.iter().any(|(p, _)| p == *k)) {
+        sqlx::query(
+            "UPDATE app_ports SET listening = 0 WHERE app_id = ? AND port = ? AND proto = ?",
+        )
+        .bind(app_id)
+        .bind(k.port)
+        .bind(k.proto.to_string())
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(new_ports)
+}
+
+/// What a poll saw of one known app.
+pub struct Sighting<'a> {
+    pub app_id: &'a str,
+    /// New process details and `last_seen`; absent for an app that stopped listening.
+    pub touch: Option<Touch<'a>>,
+    pub ports: &'a [(PortRef, AddrFamily)],
+}
+
+#[derive(Clone, Copy)]
+pub struct Touch<'a> {
+    pub process_name: &'a str,
+    pub exe_path: Option<&'a str>,
+    pub system: bool,
+}
+
 fn ts(dt: DateTime<Utc>) -> String {
     // Fixed width, so text comparison orders like time.
     dt.to_rfc3339_opts(SecondsFormat::Micros, true)
@@ -150,25 +220,31 @@ impl Database {
         Ok(())
     }
 
-    /// Record another sighting of a known app.
-    pub async fn touch_app(
+    /// Record what a poll saw of known apps, in one transaction: process details and last
+    /// sighting, and the ports ([`sync_ports_in`]).
+    pub async fn record_sightings(
         &self,
-        id: &str,
-        process_name: &str,
-        exe_path: Option<&str>,
-        system: bool,
+        sightings: &[Sighting<'_>],
         now: DateTime<Utc>,
     ) -> Result<()> {
-        sqlx::query(
-            "UPDATE apps SET process_name = ?, exe_path = ?, system = ?, last_seen = ? WHERE id = ?",
-        )
-            .bind(process_name)
-            .bind(exe_path)
-            .bind(system)
-            .bind(ts(now))
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let mut tx = self.pool.begin().await?;
+        for s in sightings {
+            if let Some(t) = &s.touch {
+                sqlx::query(
+                    "UPDATE apps SET process_name = ?, exe_path = ?, system = ?, last_seen = ? \
+                     WHERE id = ?",
+                )
+                .bind(t.process_name)
+                .bind(t.exe_path)
+                .bind(t.system)
+                .bind(ts(now))
+                .bind(s.app_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            sync_ports_in(&mut tx, s.app_id, s.ports, now).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -272,9 +348,8 @@ impl Database {
         Ok(out)
     }
 
-    /// Record which ports an app listens on now: those in `live` become listening (and
-    /// are created when new), every other known port stops listening. Returns the ports
-    /// seen for the first time.
+    /// [`sync_ports_in`] on its own, for the tests of the port bookkeeping.
+    #[cfg(test)]
     pub async fn sync_app_ports(
         &self,
         app_id: &str,
@@ -282,49 +357,7 @@ impl Database {
         now: DateTime<Utc>,
     ) -> Result<Vec<PortRef>> {
         let mut tx = self.pool.begin().await?;
-        let known: Vec<(i64, String)> =
-            sqlx::query_as("SELECT port, proto FROM app_ports WHERE app_id = ?")
-                .bind(app_id)
-                .fetch_all(&mut *tx)
-                .await?;
-        let known: Vec<PortRef> = known
-            .into_iter()
-            .map(|(p, pr)| {
-                Ok(PortRef {
-                    port: to_port(p)?,
-                    proto: pr.parse().map_err(anyhow::Error::msg)?,
-                })
-            })
-            .collect::<Result<_>>()?;
-        let mut new_ports = Vec::new();
-        for (p, family) in live {
-            if !known.contains(p) {
-                new_ports.push(*p);
-            }
-            sqlx::query(
-                "INSERT INTO app_ports (app_id, port, proto, listening, last_seen, family) \
-                 VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(app_id, port, proto) \
-                 DO UPDATE SET listening = 1, last_seen = excluded.last_seen, \
-                 family = excluded.family",
-            )
-            .bind(app_id)
-            .bind(p.port)
-            .bind(p.proto.to_string())
-            .bind(ts(now))
-            .bind(family.as_str())
-            .execute(&mut *tx)
-            .await?;
-        }
-        for k in known.iter().filter(|k| !live.iter().any(|(p, _)| p == *k)) {
-            sqlx::query(
-                "UPDATE app_ports SET listening = 0 WHERE app_id = ? AND port = ? AND proto = ?",
-            )
-            .bind(app_id)
-            .bind(k.port)
-            .bind(k.proto.to_string())
-            .execute(&mut *tx)
-            .await?;
-        }
+        let new_ports = sync_ports_in(&mut tx, app_id, live, now).await?;
         tx.commit().await?;
         Ok(new_ports)
     }

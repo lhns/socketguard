@@ -119,13 +119,17 @@ fn open_pipe(name: &str) -> std::io::Result<Stream> {
 
 #[cfg(windows)]
 pub async fn connect(name: &str) -> std::io::Result<Stream> {
+    // A burst of requests finds the one waiting server instance taken until the daemon has
+    // made the next; that takes microseconds, so start with short waits.
     let mut attempts = 0;
+    let mut wait = std::time::Duration::from_millis(1);
     loop {
         match open_pipe(name) {
             Ok(c) => return Ok(c),
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempts < 100 => {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempts < 200 => {
                 attempts += 1;
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(std::time::Duration::from_millis(50));
             }
             Err(e) => return Err(e),
         }
