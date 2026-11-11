@@ -67,6 +67,17 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Init => flows::init(&c, &mut prompt::Stdin).await,
         Command::Export(a) => export(&c, a).await,
         Command::Apply(a) => apply(&c, a).await,
+        Command::Exposure { without } => {
+            let e = c.client.exposure(without.as_deref()).await?;
+            c.print(&e, || {
+                let text = render::exposure(&e);
+                if text.is_empty() {
+                    "nothing becomes reachable: no Yggdrasil node keeps running".to_string()
+                } else {
+                    text
+                }
+            })
+        }
         Command::Disable(a) => disable(&c, a).await,
         Command::Enable => enable(&c).await,
         Command::Access(cmd) => access(cmd),
@@ -262,6 +273,7 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
             pause,
             undo,
             uninstall_packages,
+            stop_service_only,
         } => {
             let opts = crate::setup::Options {
                 yes,
@@ -275,6 +287,7 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
                     dry_run,
                     config,
                     uninstall_packages,
+                    stop_service_only,
                 };
                 crate::setup::undo(kind.into(), &u, &mut crate::setup::System, &c.client)
                     .await
@@ -329,7 +342,9 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
                 }
                 backend_config(r#type, interface, admin_endpoint)?
             };
-            let n = c.client.add_network(&NewNetwork { id, backend }).await?;
+            let saved = c.client.add_network(&NewNetwork { id, backend }).await?;
+            c.warn_pending(&saved.enforcement);
+            let n = saved.value;
             c.print(&n, || {
                 format!(
                     "added network {}\n\n{}",
@@ -338,8 +353,19 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
                 )
             })
         }
-        NetworksCmd::Rm { id, force } => {
-            c.client.delete_network(&id, force).await?;
+        NetworksCmd::Rm { id, force, yes } => {
+            // Removing the network removes its block: say what that leaves reachable.
+            let exposure = c.client.exposure(Some(&id)).await?;
+            let text = render::exposure(&exposure);
+            if !text.is_empty() {
+                eprintln!("{text}");
+                prompt::Stdin.confirm_or_yes(
+                    yes,
+                    "Remove the network anyway?",
+                    "removing this network leaves the host reachable over it; repeat with --yes to confirm",
+                )?;
+            }
+            c.client.delete_network(&id, force, true).await?;
             c.done(format!("removed network {id}"))
         }
     }
@@ -1824,6 +1850,10 @@ async fn apply(c: &Ctx, a: ApplyArgs) -> Result<()> {
 // ─── Disable and enable ──────────────────────────────────────────────────────
 
 async fn disable(c: &Ctx, a: DisableArgs) -> Result<()> {
+    let text = render::exposure(&c.client.exposure(None).await?);
+    if !text.is_empty() {
+        eprintln!("{text}");
+    }
     prompt::Stdin.confirm_or_yes(
         a.yes,
         "Remove all SocketGuard rules and addresses, opening the host?",

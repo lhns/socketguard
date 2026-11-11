@@ -33,7 +33,7 @@ impl DesiredRuleset {
         let names = self.rules.iter().filter_map(|r| r.iif.as_deref()).chain(
             self.scopes.iter().filter_map(|s| match &s.matcher {
                 ScopeMatch::Interface { name, .. } => Some(name.as_str()),
-                ScopeMatch::Destinations(_) => None,
+                ScopeMatch::Destinations(_) | ScopeMatch::DestinationNet(_) => None,
             }),
         );
         for n in names {
@@ -60,7 +60,7 @@ impl DesiredRuleset {
             .filter(|s| s.kind == ScopeKind::Overlay)
             .filter_map(|s| match &s.matcher {
                 ScopeMatch::Interface { name, .. } => Some(name.as_str()),
-                ScopeMatch::Destinations(_) => None,
+                ScopeMatch::Destinations(_) | ScopeMatch::DestinationNet(_) => None,
             })
             .collect();
         v.sort_unstable();
@@ -98,7 +98,7 @@ impl Scope {
     pub fn destinations_by_family(&self) -> (Vec<&IpAddr>, Vec<&IpAddr>) {
         match &self.matcher {
             ScopeMatch::Destinations(dsts) => dsts.iter().partition(|d| d.is_ipv6()),
-            ScopeMatch::Interface { .. } => Default::default(),
+            ScopeMatch::Interface { .. } | ScopeMatch::DestinationNet(_) => Default::default(),
         }
     }
 }
@@ -117,6 +117,10 @@ pub enum ScopeKind {
 pub enum ScopeMatch {
     /// Inbound packets whose destination is one of these addresses (any port, any interface).
     Destinations(Vec<IpAddr>),
+    /// Inbound packets whose destination lies in this network, on any interface (ADR 0051).
+    /// It holds while the interface of an overlay does not exist, which an interface match
+    /// cannot.
+    DestinationNet(IpNet),
     /// All inbound packets arriving on this interface, for the given families. Matching by
     /// interface covers every prefix on it, including rotating privacy and link-local addresses.
     Interface { name: String, families: Families },

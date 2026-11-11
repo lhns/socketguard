@@ -20,10 +20,11 @@ use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use socketguard_core::api_types::{
     error_code, event_name, ApiError, ApplyRequest, AttachPortGroup, ChangesRequest, Counts,
-    DisableRequest, EnforcementNotice, LockoutRiskInfo, MemberQuery, MoveAppRequest, NewBinding,
-    NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation, NewTag, NewTagMember,
-    ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse, ReserveRequest,
-    ReviewRequest, SetMembers, StatusResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
+    DisableRequest, Enforcement, EnforcementNotice, EnforcementStatus, ExposureQuery,
+    LockoutRiskInfo, MemberQuery, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer,
+    NewPortGroup, NewReservation, NewTag, NewTagMember, ParseCredentialsRequest,
+    ProtectHostRequest, ProtectHostResponse, ReserveRequest, ReviewRequest, SetMembers,
+    StatusResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
 use socketguard_core::{ActivityQuery, NewCredential, NewGrant};
@@ -138,6 +139,7 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::GET, "/api/networks/setup"),
     (Method::POST, "/api/networks"),
     (Method::DELETE, "/api/networks/{id}"),
+    (Method::GET, "/api/exposure"),
     (Method::GET, "/api/settings"),
     (Method::PUT, "/api/settings/protect-host"),
     (Method::GET, "/api/activity"),
@@ -207,6 +209,7 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("GET", "/api/networks/setup") => get(networks_setup),
         ("POST", "/api/networks") => post(network_create),
         ("DELETE", "/api/networks/{id}") => delete(network_delete),
+        ("GET", "/api/exposure") => get(exposure_get),
         ("GET", "/api/settings") => get(settings_get),
         ("PUT", "/api/settings/protect-host") => put(protect_host_put),
         ("GET", "/api/activity") => get(activity_list),
@@ -938,9 +941,15 @@ async fn networks_list(State(state): State<Shared>) -> ApiResult<Response> {
 /// What can be added on this host and how far each kind is (ADR 0048). Reads only; the
 /// probes run off the runtime, after the engine lock is released.
 async fn networks_setup(State(state): State<Shared>) -> ApiResult<Response> {
-    let existing = crate::setup::Existing::from_networks(&state.engine.read().await.networks());
+    let (existing, block) = {
+        let engine = state.engine.read().await;
+        (
+            crate::setup::Existing::from_networks(&engine.networks()),
+            engine.yggdrasil_block(&state).await,
+        )
+    };
     let config_path = state.config_path.clone();
-    let setup = tokio::task::spawn_blocking(move || {
+    let mut setup = tokio::task::spawn_blocking(move || {
         crate::setup::detect(
             &crate::setup::SystemProbes::default(),
             &existing,
@@ -949,6 +958,7 @@ async fn networks_setup(State(state): State<Shared>) -> ApiResult<Response> {
     })
     .await
     .map_err(anyhow::Error::from)?;
+    setup.yggdrasil_block = block;
     Ok(Json(setup).into_response())
 }
 
@@ -971,15 +981,37 @@ async fn network_create(
     // The write lock stays held until the file is written: two requests cannot save each
     // other's stale list.
     let mut engine = state.engine.write().await;
-    let network = engine.add_network(&state, inst).await?;
+    let (network, applied) = engine.add_network(&state, inst).await?;
     persist_networks(&state, &engine).await;
-    Ok((StatusCode::CREATED, Json(network)).into_response())
+    if let Err(e) = applied {
+        // Saved and live, but the rules (and so the network's block) are not in force:
+        // say so instead of a plain 201 (ADR 0051).
+        let mut body = serde_json::to_value(&network).unwrap_or_default();
+        if let Some(m) = body.as_object_mut() {
+            m.insert(
+                "enforcement".to_string(),
+                serde_json::to_value(Enforcement {
+                    status: EnforcementStatus::Failed,
+                    message: format!(
+                        "the network was added but the firewall rules could not be applied, \
+                         so it is not closed yet; retrying ({e:#})"
+                    ),
+                })
+                .unwrap_or_default(),
+            );
+        }
+        return Ok((StatusCode::ACCEPTED, Json(body)).into_response());
+    }
+    Ok(saved(&engine, StatusCode::CREATED, Some(network)))
 }
 
 #[derive(serde::Deserialize, Default)]
 struct NetworkDeleteParams {
     #[serde(default)]
     force: bool,
+    /// Remove a Yggdrasil network although its node keeps running (ADR 0051).
+    #[serde(default)]
+    confirm_exposed: bool,
 }
 
 async fn network_delete(
@@ -988,9 +1020,34 @@ async fn network_delete(
     ApiQuery(q): ApiQuery<NetworkDeleteParams>,
 ) -> ApiResult<StatusCode> {
     let mut engine = state.engine.write().await;
+    if !q.confirm_exposed && !state.db.disabled().await {
+        let exposure = engine.exposure(&state, Some(&id)).await?;
+        if exposure.networks.iter().any(|n| n.node_running) {
+            return Err(ApiErr {
+                status: StatusCode::CONFLICT,
+                body: ApiError {
+                    code: error_code::CONFIRMATION_REQUIRED.to_string(),
+                    message: "the network's software keeps running and its programs become \
+                              reachable over it; confirm with confirm_exposed"
+                        .to_string(),
+                    details: serde_json::to_value(exposure).ok(),
+                },
+            });
+        }
+    }
     engine.remove_network(&state, &id, q.force).await?;
     persist_networks(&state, &engine).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// What becomes reachable without the block of a network (`without` an id, else all).
+async fn exposure_get(
+    State(state): State<Shared>,
+    ApiQuery(q): ApiQuery<ExposureQuery>,
+) -> ApiResult<Response> {
+    let without = q.without.filter(|w| w != "all");
+    let engine = state.engine.read().await;
+    Ok(Json(engine.exposure(&state, without.as_deref()).await?).into_response())
 }
 
 /// The Tor settings the API accepts: the defaults, or exactly what the config file already

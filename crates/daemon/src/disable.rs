@@ -30,6 +30,9 @@ pub struct DisableInput<'a> {
     pub networks: Vec<NetworkSlot>,
     pub firewall: Arc<dyn Firewall>,
     pub ifaces: Arc<dyn InterfaceManager>,
+    /// What stays reachable over Yggdrasil once the rules are gone (ADR 0051); None when
+    /// the caller cannot tell. Reported as notes, so every frontend of the report shows it.
+    pub exposure: Option<socketguard_core::api_types::ExposureResponse>,
 }
 
 /// Remove everything the database knows about, then the rules.
@@ -40,8 +43,12 @@ pub async fn disable_with_db(input: DisableInput<'_>) -> Report {
         networks,
         firewall,
         ifaces,
+        exposure,
     } = input;
     let mut report = Report::default();
+    for sentence in exposure.iter().flat_map(|e| e.sentences()) {
+        report.note(sentence);
+    }
 
     // The latch first: nothing puts the rules or addresses back while we remove them.
     if let Err(e) = db.set_disabled(true).await {
@@ -317,6 +324,20 @@ async fn disable_non_ip(db: &Database, slots: &[NetworkSlot]) -> Report {
     r
 }
 
+/// What `--disable` and `uninstall` say when a Yggdrasil network was configured (ADR 0051).
+pub const YGGDRASIL_LEFT_RUNNING: &str = "The Yggdrasil block is removed with the rest: if a Yggdrasil node still runs, programs on this PC that listen on all addresses are reachable over it. Stop its service (if `networks setup` started it, `socketguard networks setup yggdrasil --undo --stop-service-only` does).";
+
+/// Whether the config file lists a Yggdrasil network.
+pub fn config_has_yggdrasil(config: &Path) -> bool {
+    std::fs::read_to_string(config)
+        .ok()
+        .and_then(|t| {
+            serde_json::from_str::<serde_json::Value>(t.strip_prefix('\u{feff}').unwrap_or(&t)).ok()
+        })
+        .and_then(|d| d.get("backends").and_then(|b| b.as_array().cloned()))
+        .is_some_and(|b| b.iter().any(|n| n["type"] == "yggdrasil"))
+}
+
 /// Where `--disable` and `uninstall` looked.
 pub struct Target<'a> {
     pub config: &'a Path,
@@ -343,14 +364,20 @@ pub async fn disable_command(
             .map_err(|e| format!("{e:#}"))?;
         db.migrate().await.map_err(|e| format!("{e:#}"))?;
         let ula = db.ula_global_id().await.map_err(|e| format!("{e:#}"))?;
-        return Ok(disable_with_db(DisableInput {
+        let mut report = disable_with_db(DisableInput {
             db: &db,
             interfaces,
             networks: make_slots(ula),
             firewall,
             ifaces,
+            exposure: None,
         })
-        .await);
+        .await;
+        // No daemon is running to ask what listens: say what the block's going means.
+        if config_has_yggdrasil(target.config) {
+            report.note(YGGDRASIL_LEFT_RUNNING);
+        }
+        return Ok(report);
     }
     let looked = format!(
         "config {} ({}), database {}",
@@ -419,6 +446,7 @@ mod tests {
         net.plant_address("lo", addr);
         net.set_remove_failing(true);
         let r = disable_with_db(DisableInput {
+            exposure: None,
             db: &db,
             interfaces: &HashMap::from([("local".to_string(), "lo".to_string())]),
             networks: vec![],
@@ -444,6 +472,7 @@ mod tests {
         let net = MockInterfaceManager::new(Arc::new(Mutex::new(vec![])));
         net.plant_address("lo", a); // b is not on the interface
         let r = disable_with_db(DisableInput {
+            exposure: None,
             db: &db,
             interfaces: &HashMap::from([("local".to_string(), "lo".to_string())]),
             networks: vec![],
@@ -599,6 +628,7 @@ mod tests {
         net.plant_address("lo", addr);
         let calls = Arc::new(Mutex::new(vec![]));
         let r = disable_with_db(DisableInput {
+            exposure: None,
             db: &db,
             interfaces: &HashMap::from([("local".to_string(), "lo".to_string())]),
             networks: vec![NetworkSlot {
@@ -644,6 +674,7 @@ mod tests {
             reachable: true,
         });
         let r = disable_with_db(DisableInput {
+            exposure: None,
             db: &db,
             interfaces: &HashMap::new(),
             networks: vec![NetworkSlot {
@@ -674,6 +705,7 @@ mod tests {
             reachable: false,
         });
         let r = disable_with_db(DisableInput {
+            exposure: None,
             db: &db,
             interfaces: &HashMap::new(),
             networks: vec![NetworkSlot {
@@ -703,6 +735,7 @@ mod tests {
             .await
             .unwrap();
         let r = disable_with_db(DisableInput {
+            exposure: None,
             db: &db,
             interfaces: &HashMap::new(),
             networks: vec![],
@@ -711,5 +744,40 @@ mod tests {
         })
         .await;
         assert!(!r.complete(), "{}", r.render());
+    }
+    #[tokio::test]
+    async fn what_stays_reachable_is_part_of_the_report() {
+        use socketguard_core::api_types::{ExposedListener, ExposureResponse, NetworkExposure};
+        let db = db().await;
+        let exposure = ExposureResponse {
+            networks: vec![NetworkExposure {
+                network: "yggdrasil".into(),
+                kind: socketguard_core::NetworkKind::Yggdrasil,
+                interface: None,
+                node_running: true,
+                listeners: vec![ExposedListener {
+                    app: "nginx".into(),
+                    port: 80,
+                    proto: socketguard_core::Protocol::Tcp,
+                }],
+                services_started_by_setup: vec![],
+            }],
+        };
+        let r = disable_with_db(DisableInput {
+            exposure: Some(exposure),
+            db: &db,
+            interfaces: &HashMap::new(),
+            networks: vec![],
+            firewall: mock_fw(),
+            ifaces: Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),
+        })
+        .await;
+        assert!(r.complete());
+        assert!(
+            r.notes.iter().any(|n| n.contains("yggdrasil keeps running")
+                && n.contains("nginx (port 80/tcp)")),
+            "{:?}",
+            r.notes
+        );
     }
 }

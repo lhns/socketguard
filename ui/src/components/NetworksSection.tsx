@@ -1,8 +1,9 @@
 import { useId, useState } from "react";
 import { toDaemonError, type Network, type NewNetwork } from "../api";
 import { errorText } from "../lib";
-import { useAddNetwork, useDeleteNetwork, useNetworks, useNetworkSetup } from "../queries";
+import { useAddNetwork, useDeleteNetwork, useExposure, useNetworks, useNetworkSetup } from "../queries";
 import ConfirmDialog from "./ConfirmDialog";
+import ExposureNotice, { exposedNetworks, stoppable, stopStartedService } from "./ExposureNotice";
 import NetworkCards from "./NetworkCards";
 import { useToast } from "./Toast";
 
@@ -23,9 +24,22 @@ export default function NetworksSection() {
   const [removing, setRemoving] = useState<Network | null>(null);
   const [force, setForce] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
+  const configPath = useNetworkSetup().data?.config_path;
+  const exposure = useExposure(removing?.id ?? "", removing?.kind === "yggdrasil");
+  const exposed = exposedNetworks(exposure.data);
+  const [stop, setStop] = useState(true);
 
-  const remove = (n: Network, forced: boolean) =>
-    del.mutate({ id: n.id, force: forced }, {
+  const remove = async (n: Network, forced: boolean) => {
+    setRemoveError(null);
+    // The service goes first: if it cannot be stopped, the block stays and nothing is removed.
+    if (exposed.length > 0 && stoppable(exposed) && stop) {
+      const why = await stopStartedService(configPath);
+      if (why) {
+        setRemoveError(why);
+        return;
+      }
+    }
+    del.mutate({ id: n.id, force: forced, confirmExposed: exposed.length > 0 }, {
       onSuccess: () => {
         toast.success(`Removed ${n.name}`);
         setRemoving(null);
@@ -38,6 +52,7 @@ export default function NetworksSection() {
         setForce(err.code === "conflict" && n.kind === "tor");
       },
     });
+  };
 
   return (
     <section className="card" aria-label="Networks">
@@ -63,6 +78,7 @@ export default function NetworksSection() {
               onClick={() => {
                 setRemoveError(null);
                 setForce(false);
+                setStop(true);
                 setRemoving(n);
               }}
             >
@@ -81,11 +97,12 @@ export default function NetworksSection() {
           title={`Remove network ${removing.name}?`}
           confirmLabel={force ? "Remove anyway" : "Remove network"}
           onCancel={() => setRemoving(null)}
-          onConfirm={() => remove(removing, force)}
+          onConfirm={() => void remove(removing, force)}
         >
           <p>
             Its addresses leave the interfaces and the grants that applied only there stop having an effect. Apps and peers stay.
           </p>
+          <ExposureNotice exposure={exposure.data} stop={stop} onStop={setStop} />
           {removeError && <div className="error-banner" role="alert">{removeError}</div>}
         </ConfirmDialog>
       )}

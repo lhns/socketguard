@@ -1054,3 +1054,92 @@ fn a_router_cannot_deliver_another_segments_source_to_a_segment_grant() {
         "the router delivers segment B's source on A's interface: dropped"
     );
 }
+
+/// ADR 0051: the managed node's own addresses are denied on any interface, so the block holds
+/// while the adapter SocketGuard knows is missing; an address of a node it does not manage is
+/// left alone, and a granted peer still reaches the addresses a grant names.
+#[test]
+fn the_managed_nodes_addresses_are_denied_without_its_interface_and_others_are_left_alone() {
+    if !enabled() {
+        return;
+    }
+    let fx = Fixture::new("node");
+    // Another address in 200::/7 on the same adapter: some other node's, not ours.
+    ip(&[
+        "-n",
+        &fx.ns.a,
+        "addr",
+        "add",
+        "200:5a::55/128",
+        "dev",
+        "ygg0",
+        "nodad",
+    ]);
+    // An address of the node's /64 that no app owns, so only the subnet scope can deny it.
+    ip(&[
+        "-n",
+        &fx.ns.a,
+        "addr",
+        "add",
+        "300:5a::200/128",
+        "dev",
+        "ygg0",
+        "nodad",
+    ]);
+    ip(&[
+        "-n",
+        &fx.ns.b,
+        "-6",
+        "route",
+        "add",
+        "300:5a::200/128",
+        "dev",
+        "ygg0",
+    ]);
+    let node = ruleset::OverlayNode {
+        address: "200:5a::1".parse().unwrap(),
+        subnet: "300:5a::/64".parse().unwrap(),
+    };
+    let known = |iface: &str, creds: &[(CredentialKind, &str)]| {
+        let mut snap = snapshot(creds);
+        snap.networks[1].interface = Some(iface.into());
+        snap.ygg_nodes = [("ygg".to_string(), node)].into();
+        snap
+    };
+    for dst in ["200:5a::1", "200:5a::55", MANAGED_YGG, "300:5a::200"] {
+        assert!(
+            eventually(|| fx.reachable(dst, None)),
+            "control: {dst} is reachable before any rule"
+        );
+    }
+
+    // The network's adapter does not exist (the node is down, or restarted under another
+    // name): the address scopes alone close the node.
+    let rs = fx.apply(&known("tun-gone", &[]));
+    assert!(rs.scopes.iter().any(|s| s.id == "overlay:ygg:addr"));
+    assert!(!fx.reachable("200:5a::1", None), "the node's address");
+    assert!(
+        !fx.reachable("300:5a::200", None),
+        "the node's subnet, beyond the managed addresses"
+    );
+    assert!(
+        fx.reachable("200:5a::55", None),
+        "an address of a node SocketGuard does not manage is untouched"
+    );
+
+    // With the adapter known and a grant, only what the grant names opens.
+    let rs = fx.apply(&known("ygg0", &[(CredentialKind::YggAddr, YGG_SRC)]));
+    assert!(rs.scopes.iter().any(|s| s.id == "overlay:ygg:subnet"));
+    assert!(
+        fx.reachable(MANAGED_YGG, Some(YGG_SRC)),
+        "granted peer and address"
+    );
+    assert!(
+        !fx.reachable(MANAGED_YGG, Some("200:5a::2")),
+        "ungranted peer"
+    );
+    assert!(
+        !fx.reachable("200:5a::1", Some(YGG_SRC)),
+        "the node address has no grant"
+    );
+}

@@ -17,14 +17,15 @@ use bytes::Bytes;
 use http::{header, HeaderValue, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{de::DeserializeOwned, Serialize};
 use socketguard_core::api_types::{
     ApiError, ApplyRequest, ApplyResponse, AttachPortGroup, ChangesRequest, ChangesResponse,
-    DisableRequest, Enforcement, EnforcementNotice, ExportDocument, MemberQuery, MoveAppRequest,
-    NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation, NewTag, NewTagMember,
-    ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse, ReserveRequest,
-    ReviewRequest, SetMembers, ShareResponse, StatusResponse, TorKeyResponse, UpdateLabel,
-    UpdatePortGroup, UpdateTag,
+    DisableRequest, Enforcement, EnforcementNotice, ExportDocument, ExposureResponse, MemberQuery,
+    MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation,
+    NewTag, NewTagMember, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse,
+    ReserveRequest, ReviewRequest, SetMembers, ShareResponse, StatusResponse, TorKeyResponse,
+    UpdateLabel, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::setup::NetworkSetup;
 use socketguard_core::{
@@ -635,17 +636,36 @@ impl Client {
         self.call(&routes::NETWORK_SETUP, &[], None, None).await
     }
 
-    pub async fn add_network(&self, req: &NewNetwork) -> Result<Network> {
-        self.call(&routes::ADD_NETWORK, &[], None, json(req)).await
+    /// Add a network. The answer carries `enforcement` (HTTP 202) when the firewall rules
+    /// could not be applied, i.e. the network is not closed yet (ADR 0051).
+    pub async fn add_network(&self, req: &NewNetwork) -> Result<Saved<Network>> {
+        self.call_saved(&routes::ADD_NETWORK, &[], json(req)).await
     }
 
     /// Remove a network. With `force`, a Tor network goes even if its onion services
-    /// could not be removed (the daemon otherwise answers 409 `conflict`).
-    pub async fn delete_network(&self, id: &str, force: bool) -> Result<()> {
-        let query = force.then(|| "force=true".to_string());
+    /// could not be removed (the daemon otherwise answers 409 `conflict`). A Yggdrasil
+    /// network whose node keeps running needs `confirm_exposed`, else the daemon answers
+    /// 409 `confirmation_required` with the [`ExposureResponse`] in `details`.
+    pub async fn delete_network(&self, id: &str, force: bool, confirm_exposed: bool) -> Result<()> {
+        let query: Vec<&str> = [
+            (force, "force=true"),
+            (confirm_exposed, "confirm_exposed=true"),
+        ]
+        .into_iter()
+        .filter_map(|(on, q)| on.then_some(q))
+        .collect();
+        let query = (!query.is_empty()).then(|| query.join("&"));
         self.call_raw(&routes::DELETE_NETWORK, &[id], query, None)
             .await
             .map(|_| ())
+    }
+
+    /// What becomes reachable over the networks without SocketGuard's block: of one
+    /// network, or (None) of all of them (ADR 0051).
+    pub async fn exposure(&self, without: Option<&str>) -> Result<ExposureResponse> {
+        let query =
+            without.map(|w| format!("without={}", utf8_percent_encode(w, NON_ALPHANUMERIC)));
+        self.call(&routes::EXPOSURE, &[], query, None).await
     }
 
     // ─── Settings ────────────────────────────────────────────────────────────

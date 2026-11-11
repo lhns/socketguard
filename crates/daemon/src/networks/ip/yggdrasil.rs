@@ -256,6 +256,17 @@ impl Ipv6Backend for YggdrasilBackend {
         configured.or_else(|| cache.interface.clone())
     }
 
+    fn node(&self) -> Option<crate::ruleset::OverlayNode> {
+        let mut cache = self.cache.lock().unwrap();
+        self.refresh_cache(&mut cache);
+        let info = cache.info.as_ref()?;
+        let subnet = ipnet::Ipv6Net::new(info.subnet.addr, info.subnet.len).ok()?;
+        Some(crate::ruleset::OverlayNode {
+            address: info.address,
+            subnet: subnet.trunc(),
+        })
+    }
+
     fn problem(&self) -> Option<String> {
         let mut cache = self.cache.lock().unwrap();
         self.refresh_cache(&mut cache);

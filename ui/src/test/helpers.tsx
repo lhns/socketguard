@@ -16,7 +16,7 @@ export const networks: Network[] = [
   { id: "n-lan", kind: "lan", name: "LAN", interface: "eth0", grants_apply: true, status: { state: "up" } },
 ];
 
-const state = (state: SetupState["state"], over: Partial<SetupState> = {}): SetupState => ({ state, found: {}, ...over });
+const state = (state: SetupState["state"], over: Partial<SetupState> = {}): SetupState => ({ state, found: {}, exposed: false, ...over });
 
 /** What `network_setup` answers by default: one LAN interface, nothing else installed. */
 export const networkSetup: NetworkSetup = {
@@ -26,7 +26,7 @@ export const networkSetup: NetworkSetup = {
   ],
   yggdrasil: state("not_installed", {
     missing: "Yggdrasil is not installed.",
-    install: { manager: "winget", command: "winget install --id YggdrasilNetwork.Yggdrasil --source winget -e", link: "https://yggdrasil-network.github.io/installation.html" },
+    download_link: "https://yggdrasil-network.github.io/installation.html",
   }),
   tor: state("not_installed", {
     missing: "Tor is not installed. Windows has no package for it; download the Tor Expert Bundle, then come back here.",
@@ -153,6 +153,7 @@ export function mockDaemon(handlers: Handlers = {}) {
     share_app: () => ({ tor: [] }),
     list_networks: () => networks,
     network_setup: () => networkSetup,
+    exposure: () => ({ networks: [] }),
     list_reservations: () => [],
     list_addresses: () => [],
     get_settings: () => settings,

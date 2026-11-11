@@ -492,6 +492,10 @@ impl Default for WfpFirewall {
 }
 
 impl Firewall for WfpFirewall {
+    fn blocks_absent_interfaces(&self) -> bool {
+        false
+    }
+
     fn apply(&self, desired: &DesiredRuleset) -> Result<()> {
         let specs = plan::plan(desired);
 

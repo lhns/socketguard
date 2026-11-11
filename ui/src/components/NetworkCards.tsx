@@ -13,9 +13,9 @@ function stateLine(kind: SetupKind, s: SetupState): string {
         ? `Found at ${s.found.address}${s.found.interface ? ` on ${s.found.interface}` : ""}.`
         : "Found and ready.";
     case "not_installed":
+      if (kind === "yggdrasil") return "Yggdrasil is not installed.";
       if (s.install) {
-        const name = kind === "yggdrasil" ? "Yggdrasil" : "Tor";
-        return `${name} is not installed. SocketGuard can install it with ${s.install.manager}.`;
+        return `Tor is not installed. SocketGuard can install it with ${s.install.manager}.`;
       }
       return s.missing ?? "Not installed.";
     default:
@@ -160,6 +160,7 @@ function KindCard({ kind, title, state, data }: { kind: SetupKind; title: string
   return (
     <CardShell label={title} title={title}>
       <p>{stateLine(kind, state)}</p>
+      {state.exposed && state.warning && <p className="hint warn" role="alert">{state.warning}</p>}
       {kind === "yggdrasil" && state.state === "ready" && peersLine(state) && <p className="hint">{peersLine(state)}</p>}
       {kind === "yggdrasil" && state.state === "ready" && (
         <p className="hint">
@@ -204,6 +205,9 @@ function SetupPanel({ kind, state, configPath, onDone }: { kind: SetupKind; stat
 
   const steps: string[] = [];
   if (state.state === "not_installed" && state.install) steps.push(`Install ${kind === "tor" ? "Tor" : "Yggdrasil"}: ${state.install.command}`);
+  if (kind === "yggdrasil") {
+    steps.push("Add the Yggdrasil network first, so that SocketGuard blocks it before Yggdrasil can start, and check that the block is in force.");
+  }
   if (state.state === "not_running") steps.push(`Start the ${kind === "tor" ? "Tor" : "Yggdrasil"} service.`);
   if (kind === "tor") {
     steps.push(
@@ -211,10 +215,9 @@ function SetupPanel({ kind, state, configPath, onDone }: { kind: SetupKind; stat
     );
     steps.push("Tell SocketGuard where Tor's cookie file is, from the torrc, and add the Tor network.");
   } else {
-    steps.push("Add the Yggdrasil network. Yggdrasil's own configuration is not touched.");
+    steps.push("Yggdrasil's own configuration is not touched.");
   }
   const command = `socketguard networks setup ${kind} --yes`;
-  const windowsYgg = kind === "yggdrasil" && state.install?.manager === "winget";
 
   const run = async () => {
     if (!configPath) return;
@@ -247,11 +250,6 @@ function SetupPanel({ kind, state, configPath, onDone }: { kind: SetupKind; stat
     <div className="setup-panel" role="group" aria-label={`Set up ${kind}`}>
       <p>Setting up needs administrator rights. It will:</p>
       <ol>{steps.map((s) => <li key={s}>{s}</li>)}</ol>
-      {windowsYgg && (
-        <p className="hint">
-          Installs the Yggdrasil service and its network adapter driver; it starts with Windows. Removing the network in SocketGuard does not uninstall it.
-        </p>
-      )}
       <p className="hint">
         The command: <code>{command}</code>. You can undo this later with <code>{`socketguard networks setup ${kind} --undo`}</code>;
         the changes are listed in setup-log.json next to the config file.

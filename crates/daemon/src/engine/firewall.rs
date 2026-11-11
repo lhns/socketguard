@@ -10,11 +10,14 @@ use crate::state::NewActivity;
 use crate::AppState;
 use chrono::Utc;
 use socketguard_core::{valid_interface_name, ActivityKind, Address, App, NetworkKind, Subject};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::Ordering;
 use std::time::UNIX_EPOCH;
 use tracing::{debug, error, warn};
+
+/// The settings key of a Yggdrasil network's last known node addresses.
+pub(super) const NODE_KEY_PREFIX: &str = "ygg_node:";
 
 impl Engine {
     /// Gather the producer's input from the DB and the active networks.
@@ -54,11 +57,50 @@ impl Engine {
             grants,
             tags,
             port_groups,
+            ygg_nodes: self.known_nodes(state).await,
             v4_subnets: self.protected_v4_subnets(&protect_host),
             protect_host,
             // Owned addresses stay denied until they are really off their interface.
             owned: owned.into_iter().map(|o| IpAddr::V6(o.addr)).collect(),
         })
+    }
+
+    /// The node addresses of the Yggdrasil networks: what the node reports now, else what
+    /// was remembered. A new answer is stored, so the block outlives the node (ADR 0051).
+    async fn known_nodes(&self, state: &AppState) -> BTreeMap<String, ruleset::OverlayNode> {
+        let mut out = BTreeMap::new();
+        for (id, active) in &self.backends {
+            if active.network.kind() != NetworkKind::Yggdrasil {
+                continue;
+            }
+            let key = format!("{NODE_KEY_PREFIX}{id}");
+            let stored = state
+                .db
+                .get_setting(&key)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_str::<ruleset::OverlayNode>(&v).ok());
+            let net = active.network.clone();
+            let live = tokio::task::spawn_blocking(move || net.node())
+                .await
+                .ok()
+                .flatten();
+            if let Some(node) = live.filter(|n| Some(*n) != stored) {
+                match serde_json::to_string(&node) {
+                    Ok(v) => {
+                        if let Err(e) = state.db.set_setting(&key, &v).await {
+                            warn!("Could not remember the address of node '{id}': {e:#}");
+                        }
+                    }
+                    Err(e) => warn!("Could not encode the address of node '{id}': {e}"),
+                }
+            }
+            if let Some(node) = live.or(stored) {
+                out.insert(id.clone(), node);
+            }
+        }
+        out
     }
 
     /// The IPv4 subnets of the protected interfaces; one without IPv4 is left out.

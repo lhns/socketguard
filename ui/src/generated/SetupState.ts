@@ -19,6 +19,15 @@ missing?: string,
  */
 install?: InstallOffer, 
 /**
+ * A node runs that SocketGuard does not manage (ADR 0051): the host may be reachable
+ * over it. Only set for Yggdrasil.
+ */
+exposed: boolean, 
+/**
+ * A plain sentence to show above the Add button.
+ */
+warning?: string, 
+/**
  * The official download page, where there is no package to offer.
  */
 download_link?: string, };

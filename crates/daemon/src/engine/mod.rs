@@ -17,6 +17,7 @@ mod addresses;
 mod batch;
 mod discovery;
 mod enforce;
+mod exposure;
 mod firewall;
 mod mutations;
 mod port_groups;
@@ -472,12 +473,18 @@ impl Engine {
             .iter()
             .map(|(id, b)| (id.clone(), b.network.clone()))
             .collect();
+        // What the block keeps off the host, said before it goes (ADR 0051).
+        let exposure = self.exposure(state, None).await.ok();
+        for sentence in exposure.iter().flat_map(|e| e.sentences()) {
+            warn!("{sentence}");
+        }
         let removed = disable_everything(
             &state.db,
             &ifaces,
             nets,
             self.firewall.clone(),
             self.ifaces.clone(),
+            exposure,
         )
         .await;
         self.commit(state, removed, None, &[DaemonEvent::SettingsChanged])
@@ -555,6 +562,7 @@ pub async fn disable_everything(
     networks: Vec<(String, Arc<dyn networks::Network>)>,
     firewall: Arc<dyn Firewall>,
     ifaces: Arc<dyn InterfaceManager>,
+    exposure: Option<socketguard_core::api_types::ExposureResponse>,
 ) -> anyhow::Result<()> {
     let slots = networks
         .into_iter()
@@ -570,6 +578,7 @@ pub async fn disable_everything(
         networks: slots,
         firewall,
         ifaces,
+        exposure,
     })
     .await
     .into_result()
@@ -659,6 +668,7 @@ mod tests {
             vec![("tor".to_string(), tor.clone())],
             Arc::new(MockFirewall::new(Arc::new(Mutex::new(vec![])))),
             Arc::new(net),
+            None,
         )
         .await;
 

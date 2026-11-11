@@ -451,17 +451,18 @@ const networkSetup: NetworkSetup = {
     { interface: "eth0", has_ipv6_prefix: true, is_default_route: false, already_added: true },
   ],
   yggdrasil: {
-    state: "not_running",
-    found: { yggdrasilctl: "C:\\Program Files\\Yggdrasil\\yggdrasilctl.exe" },
-    missing: "The Yggdrasil service is stopped.",
+    state: "ready",
+    found: { yggdrasilctl: "C:\\Program Files\\Yggdrasil\\yggdrasilctl.exe", address: "200:8af8:ba35:56ae:bef0:6284:981f:5972", interface: "Yggdrasil", peers: "2" },
+    exposed: true,
+    warning: "Yggdrasil is running but not managed: programs on this PC that listen on all addresses are reachable over it until you add it here.",
   },
   tor: {
     state: "not_installed",
-    found: {},
+    found: {}, exposed: false,
     missing: "Tor is not installed. Windows has no package for it; download the Tor Expert Bundle, then come back here.",
     download_link: "https://www.torproject.org/download/tor/",
   },
-  local: { state: "ready", found: {} },
+  local: { state: "ready", found: {}, exposed: false },
   config_path: "C:\\ProgramData\\SocketGuard\\socketguard.json",
 };
 
@@ -506,6 +507,17 @@ export function installMock() {
         case "list_networks": return networks;
         // Data only: nothing here installs or starts anything.
         case "network_setup": return networkSetup;
+        case "exposure":
+          return {
+            networks: networks
+              .filter((n) => n.kind === "yggdrasil" && (a.without === "all" || a.without === n.id))
+              .map((n) => ({
+                network: n.id, kind: n.kind, interface: n.interface, node_running: true,
+                listeners: [{ app: "nginx", port: 8080, proto: "tcp" }, { app: "sshd", port: 22, proto: "tcp" }],
+                services_started_by_setup: ["Yggdrasil"],
+              })),
+          };
+        case "stop_setup_service": return { launched: true, cancelled: false, exit_code: 0, command: "" };
         case "run_network_setup": return { launched: false, cancelled: false, exit_code: null, command: `socketguard networks setup ${a.kind} --yes` };
         case "open_download_page": return undefined;
         case "add_network": return { id: a.req.type, kind: a.req.type === "slaac" ? "lan" : a.req.type, name: a.req.type, interface: a.req.interface ?? null, grants_apply: true, status: { state: "up" } };

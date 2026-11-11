@@ -177,7 +177,8 @@ pub async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
                         },
                     })
                     .await?;
-                println!("added network {}", n.id);
+                c.warn_pending(&n.enforcement);
+                println!("added network {}", n.value.id);
             } else if !interactive {
                 println!("Add it with: socketguard networks add yggdrasil");
             }

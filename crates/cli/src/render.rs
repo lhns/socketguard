@@ -370,6 +370,9 @@ pub fn network_setup(s: &socketguard_core::setup::NetworkSetup) -> String {
         if let Some(l) = &st.download_link {
             out.push_str(&format!("\n  download: {l}"));
         }
+        if let Some(w) = &st.warning {
+            out.push_str(&format!("\n  warning: {w}"));
+        }
         out
     };
     let mut out = String::from("LAN interfaces:");
@@ -403,6 +406,12 @@ pub fn network_setup(s: &socketguard_core::setup::NetworkSetup) -> String {
         state("Tor", &s.tor),
         state("Local", &s.local)
     )
+}
+
+/// What stays reachable when a block goes (ADR 0051): one paragraph per network whose node
+/// keeps running; empty when nothing does.
+pub fn exposure(e: &socketguard_core::api_types::ExposureResponse) -> String {
+    e.sentences().join("\n")
 }
 
 pub fn networks(nets: &[Network]) -> String {

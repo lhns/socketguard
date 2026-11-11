@@ -45,9 +45,10 @@ offers and how far each network is from being added: the LAN interfaces, Yggdras
    `socketguard networks add yggdrasil` (no interface needed: it is the one that holds the node's
    address).
 2. **Install and configure.** `sudo socketguard networks setup <yggdrasil|tor>` (an elevated
-   terminal on Windows) lists its steps, asks, and runs them: install the package where one is
-   known (`winget` for Yggdrasil on Windows, `tor` from apt, dnf or pacman on Linux), start the
-   service, and for Tor add `ControlPort 9051` and `CookieAuthentication 1` to the torrc only if
+   terminal on Windows) lists its steps, asks, and runs them. For Yggdrasil the network is added
+   first, so that SocketGuard blocks it, and the service is started only once the block is
+   verified (ADR 0051); SocketGuard does not install Yggdrasil. For Tor it installs the package
+   where one is known (`tor` from apt, dnf or pacman on Linux), starts the service, and adds `ControlPort 9051` and `CookieAuthentication 1` to the torrc only if
    Tor has no control endpoint yet (a copy stays as `torrc.socketguard.bak`). Yggdrasil's own
    configuration is never edited. `--dry-run` only prints the steps. The desktop app starts the
    same command through the system's administrator prompt.
@@ -59,9 +60,9 @@ setup <kind> --undo` reverses them: it removes the torrc lines it added, puts th
 it was and removes the network; packages are only printed unless `--uninstall-packages` is given,
 and a package that was already there is never touched.
 
-What stays manual: Tor on Windows (no package; download the Tor Expert Bundle, set it up as a
+What stays manual: installing Yggdrasil (download it from its site); Tor on Windows (no package; download the Tor Expert Bundle, set it up as a
 service with a torrc that has a `DataDirectory`, then run `networks setup tor --torrc <path>`);
-Yggdrasil on Linux (its apt repository, COPR or a `.pkg` on macOS) and Tor on macOS, where the
+and Tor on macOS, where the
 command prints the official link instead. Linux and macOS paths of `networks setup` were written
 from the projects' documentation and are not covered by an end-to-end test.
 

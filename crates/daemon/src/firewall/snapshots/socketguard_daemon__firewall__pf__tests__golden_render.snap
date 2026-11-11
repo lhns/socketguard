@@ -25,5 +25,7 @@ pass in quick on eth0 inet6 proto tcp from { fd00:1:2:3::/64, fe80::/10 } to fd0
 block drop in log quick inet6 from any to { fd00::1, 301::1 }
 block drop in log quick inet from any to { 192.0.2.9 }
 block drop in log quick on ygg0 all
+block drop in log quick inet6 from any to 200:1:2:3::5/128
+block drop in log quick inet6 from any to 300:1:2:3::/64
 block drop in log quick on eth0 all
 block drop in log quick on wlan0 inet6 all

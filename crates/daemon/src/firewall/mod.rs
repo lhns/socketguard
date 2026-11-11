@@ -55,6 +55,13 @@ pub trait Firewall: Send + Sync {
         Ok(true)
     }
 
+    /// Whether a rule on an interface that does not exist yet holds once the adapter
+    /// appears. False for WFP, which binds filters to adapter LUIDs: it cannot make one for
+    /// an adapter that is not there (ADR 0051).
+    fn blocks_absent_interfaces(&self) -> bool {
+        true
+    }
+
     /// Whether interfaces resolve differently from the last apply (WFP binds filters to
     /// interface LUIDs, which change when an adapter is recreated). Cheap; `true` makes
     /// the engine re-apply.
@@ -137,6 +144,16 @@ pub(crate) fn golden_ruleset() -> DesiredRuleset {
                     name: "ygg0".into(),
                     families: Families::Both,
                 },
+            },
+            Scope {
+                id: "overlay:ygg:addr".into(),
+                kind: ScopeKind::Overlay,
+                matcher: ScopeMatch::DestinationNet("200:1:2:3::5/128".parse().unwrap()),
+            },
+            Scope {
+                id: "overlay:ygg:subnet".into(),
+                kind: ScopeKind::Overlay,
+                matcher: ScopeMatch::DestinationNet("300:1:2:3::/64".parse().unwrap()),
             },
             Scope {
                 id: "host:eth0".into(),

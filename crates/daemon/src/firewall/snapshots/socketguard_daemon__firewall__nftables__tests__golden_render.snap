@@ -21,6 +21,10 @@ table inet socketguard {
 	counter c7fdfda5f50a433ae { }
 	# overlay:ygg0
 	counter c6095c103ed141158 { }
+	# overlay:ygg:addr
+	counter ca27cc028a21d7f55 { }
+	# overlay:ygg:subnet
+	counter c10ca392fb07cd812 { }
 	# v4:app1:22:tcp:g4:eth0
 	counter cb4eb05cab53476bc { }
 	# v4:app2:53:udp:g5:eth0
@@ -54,6 +58,10 @@ table inet socketguard {
 		ip daddr { 192.0.2.9 } counter name "c7fdfda5f50a433ae" drop
 		iifname "ygg0" limit rate 10/second burst 20 packets log group 7 prefix "sg:overlay:ygg0"
 		iifname "ygg0" counter name "c6095c103ed141158" drop
+		ip6 daddr 200:1:2:3::5/128 limit rate 10/second burst 20 packets log group 7 prefix "sg:overlay:ygg:addr"
+		ip6 daddr 200:1:2:3::5/128 counter name "ca27cc028a21d7f55" drop
+		ip6 daddr 300:1:2:3::/64 limit rate 10/second burst 20 packets log group 7 prefix "sg:overlay:ygg:subnet"
+		ip6 daddr 300:1:2:3::/64 counter name "c10ca392fb07cd812" drop
 		iifname "eth0" limit rate 10/second burst 20 packets log group 7 prefix "sg:host:eth0"
 		iifname "eth0" counter name "c3b22f5fdf596bb2e" drop
 		iifname "wlan0" meta nfproto ipv6 limit rate 10/second burst 20 packets log group 7 prefix "sg:host:wlan0"

@@ -237,6 +237,7 @@ pub fn detect(p: &dyn Probes, existing: &Existing, config_path: Option<&Path>) -
         yggdrasil,
         tor: detect_tor(p, existing),
         local: detect_local(existing),
+        yggdrasil_block: None,
         // Absolute: the elevated `networks setup` has another working directory.
         config_path: config_path
             .map(|c| std::path::absolute(c).unwrap_or_else(|_| c.to_path_buf()))
@@ -293,6 +294,9 @@ fn not_installed(p: &dyn Probes, kind: SetupKind, missing: String) -> SetupState
     s
 }
 
+/// What the card says about a running node that is not added to SocketGuard.
+pub const EXPOSED_WARNING: &str = "Yggdrasil is running but not managed: programs on this PC that listen on all addresses are reachable over it until you add it here.";
+
 /// The Yggdrasil state, and the interface that holds the node's address.
 fn detect_yggdrasil(p: &dyn Probes, existing: &Existing) -> (SetupState, Option<String>) {
     let ctl = p.yggdrasilctl();
@@ -314,16 +318,11 @@ fn detect_yggdrasil(p: &dyn Probes, existing: &Existing) -> (SetupState, Option<
         return (SetupState::new(SetupStatus::Added), iface);
     }
     let Some(ctl) = ctl else {
-        let missing =
-            if install_command(SetupKind::Yggdrasil, p.os(), &|m| p.has_program(m)).is_some() {
-                "Yggdrasil is not installed."
-            } else {
-                "Yggdrasil is not installed; it has to be installed by hand."
-            };
-        return (
-            not_installed(p, SetupKind::Yggdrasil, missing.to_string()),
-            None,
-        );
+        // No package is offered: SocketGuard does not install Yggdrasil.
+        let mut s = SetupState::new(SetupStatus::NotInstalled);
+        s.missing = Some("Yggdrasil is not installed.".to_string());
+        s.download_link = Some(download_link(SetupKind::Yggdrasil).to_string());
+        return (s, None);
     };
     let mut state;
     let ctl_path = ctl.clone();
@@ -353,6 +352,12 @@ fn detect_yggdrasil(p: &dyn Probes, existing: &Existing) -> (SetupState, Option<
                 _ => "Yggdrasil is installed, but the node is not running.".to_string(),
             });
         }
+    }
+    // A node answers but SocketGuard does not manage it (ADR 0051): programs listening on
+    // all addresses are reachable over it.
+    if matches!(state.state, SetupStatus::Ready | SetupStatus::NotConfigured) {
+        state.exposed = true;
+        state.warning = Some(EXPOSED_WARNING.to_string());
     }
     state
         .found
@@ -530,20 +535,20 @@ mod tests {
     }
 
     #[test]
-    fn yggdrasil_is_not_installed_with_an_offer_on_windows_with_winget() {
+    fn yggdrasil_is_never_offered_a_package_even_where_winget_exists() {
         let p = Fake {
             programs: vec!["winget"],
             ..Default::default()
         };
         let (s, _) = detect_yggdrasil(&p, &Existing::default());
         assert_eq!(s.state, SetupStatus::NotInstalled);
-        let offer = s.install.unwrap();
-        assert_eq!(offer.manager, "winget");
+        assert!(s.install.is_none());
+        assert_eq!(s.missing.as_deref(), Some("Yggdrasil is not installed."));
         assert_eq!(
-            offer.command,
-            "winget install --id YggdrasilNetwork.Yggdrasil --source winget -e"
+            s.download_link.as_deref(),
+            Some(socketguard_core::setup::YGGDRASIL_DOWNLOAD)
         );
-        assert!(s.download_link.is_none());
+        assert!(!s.exposed);
     }
 
     #[test]
