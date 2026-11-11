@@ -95,3 +95,11 @@ A reservation behaves like an app assembled from sockets of several apps. This r
 - **Tor.** A grant on the reservation covers every published port, so those clients are admitted to its onion address. Clients granted only single rows are left out there, as before.
 - Reserving an automatic address creates a reservation with that row bound and that address as its address on that network.
 - **Bound rows on Tor keep their own address.** On a network that authorises per address (Tor), a bound row that a grant names still gets its automatic address, so a client granted only that row is admitted there. On IP networks a bound row has no automatic address; the firewall separates ports on the reservation's address.
+
+## Amendment (2026-11-11): on Tor a reservation is opened as a whole
+
+This withdraws "bound rows on Tor keep their own address". A reservation has exactly one address per network, on Tor too.
+
+- On Tor only a grant on the reservation itself (its "All sockets") admits a client to its onion address.
+- A grant on a single bound row has no effect on Tor while the row is bound. Its reach there is "not reachable", with the reason, and frontends say so before the grant is made.
+- Nothing changes on networks enforced by the firewall.
