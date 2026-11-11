@@ -79,7 +79,9 @@ pub fn plist_text(exe: &Path) -> String {
 }
 
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn write_atomic(path: &Path, content: &str) -> Result<()> {
@@ -189,13 +191,14 @@ impl<H: Host> ServiceManager for Launchd<'_, H> {
     }
     fn install(&mut self, exe: &Path, start: bool) -> Result<()> {
         let plist = self.plist_path();
-        let changed = std::fs::read_to_string(&plist).ok().as_deref()
-            != Some(plist_text(exe).as_str());
+        let changed =
+            std::fs::read_to_string(&plist).ok().as_deref() != Some(plist_text(exe).as_str());
         write_atomic(&plist, &plist_text(exe))?;
         // The property list is `RunAtLoad`, so bootstrapping starts it; a changed list needs
         // the old one booted out first.
         if self.loaded() && changed {
-            self.host.run_ok("launchctl", &["bootout", &Self::target()])?;
+            self.host
+                .run_ok("launchctl", &["bootout", &Self::target()])?;
         }
         if !self.loaded() {
             if start {
@@ -215,7 +218,8 @@ impl<H: Host> ServiceManager for Launchd<'_, H> {
     }
     fn uninstall(&mut self) -> Result<()> {
         if self.loaded() {
-            self.host.run_ok("launchctl", &["bootout", &Self::target()])?;
+            self.host
+                .run_ok("launchctl", &["bootout", &Self::target()])?;
         }
         match std::fs::remove_file(self.plist_path()) {
             Ok(()) => {}
@@ -230,7 +234,8 @@ impl<H: Host> ServiceManager for Launchd<'_, H> {
                 .run_ok("launchctl", &["kickstart", &Self::target()])?;
         } else {
             let plist = self.plist_path().display().to_string();
-            self.host.run_ok("launchctl", &["bootstrap", "system", &plist])?;
+            self.host
+                .run_ok("launchctl", &["bootstrap", "system", &plist])?;
         }
         Ok(())
     }
@@ -238,7 +243,8 @@ impl<H: Host> ServiceManager for Launchd<'_, H> {
         // KeepAlive restarts a killed job, so stopping unloads it; the plist stays and the
         // job is back at the next boot or `service start`.
         if self.loaded() {
-            self.host.run_ok("launchctl", &["bootout", &Self::target()])?;
+            self.host
+                .run_ok("launchctl", &["bootout", &Self::target()])?;
         }
         Ok(())
     }
@@ -271,7 +277,8 @@ impl ServiceManager for FakeServiceManager {
         "fake-service".into()
     }
     fn install(&mut self, exe: &Path, start: bool) -> Result<()> {
-        self.calls.push(format!("install {} start={start}", exe.display()));
+        self.calls
+            .push(format!("install {} start={start}", exe.display()));
         self.installed = true;
         if start {
             self.running = true;
@@ -341,7 +348,11 @@ pub fn installed_hint() -> Option<bool> {
     }
     #[cfg(target_os = "macos")]
     {
-        Some(Path::new(LAUNCHD_DIR).join(format!("{LAUNCHD_LABEL}.plist")).exists())
+        Some(
+            Path::new(LAUNCHD_DIR)
+                .join(format!("{LAUNCHD_LABEL}.plist"))
+                .exists(),
+        )
     }
     #[cfg(windows)]
     {
@@ -403,7 +414,8 @@ pub mod windows_scm {
         }
 
         fn install(&mut self, exe: &Path, start: bool) -> Result<()> {
-            let scm = connect(ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE)?;
+            let scm =
+                connect(ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE)?;
             let access = ServiceAccess::all();
             let service = match scm.open_service(WINDOWS_SERVICE, access) {
                 Ok(s) => {
@@ -462,8 +474,13 @@ pub mod windows_scm {
         fn start(&mut self) -> Result<()> {
             let scm = connect(ServiceManagerAccess::CONNECT)?;
             let service = scm
-                .open_service(WINDOWS_SERVICE, ServiceAccess::START | ServiceAccess::QUERY_STATUS)
-                .context("the SocketGuard service is not installed (socketguard-daemon service install)")?;
+                .open_service(
+                    WINDOWS_SERVICE,
+                    ServiceAccess::START | ServiceAccess::QUERY_STATUS,
+                )
+                .context(
+                    "the SocketGuard service is not installed (socketguard-daemon service install)",
+                )?;
             if service.query_status()?.current_state == ServiceState::Stopped {
                 service.start::<&str>(&[])?;
             }
@@ -517,8 +534,9 @@ pub mod windows_scm {
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
 
-    static RUN: std::sync::OnceLock<Box<dyn Fn(tokio::sync::watch::Receiver<bool>) -> Result<()> + Send + Sync>> =
-        std::sync::OnceLock::new();
+    static RUN: std::sync::OnceLock<
+        Box<dyn Fn(tokio::sync::watch::Receiver<bool>) -> Result<()> + Send + Sync>,
+    > = std::sync::OnceLock::new();
 
     /// Hand control to the service dispatcher: `run_daemon` is called on the service thread
     /// with a receiver that turns true when the control manager asks the service to stop.
@@ -603,7 +621,10 @@ mod tests {
         assert!(t.contains("ExecStart=/opt/sg/socketguard-daemon\n"));
         assert!(t.contains("Restart=on-failure"));
         assert!(!t.contains("/usr/local/bin"));
-        assert!(!t.contains("WorkingDirectory"), "state must not depend on a working directory");
+        assert!(
+            !t.contains("WorkingDirectory"),
+            "state must not depend on a working directory"
+        );
     }
 
     #[test]
@@ -616,7 +637,13 @@ mod tests {
                 unit_dir: d.clone(),
             };
             m.uninstall().unwrap(); // absent: nothing happens
-            assert_eq!(m.status().unwrap(), ServiceStatus { installed: false, running: false });
+            assert_eq!(
+                m.status().unwrap(),
+                ServiceStatus {
+                    installed: false,
+                    running: false
+                }
+            );
             m.install(Path::new("/bin/sg"), true).unwrap();
             m.install(Path::new("/bin/sg"), true).unwrap();
             assert!(m.status().unwrap().installed);
@@ -652,7 +679,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             host.commands,
-            ["systemctl daemon-reload", "systemctl enable socketguard.service"]
+            [
+                "systemctl daemon-reload",
+                "systemctl enable socketguard.service"
+            ]
         );
         std::fs::remove_dir_all(d).unwrap();
     }
@@ -665,11 +695,17 @@ mod tests {
         host.answer_in_order(
             "launchctl print",
             vec![
-                crate::host::Output { code: 113, ..Default::default() }, // install #1: loaded()
-                crate::host::Output { code: 113, ..Default::default() }, // install #1: !loaded()
-                crate::host::Output::default(),                          // install #2: loaded() (unchanged)
-                crate::host::Output::default(),                          // install #2: !loaded()
-                crate::host::Output::default(),                          // uninstall: loaded()
+                crate::host::Output {
+                    code: 113,
+                    ..Default::default()
+                }, // install #1: loaded()
+                crate::host::Output {
+                    code: 113,
+                    ..Default::default()
+                }, // install #1: !loaded()
+                crate::host::Output::default(), // install #2: loaded() (unchanged)
+                crate::host::Output::default(), // install #2: !loaded()
+                crate::host::Output::default(), // uninstall: loaded()
             ],
         );
         {
@@ -677,18 +713,27 @@ mod tests {
                 host: &mut host,
                 dir: d.clone(),
             };
-            m.install(Path::new("/usr/local/bin/socketguard-daemon"), true).unwrap();
+            m.install(Path::new("/usr/local/bin/socketguard-daemon"), true)
+                .unwrap();
             let plist = std::fs::read_to_string(m.plist_path()).unwrap();
             assert!(plist.contains("<key>RunAtLoad</key><true/>"));
             assert!(plist.contains("<key>KeepAlive</key><true/>"));
-            m.install(Path::new("/usr/local/bin/socketguard-daemon"), true).unwrap();
+            m.install(Path::new("/usr/local/bin/socketguard-daemon"), true)
+                .unwrap();
             m.uninstall().unwrap();
             assert!(!m.plist_path().exists());
             m.uninstall().unwrap();
         }
-        let bootstraps = host.commands.iter().filter(|c| c.starts_with("launchctl bootstrap system ")).count();
+        let bootstraps = host
+            .commands
+            .iter()
+            .filter(|c| c.starts_with("launchctl bootstrap system "))
+            .count();
         assert_eq!(bootstraps, 1, "{:?}", host.commands);
-        assert!(host.commands.iter().any(|c| c == "launchctl bootout system/de.lhns.socketguard"));
+        assert!(host
+            .commands
+            .iter()
+            .any(|c| c == "launchctl bootout system/de.lhns.socketguard"));
         std::fs::remove_dir_all(d).unwrap();
     }
 }

@@ -89,6 +89,7 @@ pub async fn run(resolved: Resolved, shutdown: impl Future<Output = ()> + Send +
     info!("Database initialized at {}", config.db_path);
 
     let ula_global_id = db.ula_global_id().await?;
+    networks::ip::dhcpv6::use_store(db.blocking_store());
     let engine = engine::Engine::new(&config, ula_global_id)?;
     engine.register_metrics(&opentelemetry::global::meter("socketguard"));
 

@@ -41,7 +41,11 @@ pub trait Host {
                 program,
                 args.join(" "),
                 out.code,
-                out.stderr.trim().lines().next().unwrap_or(out.stdout.trim())
+                out.stderr
+                    .trim()
+                    .lines()
+                    .next()
+                    .unwrap_or(out.stdout.trim())
             );
         }
         Ok(out)

@@ -433,10 +433,7 @@ async fn status(State(state): State<Shared>) -> ApiResult<Json<StatusResponse>> 
             groups: engine.list_groups(&state).await?.len() as u32,
             grants: state.db.list_grants().await?.len() as u32,
         },
-        config_path: state
-            .config_path
-            .as_ref()
-            .map(|p| p.display().to_string()),
+        config_path: state.config_path.as_ref().map(|p| p.display().to_string()),
         db_path: Some(config.db_path.clone()),
         socket: Some(if cfg!(windows) {
             config.api_pipe.clone()

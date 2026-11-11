@@ -120,14 +120,21 @@ mod tests {
         let w = locations_for("windows", Some(r"D:\PD"));
         assert_eq!(
             w.config(),
-            PathBuf::from(r"D:\PD").join("SocketGuard").join("socketguard.json")
+            PathBuf::from(r"D:\PD")
+                .join("SocketGuard")
+                .join("socketguard.json")
         );
         assert_eq!(
             w.db(),
-            PathBuf::from(r"D:\PD").join("SocketGuard").join("socketguard.db")
+            PathBuf::from(r"D:\PD")
+                .join("SocketGuard")
+                .join("socketguard.db")
         );
         let l = locations_for("linux", None);
-        assert_eq!(l.config(), PathBuf::from("/etc/socketguard/socketguard.json"));
+        assert_eq!(
+            l.config(),
+            PathBuf::from("/etc/socketguard/socketguard.json")
+        );
         assert_eq!(l.db(), PathBuf::from("/var/lib/socketguard/socketguard.db"));
         assert_eq!(l.dirs().len(), 2);
         let m = locations_for("macos", None);
@@ -141,12 +148,18 @@ mod tests {
     #[test]
     fn relative_db_path_is_against_the_config_directory() {
         let cfg = Path::new("/srv/x/sg.json");
-        assert_eq!(resolve_db_path(cfg, "a.db"), Path::new("/srv/x").join("a.db"));
+        assert_eq!(
+            resolve_db_path(cfg, "a.db"),
+            Path::new("/srv/x").join("a.db")
+        );
         assert_eq!(
             resolve_db_path(cfg, ""),
             Path::new("/srv/x").join("socketguard.db")
         );
         assert_eq!(resolve_db_path(cfg, ":memory:"), PathBuf::from(":memory:"));
-        assert_eq!(resolve_db_path(&default_config_path(), ""), default_db_path());
+        assert_eq!(
+            resolve_db_path(&default_config_path(), ""),
+            default_db_path()
+        );
     }
 }
