@@ -90,7 +90,7 @@ pub fn plan(addr: &EnforcedAddress) -> Plan {
     for g in &addr.grants {
         let ports: BTreeSet<PortRef> = tcp
             .iter()
-            .filter(|p| g.port.is_none_or(|gp| gp == **p))
+            .filter(|p| g.ports.contains(**p))
             .copied()
             .collect();
         if ports.is_empty() {
@@ -441,7 +441,7 @@ mod tests {
     use super::*;
     use crate::networks::EnforcedGrant;
     use crate::test_support::MockTorControl;
-    use socketguard_core::Credential;
+    use socketguard_core::{Credential, PortRangeSet};
 
     const KEY_A: &str = "ZGBMJ4VIRNVUOQ5SJ2JXPSSWHB2R4YGTKPDGSMZ4HWCD5WLT2YKQ";
     const KEY_B: &str = "FDBSRGWHBKODXLW6IWZZSNGD5AXYI3X4SRXHPQ3GIGJO7OGEDMJQ";
@@ -482,7 +482,10 @@ mod tests {
 
     fn grant(p: Option<u16>, subject: EnforcedSubject) -> EnforcedGrant {
         EnforcedGrant {
-            port: p.map(port),
+            ports: match p {
+                Some(p) => PortRangeSet::from_ports([port(p)]),
+                None => PortRangeSet::everything(),
+            },
             subject,
         }
     }
@@ -612,7 +615,7 @@ mod tests {
         let req = LocatorRequest {
             app_id: "app".into(),
             address_id: "a".into(),
-            ports: socketguard_core::PortSet::All,
+            scope: socketguard_core::Scope::All,
         };
         let loc = n.ensure_locator(&req).unwrap();
         let Locator::Onion { hostname } = &loc.locator else {
@@ -639,7 +642,7 @@ mod tests {
         let req = LocatorRequest {
             app_id: "app".into(),
             address_id: "a".into(),
-            ports: socketguard_core::PortSet::All,
+            scope: socketguard_core::Scope::All,
         };
         let loc = n.ensure_locator(&req).unwrap();
         let mut addr = address(&[8080], vec![grant(None, EnforcedSubject::Anyone)]);
@@ -859,7 +862,7 @@ mod tests {
             locator: Locator::Onion {
                 hostname: "svc1.onion".into(),
             },
-            ports: socketguard_core::PortSet::All,
+            scope: socketguard_core::Scope::All,
             created_at: chrono::Utc::now(),
         };
         mock.set_down(true);

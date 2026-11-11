@@ -15,13 +15,13 @@ pub mod tor_client_key;
 pub mod tor_control;
 
 use crate::iface::InterfaceManager;
-use crate::ruleset::{served_ports, subject_credentials, Snapshot};
+use crate::ruleset::{subject_credentials, Snapshot};
 use anyhow::Result;
 use ip::{IpNetwork, Ipv6Backend, Prefix};
 use socketguard_core::config::BackendConfig;
 use socketguard_core::{
     Address, AddressId, AppId, Credential, CredentialKind, Locator, Network as NetworkInfo,
-    NetworkKind, NetworkStatus, PortRef, PortSet, Subject,
+    NetworkKind, NetworkStatus, PortRangeSet, PortRef, Scope, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv6Addr};
@@ -47,7 +47,7 @@ pub struct Capabilities {
 pub struct LocatorRequest {
     pub app_id: AppId,
     pub address_id: AddressId,
-    pub ports: PortSet,
+    pub scope: Scope,
 }
 
 /// A new locator, with the secret (the onion service key) that must be stored with it.
@@ -85,8 +85,8 @@ pub struct EnforcedAddress {
 
 #[derive(Debug, Clone)]
 pub struct EnforcedGrant {
-    /// None = every port.
-    pub port: Option<PortRef>,
+    /// The ports of the app the grant covers.
+    pub ports: PortRangeSet,
     pub subject: EnforcedSubject,
 }
 
@@ -206,23 +206,32 @@ pub fn enforcement_for(
         snap.peers.iter().map(|p| (p.id.as_str(), p)).collect();
     let mut addresses = Vec::new();
     for app in &snap.apps {
-        let listening: Vec<PortRef> = app
-            .ports
-            .iter()
-            .filter(|p| p.listening)
-            .map(|p| p.port_ref())
-            .collect();
-        for address in app.addresses.iter().filter(|a| a.network_id == network.id) {
-            let ports: Vec<PortRef> = served_ports(app, address)
-                .into_iter()
-                .filter(|p| listening.contains(p))
-                .collect();
-            let grants = socketguard_core::grants_for_app(&snap.grants, &snap.tags, &app.id)
+        let listening = PortRangeSet::from_ports(
+            app.ports
                 .iter()
-                .filter(|g| g.network_id.as_deref().is_none_or(|n| n == network.id))
+                .filter(|p| p.listening)
+                .map(|p| p.port_ref()),
+        );
+        // The exclusion rule of the firewall does not matter here: only ports the app
+        // itself listens on are published, and those always stay.
+        let none = PortRangeSet::new();
+        let app_grants = socketguard_core::grants_for_app(
+            &snap.grants,
+            &snap.tags,
+            app,
+            &snap.socket_groups,
+            &none,
+        );
+        for address in app.addresses.iter().filter(|a| a.network_id == network.id) {
+            let served =
+                socketguard_core::scope_ports(app, &address.scope, &snap.socket_groups, &none);
+            let ports: Vec<PortRef> = served.total().intersect(&listening).ports().collect();
+            let grants = app_grants
+                .iter()
+                .filter(|g| g.grant.network_id.as_deref().is_none_or(|n| n == network.id))
                 .map(|g| EnforcedGrant {
-                    port: g.port,
-                    subject: match &g.subject {
+                    ports: g.ports.total(),
+                    subject: match &g.grant.subject {
                         Subject::Anyone => EnforcedSubject::Anyone,
                         s => EnforcedSubject::Credentials(
                             subject_credentials(&snap.groups, &peers, s)

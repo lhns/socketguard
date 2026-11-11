@@ -116,8 +116,8 @@ async fn split_and_merge_and_errors() {
         .await;
     assert_eq!(s, StatusCode::CREATED, "{only}");
     assert_eq!(
-        only["ports"],
-        json!({"only": [{"port": 80, "proto": "tcp"}]})
+        only["scope"],
+        json!({"kind": "port", "port": 80, "proto": "tcp"})
     );
 
     let (s, body) = d
@@ -154,7 +154,7 @@ async fn split_and_merge_and_errors() {
     let (s, body) = d
         .post(
             &format!("{path}/merge"),
-            json!({"network_id": "ygg", "address_ids": [ygg_ids[0]]}),
+            json!({"network_id": "ygg", "address_ids": []}),
         )
         .await;
     assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
@@ -457,7 +457,7 @@ async fn grants_with_reach_filters_and_errors() {
         .await;
     assert_eq!((s, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
     let (s, body) = d
-        .post("/api/grants", json!({"target": {"kind": "app", "id": app_id}, "port": {"port": 9, "proto": "tcp"}, "subject": {"kind": "peer", "id": alice}}))
+        .post("/api/grants", json!({"target": {"kind": "app", "id": app_id}, "scope": {"kind": "port", "port": 9, "proto": "tcp"}, "subject": {"kind": "peer", "id": alice}}))
         .await;
     assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
     let (s, body) = d
@@ -969,7 +969,7 @@ async fn populated() -> Daemon {
         assert_eq!(s, StatusCode::CREATED, "{b}");
     }
     let (s, b) = d
-        .post("/api/grants", json!({"target": {"kind": "app", "id": app_id}, "network_id": "ygg", "port": {"port": 80, "proto": "tcp"}, "subject": {"kind": "anyone"}, "confirm_open": true}))
+        .post("/api/grants", json!({"target": {"kind": "app", "id": app_id}, "network_id": "ygg", "scope": {"kind": "port", "port": 80, "proto": "tcp"}, "subject": {"kind": "anyone"}, "confirm_open": true}))
         .await;
     assert_eq!(s, StatusCode::CREATED, "{b}");
     d
@@ -1085,7 +1085,7 @@ async fn apply_makes_the_state_match_the_document() {
         )
         .unwrap(),
     );
-    doc.grants.push(serde_json::from_value(json!({"app": {"id": app.id, "name": "x"}, "port": {"port": 80, "proto": "tcp"}, "subject": "anyone"})).unwrap());
+    doc.grants.push(serde_json::from_value(json!({"app": {"id": app.id, "name": "x"}, "scope": {"kind": "port", "port": 80, "proto": "tcp"}, "subject": "anyone"})).unwrap());
 
     let r = apply_ok(&d, &doc, false).await;
     assert!(!r.is_empty() && !r.dry_run);

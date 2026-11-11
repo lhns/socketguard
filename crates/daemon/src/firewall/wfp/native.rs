@@ -128,6 +128,7 @@ struct CondStore {
     v6_mask: Vec<Box<FWP_V6_ADDR_AND_MASK>>,
     v4_mask: Vec<Box<FWP_V4_ADDR_AND_MASK>>,
     luids: Vec<Box<u64>>,
+    ranges: Vec<Box<FWP_RANGE0>>,
 }
 
 fn raw_cond(
@@ -159,6 +160,18 @@ fn raw_cond(
             r.fieldKey = FWPM_CONDITION_IP_LOCAL_PORT;
             r.conditionValue.r#type = FWP_UINT16;
             r.conditionValue.Anonymous.uint16 = *p;
+        }
+        Cond::LocalPortRange(low, high) => {
+            r.fieldKey = FWPM_CONDITION_IP_LOCAL_PORT;
+            r.matchType = FWP_MATCH_RANGE;
+            let mut range: Box<FWP_RANGE0> = Box::new(unsafe { std::mem::zeroed() });
+            range.valueLow.r#type = FWP_UINT16;
+            range.valueLow.Anonymous.uint16 = *low;
+            range.valueHigh.r#type = FWP_UINT16;
+            range.valueHigh.Anonymous.uint16 = *high;
+            r.conditionValue.r#type = FWP_RANGE_TYPE;
+            r.conditionValue.Anonymous.rangeValue = &mut *range;
+            store.ranges.push(range);
         }
         Cond::RemotePort(p) => {
             r.fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
@@ -696,5 +709,21 @@ mod tests {
         let c = raw_cond(&mut store, &Cond::NotArrivalIf("ygg0".into()), &luids).unwrap();
         assert_eq!(c.matchType, FWP_MATCH_NOT_EQUAL);
         assert!(raw_cond(&mut store, &Cond::ArrivalIf("nope".into()), &luids).is_err());
+    }
+
+    #[test]
+    fn a_port_range_is_a_range_condition_that_outlives_the_call() {
+        let mut store = CondStore::default();
+        let luids = HashMap::new();
+        let c = raw_cond(&mut store, &Cond::LocalPortRange(50000, 51000), &luids).unwrap();
+        assert_eq!(c.fieldKey, FWPM_CONDITION_IP_LOCAL_PORT);
+        assert_eq!(c.matchType, FWP_MATCH_RANGE);
+        assert_eq!(c.conditionValue.r#type, FWP_RANGE_TYPE);
+        // The condition points into the store, which keeps the range alive and in place.
+        let range = unsafe { &*c.conditionValue.Anonymous.rangeValue };
+        assert_eq!(unsafe { range.valueLow.Anonymous.uint16 }, 50000);
+        assert_eq!(unsafe { range.valueHigh.Anonymous.uint16 }, 51000);
+        assert_eq!(range.valueLow.r#type, FWP_UINT16);
+        assert_eq!(store.ranges.len(), 1);
     }
 }

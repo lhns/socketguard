@@ -1,15 +1,18 @@
-//! The schema (v6), its migrations and the archive of pre-v1 databases.
+//! The schema (v7), its migrations and the archive of pre-v1 databases.
 
 use super::protect::protect_files;
 use super::settings::FRESH_DB_KEY;
-use super::{with_suffix, Database};
+use super::{ts, with_suffix, Database};
 use anyhow::{bail, Context, Result};
+use chrono::Utc;
+use socketguard_core::{new_id, normalize_ranges, ranges_text, PortRange, PortRef};
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, SqliteConnection};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Schema v1 -> v2: the service keys of onion addresses (ADR 0037).
 const MIGRATION_1_TO_2: &str = r#"
@@ -117,13 +120,117 @@ CREATE TABLE tor_client_keys (
 );
 "#;
 
+/// Schema v6 -> v7: socket groups and scopes (ADR 0047). Grants, tag members and addresses
+/// get a `socket_group` column next to `port`/`proto`: all NULL = every socket, a port with
+/// its protocol, or a group. The unique indexes cover it.
+///
+/// `addresses` is altered in place rather than rebuilt: `onion_keys` cascades from it, and
+/// dropping the table would delete the keys. The old `ports` column is read by
+/// [`finish_6_to_7`], which turns what SQL cannot (several ports) into socket groups, and
+/// then drops it.
+const MIGRATION_6_TO_7: &str = r#"
+CREATE TABLE socket_groups (
+    id TEXT PRIMARY KEY,
+    label TEXT UNIQUE NOT NULL,
+    ports TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE socket_group_apps (
+    group_id TEXT NOT NULL REFERENCES socket_groups(id) ON DELETE CASCADE,
+    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, app_id)
+);
+CREATE INDEX socket_group_apps_app ON socket_group_apps(app_id);
+
+ALTER TABLE grants ADD COLUMN socket_group TEXT;
+DROP INDEX grants_unique;
+CREATE UNIQUE INDEX grants_unique ON grants (
+    target_kind, target_id, COALESCE(port, -1), COALESCE(proto, ''),
+    COALESCE(socket_group, ''), COALESCE(network_id, ''),
+    subject_kind, COALESCE(subject_id, '')
+);
+
+ALTER TABLE tag_members ADD COLUMN socket_group TEXT;
+DROP INDEX tag_members_unique;
+CREATE UNIQUE INDEX tag_members_unique ON tag_members (
+    tag_id, app_id, COALESCE(port, -1), COALESCE(proto, ''), COALESCE(socket_group, '')
+);
+
+ALTER TABLE addresses ADD COLUMN port INTEGER;
+ALTER TABLE addresses ADD COLUMN proto TEXT;
+ALTER TABLE addresses ADD COLUMN socket_group TEXT;
+UPDATE addresses
+    SET port = json_extract(ports, '$[0].port'), proto = json_extract(ports, '$[0].proto')
+    WHERE CASE WHEN ports = 'all' THEN 0 ELSE json_array_length(ports) = 1 END;
+"#;
+
+/// The part of v6 -> v7 that needs code: an address that served several ports becomes a
+/// socket group of those ports (labelled by them, so one group serves every app with the
+/// same set) attached to its app, with the address scoped to the group; one that served
+/// none is dropped; then the old `ports` column goes.
+async fn finish_6_to_7(conn: &mut SqliteConnection) -> Result<()> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT id, app_id, ports FROM addresses \
+         WHERE CASE WHEN ports = 'all' THEN 0 ELSE json_array_length(ports) != 1 END",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut by_label: HashMap<String, String> = HashMap::new();
+    for (id, app_id, ports) in rows {
+        let refs: Vec<PortRef> = serde_json::from_str(&ports)
+            .with_context(|| format!("address {id} has unreadable ports"))?;
+        if refs.is_empty() {
+            // Served nothing; scope All would widen it.
+            sqlx::query("DELETE FROM addresses WHERE id = ?")
+                .bind(&id)
+                .execute(&mut *conn)
+                .await?;
+            continue;
+        }
+        let ranges = normalize_ranges(&refs.iter().map(|p| PortRange::single(*p)).collect::<Vec<_>>());
+        let label = ranges_text(&ranges);
+        let group_id = match by_label.get(&label) {
+            Some(g) => g.clone(),
+            None => {
+                let g = new_id();
+                sqlx::query(
+                    "INSERT INTO socket_groups (id, label, ports, created_at) VALUES (?, ?, ?, ?)",
+                )
+                .bind(&g)
+                .bind(&label)
+                .bind(serde_json::to_string(&ranges)?)
+                .bind(ts(Utc::now()))
+                .execute(&mut *conn)
+                .await?;
+                by_label.insert(label, g.clone());
+                g
+            }
+        };
+        sqlx::query("INSERT OR IGNORE INTO socket_group_apps (group_id, app_id) VALUES (?, ?)")
+            .bind(&group_id)
+            .bind(&app_id)
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("UPDATE addresses SET socket_group = ? WHERE id = ?")
+            .bind(&group_id)
+            .bind(&id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    sqlx::raw_sql("ALTER TABLE addresses DROP COLUMN ports")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
 /// `MIGRATIONS[n]` takes the schema from v(n+1) to v(n+2).
-const MIGRATIONS: [&str; 5] = [
+const MIGRATIONS: [&str; 6] = [
     MIGRATION_1_TO_2,
     MIGRATION_2_TO_3,
     MIGRATION_3_TO_4,
     MIGRATION_4_TO_5,
     MIGRATION_5_TO_6,
+    MIGRATION_6_TO_7,
 ];
 
 const SCHEMA: &str = r#"
@@ -275,6 +382,9 @@ impl Database {
         for sql in &MIGRATIONS[usize::try_from(version.max(1) - 1)?..] {
             sqlx::raw_sql(sql).execute(&mut *tx).await?;
         }
+        if version < 7 {
+            finish_6_to_7(&mut tx).await?;
+        }
         if version != SCHEMA_VERSION {
             sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
                 .execute(&mut *tx)
@@ -329,6 +439,8 @@ mod tests {
                 "peer_groups",
                 "peers",
                 "settings",
+                "socket_group_apps",
+                "socket_groups",
                 "tag_exclusions",
                 "tag_members",
                 "tags",
@@ -548,7 +660,7 @@ mod tests {
         assert_eq!(ids, ["g1", "g3"], "the oldest of each duplicate stays");
 
         let mut again = grant("a", Subject::Anyone);
-        again.port = None;
+        again.scope = socketguard_core::Scope::All;
         let err = db.insert_grant(&again).await.unwrap_err();
         assert!(super::super::is_unique_violation(&err), "{err:#}");
         drop(db);
@@ -632,6 +744,136 @@ mod tests {
         db.insert_grant(&dup)
             .await
             .expect("a tag with the same id is another target");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn v6_database_migrates_to_v7_with_scopes_and_socket_groups() {
+        use socketguard_core::{Protocol, Scope, Target};
+        let path = temp_db_path("v6-to-v7");
+        {
+            let opts = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true);
+            let mut c = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::raw_sql(SCHEMA).execute(&mut c).await.unwrap();
+            for sql in &MIGRATIONS[..5] {
+                sqlx::raw_sql(sql).execute(&mut c).await.unwrap();
+            }
+            sqlx::query("PRAGMA user_version = 6")
+                .execute(&mut c)
+                .await
+                .unwrap();
+            let web = r#"[{"port":80,"proto":"tcp"},{"port":443,"proto":"tcp"}]"#;
+            let web_rev = r#"[{"port":443,"proto":"tcp"},{"port":80,"proto":"tcp"}]"#;
+            let dns = r#"[{"port":53,"proto":"udp"},{"port":54,"proto":"udp"}]"#;
+            let one = r#"[{"port":8080,"proto":"tcp"}]"#;
+            sqlx::raw_sql(&format!(
+                "INSERT INTO apps (id, name, process_name, reviewed, first_seen, last_seen) \
+                 VALUES ('a', 'n', 'p', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), \
+                        ('b', 'n', 'p', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'); \
+                 INSERT INTO addresses (id, app_id, network_id, ports, locator_kind, locator, \
+                                        created_at) VALUES \
+                 ('all', 'a', 'ygg', 'all', 'ipv6', '300:1::1', '2026-01-01T00:00:00Z'), \
+                 ('one', 'a', 'ygg', '{one}', 'ipv6', '300:1::2', '2026-01-01T00:00:01Z'), \
+                 ('many', 'a', 'ygg', '{web_rev}', 'ipv6', '300:1::3', '2026-01-01T00:00:02Z'), \
+                 ('many_b', 'b', 'ygg', '{web}', 'ipv6', '300:1::4', '2026-01-01T00:00:03Z'), \
+                 ('none', 'b', 'ygg', '[]', 'ipv6', '300:1::5', '2026-01-01T00:00:04Z'), \
+                 ('onion', 'b', 'tor', '{dns}', 'onion', 'abc.onion', '2026-01-01T00:00:05Z'); \
+                 INSERT INTO onion_keys (address_id, private_key) VALUES ('onion', 'secret'); \
+                 INSERT INTO grants (id, target_kind, target_id, port, proto, network_id, \
+                                     subject_kind, subject_id, created_at) VALUES \
+                 ('g1', 'app', 'a', 80, 'tcp', NULL, 'peer', 'p1', '2026-01-01T00:00:00Z'), \
+                 ('g2', 'app', 'a', NULL, NULL, NULL, 'anyone', NULL, '2026-01-01T00:00:00Z'); \
+                 INSERT INTO tags (id, label, patterns, created_at) \
+                 VALUES ('t', 'dev', '[]', '2026-01-01T00:00:00Z'); \
+                 INSERT INTO tag_members (tag_id, app_id, port, proto) VALUES \
+                 ('t', 'a', NULL, NULL), ('t', 'b', 22, 'tcp');"
+            ))
+            .execute(&mut c)
+            .await
+            .unwrap();
+        }
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+
+        // Addresses: all stays All, one port becomes Port, several ports a group of those
+        // ports attached to the app (shared by apps with the same set), none is dropped.
+        let addrs: std::collections::HashMap<String, socketguard_core::Address> = db
+            .list_addresses()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|a| (a.id.clone(), a))
+            .collect();
+        assert_eq!(addrs["all"].scope, Scope::All);
+        assert_eq!(
+            addrs["one"].scope,
+            Scope::Port {
+                port: 8080,
+                proto: Protocol::Tcp
+            }
+        );
+        assert!(
+            !addrs.contains_key("none"),
+            "an address serving nothing is dropped"
+        );
+        let groups = db.list_socket_groups().await.unwrap();
+        let labels: Vec<&str> = groups.iter().map(|g| g.label.as_str()).collect();
+        assert_eq!(labels, ["53-54/udp", "80/tcp, 443/tcp"]);
+        let web = groups
+            .iter()
+            .find(|g| g.label == "80/tcp, 443/tcp")
+            .unwrap();
+        assert_eq!(web.apps, ["a", "b"], "the same ports share a group");
+        assert_eq!(addrs["many"].scope, Scope::Group { id: web.id.clone() });
+        assert_eq!(addrs["many_b"].scope, addrs["many"].scope);
+        let dns = groups.iter().find(|g| g.label == "53-54/udp").unwrap();
+        assert_eq!(addrs["onion"].scope, Scope::Group { id: dns.id.clone() });
+        assert_eq!(dns.apps, ["b"]);
+        // The onion key survived the change of the addresses table.
+        assert_eq!(db.onion_keys().await.unwrap()["onion"], "secret");
+        let cols: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('addresses')")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert!(!cols.contains(&"ports".to_string()));
+
+        // Grants and tag members keep their meaning.
+        let grants = db.list_grants().await.unwrap();
+        assert_eq!(
+            grants[0].scope,
+            Scope::Port {
+                port: 80,
+                proto: Protocol::Tcp
+            }
+        );
+        assert_eq!(grants[1].scope, Scope::All);
+        assert!(grants.iter().all(|g| g.target == Target::App("a".into())));
+        let tag = db.get_tag("t").await.unwrap().unwrap();
+        assert_eq!(tag.members[0].scope, Scope::All);
+        assert_eq!(
+            tag.members[1].scope,
+            Scope::Port {
+                port: 22,
+                proto: Protocol::Tcp
+            }
+        );
+        // The unique indexes now cover the group column.
+        let mut by_group = grant("a", Subject::Peer("p1".into()));
+        by_group.scope = Scope::Group { id: web.id.clone() };
+        db.insert_grant(&by_group).await.unwrap();
+        let mut again = by_group.clone();
+        again.id = "other".into();
+        let err = db.insert_grant(&again).await.unwrap_err();
+        assert!(super::super::is_unique_violation(&err), "{err:#}");
+        again.scope = Scope::Group { id: "elsewhere".into() };
+        db.insert_grant(&again)
+            .await
+            .expect("another group is another grant");
+        db.migrate().await.expect("idempotent");
         drop(db);
         let _ = std::fs::remove_file(&path);
     }

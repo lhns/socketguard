@@ -111,13 +111,12 @@ pub fn create_firewall() -> Box<dyn Firewall> {
 /// A representative ruleset shared by the renderers' golden tests.
 #[cfg(test)]
 pub(crate) fn golden_ruleset() -> DesiredRuleset {
-    use socketguard_core::Protocol;
+    use socketguard_core::{PortRange, PortRef, Protocol};
     let rule = |id: &str, iif: Option<&str>, dst: &str, port, proto, sources| Rule {
         id: id.to_string(),
         iif: iif.map(str::to_string),
         dst: Dst::Addr(dst.parse().unwrap()),
-        port,
-        proto,
+        ports: PortRange::single(PortRef { port, proto }),
         sources,
     };
     DesiredRuleset {
@@ -197,8 +196,10 @@ pub(crate) fn golden_ruleset() -> DesiredRuleset {
                 id: "v4:app1:22:tcp:g4:eth0".into(),
                 iif: Some("eth0".into()),
                 dst: Dst::HostV4,
-                port: 22,
-                proto: Protocol::Tcp,
+                ports: PortRange::single(PortRef {
+                    port: 22,
+                    proto: Protocol::Tcp,
+                }),
                 sources: Sources::Nets(vec![
                     "192.168.1.5/32".parse().unwrap(),
                     "10.0.20.0/24".parse().unwrap(),
@@ -208,8 +209,10 @@ pub(crate) fn golden_ruleset() -> DesiredRuleset {
                 id: "v4:app2:53:udp:g5:eth0".into(),
                 iif: Some("eth0".into()),
                 dst: Dst::HostV4,
-                port: 53,
-                proto: Protocol::Udp,
+                ports: PortRange::single(PortRef {
+                    port: 53,
+                    proto: Protocol::Udp,
+                }),
                 sources: Sources::Any,
             },
             // A segment grant: everyone on the interface's prefix and link-local range.

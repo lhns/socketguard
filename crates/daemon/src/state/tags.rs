@@ -1,9 +1,16 @@
 //! Tags (ADR 0043), the writes a batch of changes applies in one transaction (ADR 0045)
 //! and the Tor client keys the daemon generated.
 
-use super::{insert_grant_in, insert_peer_in, parse_ts, to_port, ts, Database, Tx};
-use anyhow::{bail, Result};
-use socketguard_core::{App, Credential, Grant, Peer, PortRef, Tag, TagId, TagMember};
+use super::socket_groups::{
+    attach_in, delete_socket_group_in, detach_in, insert_socket_group_in, update_socket_group_in,
+};
+use super::{
+    insert_grant_in, insert_peer_in, parse_ts, scope_columns, scope_from_columns, ts, Database, Tx,
+};
+use anyhow::Result;
+use socketguard_core::{
+    App, Credential, Grant, Peer, PortRange, Scope, SocketGroup, Tag, TagId, TagMember,
+};
 use sqlx::Row;
 use std::collections::HashMap;
 
@@ -19,16 +26,36 @@ pub enum Write {
     AddTagMember {
         tag_id: TagId,
         app_id: String,
-        port: Option<PortRef>,
+        scope: Scope,
     },
     /// Remove one member. With `exclude`, remember the app as excluded so patterns do not
     /// add it back.
     RemoveTagMember {
         tag_id: TagId,
         app_id: String,
-        port: Option<PortRef>,
+        scope: Scope,
         exclude: bool,
     },
+    /// The group with its attachments.
+    InsertSocketGroup(SocketGroup),
+    UpdateSocketGroup {
+        id: String,
+        label: Option<String>,
+        ports: Option<Vec<PortRange>>,
+    },
+    /// The attachments go with the group.
+    DeleteSocketGroup(String),
+    /// Idempotent.
+    AttachSocketGroup {
+        group_id: String,
+        app_id: String,
+    },
+    DetachSocketGroup {
+        group_id: String,
+        app_id: String,
+    },
+    /// An address and, with it, its onion key.
+    DeleteAddress(String),
     SetReviewed {
         app_id: String,
         reviewed: bool,
@@ -54,15 +81,15 @@ async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
                 .execute(&mut **tx)
                 .await?;
             for m in &t.members {
-                add_member(tx, &t.id, &m.app_id, m.port).await?;
+                add_member(tx, &t.id, &m.app_id, &m.scope).await?;
             }
         }
         Write::AddTagMember {
             tag_id,
             app_id,
-            port,
+            scope,
         } => {
-            add_member(tx, tag_id, app_id, *port).await?;
+            add_member(tx, tag_id, app_id, scope).await?;
             sqlx::query("DELETE FROM tag_exclusions WHERE tag_id = ? AND app_id = ?")
                 .bind(tag_id)
                 .bind(app_id)
@@ -72,17 +99,20 @@ async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
         Write::RemoveTagMember {
             tag_id,
             app_id,
-            port,
+            scope,
             exclude,
         } => {
+            let (port, proto, group) = scope_columns(scope);
             sqlx::query(
                 "DELETE FROM tag_members WHERE tag_id = ? AND app_id = ? \
-                 AND COALESCE(port, -1) = ? AND COALESCE(proto, '') = ?",
+                 AND COALESCE(port, -1) = ? AND COALESCE(proto, '') = ? \
+                 AND COALESCE(socket_group, '') = ?",
             )
             .bind(tag_id)
             .bind(app_id)
-            .bind(port.map_or(-1, |p| i64::from(p.port)))
-            .bind(port.map_or(String::new(), |p| p.proto.to_string()))
+            .bind(port.unwrap_or(-1))
+            .bind(proto.unwrap_or_default())
+            .bind(group.unwrap_or_default())
             .execute(&mut **tx)
             .await?;
             if *exclude {
@@ -92,6 +122,19 @@ async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
                     .execute(&mut **tx)
                     .await?;
             }
+        }
+        Write::InsertSocketGroup(g) => insert_socket_group_in(tx, g).await?,
+        Write::UpdateSocketGroup { id, label, ports } => {
+            update_socket_group_in(tx, id, label.as_deref(), ports.as_deref()).await?
+        }
+        Write::DeleteSocketGroup(id) => delete_socket_group_in(tx, id).await?,
+        Write::AttachSocketGroup { group_id, app_id } => attach_in(tx, group_id, app_id).await?,
+        Write::DetachSocketGroup { group_id, app_id } => detach_in(tx, group_id, app_id).await?,
+        Write::DeleteAddress(id) => {
+            sqlx::query("DELETE FROM addresses WHERE id = ?")
+                .bind(id)
+                .execute(&mut **tx)
+                .await?;
         }
         Write::SetReviewed { app_id, reviewed } => {
             sqlx::query("UPDATE apps SET reviewed = ? WHERE id = ?")
@@ -104,19 +147,17 @@ async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
     Ok(())
 }
 
-async fn add_member(
-    tx: &mut Tx<'_>,
-    tag_id: &str,
-    app_id: &str,
-    port: Option<PortRef>,
-) -> Result<()> {
+async fn add_member(tx: &mut Tx<'_>, tag_id: &str, app_id: &str, scope: &Scope) -> Result<()> {
+    let (port, proto, group) = scope_columns(scope);
     sqlx::query(
-        "INSERT OR IGNORE INTO tag_members (tag_id, app_id, port, proto) VALUES (?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO tag_members (tag_id, app_id, port, proto, socket_group) \
+         VALUES (?, ?, ?, ?, ?)",
     )
     .bind(tag_id)
     .bind(app_id)
-    .bind(port.map(|p| p.port))
-    .bind(port.map(|p| p.proto.to_string()))
+    .bind(port)
+    .bind(proto)
+    .bind(group)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -173,7 +214,7 @@ impl Database {
             });
         }
         let members = sqlx::query(
-            "SELECT tag_id, app_id, port, proto FROM tag_members \
+            "SELECT tag_id, app_id, port, proto, socket_group FROM tag_members \
              WHERE (?1 IS NULL OR tag_id = ?1) ORDER BY rowid",
         )
         .bind(only)
@@ -181,19 +222,10 @@ impl Database {
         .await?;
         let mut by_tag: HashMap<String, Vec<TagMember>> = HashMap::new();
         for r in members {
-            let port: Option<i64> = r.get("port");
-            let proto: Option<String> = r.get("proto");
-            let port = match (port, proto) {
-                (Some(p), Some(pr)) => Some(PortRef {
-                    port: to_port(p)?,
-                    proto: pr.parse().map_err(anyhow::Error::msg)?,
-                }),
-                (None, _) => None,
-                (Some(_), None) => bail!("tag member with a port but no protocol"),
-            };
+            let scope = scope_from_columns(r.get("port"), r.get("proto"), r.get("socket_group"))?;
             by_tag.entry(r.get("tag_id")).or_default().push(TagMember {
                 app_id: r.get("app_id"),
-                port,
+                scope,
             });
         }
         let excluded = sqlx::query(
@@ -264,7 +296,7 @@ impl Database {
                 continue;
             }
             let mut tx = self.pool.begin().await?;
-            add_member(&mut tx, &tag.id, &app.id, None).await?;
+            add_member(&mut tx, &tag.id, &app.id, &Scope::All).await?;
             tx.commit().await?;
             joined.push(tag.id);
         }
@@ -324,7 +356,7 @@ mod tests {
     use crate::state::test_util::*;
     use crate::state::{is_unique_violation, Write};
     use chrono::Utc;
-    use socketguard_core::{new_id, CredentialKind, Subject, Tag, TagMember, Target};
+    use socketguard_core::{new_id, CredentialKind, Scope, Subject, Tag, TagMember, Target};
 
     fn tag(label: &str, patterns: &[&str], members: Vec<TagMember>) -> Tag {
         Tag {
@@ -347,7 +379,7 @@ mod tests {
             &["py*"],
             vec![TagMember {
                 app_id: "a".into(),
-                port: None,
+                scope: Scope::All,
             }],
         );
         db.apply_writes(&[Write::InsertTag(t.clone())])
@@ -357,15 +389,15 @@ mod tests {
             Write::AddTagMember {
                 tag_id: t.id.clone(),
                 app_id: "b".into(),
-                port: Some(socketguard_core::PortRef {
+                scope: Scope::Port {
                     port: 80,
                     proto: socketguard_core::Protocol::Tcp,
-                }),
+                },
             },
             Write::RemoveTagMember {
                 tag_id: t.id.clone(),
                 app_id: "a".into(),
-                port: None,
+                scope: Scope::All,
                 exclude: true,
             },
         ])
@@ -380,7 +412,7 @@ mod tests {
         db.apply_writes(&[Write::AddTagMember {
             tag_id: t.id.clone(),
             app_id: "a".into(),
-            port: None,
+            scope: Scope::All,
         }])
         .await
         .unwrap();
@@ -395,7 +427,7 @@ mod tests {
         db.apply_writes(&[Write::AddTagMember {
             tag_id: t.id.clone(),
             app_id: "a".into(),
-            port: None,
+            scope: Scope::All,
         }])
         .await
         .unwrap();
@@ -404,6 +436,52 @@ mod tests {
         let dup = tag("dev", &[], vec![]);
         let err = db.apply_writes(&[Write::InsertTag(dup)]).await.unwrap_err();
         assert!(is_unique_violation(&err));
+    }
+
+    #[tokio::test]
+    async fn members_by_scope_are_distinct_and_removed_by_scope() {
+        let db = db().await;
+        db.insert_app(&app("a")).await.unwrap();
+        let t = tag("dev", &[], vec![]);
+        db.apply_writes(&[Write::InsertTag(t.clone())])
+            .await
+            .unwrap();
+        let scopes = [
+            Scope::All,
+            Scope::Port {
+                port: 80,
+                proto: socketguard_core::Protocol::Tcp,
+            },
+            Scope::Group { id: "sg".into() },
+        ];
+        for scope in &scopes {
+            db.apply_writes(&[Write::AddTagMember {
+                tag_id: t.id.clone(),
+                app_id: "a".into(),
+                scope: scope.clone(),
+            }])
+            .await
+            .unwrap();
+        }
+        let got: Vec<Scope> = db
+            .get_tag(&t.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .members
+            .into_iter()
+            .map(|m| m.scope)
+            .collect();
+        assert_eq!(got, scopes);
+        db.apply_writes(&[Write::RemoveTagMember {
+            tag_id: t.id.clone(),
+            app_id: "a".into(),
+            scope: scopes[2].clone(),
+            exclude: false,
+        }])
+        .await
+        .unwrap();
+        assert_eq!(db.get_tag(&t.id).await.unwrap().unwrap().members.len(), 2);
     }
 
     #[tokio::test]
@@ -463,7 +541,7 @@ mod tests {
         db.apply_writes(&[Write::RemoveTagMember {
             tag_id: t.id.clone(),
             app_id: "a".into(),
-            port: None,
+            scope: Scope::All,
             exclude: true,
         }])
         .await

@@ -6,7 +6,7 @@ use crate::api::DaemonEvent;
 use crate::state::{NewActivity, Write};
 use crate::AppState;
 use chrono::Utc;
-use socketguard_core::{new_id, ActivityKind, App, PortRef, Tag, TagMember};
+use socketguard_core::{new_id, ActivityKind, App, Scope, Tag, TagMember};
 
 /// The patterns as stored: trimmed, no blanks, no duplicates.
 pub(super) fn clean_patterns(patterns: &[String]) -> Vec<String> {
@@ -96,7 +96,7 @@ impl Engine {
             .into_iter()
             .map(|a| TagMember {
                 app_id: a.id.clone(),
-                port: None,
+                scope: Scope::All,
             })
             .collect();
         for m in matched {
@@ -148,7 +148,7 @@ impl Engine {
                 .map(|a| Write::AddTagMember {
                     tag_id: id.to_string(),
                     app_id: a.id.clone(),
-                    port: None,
+                    scope: Scope::All,
                 })
                 .collect();
             state.db.apply_writes(&writes).await?;
@@ -187,13 +187,13 @@ impl Engine {
         Ok(())
     }
 
-    /// Add an app (or one port of it) to a tag.
+    /// Add an app (or a port or socket group of it) to a tag.
     pub async fn add_tag_member(
         &self,
         state: &AppState,
         tag_id: &str,
         app_id: &str,
-        port: Option<PortRef>,
+        scope: Scope,
         confirm_open: bool,
     ) -> Result<Tag, EngineError> {
         let tag = self.get_tag(state, tag_id).await?;
@@ -202,17 +202,10 @@ impl Engine {
             .get_app(app_id)
             .await?
             .ok_or_else(|| EngineError::NotFound(format!("app {app_id}")))?;
-        if let Some(p) = port {
-            if !app.has_port(p) {
-                return Err(EngineError::Invalid(format!(
-                    "{} has no port {p}",
-                    app.name
-                )));
-            }
-        }
+        Self::check_scope_on_app(&super::mutations::Catalog::load(state).await?, &app, &scope)?;
         let member = TagMember {
             app_id: app_id.to_string(),
-            port,
+            scope: scope.clone(),
         };
         if !confirm_open
             && !tag.members.contains(&member)
@@ -225,7 +218,7 @@ impl Engine {
             .apply_writes(&[Write::AddTagMember {
                 tag_id: tag_id.to_string(),
                 app_id: app_id.to_string(),
-                port,
+                scope,
             }])
             .await?;
         let applied = self.apply_firewall(state).await;
@@ -244,33 +237,33 @@ impl Engine {
         self.get_tag(state, tag_id).await
     }
 
-    /// Remove an app (or one port of it) from a tag. Removing a whole app that the tag's
-    /// patterns match is remembered, so discovery does not add it back.
+    /// Remove an app (or a port or socket group of it) from a tag. Removing a whole app that
+    /// the tag's patterns match is remembered, so discovery does not add it back.
     pub async fn remove_tag_member(
         &self,
         state: &AppState,
         tag_id: &str,
         app_id: &str,
-        port: Option<PortRef>,
+        scope: Scope,
     ) -> Result<Tag, EngineError> {
         let tag = self.get_tag(state, tag_id).await?;
         if !tag
             .members
             .iter()
-            .any(|m| m.app_id == app_id && m.port == port)
+            .any(|m| m.app_id == app_id && m.scope == scope)
         {
             return Err(EngineError::NotFound(format!(
                 "membership of app {app_id} in tag {}",
                 tag.label
             )));
         }
-        let exclude = Self::removal_excludes(state, &tag, app_id, port).await?;
+        let exclude = Self::removal_excludes(state, &tag, app_id, &scope).await?;
         state
             .db
             .apply_writes(&[Write::RemoveTagMember {
                 tag_id: tag_id.to_string(),
                 app_id: app_id.to_string(),
-                port,
+                scope,
                 exclude,
             }])
             .await?;
@@ -296,9 +289,9 @@ impl Engine {
         state: &AppState,
         tag: &Tag,
         app_id: &str,
-        port: Option<PortRef>,
+        scope: &Scope,
     ) -> Result<bool, EngineError> {
-        if port.is_some() || tag.patterns.is_empty() {
+        if !scope.is_all() || tag.patterns.is_empty() {
             return Ok(false);
         }
         Ok(state

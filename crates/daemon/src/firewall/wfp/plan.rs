@@ -43,6 +43,8 @@ pub(crate) enum Action {
 pub(crate) enum Cond {
     LocalAddr(IpAddr),
     LocalPort(u16),
+    /// A range of local ports, both ends included (a rule over a socket group's range).
+    LocalPortRange(u16, u16),
     RemotePort(u16),
     Proto(u8),
     /// A host (full prefix) matches by address, anything else by address+mask.
@@ -161,8 +163,12 @@ pub(crate) fn plan(desired: &DesiredRuleset) -> Vec<FilterSpec> {
             // Any IPv4 destination of the host: no address condition on the v4 layer.
             Dst::HostV4 => (Layer::V4, Vec::new()),
         };
-        base.push(Cond::LocalPort(rule.port));
-        base.push(Cond::Proto(proto_number(rule.proto)));
+        base.push(if rule.ports.is_single() {
+            Cond::LocalPort(rule.ports.start)
+        } else {
+            Cond::LocalPortRange(rule.ports.start, rule.ports.end)
+        });
+        base.push(Cond::Proto(proto_number(rule.ports.proto)));
         if let Some(iif) = &rule.iif {
             base.push(Cond::ArrivalIf(iif.clone()));
         }
@@ -229,6 +235,7 @@ pub(crate) fn plan(desired: &DesiredRuleset) -> Vec<FilterSpec> {
 mod tests {
     use super::*;
     use crate::firewall::{Rule, Scope, ScopeKind};
+    use socketguard_core::{PortRange, PortRef};
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
@@ -248,8 +255,10 @@ mod tests {
             id: id.into(),
             iif: iif.map(Into::into),
             dst: Dst::Addr(ip(dst)),
-            port: 8080,
-            proto: Protocol::Tcp,
+            ports: PortRange::single(PortRef {
+                port: 8080,
+                proto: Protocol::Tcp,
+            }),
             sources,
         }
     }
@@ -468,9 +477,30 @@ mod tests {
     }
 
     #[test]
+    fn a_port_range_rule_has_a_range_condition() {
+        let mut r = rule("range", "fd00::1", Some("ygg0"), Sources::Any);
+        r.ports = "50000-51000/tcp".parse().unwrap();
+        let p = plan(&DesiredRuleset {
+            scopes: vec![],
+            rules: vec![r],
+        });
+        assert_eq!(p.len(), 1);
+        assert!(p[0].conds.contains(&Cond::LocalPortRange(50000, 51000)));
+        assert!(!p[0].conds.iter().any(|c| matches!(c, Cond::LocalPort(_))));
+        assert!(p[0].conds.contains(&Cond::Proto(6)));
+        // A single port stays a plain port condition.
+        let one = rule("one", "fd00::1", None, Sources::Any);
+        let p = plan(&DesiredRuleset {
+            scopes: vec![],
+            rules: vec![one],
+        });
+        assert!(p[0].conds.contains(&Cond::LocalPort(8080)));
+    }
+
+    #[test]
     fn rule_any_source_v4_udp_has_no_remote_condition() {
         let mut r = rule("r2", "10.0.0.1", None, Sources::Any);
-        r.proto = Protocol::Udp;
+        r.ports.proto = Protocol::Udp;
         let p = plan(&DesiredRuleset {
             scopes: vec![],
             rules: vec![r],
