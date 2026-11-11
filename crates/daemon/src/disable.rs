@@ -362,8 +362,17 @@ pub async fn disable_command(
         let db = Database::open_existing(&path)
             .await
             .map_err(|e| format!("{e:#}"))?;
-        db.migrate().await.map_err(|e| format!("{e:#}"))?;
-        let ula = db.ula_global_id().await.map_err(|e| format!("{e:#}"))?;
+        let ula = match db.migrate().await {
+            Ok(()) => db.ula_global_id().await,
+            Err(e) => Err(e),
+        };
+        let ula = match ula {
+            Ok(u) => u,
+            Err(e) => {
+                db.close().await;
+                return Err(format!("{e:#}"));
+            }
+        };
         let mut report = disable_with_db(DisableInput {
             db: &db,
             interfaces,
@@ -377,6 +386,9 @@ pub async fn disable_command(
         if config_has_yggdrasil(target.config) {
             report.note(YGGDRASIL_LEFT_RUNNING);
         }
+        // Windows cannot delete a file that is still open, and `uninstall --purge` deletes
+        // the database next.
+        db.close().await;
         return Ok(report);
     }
     let looked = format!(
@@ -574,6 +586,43 @@ mod tests {
             0,
             "no file appeared"
         );
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// `uninstall --purge` deletes the database right after the disable step; Windows refuses
+    /// to delete a file that is still open, so the step must have closed it.
+    #[tokio::test]
+    async fn the_database_can_be_deleted_right_after_disable() {
+        let d = tmp();
+        let (cfg, dbp) = (d.join("socketguard.json"), d.join("socketguard.db"));
+        let db = Database::new(&dbp.to_string_lossy()).await.unwrap();
+        db.migrate().await.unwrap();
+        db.close().await;
+        let calls = Arc::new(Mutex::new(vec![]));
+        let fw = Arc::new(MockFirewall::new(calls));
+        disable_command(
+            &Target {
+                config: &cfg,
+                config_found: false,
+                db: &dbp,
+            },
+            false,
+            false,
+            fw,
+            Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),
+            &HashMap::new(),
+            &no_slots,
+        )
+        .await
+        .unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            let f = std::path::PathBuf::from(format!("{}{suffix}", dbp.display()));
+            match std::fs::remove_file(&f) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("cannot delete {}: {e}", f.display()),
+            }
+        }
         std::fs::remove_dir_all(d).unwrap();
     }
 

@@ -240,6 +240,11 @@ impl Database {
         })
     }
 
+    /// Close every connection, so the files can be deleted (Windows refuses otherwise).
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+
     // ======== Apps ========
 
     pub async fn insert_app(&self, app: &App) -> Result<()> {

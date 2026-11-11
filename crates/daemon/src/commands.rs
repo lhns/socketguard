@@ -287,6 +287,8 @@ async fn export_to(r: &Resolved, file: &Path) -> Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("{e:?}"))?
     };
+    // Windows cannot delete a file that is still open (`uninstall --purge` does, next).
+    st.db.close().await;
     let mut text = serde_json::to_string_pretty(&doc)?;
     text.push('\n');
     std::fs::write(file, text).with_context(|| format!("writing {}", file.display()))
