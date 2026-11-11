@@ -117,6 +117,7 @@ impl Rig {
                 expect_tor_uid: None,
                 cookie_owner: None,
                 allow_remote_control: false,
+                managed: false,
             },
         };
         backends.insert(

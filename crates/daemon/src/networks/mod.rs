@@ -16,7 +16,7 @@ pub mod tor_control;
 
 use crate::iface::InterfaceManager;
 use crate::ruleset::{subject_credentials, Snapshot};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use ip::{IpNetwork, Ipv6Backend, Prefix};
 use socketguard_core::config::BackendConfig;
 use socketguard_core::{
@@ -162,7 +162,12 @@ pub fn create(
             expect_tor_uid,
             cookie_owner,
             allow_remote_control,
+            managed,
         } => {
+            // TODO(managed): the managed Tor network (ADR 0052) is built by the next change.
+            if *managed {
+                bail!("managed networks are not available yet");
+            }
             let opts = tor_control::AuthOptions {
                 auth: auth.clone(),
                 cookie_path: cookie_path.clone(),
@@ -186,14 +191,23 @@ pub fn create(
         BackendConfig::Yggdrasil {
             admin_endpoint,
             interface,
-        } => Ok(ip_network(
-            config,
-            ip::yggdrasil::YggdrasilBackend::new(Box::new(ip::yggdrasil::YggdrasilctlNode::new(
-                admin_endpoint.clone(),
-            )))
-            .with_host(net.clone(), interface.clone()),
-            net,
-        )),
+            managed,
+            peers: _,
+        } => {
+            // TODO(managed): the managed Yggdrasil network (ADR 0052) is built by the next
+            // change.
+            if *managed {
+                bail!("managed networks are not available yet");
+            }
+            Ok(ip_network(
+                config,
+                ip::yggdrasil::YggdrasilBackend::new(Box::new(
+                    ip::yggdrasil::YggdrasilctlNode::new(admin_endpoint.clone()),
+                ))
+                .with_host(net.clone(), interface.clone()),
+                net,
+            ))
+        }
         BackendConfig::Slaac { interface, prefix } => Ok(ip_network(
             config,
             ip::slaac::SlaacBackend::new(interface, prefix.as_deref(), net.clone())?,
@@ -335,6 +349,7 @@ mod tests {
             status: NetworkStatus::Up,
             prefix: None,
             vlan_id: None,
+            managed: None,
         }
     }
 

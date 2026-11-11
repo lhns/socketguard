@@ -57,6 +57,7 @@ impl Harness {
                 expect_tor_uid: None,
                 cookie_owner: None,
                 allow_remote_control: false,
+                managed: false,
             },
         };
         let mut backends = HashMap::new();
@@ -610,6 +611,7 @@ async fn a_remote_control_address_is_refused_when_the_network_is_made() {
         expect_tor_uid: None,
         cookie_owner: None,
         allow_remote_control: allow,
+        managed: false,
     };
     let net: Arc<dyn socketguard_daemon::iface::InterfaceManager> =
         Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![]))));

@@ -5,8 +5,8 @@ use crate::api::DaemonEvent;
 use crate::networks;
 use crate::ruleset::Snapshot;
 use crate::AppState;
-use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
-use socketguard_core::{Address, Network};
+use socketguard_core::config::{BackendConfig, BackendInstanceConfig, DaemonConfig};
+use socketguard_core::{ActivityKind, Address, Network};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -180,6 +180,53 @@ impl Engine {
             .find(|n| n.id == inst.id)
             .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))?;
         Ok((network, applied))
+    }
+
+    /// The API's `PUT /api/networks/{id}/peers`: replace the peers of a managed Yggdrasil
+    /// network. The caller saves the config (`persist_networks`) while it holds the write
+    /// lock, as for add and remove.
+    pub async fn set_peers(
+        &mut self,
+        state: &AppState,
+        id: &str,
+        peers: Vec<String>,
+    ) -> Result<Network, EngineError> {
+        let Some(active) = self.backends.get_mut(id) else {
+            return Err(EngineError::NotFound(format!("network {id}")));
+        };
+        let mut updated = active.config.backend.clone();
+        match &mut updated {
+            BackendConfig::Yggdrasil {
+                managed: true,
+                peers: current,
+                ..
+            } => *current = peers,
+            _ => {
+                return Err(EngineError::Invalid(format!(
+                    "network {id} is not a managed Yggdrasil network; an existing node has its own peers"
+                )))
+            }
+        }
+        updated.validate_managed().map_err(EngineError::Invalid)?;
+        let count = updated.peers().len();
+        active.config.backend = updated;
+        // TODO(managed): restart the child process so that it connects to the new peers.
+        let activity = NewActivity::new(
+            ActivityKind::NetworkChanged,
+            format!("Changed the peers of {id} ({count} now)"),
+        )
+        .network(id);
+        self.commit(
+            state,
+            Ok(()),
+            Some(activity),
+            &[DaemonEvent::NetworksChanged],
+        )
+        .await?;
+        self.networks()
+            .into_iter()
+            .find(|n| n.id == id)
+            .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))
     }
 
     /// The API's remove. A network that is not an IP network (Tor) first removes every

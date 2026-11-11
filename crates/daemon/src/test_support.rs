@@ -581,6 +581,16 @@ pub async fn test_app_state_at(
     config: DaemonConfig,
     config_path: Option<std::path::PathBuf>,
 ) -> Arc<AppState> {
+    test_app_state_with(engine, config, config_path, crate::bundled::Bundled::none()).await
+}
+
+/// [`test_app_state_at`] with a `third_party` directory (see `Bundled::from_dir`).
+pub async fn test_app_state_with(
+    engine: crate::engine::Engine,
+    config: DaemonConfig,
+    config_path: Option<std::path::PathBuf>,
+    bundled: crate::bundled::Bundled,
+) -> Arc<AppState> {
     let db = crate::state::Database::new(":memory:").await.unwrap();
     db.migrate().await.unwrap();
 
@@ -592,6 +602,7 @@ pub async fn test_app_state_at(
         db,
         engine: tokio::sync::RwLock::new(engine),
         firewall_lock: tokio::sync::Mutex::new(()),
+        bundled: Arc::new(bundled),
         events: events_tx,
     })
 }
@@ -636,6 +647,8 @@ pub fn ygg_net() -> Net {
         id: "ygg",
         config: socketguard_core::config::BackendConfig::Yggdrasil {
             interface: Some("ygg0".into()),
+            managed: false,
+            peers: vec![],
             admin_endpoint: None,
         },
         mock,

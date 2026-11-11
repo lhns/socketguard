@@ -10,7 +10,6 @@ use crate::report::Report;
 use crate::service::ServiceManager;
 use anyhow::{bail, Result};
 use socketguard_core::install_log::{Change, Entry};
-use socketguard_core::setup::SetupKind;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -91,21 +90,9 @@ pub async fn uninstall(
         );
     }
 
-    // 2a. A Yggdrasil service that setup started stops before its block goes (ADR 0051).
     let mut report = Report::default();
     let record = Record::for_config(&paths.config);
     let entries = record.entries()?;
-    let mut stopped: Vec<Entry> = vec![];
-    for e in entries.iter().rev() {
-        if e.kind == Some(SetupKind::Yggdrasil) && matches!(e.change, Change::ServiceStarted { .. })
-        {
-            let r = undo_entry(host, mgr, groups, platform, e);
-            if r.complete() {
-                stopped.push(e.clone());
-            }
-            report.extend(r);
-        }
-    }
 
     // 2. Disable.
     let disabled = disable(opts.force).await;
@@ -119,10 +106,6 @@ pub async fn uninstall(
     }
 
     // 3. Undo the record, newest first. Directories wait until the data is gone.
-    let entries: Vec<Entry> = entries
-        .into_iter()
-        .filter(|e| !stopped.contains(e))
-        .collect();
     let mut kept_entries: Vec<Entry> = vec![];
     let mut dirs: Vec<Entry> = vec![];
     let mut service_seen = false;
@@ -141,13 +124,10 @@ pub async fn uninstall(
     }
     // 4. The service registration goes even when nothing recorded it.
     if !service_seen {
-        let e = Entry::now(
-            None,
-            Change::ServiceRegistered {
-                name: mgr.service_name(),
-                manager: mgr.manager().into(),
-            },
-        );
+        let e = Entry::now(Change::ServiceRegistered {
+            name: mgr.service_name(),
+            manager: mgr.manager().into(),
+        });
         report.extend(undo_entry(host, mgr, groups, platform, &e));
     }
 
@@ -374,12 +354,7 @@ mod tests {
 
     fn record(w: &World, changes: Vec<Change>) {
         Record::for_config(&w.config)
-            .write(
-                &changes
-                    .into_iter()
-                    .map(|c| Entry::now(None, c))
-                    .collect::<Vec<_>>(),
-            )
+            .write(&changes.into_iter().map(Entry::now).collect::<Vec<_>>())
             .unwrap();
     }
 
@@ -800,57 +775,5 @@ mod tests {
         assert!(!strictly_inside(&root.join("..").join("x"), &root));
         assert!(!strictly_inside(&std::env::temp_dir().join("other"), &root));
         assert!(!strictly_inside(Path::new("tor"), &root));
-    }
-    #[tokio::test]
-    async fn a_yggdrasil_service_setup_started_stops_before_the_block_goes_and_only_once() {
-        let w = world();
-        Record::for_config(&w.config)
-            .write(&[Entry::now(
-                Some(SetupKind::Yggdrasil),
-                Change::ServiceStarted {
-                    service: "Yggdrasil".into(),
-                    previous_state: "stopped".into(),
-                    previous_enabled: None,
-                    undo: vec!["sc.exe".into(), "stop".into(), "Yggdrasil".into()],
-                },
-            )])
-            .unwrap();
-        let (mut host, mut mgr, mut groups) = (
-            FakeHost::new("windows"),
-            FakeServiceManager {
-                installed: true,
-                ..Default::default()
-            },
-            FakeGroups::default(),
-        );
-        let order = RefCell::new(vec![]);
-        let mut disabled = Report::default();
-        disabled.removed("firewall rules");
-        let report = run(
-            &w,
-            &mut host,
-            &mut mgr,
-            &mut groups,
-            UninstallOptions::default(),
-            disabled,
-            &order,
-        )
-        .await
-        .unwrap();
-        let at = |needle: &str| {
-            report
-                .items
-                .iter()
-                .position(|i| i.what.contains(needle))
-                .unwrap_or_else(|| panic!("{needle} in {report:?}"))
-        };
-        assert!(at("service Yggdrasil") < at("firewall rules"));
-        let stops = host
-            .commands
-            .iter()
-            .filter(|c| c.as_str() == "sc.exe stop Yggdrasil")
-            .count();
-        assert_eq!(stops, 1, "{:?}", host.commands);
-        std::fs::remove_dir_all(w.d).unwrap();
     }
 }

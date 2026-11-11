@@ -99,7 +99,7 @@ pub fn prepare_dirs(config: &Path, db: &Path, record: &Record) -> Result<Vec<Pat
         let p = d.display().to_string();
         record.push_once(
             |c| matches!(c, Change::DirectoryCreated { path } if *path == p),
-            Entry::now(None, Change::DirectoryCreated { path: p.clone() }),
+            Entry::now(Change::DirectoryCreated { path: p.clone() }),
         )?;
     }
     Ok(created)
@@ -123,13 +123,10 @@ pub fn record_wfp_option_once(prior: Option<u32>) {
     let rec = Record::new(path.clone());
     let r = rec.push_once(
         |c| matches!(c, Change::WfpEngineOption { .. }),
-        Entry::now(
-            None,
-            Change::WfpEngineOption {
-                option: "FWPM_ENGINE_COLLECT_NET_EVENTS".into(),
-                prior,
-            },
-        ),
+        Entry::now(Change::WfpEngineOption {
+            option: "FWPM_ENGINE_COLLECT_NET_EVENTS".into(),
+            prior,
+        }),
     );
     if let Err(e) = r {
         tracing::warn!("Could not record the WFP engine option: {e:#}");
@@ -169,16 +166,13 @@ pub fn ensure_pf_anchor(host: &mut dyn Host, conf: &Path, record: &Record) -> Re
     // The first record says what the host looked like before SocketGuard.
     record.push_once(
         same,
-        Entry::now(
-            None,
-            Change::PfAnchor {
-                conf: conf.display().to_string(),
-                line: PF_ANCHOR_LINE.into(),
-                line_added: false,
-                pf_enabled_before: was_enabled,
-                pf_enabled_by_us: false,
-            },
-        ),
+        Entry::now(Change::PfAnchor {
+            conf: conf.display().to_string(),
+            line: PF_ANCHOR_LINE.into(),
+            line_added: false,
+            pf_enabled_before: was_enabled,
+            pf_enabled_by_us: false,
+        }),
     )?;
     if !had_line {
         let mut new = text.clone();
@@ -266,13 +260,10 @@ pub fn service_install(
     let (name, manager) = (mgr.service_name(), mgr.manager().to_string());
     record.push_once(
         |c| matches!(c, Change::ServiceRegistered { .. }),
-        Entry::now(
-            None,
-            Change::ServiceRegistered {
-                name: name.clone(),
-                manager,
-            },
-        ),
+        Entry::now(Change::ServiceRegistered {
+            name: name.clone(),
+            manager,
+        }),
     )?;
     host.say(&format!(
         "SocketGuard is installed as the service {name}{}.",
@@ -402,84 +393,19 @@ pub fn undo_entry(
                 },
             }
         }
-        Change::PackageInstalled {
-            package, uninstall, ..
-        } => {
-            r.kept(
-                format!("package {package}"),
-                format!(
-                    "packages are never uninstalled here; to remove it: {}",
-                    uninstall.join(" ")
-                ),
-            );
-        }
-        Change::ServiceStarted { service, undo, .. } => {
-            let what = format!("service {service} started by network setup");
-            match undo.split_first() {
-                None => r.absent(what),
-                Some((prog, args)) => {
-                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                    match host.run_ok(prog, &args) {
-                        Ok(_) => r.removed(format!("{what} (stopped again)")),
-                        Err(err) => r.left(what, format!("{err:#}")),
-                    }
-                }
-            }
-        }
-        Change::FileEdited {
-            path,
-            lines,
-            backup,
-        } => {
-            let what = format!("lines added to {path}");
-            let res = (|| -> Result<bool> {
-                let p = Path::new(path);
-                let mut changed = false;
-                if let Ok(text) = std::fs::read_to_string(p) {
-                    let new = install_log::remove_lines(&text, lines);
-                    if new != text {
-                        write_keep_mode(p, &new)?;
-                        changed = true;
-                    }
-                }
-                if let Some(b) = backup {
-                    match std::fs::remove_file(b) {
-                        Ok(()) => changed = true,
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => return Err(e).context(format!("deleting {b}")),
-                    }
-                }
-                Ok(changed)
-            })();
-            match res {
-                Ok(true) => r.removed(what),
-                Ok(false) => r.absent(what),
-                Err(err) => r.left(what, format!("{err:#}")),
-            }
-        }
-        Change::ConfigEntryWritten { path, id } => {
-            let what = format!("network {id} in {path}");
-            let res = (|| -> Result<bool> {
-                let Ok(text) = std::fs::read_to_string(path) else {
-                    return Ok(false);
-                };
-                match install_log::remove_backend_entry(&text, id).map_err(anyhow::Error::msg)? {
-                    Some(new) => {
-                        write_keep_mode(Path::new(path), &new)?;
-                        Ok(true)
-                    }
-                    None => Ok(false),
-                }
-            })();
-            match res {
-                Ok(true) => r.removed(what),
-                Ok(false) => r.absent(what),
-                Err(err) => r.left(what, format!("{err:#}")),
-            }
-        }
-        Change::NetworkAdded { id } => r.absent(format!(
-            "network {id} in the running daemon (the daemon is stopped)"
-        )),
+        // TODO(managed): undo of the managed-network entries comes with the networks.
+        Change::UnprivilegedAccount { name, .. } => r.kept(
+            format!("account {name}"),
+            "removed with the managed networks' data (not implemented yet)",
+        ),
+        Change::WintunDriver { .. } => r.kept(
+            "Wintun driver",
+            "removed with the managed networks' data (not implemented yet)",
+        ),
+        Change::Legacy => r.kept(
+            "an entry of a removed feature",
+            "entry of a removed feature; nothing to undo",
+        ),
         Change::DirectoryCreated { .. } | Change::OwnedDirectory { .. } => {}
     }
     r
@@ -648,32 +574,23 @@ mod tests {
         let mut groups = FakeGroups::default();
         groups.groups.insert("socketguard".into(), vec![]);
         let mut plat = FakePlatform::default();
-        let g = Entry::now(
-            None,
-            Change::AccessGroup {
-                name: "socketguard".into(),
-                created: false,
-            },
-        );
+        let g = Entry::now(Change::AccessGroup {
+            name: "socketguard".into(),
+            created: false,
+        });
         let r = undo_entry(&mut host, &mut mgr, &mut groups, &mut plat, &g);
         assert!(groups.groups.contains_key("socketguard"), "never removed");
         assert!(r.complete());
-        let g = Entry::now(
-            None,
-            Change::AccessGroup {
-                name: "socketguard".into(),
-                created: true,
-            },
-        );
+        let g = Entry::now(Change::AccessGroup {
+            name: "socketguard".into(),
+            created: true,
+        });
         undo_entry(&mut host, &mut mgr, &mut groups, &mut plat, &g);
         assert!(!groups.groups.contains_key("socketguard"));
-        let w = Entry::now(
-            None,
-            Change::WfpEngineOption {
-                option: "COLLECT_NET_EVENTS".into(),
-                prior: Some(0),
-            },
-        );
+        let w = Entry::now(Change::WfpEngineOption {
+            option: "COLLECT_NET_EVENTS".into(),
+            prior: Some(0),
+        });
         undo_entry(&mut host, &mut mgr, &mut groups, &mut plat, &w);
         assert_eq!(plat.restored, [0]);
     }

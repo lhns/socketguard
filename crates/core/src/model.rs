@@ -580,10 +580,12 @@ pub enum ActivityKind {
     ProtectHostChanged,
     Blocked,
     RemoteAdminExposed,
+    /// A network's settings changed (a managed Yggdrasil's peers).
+    NetworkChanged,
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 23] = [
+    pub const ALL: [ActivityKind; 24] = [
         ActivityKind::AppDiscovered,
         ActivityKind::AppRemoved,
         ActivityKind::GrantAdded,
@@ -607,6 +609,7 @@ impl ActivityKind {
         ActivityKind::ProtectHostChanged,
         ActivityKind::Blocked,
         ActivityKind::RemoteAdminExposed,
+        ActivityKind::NetworkChanged,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -634,6 +637,7 @@ impl ActivityKind {
             ActivityKind::ProtectHostChanged => "protect_host_changed",
             ActivityKind::Blocked => "blocked",
             ActivityKind::RemoteAdminExposed => "remote_admin_exposed",
+            ActivityKind::NetworkChanged => "network_changed",
         }
     }
 }

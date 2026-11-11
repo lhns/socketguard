@@ -1,6 +1,6 @@
 //! What the block on a Yggdrasil network keeps off the host, and whether it is in force
 //! (ADR 0051). Read-only: the frontends show it before the block goes (turn off, remove a
-//! network) and `networks setup` checks it before it starts any software.
+//! network) and the network add checks it before it starts any software.
 
 use super::*;
 use crate::firewall::ScopeMatch;
@@ -104,7 +104,6 @@ impl Engine {
             .collect();
         listeners.sort_by(|a, b| (&a.app, a.port, a.proto).cmp(&(&b.app, b.port, b.proto)));
         listeners.dedup();
-        let started = started_by_setup(state.config_path.as_deref());
         let mut ids: Vec<&String> = self
             .backends
             .iter()
@@ -134,36 +133,9 @@ impl Engine {
                     } else {
                         vec![]
                     },
-                    services_started_by_setup: started.clone(),
                 }
             })
             .collect();
         Ok(ExposureResponse { networks })
     }
-}
-
-/// The services `networks setup yggdrasil` started, from the install record next to the
-/// config file.
-fn started_by_setup(config: Option<&std::path::Path>) -> Vec<String> {
-    use socketguard_core::install_log::{read_file, Change};
-    use socketguard_core::setup::SetupKind;
-    let Some(config) = config else {
-        return vec![];
-    };
-    let path = config
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("setup-log.json");
-    let mut out: Vec<String> = read_file(&path)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|e| e.kind == Some(SetupKind::Yggdrasil))
-        .filter_map(|e| match e.change {
-            Change::ServiceStarted { service, .. } => Some(service),
-            _ => None,
-        })
-        .collect();
-    out.sort();
-    out.dedup();
-    out
 }

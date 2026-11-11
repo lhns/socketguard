@@ -279,6 +279,7 @@ async fn export_to(r: &Resolved, file: &Path) -> Result<()> {
         db,
         engine: tokio::sync::RwLock::new(eng),
         firewall_lock: tokio::sync::Mutex::new(()),
+        bundled: std::sync::Arc::new(crate::bundled::Bundled::none()),
         events: tokio::sync::broadcast::channel(1).0,
     };
     let doc = {

@@ -973,6 +973,11 @@ impl NewActivity {
         self.peer_id = Some(id.to_string());
         self
     }
+
+    pub fn network(mut self, id: &str) -> Self {
+        self.network_id = Some(id.to_string());
+        self
+    }
 }
 
 const ADDRESS_SELECT: &str = "SELECT id, app_id, reservation_id, network_id, port, proto, \

@@ -168,13 +168,10 @@ pub fn ensure_group(
     }
     record.push_once(
         |c| matches!(c, Change::AccessGroup { name: n, .. } if n == name),
-        Entry::now(
-            None,
-            Change::AccessGroup {
-                name: name.to_string(),
-                created: !existed,
-            },
-        ),
+        Entry::now(Change::AccessGroup {
+            name: name.to_string(),
+            created: !existed,
+        }),
     )?;
     Ok(!existed)
 }

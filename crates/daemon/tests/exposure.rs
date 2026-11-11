@@ -197,18 +197,10 @@ async fn an_apply_that_failed_is_said_in_the_response() {
 }
 
 #[tokio::test]
-async fn the_exposure_lists_listeners_on_all_addresses_and_the_services_setup_started() {
+async fn the_exposure_lists_listeners_on_all_addresses() {
     let dir = std::env::temp_dir().join(format!("sg-exp-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = dir.join("socketguard.json");
-    std::fs::write(
-        dir.join("setup-log.json"),
-        r#"{"entries":[
-            {"time":"t","kind":"yggdrasil","type":"service_started","service":"Yggdrasil","previous_state":"stopped","previous_enabled":null,"undo":["sc.exe","stop","Yggdrasil"]},
-            {"time":"t","kind":"tor","type":"service_started","service":"tor","previous_state":"stopped","previous_enabled":null,"undo":[]}
-        ]}"#,
-    )
-    .unwrap();
     let f = Fixture::new(with_ygg(), Some(config)).await;
     let (s, e) = f.get("/api/exposure?without=ygg").await;
     assert_eq!(s, StatusCode::OK, "{e}");
@@ -221,7 +213,6 @@ async fn the_exposure_lists_listeners_on_all_addresses_and_the_services_setup_st
         n["listeners"],
         json!([{"app": "nginx", "port": 80, "proto": "tcp"}])
     );
-    assert_eq!(n["services_started_by_setup"], json!(["Yggdrasil"]));
     // Without a name, or `all`, every Yggdrasil network; other networks are not in it.
     for q in ["/api/exposure", "/api/exposure?without=all"] {
         let (s, e) = f.get(q).await;

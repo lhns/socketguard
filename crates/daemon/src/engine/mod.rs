@@ -356,6 +356,22 @@ impl Engine {
             status,
             prefix,
             vlan_id: None,
+            // TODO(managed): the live state of the child process; until it runs, a managed
+            // network reports only what its config says.
+            managed: active
+                .config
+                .backend
+                .is_managed()
+                .then(|| socketguard_core::ManagedInfo {
+                    state: socketguard_core::ChildState::Unavailable,
+                    progress: None,
+                    detail: None,
+                    runs_as: None,
+                    version: None,
+                    address: None,
+                    peers: active.config.backend.peers().to_vec(),
+                    peers_connected: None,
+                }),
         }
     }
 

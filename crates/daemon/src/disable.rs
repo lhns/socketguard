@@ -325,7 +325,7 @@ async fn disable_non_ip(db: &Database, slots: &[NetworkSlot]) -> Report {
 }
 
 /// What `--disable` and `uninstall` say when a Yggdrasil network was configured (ADR 0051).
-pub const YGGDRASIL_LEFT_RUNNING: &str = "The Yggdrasil block is removed with the rest: if a Yggdrasil node still runs, programs on this PC that listen on all addresses are reachable over it. Stop its service (if `networks setup` started it, `socketguard networks setup yggdrasil --undo --stop-service-only` does).";
+pub const YGGDRASIL_LEFT_RUNNING: &str = "The Yggdrasil block is removed with the rest: if a Yggdrasil node still runs, programs on this PC that listen on all addresses are reachable over it. Stop its service yourself to close it.";
 
 /// Whether the config file lists a Yggdrasil network.
 pub fn config_has_yggdrasil(config: &Path) -> bool {
@@ -760,7 +760,6 @@ mod tests {
                     port: 80,
                     proto: socketguard_core::Protocol::Tcp,
                 }],
-                services_started_by_setup: vec![],
             }],
         };
         let r = disable_with_db(DisableInput {

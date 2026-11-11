@@ -115,6 +115,7 @@ pub async fn run(
         db,
         engine: tokio::sync::RwLock::new(engine),
         firewall_lock: tokio::sync::Mutex::new(()),
+        bundled: Arc::new(crate::bundled::Bundled::locate()),
         events: events_tx,
     });
 

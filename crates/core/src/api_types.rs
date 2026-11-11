@@ -266,8 +266,6 @@ pub struct NetworkExposure {
     pub node_running: bool,
     /// The programs listening on all addresses (what the block keeps off the network).
     pub listeners: Vec<ExposedListener>,
-    /// The services `socketguard networks setup` started for this network (its setup log).
-    pub services_started_by_setup: Vec<String>,
 }
 
 impl NetworkExposure {
@@ -295,14 +293,7 @@ impl NetworkExposure {
             s.push_str(&format!(": {}", list.join(", ")));
         }
         s.push('.');
-        if self.services_started_by_setup.is_empty() {
-            s.push_str(" Stop its service yourself to close it.");
-        } else {
-            s.push_str(&format!(
-                " SocketGuard's setup started {}; `socketguard networks setup yggdrasil --undo --stop-service-only` stops it.",
-                self.services_started_by_setup.join(", ")
-            ));
-        }
+        s.push_str(" Stop its service yourself to close it.");
         Some(s)
     }
 }
