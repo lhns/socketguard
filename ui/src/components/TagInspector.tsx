@@ -6,6 +6,7 @@ import { ALL_SCOPE, errorField, errorText, sameScope, scopeKey, scopeLabel, scop
 import { useNav } from "../nav";
 import { useApps, useDeleteTag, useGrants, useList, usePortGroups, useReservations, useUpdateTag } from "../queries";
 import AccessList, { type AccessHighlight } from "./AccessList";
+import { ActionRow, DangerZone } from "./ActionRow";
 import AddAccess from "./AddAccess";
 import AddToReserved from "./AddToReserved";
 import CommitPreview from "./CommitPreview";
@@ -52,7 +53,7 @@ export function TagInspector({ tag, highlight, onCollapse, onClose }: { tag: Tag
 
   return (
     <Inspector label="Tag details" title={tag.label} subtitle={`tag · ${tag.members.length} ${tag.members.length === 1 ? "member" : "members"}`} onCollapse={onCollapse} onClose={onClose}>
-      <Section title="Name and patterns">
+      <Section title="Name">
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -64,12 +65,15 @@ export function TagInspector({ tag, highlight, onCollapse, onClose }: { tag: Tag
             <input id={`${id}-n`} className="input" value={label} onChange={(e) => setLabel(e.target.value)} required />
             {error?.field === "label" && <span className="field-error">{error.text}</span>}
           </div>
-          <div className="form-row">
-            <label htmlFor={`${id}-p`}>Auto-match patterns (one per line)</label>
-            <textarea id={`${id}-p`} className="input mono" rows={2} value={patterns} onChange={(e) => setPatterns(e.target.value)} placeholder="nginx*" />
-            <p className="hint">Programs whose name or path match join the tag, now and when they are first seen.</p>
-            {error?.field === "patterns" && <span className="field-error">{error.text}</span>}
-          </div>
+          <details className="advanced" open={tag.patterns.length > 0 || error?.field === "patterns"} key={tag.id}>
+            <summary>Advanced: add apps automatically by name</summary>
+            <div className="form-row">
+              <label htmlFor={`${id}-p`}>Auto-match patterns (one per line)</label>
+              <textarea id={`${id}-p`} className="input mono" rows={2} value={patterns} onChange={(e) => setPatterns(e.target.value)} placeholder="nginx*" />
+              <p className="hint">Programs whose name or path match join the tag, now and when they are first seen.</p>
+              {error?.field === "patterns" && <span className="field-error">{error.text}</span>}
+            </div>
+          </details>
           {error && error.field !== "label" && error.field !== "patterns" && <div className="error-banner" role="alert">{error.text}</div>}
           <button type="submit" className="btn btn-sm" disabled={!dirty || update.isPending}>Save tag</button>
         </form>
@@ -82,14 +86,15 @@ export function TagInspector({ tag, highlight, onCollapse, onClose }: { tag: Tag
       <Section title="Who can reach its members">
         <AccessList entries={grantEntries(grants, "subject", names)} direction="who" networks={names.networks} onRevoke={revoke} highlight={highlight} empty="No grants on this tag." />
         <CommitPreview commit={revokeCommit} />
-        <AddAccess fixed={{ side: "targets", targets: [{ kind: "tag", id: tag.id }] }} />
+        <ActionRow>
+          <AddAccess fixed={{ side: "targets", targets: [{ kind: "tag", id: tag.id }] }} />
+          {!bound && <AddToReserved target={{ kind: "tag", tag_id: tag.id }} />}
+        </ActionRow>
       </Section>
 
-      {!bound && <AddToReserved target={{ kind: "tag", tag_id: tag.id }} />}
-
-      <div className="actions">
+      <DangerZone>
         <button className="btn btn-danger btn-sm" onClick={() => setDeleting(true)}>Delete tag</button>
-      </div>
+      </DangerZone>
 
       {asking && (
         <ConfirmDialog title="Open more apps to anyone?" confirmLabel="Save and open" onCancel={() => setAsking(false)} onConfirm={() => { setAsking(false); save(true); }}>
@@ -204,7 +209,7 @@ function Members({ tag }: { tag: Tag }) {
           <button type="button" className="btn-icon" aria-label="Done choosing rows" title="Done" onClick={() => setChosen(null)}>×</button>
         </div>
       )}
-      <CommitPreview commit={commit} title="Joining this tag lets more in" />
+      <CommitPreview commit={commit} title="Change this tag's members?" confirmLabel="Apply" />
     </>
   );
 }
@@ -233,11 +238,11 @@ export function TagsInspector({ tags, onCollapse, onClose }: { tags: Tag[] } & C
       <Section title="Who can reach their members">
         <AccessList entries={entries} direction="who" networks={names.networks} onRevoke={revoke} unit="tags" empty="No grants on these tags." />
         <CommitPreview commit={revokeCommit} />
-        <AddAccess fixed={{ side: "targets", targets: tags.map((t) => ({ kind: "tag" as const, id: t.id })) }} />
+        <ActionRow><AddAccess fixed={{ side: "targets", targets: tags.map((t) => ({ kind: "tag" as const, id: t.id })) }} /></ActionRow>
       </Section>
-      <div className="actions">
+      <DangerZone>
         <button className="btn btn-danger btn-sm" onClick={() => setDeleting(true)}>Delete {tags.length} tags</button>
-      </div>
+      </DangerZone>
       {deleting && (
         <ConfirmDialog title={`Delete ${tags.length} tags?`} confirmLabel="Delete tags" onCancel={() => setDeleting(false)} onConfirm={() => void deleteAll()}>
           <p>The grants on these tags are removed with them. The apps stay.</p>
@@ -268,12 +273,15 @@ export function NewTagForm({ onCreated, onClose }: { onCreated: (label: string) 
           <input id={`${id}-l`} className="input" value={label} onChange={(e) => setLabel(e.target.value)} required />
           {field === "label" && <span className="field-error" role="alert">{failed}</span>}
         </div>
-        <div className="form-row">
-          <label htmlFor={`${id}-p`}>Auto-match patterns (one per line, optional)</label>
-          <textarea id={`${id}-p`} className="input mono" rows={2} value={patterns} onChange={(e) => setPatterns(e.target.value)} placeholder="nginx*" />
-          <p className="hint">Programs whose name or path match join the tag, now and when they are first seen, so one grant on the tag covers future services too.</p>
-          {field === "patterns" && <span className="field-error" role="alert">{failed}</span>}
-        </div>
+        <details className="advanced" open={field === "patterns"}>
+          <summary>Advanced: add apps automatically by name</summary>
+          <div className="form-row">
+            <label htmlFor={`${id}-p`}>Auto-match patterns (one per line, optional)</label>
+            <textarea id={`${id}-p`} className="input mono" rows={2} value={patterns} onChange={(e) => setPatterns(e.target.value)} placeholder="nginx*" />
+            <p className="hint">Programs whose name or path match join the tag, now and when they are first seen, so one grant on the tag covers future services too.</p>
+            {field === "patterns" && <span className="field-error" role="alert">{failed}</span>}
+          </div>
+        </details>
         {failed && field !== "label" && field !== "patterns" && <div className="error-banner" role="alert">{failed}</div>}
         <div className="actions">
           <button type="submit" className="btn btn-primary btn-sm" disabled={commit.state.phase === "checking" || commit.state.phase === "applying"}>Create tag</button>

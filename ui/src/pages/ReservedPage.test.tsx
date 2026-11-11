@@ -160,7 +160,7 @@ describe("one reservation", () => {
     await user.click(within(rowOf("All ports")).getByRole("button", { name: "Add access to All ports" }));
     const form = screen.getByRole("form", { name: "Add access" });
     expect([...within(form).getByRole("group", { name: "What to open" }).querySelectorAll("button")].map((b) => b.textContent)).toEqual(["All ports"]);
-    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
+    await user.click(within(form).getByRole("combobox", { name: "Who" }));
     await user.click(screen.getByRole("checkbox", { name: "bob" }));
     await user.keyboard("{Escape}");
     await user.click(within(form).getByRole("button", { name: "Add access" }));
@@ -180,11 +180,11 @@ describe("one reservation", () => {
     await openReservation(user, "front");
     await user.click(within(rowOf("nginx · 443/tcp")).getByRole("button", { name: "Add access to nginx · 443/tcp" }));
     const form = screen.getByRole("form", { name: "Add access" });
-    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
+    await user.click(within(form).getByRole("combobox", { name: "Who" }));
     await user.click(screen.getByRole("checkbox", { name: "alice" }));
     await user.keyboard("{Escape}");
     await user.click(within(form).getByRole("button", { name: "Add access" }));
-    const review = await within(form).findByRole("region", { name: "Review before applying" });
+    const review = await screen.findByRole("dialog");
     expect(review).toHaveTextContent(`On Tor: not reachable — ${TOR_NOTE}`);
   });
 
@@ -264,10 +264,10 @@ describe("Add ports", () => {
     const user = userEvent.setup();
     renderWithProviders(<ReservedPage />);
     await pick(user, "front", /^80\/tcp/);
-    const review = await within(inspector()).findByRole("region", { name: "Review before applying" });
+    const review = await screen.findByRole("dialog");
     expect(review).toHaveTextContent("reachable by alice");
     expect(applied(d)).toEqual([]);
-    await user.click(within(review).getByRole("button", { name: "Apply" }));
+    await user.click(within(review).getByRole("button", { name: /^(Give access|Apply|Add to reserved address|Add|Transfer access|Take over|Create and attach|Open .* to anyone)$/ }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
   });
 
@@ -277,11 +277,9 @@ describe("Add ports", () => {
     const user = userEvent.setup();
     renderWithProviders(<ReservedPage />);
     await pick(user, "public", /^80\/tcp/);
-    const review = await within(inspector()).findByRole("region", { name: "Review before applying" });
-    await user.click(within(review).getByRole("button", { name: "Apply" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByRole("dialog", { name: "Open nginx 80/tcp in public to anyone?" });
     expect(applied(d)).toEqual([]);
-    await user.click(within(dialog).getByRole("button", { name: "Open it" }));
+    await user.click(within(dialog).getByRole("button", { name: "Open nginx 80/tcp in public to anyone" }));
     await waitFor(() => expect(applied(d)[0][0]).toMatchObject({ op: "add_binding", reservation_id: "r3", confirm_open: true }));
   });
 });

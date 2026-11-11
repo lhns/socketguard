@@ -14,7 +14,7 @@ async function start() {
   // Development only: `?mock` runs the frontend on fake daemon data in a plain browser. The
   // condition is false in a production build, so the mock is not bundled.
   if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock")) {
-    (await import("./dev/mock")).installMock();
+    (await import("./dev/mock")).installMock(new URLSearchParams(window.location.search).get("mock"));
   }
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>

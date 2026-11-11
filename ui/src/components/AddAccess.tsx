@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { ChangeOp, NewCredential, Scope, Subject, Target } from "../api";
 import { useCommit } from "../commit";
-import { ALL_SCOPE, CREDENTIAL_PLACEHOLDER, portLabel, portOfScope, scopeKey, scopeLabel, scopeOfPort, subjectLabel, targetLabel } from "../lib";
+import { ALL_SCOPE, portLabel, portOfScope, scopeKey, scopeLabel, scopeOfPort, subjectLabel, targetLabel } from "../lib";
 import { useApps, useGroups, useList, useNetworks, useParsedCredentials, usePeers, useReservations, usePortGroups, useTags } from "../queries";
 import { CREDENTIAL_INFO } from "../reach";
 import CommitPreview from "./CommitPreview";
+import { useFormOpen } from "./ActionRow";
 import Picker, { type PickerItem } from "./Picker";
 
 /** One side is fixed by the selection; the other is chosen here. */
@@ -48,6 +49,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
   const reservations = useList(useReservations());
 
   const [open, setOpen] = useState(false);
+  const stepAside = useFormOpen(open);
   const [chips, setChips] = useState<Chip[]>([]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [nets, setNets] = useState<Set<string>>(new Set());
@@ -195,15 +197,6 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, fixed, chips, targets, picked, options, nets, portGroups]);
 
-  // A review of an earlier form is stale as soon as the form changes.
-  const opsKey = JSON.stringify(ops);
-  const { cancel } = commit;
-  useEffect(() => {
-    cancel();
-  }, [opsKey, cancel]);
-
-  // The review has its own Apply and Cancel.
-  const reviewing = commit.state.phase === "review" || commit.state.phase === "confirm";
   const grantCount = ops.filter((o) => o.op === "add_grant").length;
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -216,6 +209,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
       : fixed.subjects.map((s) => subjectLabel(s, peers, groups));
   const summary = fixedNames.length > 3 ? `${fixedNames.slice(0, 3).join(", ")} and ${fixedNames.length - 3} more` : fixedNames.join(", ");
 
+  if (stepAside) return null;
   if (!open) {
     const start = () => {
       if (preselect) setPicked(new Set([scopeKey(preselect)]));
@@ -226,7 +220,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
         {preselect ? (
           <button className="btn btn-sm" aria-label={rowLabel ? `Add access to ${rowLabel}` : undefined} onClick={start}>Add access</button>
         ) : (
-          <button className="btn btn-primary btn-sm" onClick={start}>Add access…</button>
+          <button className="btn btn-sm" onClick={start}>Add access…</button>
         )}
       </div>
     );
@@ -239,24 +233,23 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
         {choosingSubjects ? "?" : " reach?"}
       </p>
 
-      {chips.length > 0 && (
-        <ul className="chip-row" aria-label={choosingSubjects ? "Chosen subjects" : "Chosen targets"}>
-          {chips.map((c) => (
-            <li key={c.key} className={`subject-chip${c.kind === "new" ? " subject-chip-new" : ""}`}>
-              {c.kind === "new" ? <NewPeer chip={c} /> : <span>{c.label}</span>}
-              <button type="button" className="btn-icon" aria-label={`Remove ${c.label}`} title={`Remove ${c.label}`} onClick={() => setChips(chips.filter((x) => x.key !== c.key))}>
-                ×
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
       <Picker
         label={choosingSubjects ? "Who" : "What"}
-        trigger={choosingSubjects ? "Choose who…" : "Choose apps, tags or reserved addresses…"}
-        triggerClass="btn btn-sm"
-        placeholder={choosingSubjects ? `Search, or paste a key, address or IP (${CREDENTIAL_PLACEHOLDER})` : "Search apps, tags and reserved addresses"}
+        field={
+          chips.length > 0 ? (
+            <ul className="chip-row" aria-label={choosingSubjects ? "Chosen subjects" : "Chosen targets"}>
+              {chips.map((c) => (
+                <li key={c.key} className={`subject-chip${c.kind === "new" ? " subject-chip-new" : ""}`}>
+                  {c.kind === "new" ? <NewPeer chip={c} /> : <span>{c.label}</span>}
+                  <button type="button" className="btn-icon" aria-label={`Remove ${c.label}`} title={`Remove ${c.label}`} onClick={() => setChips(chips.filter((x) => x.key !== c.key))}>
+                    ×
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null
+        }
+        placeholder={choosingSubjects ? "Peer, group, Anyone — or paste a key or address" : "App, tag or reserved address"}
         items={items}
         onToggle={toggle}
         onQuery={setQuery}
@@ -300,38 +293,38 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
         </div>
       )}
 
-      <details className="add-limits">
-        <summary>Limit to networks (optional)</summary>
-        <fieldset className="field-group">
-          <legend>Networks</legend>
-          <p className="hint">None ticked: every network that takes grants. Anyone on one network means everyone on it.</p>
-          {grantNetworks.map((n) => (
-            <label key={n.id} className="check">
-              <input
-                type="checkbox"
-                checked={nets.has(n.id)}
-                onChange={(e) => {
-                  const next = new Set(nets);
-                  if (e.target.checked) next.add(n.id);
-                  else next.delete(n.id);
-                  setNets(next);
-                }}
-              />
-              {n.name}
-            </label>
-          ))}
-        </fieldset>
-      </details>
-
-      {reviewing ? null : (
-        <div className="actions">
-          <button type="submit" className="btn btn-primary btn-sm" disabled={!ready || grantCount === 0 || commit.state.phase === "checking" || commit.state.phase === "applying"}>
-            Add access
+      {grantNetworks.length > 1 && (
+        <div className="scope-row" role="group" aria-label="Networks">
+          <button type="button" className="scope-chip" aria-pressed={nets.size === 0} onClick={() => setNets(new Set())}>
+            All networks
           </button>
-          <button type="button" className="btn btn-sm" onClick={reset}>Cancel</button>
+          {grantNetworks.map((n) => (
+            <button
+              key={n.id}
+              type="button"
+              className="scope-chip"
+              aria-pressed={nets.has(n.id)}
+              onClick={() => {
+                // A specific network replaces "All networks"; none left means all again.
+                const next = new Set(nets);
+                if (next.has(n.id)) next.delete(n.id);
+                else next.add(n.id);
+                setNets(next);
+              }}
+            >
+              {n.name}
+            </button>
+          ))}
         </div>
       )}
-      <CommitPreview commit={commit} title="This gives access" />
+
+      <div className="actions">
+        <button type="submit" className="btn btn-primary btn-sm" disabled={!ready || grantCount === 0 || commit.state.phase === "checking" || commit.state.phase === "applying"}>
+          Add access
+        </button>
+        <button type="button" className="btn btn-sm" onClick={reset}>Cancel</button>
+      </div>
+      <CommitPreview commit={commit} title="Give access?" confirmLabel="Give access" />
     </form>
   );
 }

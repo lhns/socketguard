@@ -1,8 +1,9 @@
 // The one rule for every edit that changes who can reach what:
 //   1. ask the daemon what the batch would do (a dry run);
 //   2. if nobody gains access, apply it at once (an edit that only closes also gets an Undo);
-//   3. otherwise show the changes where the edit was made and wait for one Apply;
-//   4. anything that opens an app to Anyone asks for a confirmation first.
+//   3. otherwise ONE confirmation dialog lists the changes; when something is opened to Anyone it
+//      is the same dialog in its warning form, and its button is what applies with `confirm_open`.
+// There is no inline review (ADR 0042).
 // Group membership has no batch operation, so the same steps run on a description the UI
 // builds itself: joining a group that has grants gives its members that access.
 import { useCallback, useRef, useState } from "react";
@@ -16,8 +17,8 @@ import { useApps, useChanges, useGrants, useList, usePeers, useSetGroupMembers, 
 export type CommitState =
   | { phase: "idle" }
   | { phase: "checking" }
-  | { phase: "review"; changes: BatchChange[]; opens: boolean }
-  | { phase: "confirm"; changes: BatchChange[] }
+  /** The confirmation dialog is open. `opens`: it is the Anyone form. An apply error stays here. */
+  | { phase: "confirm"; changes: BatchChange[]; opens: boolean; busy: boolean; error: string | null }
   | { phase: "applying" }
   | { phase: "error"; message: string };
 
@@ -38,13 +39,13 @@ interface Edit {
   undo?: () => Promise<void>;
   /** A button on the success toast, from the ids the batch created (when there is no Undo). */
   link?: (refs: ChangesResponse["refs"]) => ToastAction;
-  /** Show the review even when nobody gains access (an edit that moves a lot, such as move_app). */
+  /** Show the dialog even when nobody gains access (an edit that moves a lot, such as move_app). */
   alwaysReview?: boolean;
 }
 
 const IDLE: CommitState = { phase: "idle" };
 
-/** `useCommit()` per place that edits, so the review shows where the edit was made. */
+/** `useCommit()` per place that edits; render its state with `<CommitPreview commit={...} />`. */
 export function useCommit(onDone?: () => void) {
   const toast = useToast();
   const changes = useChanges();
@@ -54,18 +55,24 @@ export function useCommit(onDone?: () => void) {
   const peers = useList(usePeers());
   const grants = useList(useGrants());
   const [state, setState] = useState<CommitState>(IDLE);
-  const waiting = useRef<{ edit: Edit; changes: BatchChange[] } | null>(null);
+  /** The edit whose dialog is open. */
+  const waiting = useRef<{ edit: Edit; changes: BatchChange[]; opens: boolean } | null>(null);
 
   const finish = useCallback(
-    async (edit: Edit, confirmed: boolean, seen: BatchChange[]) => {
-      setState({ phase: "applying" });
+    async (edit: Edit, confirmed: boolean, seen: BatchChange[], opens: boolean) => {
+      const dialog = waiting.current !== null;
+      if (dialog) setState({ phase: "confirm", changes: seen, opens, busy: true, error: null });
+      else setState({ phase: "applying" });
       let refs: ChangesResponse["refs"];
       try {
         refs = (await edit.apply(confirmed)) ?? {};
       } catch (e) {
         if (!confirmed && toDaemonError(e).code === "confirmation_required") {
-          waiting.current = { edit, changes: seen };
-          setState({ phase: "confirm", changes: seen });
+          // The dry run did not flag it: the same dialog, in its Anyone form.
+          waiting.current = { edit, changes: seen, opens: true };
+          setState({ phase: "confirm", changes: seen, opens: true, busy: false, error: null });
+        } else if (dialog) {
+          setState({ phase: "confirm", changes: seen, opens, busy: false, error: errorText(e) });
         } else {
           setState({ phase: "error", message: errorText(e) });
         }
@@ -103,15 +110,15 @@ export function useCommit(onDone?: () => void) {
         setState({ phase: "error", message: errorText(e) });
         return;
       }
-      if (!check.widens && !check.opens && !edit.alwaysReview) return finish(edit, false, check.changes);
-      waiting.current = { edit, changes: check.changes };
-      setState({ phase: "review", changes: check.changes, opens: check.opens });
+      if (!check.widens && !check.opens && !edit.alwaysReview) return finish(edit, false, check.changes, false);
+      waiting.current = { edit, changes: check.changes, opens: check.opens };
+      setState({ phase: "confirm", changes: check.changes, opens: check.opens, busy: false, error: null });
     },
     [finish],
   );
 
   /** A batch. `undo` is the inverse batch of an edit that only closes; `alwaysReview` shows the
-   * diff before applying whatever the reach; `link` adds a button to the toast. */
+   * dialog before applying whatever the reach; `link` adds a button to the toast. */
   const runBatch = useCallback(
     (ops: ChangeOp[], done: string, undo?: ChangeOp[], alwaysReview = false, link?: Edit["link"]) =>
       run({
@@ -180,18 +187,10 @@ export function useCommit(onDone?: () => void) {
     [run, grants, peers, apps, tags, setMembers],
   );
 
-  /** Apply what the review shows (asks first when it opens something to Anyone). */
-  const apply = useCallback(() => {
+  /** The dialog's button: apply, with the Anyone confirmation when the dialog was the Anyone form. */
+  const confirm = useCallback(() => {
     const w = waiting.current;
-    if (!w) return;
-    if (state.phase === "review" && state.opens) setState({ phase: "confirm", changes: w.changes });
-    else void finish(w.edit, false, w.changes);
-  }, [state, finish]);
-
-  /** The user agreed to open it to Anyone. */
-  const confirmOpen = useCallback(() => {
-    const w = waiting.current;
-    if (w) void finish(w.edit, true, w.changes);
+    if (w) void finish(w.edit, w.opens, w.changes, w.opens);
   }, [finish]);
 
   const cancel = useCallback(() => {
@@ -199,13 +198,7 @@ export function useCommit(onDone?: () => void) {
     setState(IDLE);
   }, []);
 
-  /** The user said no to the question: back to the review. */
-  const declineOpen = useCallback(() => {
-    const w = waiting.current;
-    if (w) setState({ phase: "review", changes: w.changes, opens: true });
-  }, []);
-
-  return { state, runBatch, runGroupMembers, apply, confirmOpen, declineOpen, cancel };
+  return { state, runBatch, runGroupMembers, confirm, cancel };
 }
 
 export type Commit = ReturnType<typeof useCommit>;

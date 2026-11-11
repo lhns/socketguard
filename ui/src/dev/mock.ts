@@ -8,7 +8,7 @@ import type {
 import { ALL_SCOPE, rangeLabel, sameScope } from "../lib";
 
 const T0 = "2026-01-01T00:00:00Z";
-const networks: Network[] = [
+let networks: Network[] = [
   { id: "n-local", kind: "local", name: "Local", interface: "lo", grants_apply: false, status: { state: "up" } },
   { id: "n-ygg", kind: "yggdrasil", name: "Yggdrasil", interface: "ygg0", grants_apply: true, status: { state: "up" } },
   { id: "n-lan", kind: "lan", name: "LAN", interface: "eth0", grants_apply: true, status: { state: "up" } },
@@ -468,7 +468,45 @@ const networkSetup: NetworkSetup = {
 
 const done = <T,>(value: T) => ({ value, enforcement: null });
 
-export function installMock() {
+/** `?mock=fresh`: a host nobody has set up yet. About a dozen apps (half of them system services),
+ * every one with only its Local address, no grants, no reservations, one peer, and the Local
+ * and a LAN network. Each call starts over, so tests can use it. */
+function seedFresh() {
+  networks = [
+    { id: "n-local", kind: "local", name: "Local", interface: "lo", grants_apply: false, status: { state: "up" } },
+    { id: "n-lan", kind: "lan", name: "LAN", interface: "eth0", grants_apply: true, status: { state: "up" } },
+  ];
+  const mk = (id: string, name: string, system: boolean, ports: [number, "tcp" | "udp"][]): App => ({
+    id, name, process_name: name, exe_path: system ? null : `/usr/bin/${name}`, interpreter_arg: null, identity_note: null, exe_missing: false, reviewed: false, system,
+    first_seen: T0, last_seen: T0,
+    ports: ports.map(([port, proto]) => ({ port, proto, listening: true, last_seen: T0, family: "dual" as const })),
+    addresses: [{ id: `${id}-l`, app_id: id, network_id: "n-local", scope: ALL_SCOPE, locator: { kind: "ipv6", addr: "::1" }, created_at: T0, reservation_id: null, up: true, excluded: [], notes: [] }],
+  });
+  apps = [
+    mk("f1", "nginx", false, [[80, "tcp"], [443, "tcp"]]),
+    mk("f2", "postgres", false, [[5432, "tcp"]]),
+    mk("f3", "redis-server", false, [[6379, "tcp"]]),
+    mk("f4", "sshd", false, [[22, "tcp"]]),
+    mk("f5", "grafana", false, [[3000, "tcp"], [3001, "tcp"]]),
+    mk("f6", "node", false, [[8080, "tcp"], [9229, "tcp"]]),
+    mk("s1", "svchost (RpcSs)", true, [[135, "tcp"]]),
+    mk("s2", "svchost (Dnscache)", true, [[53, "udp"]]),
+    mk("s3", "lsass", true, [[49664, "tcp"]]),
+    mk("s4", "spoolsv", true, [[49668, "tcp"]]),
+    mk("s5", "wininit", true, [[49665, "tcp"]]),
+    mk("s6", "services", true, [[49666, "tcp"]]),
+  ];
+  peers = [{ id: "p1", label: "alice", groups: [], created_at: T0, credentials: [{ id: "c1", kind: "ip", value: "192.168.1.20", label: null }] }];
+  groups = [];
+  tags = [];
+  portGroups = [];
+  grants = [];
+  bindings = [];
+  reservations = [];
+}
+
+export function installMock(kind?: string | null) {
+  if (kind === "fresh") seedFresh();
   mockIPC(
     (cmd, args) => {
       if (cmd.startsWith("plugin:")) return undefined;

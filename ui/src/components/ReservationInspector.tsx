@@ -7,6 +7,7 @@ import { boundRows, conflictText, type BoundRow } from "../reservations";
 import { useApps, useGrants, useList, useReleaseReservation, useReservations, usePortGroups, useTags } from "../queries";
 import { bindsRow } from "../matrix";
 import type { AccessHighlight } from "./AccessList";
+import { DangerZone, RowButton } from "./ActionRow";
 import AddAccess from "./AddAccess";
 import AddressLines from "./AddressLines";
 import CommitPreview from "./CommitPreview";
@@ -104,7 +105,7 @@ export function ReservationInspector({ reservation: r, highlight, onCollapse, on
           />
         }
       >
-        <CommitPreview commit={bind} title="This lets more in" />
+        <CommitPreview commit={bind} title="Add to this reserved address?" confirmLabel="Add" />
         <ul className="plain-list port-list">
           <AllPortsCard reservation={r} highlight={highlight} />
           {rows.map((row) => (
@@ -114,9 +115,9 @@ export function ReservationInspector({ reservation: r, highlight, onCollapse, on
         {rows.length === 0 && <p className="muted">Nothing is bound yet. Add the ports it should front.</p>}
       </Section>
 
-      <div className="actions">
+      <DangerZone>
         <button className="btn btn-danger btn-sm" onClick={() => setReleasing(true)}>Release reservation</button>
-      </div>
+      </DangerZone>
 
       {releasing && (
         <ConfirmDialog
@@ -155,7 +156,7 @@ function AllPortsCard({ reservation: r, highlight }: { reservation: ReservationV
         </>
       }
       access={<RowAccess entries={entries} rowScope={ALL_SCOPE} empty="Nobody can reach it." highlight={highlight} />}
-      add={<AddAccess fixed={{ side: "targets", targets: [{ kind: "reservation", id: r.id }] }} preselect={ALL_SCOPE} rowLabel="All ports" />}
+      actions={<AddAccess fixed={{ side: "targets", targets: [{ kind: "reservation", id: r.id }] }} preselect={ALL_SCOPE} rowLabel="All ports" />}
     />
   );
 }
@@ -179,8 +180,19 @@ function BoundCard({ reservation: r, row, conflict, highlight }: { reservation: 
           <span className="port-name">{row.label}</span>
           {row.viaTag && row.appId && <span className="badge badge-kind">via tag {row.viaTag.label}</span>}
           {conflict && <span className="badge reach reach-warn" title="Another app claims the same ports">port conflict</span>}
-          <button
-            className="btn btn-sm port-action"
+        </>
+      }
+      access={
+        row.appId ? (
+          <RowAccess entries={entries} rowScope={row.scope} empty={empty} highlight={highlight} />
+        ) : (
+          <p className="muted">This tag has no members yet.</p>
+        )
+      }
+      actions={
+        <>
+          {row.appId && <AddAccess fixed={{ side: "targets", targets: [{ kind: "app", id: row.appId }] }} preselect={row.scope} rowLabel={row.label} />}
+          <RowButton
             aria-label={`Remove ${what} from reservation`}
             onClick={() =>
               void remove.runBatch(
@@ -191,17 +203,9 @@ function BoundCard({ reservation: r, row, conflict, highlight }: { reservation: 
             }
           >
             Remove from reservation
-          </button>
+          </RowButton>
         </>
       }
-      access={
-        row.appId ? (
-          <RowAccess entries={entries} rowScope={row.scope} empty={empty} highlight={highlight} />
-        ) : (
-          <p className="muted">This tag has no members yet.</p>
-        )
-      }
-      add={row.appId ? <AddAccess fixed={{ side: "targets", targets: [{ kind: "app", id: row.appId }] }} preselect={row.scope} rowLabel={row.label} /> : undefined}
     />
   );
 }
@@ -301,9 +305,9 @@ export function ReservationsInspector({ reservations, onCollapse, onClose }: { r
 
   return (
     <Inspector label="Reservations details" title={`${reservations.length} reservations selected`} subtitle={shown} onCollapse={onCollapse} onClose={onClose}>
-      <div className="actions">
+      <DangerZone>
         <button className="btn btn-danger btn-sm" onClick={() => setReleasing(true)}>Release {reservations.length}</button>
-      </div>
+      </DangerZone>
       {releasing && (
         <ConfirmDialog
           title={`Release ${reservations.length} reservations?`}

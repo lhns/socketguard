@@ -5,6 +5,7 @@ import type { AccessHighlight } from "../components/AccessList";
 import { AppInspector, AppsInspector } from "../components/AppInspector";
 import EntityList, { type ListColumn, type ListRow, type ListSection } from "../components/EntityList";
 import Inspector, { InspectorEmpty } from "../components/Inspector";
+import Split from "../components/Split";
 import Picker, { type PickerItem } from "../components/Picker";
 import { NewPortGroupForm, PortGroupInspector, PortGroupsInspector } from "../components/PortGroupInspector";
 import { NewTagForm, TagInspector, TagsInspector } from "../components/TagInspector";
@@ -211,7 +212,8 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
         }
         if (r.m.kind === "tag") {
           const t = tagById.get(r.m.target.id);
-          return <span className="muted">{t && t.patterns.length > 0 ? `matches ${t.patterns.join(", ")}` : ""}</span>;
+          const text = t && t.patterns.length > 0 ? `matches ${t.patterns.join(", ")}` : "";
+          return <span className="muted cell-ellipsis" title={text || undefined}>{text}</span>;
         }
         const mine = (membershipsByApp.get(r.m.target.id) ?? []).filter((m) => (r.m.kind === "app" ? true : sameScope(m.scope, r.m.scope)));
         return (
@@ -268,19 +270,19 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
         }
         const sum = summaries.get(r.m.target.id)!;
         return (
-          <>
+          <span className="cell-flow">
             {sum.open && <span className="badge reach reach-bad">open to anyone</span>}
             {sum.segment && <span className="badge reach reach-warn">segment</span>}
             {sum.direct + sum.viaTag === 0 ? (
-              <span className="muted">closed</span>
+              <span className="muted nowrap">closed</span>
             ) : (
-              <span className="muted">
+              <span className="muted nowrap">
                 {sum.direct > 0 && `${sum.direct} direct`}
                 {sum.direct > 0 && sum.viaTag > 0 && ", "}
                 {sum.viaTag > 0 && `${sum.viaTag} via tag`}
               </span>
             )}
-          </>
+          </span>
         );
       },
     },
@@ -436,7 +438,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
       {apps.isLoading && <p className="muted">Loading…</p>}
       {apps.error && <div className="error-banner">{errorText(apps.error)}</div>}
 
-      <div className={`split-layout${collapsed ? " split-collapsed" : ""}${hidden ? " split-closed" : ""}`}>
+      <Split id="apps" collapsed={collapsed} closed={hidden}>
         <section aria-label="Apps and tags" className="split-list">
           <EntityList<AppRow>
             label="Apps and tags"
@@ -466,7 +468,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
           />
         </section>
         {!hidden && <section aria-label="Details" className="split-inspector">{inspector}</section>}
-      </div>
+      </Split>
     </div>
   );
 }
@@ -477,10 +479,10 @@ function RowName({ r }: { r: AppRow }) {
   if (r.m.kind === "port") return <span className={r.m.port ? "mono" : undefined}>{r.m.label}</span>;
   const a = r.m.app!;
   return (
-    <>
-      {a.name}{" "}
+    <span className="name-badges">
+      <span className="name-text" title={a.name}>{a.name}</span>
       {!a.reviewed && <span className="badge badge-pending">pending</span>}
       {a.identity_note === "unidentified" && <span className="badge reach reach-warn" title="Owner of the port unknown">unidentified</span>}
-    </>
+    </span>
   );
 }

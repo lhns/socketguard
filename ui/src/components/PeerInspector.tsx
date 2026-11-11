@@ -13,6 +13,7 @@ import {
 } from "../queries";
 import { CREDENTIAL_INFO, CredentialBadge, ParsedChips } from "../reach";
 import AccessList from "./AccessList";
+import { ActionRow, DangerZone } from "./ActionRow";
 import AddAccess from "./AddAccess";
 import CommitPreview from "./CommitPreview";
 import ConfirmDialog from "./ConfirmDialog";
@@ -78,7 +79,7 @@ export function GroupPicker({ peerIds }: { peerIds: string[] }) {
           })}
         />
       </div>
-      <CommitPreview commit={commit} title="Joining this group lets more in" />
+      <CommitPreview commit={commit} title="Add to this group?" confirmLabel="Add to group" />
     </div>
   );
 }
@@ -220,13 +221,15 @@ export function PeerInspector({ peer, onCollapse, onClose }: { peer: Peer } & Co
           empty="It can reach nothing."
         />
         <CommitPreview commit={revokeCommit} />
-        <AddAccess fixed={{ side: "subjects", subjects: [{ kind: "peer", id: peer.id }] }} />
+        <ActionRow><AddAccess fixed={{ side: "subjects", subjects: [{ kind: "peer", id: peer.id }] }} /></ActionRow>
       </Section>
 
       <div className="actions">
         <ShowAsColumn columnKey={`peer:${peer.id}`} />
-        <button className="btn btn-danger btn-sm" onClick={() => setConfirming(true)} aria-label={`Delete peer ${peer.label}`}>Delete peer</button>
       </div>
+      <DangerZone>
+        <button className="btn btn-danger btn-sm" onClick={() => setConfirming(true)} aria-label={`Delete peer ${peer.label}`}>Delete peer</button>
+      </DangerZone>
 
       {regenerating && (
         <ConfirmDialog title="Regenerate the Tor access key?" confirmLabel="Regenerate" onCancel={() => setRegenerating(false)} onConfirm={() => { setRegenerating(false); generate(); }}>
@@ -281,11 +284,11 @@ export function PeersInspector({ peers, onCollapse, onClose }: { peers: Peer[] }
       <Section title="What they can reach">
         <AccessList entries={entries} direction="what" networks={names.networks} onRevoke={revoke} unit="peers" empty="None of them can reach anything." />
         <CommitPreview commit={revokeCommit} />
-        <AddAccess fixed={{ side: "subjects", subjects: peers.map((p) => ({ kind: "peer" as const, id: p.id })) }} />
+        <ActionRow><AddAccess fixed={{ side: "subjects", subjects: peers.map((p) => ({ kind: "peer" as const, id: p.id })) }} /></ActionRow>
       </Section>
-      <div className="actions">
+      <DangerZone>
         <button className="btn btn-danger btn-sm" onClick={() => setDeleting(true)}>Delete {peers.length} peers</button>
-      </div>
+      </DangerZone>
       {deleting && (
         <ConfirmDialog title={`Delete ${peers.length} peers?`} confirmLabel="Delete peers" onCancel={() => setDeleting(false)} onConfirm={() => void deleteAll()}>
           <p>Grants to these peers are removed with them.</p>

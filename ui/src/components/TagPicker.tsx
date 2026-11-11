@@ -97,7 +97,7 @@ export default function TagPicker({ appIds, scope: rowScope }: Props) {
           empty="No tags yet. Type a name to create one."
         />
       </div>
-      <CommitPreview commit={commit} title="This lets more in" />
+      <CommitPreview commit={commit} title="Change tags?" confirmLabel="Apply" />
     </div>
   );
 }

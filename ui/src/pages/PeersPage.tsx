@@ -4,6 +4,7 @@ import type { Network, Peer, PeerGroup } from "../api";
 import EntityList, { type ListColumn, type ListRow, type ListSection } from "../components/EntityList";
 import { BuiltinInspector, GroupInspector, GroupsInspector, NewGroupForm } from "../components/GroupInspector";
 import { InspectorEmpty, useNameCtx } from "../components/Inspector";
+import Split from "../components/Split";
 import { AddPeersForm, PeerInspector, PeersInspector } from "../components/PeerInspector";
 import { errorText } from "../lib";
 import type { FocusMessage } from "../nav";
@@ -183,7 +184,7 @@ export default function PeersPage({ focus = { seq: 0 } }: { focus?: FocusMessage
       </div>
       {peers.isLoading && <p className="muted">Loading…</p>}
       {peers.error && <div className="error-banner">{errorText(peers.error)}</div>}
-      <div className={`split-layout${hidden ? " split-closed" : ""}`}>
+      <Split id="peers" closed={hidden}>
         <section aria-label="Peers and groups" className="split-list">
           <EntityList<PeerRow>
             label="Peers and groups"
@@ -199,7 +200,7 @@ export default function PeersPage({ focus = { seq: 0 } }: { focus?: FocusMessage
           />
         </section>
         {!hidden && <section aria-label="Peer details" className="split-inspector">{inspector}</section>}
-      </div>
+      </Split>
     </div>
   );
 }

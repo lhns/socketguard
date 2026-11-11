@@ -4,6 +4,7 @@ import type { Scope } from "../api";
 import { reachNotes } from "../batch";
 import { useRevoke } from "../commit";
 import AccessList, { type AccessHighlight } from "./AccessList";
+import { ActionRow } from "./ActionRow";
 import CommitPreview from "./CommitPreview";
 import { useNameCtx } from "./Inspector";
 
@@ -16,21 +17,21 @@ interface CardProps {
   tags?: ReactNode;
   /** Who can reach it (a RowAccess), absent where grants do not apply. */
   access?: ReactNode;
-  /** The Add access part. */
-  add?: ReactNode;
+  /** The actions of the row (Add access, Add to reserved address…, Detach): one ActionRow. */
+  actions?: ReactNode;
   /** The Address part, always last; the cards of a reservation have none. */
   address?: ReactNode;
 }
 
 /** One row of the Ports section, in an app and in a reservation. The parts are always in this
- * order: name, tags, who can reach it, Add access, address. */
-export default function RowCard({ rowKey, itemRef, head, tags, access, add, address }: CardProps) {
+ * order: name, tags, who can reach it, actions, address. */
+export default function RowCard({ rowKey, itemRef, head, tags, access, actions, address }: CardProps) {
   return (
     <li className="port-row" ref={itemRef} data-row={rowKey}>
       <div className="port-head">{head}</div>
       {tags && <div className="port-tags">{tags}</div>}
       {access}
-      {add && <div className="port-add">{add}</div>}
+      {actions && <div className="port-add"><ActionRow>{actions}</ActionRow></div>}
       {address}
     </li>
   );

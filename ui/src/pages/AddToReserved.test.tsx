@@ -109,7 +109,7 @@ describe("Add to reserved address… on a row", () => {
     const ports = await openApp(user);
     await user.click(within(rowOf(ports, "80/tcp")).getByRole("button", ACTION));
     await user.click(await screen.findByRole("checkbox", { name: /^front/ }));
-    expect(await within(ports).findByRole("region", { name: "Review before applying" })).toHaveTextContent("reachable by alice");
+    expect(await screen.findByRole("dialog")).toHaveTextContent("reachable by alice");
     expect(applied(d)).toHaveLength(0);
   });
 });
