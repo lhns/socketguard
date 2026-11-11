@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 export interface PickerItem {
   id: string;
@@ -90,9 +90,9 @@ export default function Picker({
 
   // The list floats at the button's position, so a scrolling panel around it does not clip it.
   const [pos, setPos] = useState<{ top?: number; bottom?: number; left: number; width: number; max: number } | null>(null);
-  useLayoutEffect(() => {
+  const place = useCallback(() => {
     const anchor = isField ? fieldBox.current : button.current;
-    if (!open || !anchor) return;
+    if (!anchor) return;
     const r = anchor.getBoundingClientRect();
     const width = isField ? Math.min(Math.max(r.width, 260), window.innerWidth - 16) : Math.min(300, window.innerWidth - 16);
     const left = align === "right" ? Math.max(8, r.right - width) : Math.min(Math.max(8, r.left), window.innerWidth - width - 8);
@@ -104,7 +104,10 @@ export default function Picker({
     } else {
       setPos({ top, left, width, max: Math.max(140, Math.min(320, below)) });
     }
-  }, [open, align, isField]);
+  }, [align, isField]);
+  useLayoutEffect(() => {
+    if (open) place();
+  }, [open, place]);
 
   useEffect(() => {
     if (!open) return;
@@ -112,8 +115,10 @@ export default function Picker({
       if (root.current && !root.current.contains(e.target as Node)) setOpen(false);
     };
     // Scrolling the page moves the button away from the list.
+    // A field is focused by the browser scrolling it into view, so there the list follows it.
     const scrolled = (e: Event) => {
-      if (!root.current?.contains(e.target as Node)) setOpen(false);
+      if (isField) place();
+      else if (!root.current?.contains(e.target as Node)) setOpen(false);
     };
     document.addEventListener("mousedown", outside);
     window.addEventListener("scroll", scrolled, true);

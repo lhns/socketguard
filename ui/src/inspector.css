@@ -112,7 +112,7 @@
 .port-name { font-weight: 600; font-size: 14px; }
 .port-action { margin-left: auto; }
 .port-access .access-list .access-item:first-child { padding-top: 0; }
-.also-line { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+.also-line { display: block; font-size: 12px; color: var(--text-muted); margin-top: 4px; text-align: left; }
 .port-add .add-access { margin-top: 0; }
 .sub-title { font-size: 12px; font-weight: 600; color: var(--text-muted); margin: 12px 0 6px; }
 .per-app + .per-app { margin-top: 4px; }
@@ -180,7 +180,7 @@ body.split-dragging { cursor: col-resize; user-select: none; }
 .nowrap { white-space: nowrap; }
 .cell-ellipsis { display: block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .name-badges { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; vertical-align: middle; }
-.name-badges .name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.name-badges .name-text { min-width: 8ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .name-badges .badge { flex: none; }
 .entity-table .name-cell { max-width: 320px; }
 .address-controls { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }

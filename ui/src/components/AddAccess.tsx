@@ -220,7 +220,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
         {preselect ? (
           <button className="btn btn-sm" aria-label={rowLabel ? `Add access to ${rowLabel}` : undefined} onClick={start}>Add access</button>
         ) : (
-          <button className="btn btn-primary btn-sm" onClick={start}>Add access…</button>
+          <button className="btn btn-sm" onClick={start}>Add access…</button>
         )}
       </div>
     );
