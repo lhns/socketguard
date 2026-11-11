@@ -12,7 +12,11 @@ export type ChangeOp = { "op": "create_peer",
 /**
  * A client-chosen name starting with `$`, e.g. `$new0`.
  */
-ref?: string, label: string, credentials: Array<NewCredential>, } | { "op": "create_tag", ref?: string, label: string, patterns: Array<string>, } | { "op": "add_grant", target: Target, port?: PortRef, network_id?: string, subject: Subject, 
+ref?: string, 
+/**
+ * Optional, as in `NewPeer`.
+ */
+label?: string, credentials: Array<NewCredential>, } | { "op": "create_group", ref?: string, label: string, members: Array<string>, } | { "op": "create_tag", ref?: string, label: string, patterns: Array<string>, } | { "op": "add_grant", target: Target, port?: PortRef, network_id?: string, subject: Subject, 
 /**
  * Needed when the subject is Anyone; without it the whole batch is refused.
  */

@@ -150,7 +150,9 @@ pub enum PeersCmd {
 
 #[derive(Args, Debug)]
 pub struct PeerAddArgs {
-    pub label: String,
+    /// A name for the peer; without one it is named after its first credential
+    #[arg(long, short = 'n')]
+    pub label: Option<String>,
     /// Credentials with a guessed kind
     pub values: Vec<String>,
     /// Yggdrasil public key (64 hex characters)
@@ -507,14 +509,14 @@ mod tests {
     #[test]
     fn peers_add_takes_values_and_flags() {
         let c = parse(&[
-            "peers", "add", "bob", "ba83", "--addr", "a", "--addr", "b", "--cred", "ip=1::1",
-            "--key", "k",
+            "peers", "add", "--label", "bob", "ba83", "--addr", "a", "--addr", "b", "--cred",
+            "ip=1::1", "--key", "k",
         ])
         .unwrap();
         let Command::Peers(PeersCmd::Add(a)) = c.command else {
             panic!()
         };
-        assert_eq!(a.label, "bob");
+        assert_eq!(a.label.as_deref(), Some("bob"));
         assert_eq!(a.values, ["ba83"]);
         assert_eq!(a.addr, ["a", "b"]);
         assert_eq!(a.creds, ["ip=1::1"]);

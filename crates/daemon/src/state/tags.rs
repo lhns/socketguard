@@ -9,7 +9,7 @@ use super::{
 };
 use anyhow::Result;
 use socketguard_core::{
-    App, Credential, Grant, Peer, PortRange, Scope, SocketGroup, Tag, TagId, TagMember,
+    App, Credential, Grant, Peer, PeerGroup, PortRange, Scope, SocketGroup, Tag, TagId, TagMember,
 };
 use sqlx::Row;
 use std::collections::HashMap;
@@ -18,6 +18,8 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub enum Write {
     InsertPeer(Peer),
+    /// The group with its members.
+    InsertGroup(PeerGroup),
     /// The tag with its members.
     InsertTag(Tag),
     InsertGrant(Grant),
@@ -65,6 +67,21 @@ pub enum Write {
 async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
     match w {
         Write::InsertPeer(p) => insert_peer_in(tx, p).await?,
+        Write::InsertGroup(g) => {
+            sqlx::query("INSERT INTO peer_groups (id, label, created_at) VALUES (?, ?, ?)")
+                .bind(&g.id)
+                .bind(&g.label)
+                .bind(ts(g.created_at))
+                .execute(&mut **tx)
+                .await?;
+            for m in &g.members {
+                sqlx::query("INSERT INTO peer_group_members (group_id, peer_id) VALUES (?, ?)")
+                    .bind(&g.id)
+                    .bind(m)
+                    .execute(&mut **tx)
+                    .await?;
+            }
+        }
         Write::InsertGrant(g) => insert_grant_in(tx, g).await?,
         Write::DeleteGrant(id) => {
             sqlx::query("DELETE FROM grants WHERE id = ?")

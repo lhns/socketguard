@@ -512,7 +512,7 @@ async fn peer_create(
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
     let peer = engine
-        .create_peer(&state, &req.label, &req.credentials)
+        .create_peer(&state, req.label.as_deref().unwrap_or(""), &req.credentials)
         .await?;
     Ok((StatusCode::CREATED, Json(peer)).into_response())
 }

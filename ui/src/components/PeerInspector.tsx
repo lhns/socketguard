@@ -57,7 +57,9 @@ export function GroupPicker({ peerIds }: { peerIds: string[] }) {
         {mine.length === 0 && <span className="muted">no groups</span>}
         <Picker
           label="Groups"
-          trigger="Groups…"
+          trigger="+"
+          triggerClass="tag-pill tag-pill-add"
+          compactLabel="Add or remove groups"
           items={items}
           onToggle={toggle}
           open={open}
@@ -321,18 +323,21 @@ function TorKeyDialog({ peer, result, onClose }: { peer: Peer; result: TorKeyRes
   );
 }
 
-/** Paste keys, addresses or IPs; each becomes a peer (or all become one). */
+/** Paste keys, addresses or IPs; each becomes a peer, named by the daemon. They can all go into a
+ * new group, in the same batch. */
 export function AddPeersForm({ onClose }: { onClose: () => void }) {
   const id = useId();
-  const [label, setLabel] = useState("");
   const [value, setValue] = useState("");
-  const [perValue, setPerValue] = useState(false);
+  const [grouped, setGrouped] = useState(false);
+  const [group, setGroup] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
   const parsed = useParsedCredentials(value);
   const commit = useCommit(() => {
-    setLabel("");
     setValue("");
+    setGroup("");
+    setGrouped(false);
   });
+  const valid = (parsed.data ?? []).filter((p) => p.error === null && p.kind !== null).length;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -345,18 +350,21 @@ export function AddPeersForm({ onClose }: { onClose: () => void }) {
     }
     const result = credentialsFromParsed(fresh);
     if ("error" in result) return setLocalError(result.error);
-    const ops: ChangeOp[] = perValue
-      ? result.credentials.map((c, i) => ({ op: "create_peer", ref: `$new${i}`, label: c.value, credentials: [c] }))
-      : [{ op: "create_peer", ref: "$new0", label: label.trim(), credentials: result.credentials }];
-    void commit.runBatch(ops, ops.length === 1 ? `Added ${(ops[0] as { label: string }).label}` : `Added ${ops.length} peers`);
+    const refs = result.credentials.map((_, i) => `$new${i}`);
+    const ops: ChangeOp[] = result.credentials.map((c, i) => ({ op: "create_peer", ref: refs[i], credentials: [c] }));
+    if (grouped) ops.push({ op: "create_group", ref: "$group", label: group.trim(), members: refs });
+    const n = result.credentials.length;
+    void commit.runBatch(ops, `Added ${n} ${n === 1 ? "peer" : "peers"}${grouped ? ` to group ${group.trim()}` : ""}`);
   };
 
   const failed = commit.state.phase === "error" ? splitOperationError(commit.state.message).text : null;
   const field = failed ? errorField({ code: "invalid", message: failed }) : null;
-  const credentialsError = localError ?? (field === "credentials" ? failed : null);
+  const groupError = failed !== null && failed.toLowerCase().includes("group") ? failed : null;
+  const credentialsError = localError ?? (!groupError && field === "credentials" ? failed : null);
+  const otherError = failed !== null && !groupError && !credentialsError ? failed : null;
 
   return (
-    <Inspector label="Add peers" title="Add peers" onClose={onClose}>
+    <Inspector label="Add peers" title="Add peers">
       <form onSubmit={submit}>
         <div className="form-row">
           <label htmlFor={`${id}-v`}>Keys, addresses or IPs</label>
@@ -366,29 +374,29 @@ export function AddPeersForm({ onClose }: { onClose: () => void }) {
             rows={4}
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            placeholder={`${CREDENTIAL_PLACEHOLDER}\nPaste several, separated by lines, commas or spaces.`}
+            placeholder={`${CREDENTIAL_PLACEHOLDER}\nPaste several, separated by lines, commas or spaces. Each becomes a peer named after its value.`}
             required
           />
           {credentialsError && <span className="field-error" role="alert">{credentialsError}</span>}
         </div>
         {value.trim() && <ParsedChips parsed={parsed.data} />}
         <label className="check">
-          <input type="checkbox" checked={perValue} onChange={(e) => setPerValue(e.target.checked)} />
-          One peer per value (each named after its value)
+          <input type="checkbox" checked={grouped} onChange={(e) => setGrouped(e.target.checked)} />
+          Create group
         </label>
-        {!perValue && (
+        {grouped && (
           <div className="form-row">
-            <label htmlFor={`${id}-l`}>Label</label>
-            <input id={`${id}-l`} className="input" value={label} onChange={(e) => setLabel(e.target.value)} required />
-            {field === "label" && <span className="field-error" role="alert">{failed}</span>}
+            <label htmlFor={`${id}-g`}>Group name</label>
+            <input id={`${id}-g`} className="input" value={group} onChange={(e) => setGroup(e.target.value)} required />
+            {groupError && <span className="field-error" role="alert">{groupError}</span>}
           </div>
         )}
-        {failed && field !== "label" && field !== "credentials" && <div className="error-banner" role="alert">{failed}</div>}
+        {otherError && <div className="error-banner" role="alert">{otherError}</div>}
         <div className="actions">
           <button type="submit" className="btn btn-primary btn-sm" disabled={commit.state.phase === "checking" || commit.state.phase === "applying"}>
-            {perValue ? "Create peers" : "Create peer"}
+            {valid > 0 ? `Create ${valid} ${valid === 1 ? "peer" : "peers"}` : "Create peers"}
           </button>
-          <button type="button" className="btn btn-sm" onClick={onClose}>Close</button>
+          <button type="button" className="btn btn-sm" onClick={onClose}>Cancel</button>
         </div>
       </form>
       <details className="help">

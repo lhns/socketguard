@@ -12,13 +12,11 @@ interface Props {
   appIds: string[];
   /** Tag one port of the app instead of the whole app. */
   port?: PortRef | null;
-  /** A small "+" button, for a row of ports. */
-  compact?: boolean;
 }
 
 /** The tags of the selected apps. The first one shown is a tag the app has; the rest are a
  * search away, and a typed name that does not exist can be created and applied in one step. */
-export default function TagPicker({ appIds, port = null, compact = false }: Props) {
+export default function TagPicker({ appIds, port = null }: Props) {
   const nav = useNav();
   const tags = (useTags().data ?? []);
   const [open, setOpen] = useState(false);
@@ -71,8 +69,7 @@ export default function TagPicker({ appIds, port = null, compact = false }: Prop
   return (
     <div className="tag-picker">
       <div className="tag-row">
-        {!compact &&
-          mine.map((t) => (
+        {mine.map((t) => (
             <button
               key={t.id}
               className={`tag-pill${count(t.id) < appIds.length ? " tag-pill-partial" : ""}`}
@@ -81,13 +78,13 @@ export default function TagPicker({ appIds, port = null, compact = false }: Prop
             >
               {t.label}{count(t.id) < appIds.length ? ` ${count(t.id)}/${appIds.length}` : ""}
             </button>
-          ))}
-        {!compact && mine.length === 0 && <span className="muted">no tags</span>}
+        ))}
+        {port === null && mine.length === 0 && <span className="muted">no tags</span>}
         <Picker
           label={port ? `Tags of ${portLabel(port)}` : "Tags"}
-          trigger={compact ? "+" : "Tags…"}
-          triggerClass={compact ? "btn btn-sm btn-icon" : "btn btn-sm"}
-          compactLabel={compact && port ? `Tags of ${portLabel(port)}` : undefined}
+          trigger="+"
+          triggerClass="tag-pill tag-pill-add"
+          compactLabel={port ? `Add or remove tags of ${portLabel(port)}` : "Add or remove tags"}
           items={items}
           onToggle={toggle}
           create={(typed) => create(typed)}

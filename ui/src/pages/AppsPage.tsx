@@ -41,8 +41,14 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   const [scope, setScope] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [stripOpen, setStripOpen] = useState(false);
+  const [closed, setClosed] = useState(false);
   const [highlight, setHighlight] = useState<AccessHighlight | null>(null);
   const [selectLabel, setSelectLabel] = useState<string | null>(null);
+  // Showing the details again after they were closed or folded away.
+  const reveal = () => {
+    setStripOpen(true);
+    setClosed(false);
+  };
 
   const tagList = useMemo(() => tags.data ?? [], [tags.data]);
   const appList = useMemo(() => apps.data ?? [], [apps.data]);
@@ -63,7 +69,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
     if (key) {
       setSelected(new Set([key]));
       setCreating(false);
-      setStripOpen(true);
+      reveal();
       setHighlight(null);
     }
     // Only a new link counts.
@@ -116,7 +122,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
       title: "Tags",
       count: shownTags.length,
       rows: buildRows([], shownTags, new Set()).map(toRow),
-      action: <button className="btn btn-sm" onClick={() => { setCreating(true); setSelected(new Set()); setStripOpen(true); }}>New tag</button>,
+      action: <button className="btn btn-sm" onClick={() => { setCreating(true); setSelected(new Set()); reveal(); }}>New tag</button>,
       emptyText: tagList.length === 0 ? "No tags yet. A tag groups apps so one grant covers all of them, also programs that start later." : "No tag matches.",
     },
     { key: "apps", title: "Apps", count: own.length, rows: appRows(own), emptyText: appList.length === 0 ? "No apps detected yet. The daemon discovers listening programs automatically." : "No app matches." },
@@ -209,7 +215,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
     setSelected(new Set([r.m.kind === "tag" ? r.key : `app:${r.m.target.id}`]));
     setHighlight({ subject: c.subject, networkId: c.networkId });
     setCreating(false);
-    setStripOpen(true);
+    reveal();
   };
   const subjectColumns: ListColumn<AppRow>[] = shownCols.map((c) => ({
     key: c.key,
@@ -227,31 +233,29 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   // ─── Selection and the inspector ───────────────────────────────────────────
   const selectedApps = appList.filter((a) => selected.has(`app:${a.id}`));
   const selectedTags = tagList.filter((t) => selected.has(`tag:${t.id}`));
-  const clear = () => {
-    setSelected(new Set());
-    setCreating(false);
-    setHighlight(null);
-  };
+  // Closing hides the details but keeps the selection; the next click or tick shows them again.
+  const close = () => setClosed(true);
   const open = (r: AppRow) => {
     setSelected(new Set([r.m.kind === "tag" ? r.key : `app:${r.m.target.id}`]));
     setCreating(false);
     setHighlight(null);
-    setStripOpen(true);
+    reveal();
   };
   const collapsed = withCols && !stripOpen;
+  const hidden = !withCols && closed && !creating;
   const onCollapse = withCols ? () => setStripOpen(false) : undefined;
 
   const inspector = (() => {
-    if (collapsed) return <Inspector label="Details" title="" collapsed onExpand={() => setStripOpen(true)} />;
+    if (collapsed) return <Inspector label="Details" title="" collapsed onExpand={reveal} />;
     if (creating) return <NewTagForm onCreated={(label) => { setCreating(false); setSelectLabel(label); }} onClose={() => setCreating(false)} />;
     if (selectedApps.length === 1 && selectedTags.length === 0) {
-      return <AppInspector key={selectedApps[0].id} id={selectedApps[0].id} highlight={highlight} onCollapse={onCollapse} onClose={clear} />;
+      return <AppInspector key={selectedApps[0].id} id={selectedApps[0].id} highlight={highlight} onCollapse={onCollapse} onClose={close} />;
     }
-    if (selectedApps.length > 1) return <AppsInspector ids={selectedApps.map((a) => a.id)} onCollapse={onCollapse} onClose={clear} />;
+    if (selectedApps.length > 1) return <AppsInspector ids={selectedApps.map((a) => a.id)} onCollapse={onCollapse} onClose={close} />;
     if (selectedTags.length === 1) {
-      return <TagInspector key={selectedTags[0].id} tag={selectedTags[0]} highlight={highlight} onCollapse={onCollapse} onClose={clear} />;
+      return <TagInspector key={selectedTags[0].id} tag={selectedTags[0]} highlight={highlight} onCollapse={onCollapse} onClose={close} />;
     }
-    if (selectedTags.length > 1) return <TagsInspector tags={selectedTags} onCollapse={onCollapse} onClose={clear} />;
+    if (selectedTags.length > 1) return <TagsInspector tags={selectedTags} onCollapse={onCollapse} onClose={close} />;
     return <InspectorEmpty>Select an app or a tag to see who can reach it. Tick several to change them together.</InspectorEmpty>;
   })();
 
@@ -296,7 +300,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
         </label>
         {filterTag && (
           <button className="tag-pill tag-pill-active" onClick={() => setTagFilter(null)} aria-label={`Stop filtering by tag ${filterTag.label}`}>
-            tag: {filterTag.label} ×
+            tag: {filterTag.label} <span className="pill-x" aria-hidden="true">×</span>
           </button>
         )}
         {withCols && (
@@ -326,7 +330,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
       {apps.isLoading && <p className="muted">Loading…</p>}
       {apps.error && <div className="error-banner">{errorText(apps.error)}</div>}
 
-      <div className={`split-layout${collapsed ? " split-collapsed" : ""}`}>
+      <div className={`split-layout${collapsed ? " split-collapsed" : ""}${hidden ? " split-closed" : ""}`}>
         <section aria-label="Apps and tags" className="split-list">
           <EntityList<AppRow>
             label="Apps and tags"
@@ -335,7 +339,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
             name={(r) => <RowName r={r} />}
             nameLabel={(r) => r.m.label.replace(/^tag /, "")}
             selected={selected}
-            onSelect={(keys) => { setSelected(keys); setCreating(false); setHighlight(null); }}
+            onSelect={(keys) => { setSelected(keys); setCreating(false); setHighlight(null); reveal(); }}
             onOpen={open}
             selectAllKind="app"
             selectAllLabel="Select all shown apps"
@@ -355,7 +359,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
             }
           />
         </section>
-        <section aria-label="Details" className="split-inspector">{inspector}</section>
+        {!hidden && <section aria-label="Details" className="split-inspector">{inspector}</section>}
       </div>
     </div>
   );

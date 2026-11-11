@@ -61,7 +61,7 @@ async fn exercise(r: &Running) -> socketguard_client::EventStream {
     let mut events = c.events().await.unwrap();
     let peer = c
         .create_peer(&NewPeer {
-            label: "alice".into(),
+            label: Some("alice".into()),
             credentials: vec![],
         })
         .await

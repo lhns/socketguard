@@ -124,7 +124,7 @@ function detail(a: App): AppDetail {
 
 interface Op { op: string; [k: string]: unknown }
 function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
-  const snap = { grants: [...grants], tags: tags.map((t) => ({ ...t, members: [...t.members] })), peers: [...peers], apps: apps.map((a) => ({ ...a })) };
+  const snap = { groups: [...groups], grants: [...grants], tags: tags.map((t) => ({ ...t, members: [...t.members] })), peers: [...peers], apps: apps.map((a) => ({ ...a })) };
   const refs: Record<string, string> = {};
   const out: BatchChange[] = [];
   let widens = false;
@@ -133,11 +133,26 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
     const op = raw as unknown as Op;
     switch (op.op) {
       case "create_peer": {
-        const p: Peer = { id: uid("p"), label: op.label as string, groups: [], created_at: T0, credentials: (op.credentials as { kind: Peer["credentials"][0]["kind"]; value: string }[]).map((c) => ({ id: uid("c"), kind: c.kind, value: c.value, label: null })) };
+        const creds = op.credentials as { kind: Peer["credentials"][0]["kind"]; value: string }[];
+        // The daemon names an unnamed peer after its first credential.
+        const first = creds[0]?.value ?? "";
+        const base = ((op.label as string | undefined) ?? "").trim() || (first.length > 24 ? `${first.slice(0, 12)}…` : first);
+        let name = base;
+        for (let n = 2; !op.label && peers.some((x) => x.label === name); n++) name = `${base} (${n})`;
+        const p: Peer = { id: uid("p"), label: name, groups: [], created_at: T0, credentials: (op.credentials as { kind: Peer["credentials"][0]["kind"]; value: string }[]).map((c) => ({ id: uid("c"), kind: c.kind, value: c.value, label: null })) };
         if (peers.some((x) => x.label === p.label)) throw { code: "conflict", message: `operation ${out.length}: peer ${p.label} already exists` };
         if (op.ref) refs[op.ref as string] = p.id;
         peers = [...peers, p];
         out.push({ kind: "create", item: "peer", name: p.label, id: p.id, opens_to_anyone: false });
+        break;
+      }
+      case "create_group": {
+        const g: PeerGroup = { id: uid("g"), label: op.label as string, members: (op.members as string[]).map(res), created_at: T0 };
+        if (groups.some((x) => x.label === g.label)) throw { code: "conflict", message: `operation ${out.length}: group ${g.label} already exists` };
+        if (op.ref) refs[op.ref as string] = g.id;
+        groups = [...groups, g];
+        peers = peers.map((p) => (g.members.includes(p.id) ? { ...p, groups: [...p.groups, g.id] } : p));
+        out.push({ kind: "create", item: "group", name: g.label, id: g.id, opens_to_anyone: false });
         break;
       }
       case "create_tag": {
@@ -207,6 +222,7 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
     grants = snap.grants;
     tags = snap.tags;
     peers = snap.peers;
+    groups = snap.groups;
     apps = snap.apps;
   }
   return { dry_run: req.dry_run, refs, changes: out, changes_reach: widens };

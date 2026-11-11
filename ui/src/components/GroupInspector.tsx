@@ -44,6 +44,21 @@ export function GroupInspector({ group, onCollapse, onClose }: { group: PeerGrou
     setOpen(false);
   };
 
+  const memberPicker = (
+    <Picker
+      label={`Members of ${group.label}`}
+      trigger="+"
+      triggerClass="tag-pill tag-pill-add"
+      compactLabel="Add or remove members"
+      items={items}
+      onToggle={toggle}
+      open={open}
+      onOpenChange={setOpen}
+      placeholder="Find a peer"
+      empty="No peers yet."
+    />
+  );
+
   return (
     <Inspector label="Group details" title={group.label} subtitle={`group · ${group.members.length} ${group.members.length === 1 ? "peer" : "peers"}`} onCollapse={onCollapse} onClose={onClose}>
       <Section title="Name">
@@ -68,16 +83,13 @@ export function GroupInspector({ group, onCollapse, onClose }: { group: PeerGrou
       </Section>
 
       <Section title={`Members (${group.members.length})`}>
-        {group.members.length === 0 ? (
-          <p className="muted">No members yet.</p>
-        ) : (
-          <ul className="chip-row">
-            {group.members.map((m) => (
-              <li key={m}><button className="tag-pill" onClick={() => nav.go("peers", { peerId: m })}>{peerName(m)}</button></li>
-            ))}
-          </ul>
-        )}
-        <Picker label={`Members of ${group.label}`} trigger="Members…" items={items} onToggle={toggle} open={open} onOpenChange={setOpen} placeholder="Find a peer" empty="No peers yet." />
+        <div className="tag-row">
+          {group.members.length === 0 && <span className="muted">No members yet.</span>}
+          {group.members.map((m) => (
+            <button key={m} className="tag-pill" onClick={() => nav.go("peers", { peerId: m })}>{peerName(m)}</button>
+          ))}
+          {memberPicker}
+        </div>
         <CommitPreview commit={members} title="Joining this group lets more in" />
       </Section>
 
@@ -183,7 +195,7 @@ export function NewGroupForm({ onCreated, onClose }: { onCreated: (label: string
   const [error, setError] = useState<string | null>(null);
   const peers = usePeers().data ?? [];
   return (
-    <Inspector label="New group" title="New group" onClose={onClose}>
+    <Inspector label="New group" title="New group">
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -204,7 +216,7 @@ export function NewGroupForm({ onCreated, onClose }: { onCreated: (label: string
         </div>
         <p className="hint">
           A grant to a group applies to every member, including peers added later.{" "}
-          {peers.length > 0 ? "Add the members afterwards, or select peers and use Groups…." : ""}
+          {peers.length > 0 ? "Add the members afterwards, or select peers and use + next to Groups in their details." : ""}
         </p>
         <div className="actions">
           <button type="submit" className="btn btn-primary btn-sm" disabled={create.isPending}>Create group</button>

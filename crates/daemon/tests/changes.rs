@@ -772,3 +772,158 @@ async fn a_new_tag_has_no_grants_so_only_the_anyone_grant_itself_is_confirmed() 
     let tags = d.state.db.list_tags().await.unwrap();
     assert_eq!(tags[0].members[0].app_id, app_id);
 }
+
+// ─── Unnamed peers and groups in a batch ─────────────────────────────────────
+
+fn sibling_key(last: &str) -> String {
+    format!("{}{last}", &KEY[..62])
+}
+
+#[tokio::test]
+async fn an_unnamed_peer_is_named_after_its_first_credential() {
+    let d = Daemon::new().await;
+    let (s, p) = d
+        .post(
+            "/api/peers",
+            json!({"credentials": [{"kind": "ip", "value": "fd00::1/128"}]}),
+        )
+        .await;
+    assert_eq!(
+        (s, p["label"].as_str()),
+        (StatusCode::CREATED, Some("fd00::1"))
+    );
+    let (_, p) = d
+        .post(
+            "/api/peers",
+            json!({"credentials": [{"kind": "ip", "value": "10.0.0.5"}]}),
+        )
+        .await;
+    assert_eq!(p["label"], "10.0.0.5");
+    // A blank name counts as none, and a key is shortened.
+    let (s, p) = d
+        .post(
+            "/api/peers",
+            json!({"label": "  ", "credentials": [{"kind": "ygg_key", "value": KEY}]}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{p}");
+    let short = &KEY[..12];
+    assert_eq!(p["label"], format!("{short}…"));
+    // The same name again gets a suffix, then the next number.
+    for (last, name) in [
+        ("00", format!("{short}… (2)")),
+        ("01", format!("{short}… (3)")),
+    ] {
+        let (_, p) = d
+            .post(
+                "/api/peers",
+                json!({"credentials": [{"kind": "ygg_key", "value": sibling_key(last)}]}),
+            )
+            .await;
+        assert_eq!(p["label"], name);
+    }
+}
+
+#[tokio::test]
+async fn a_peer_with_neither_name_nor_credential_is_refused_and_a_given_name_still_clashes() {
+    let d = Daemon::new().await;
+    let (s, body) = d.post("/api/peers", json!({})).await;
+    assert_eq!(
+        (s, code(&body)),
+        (StatusCode::BAD_REQUEST, "invalid"),
+        "{body}"
+    );
+    let (s, body) = d
+        .post("/api/changes", json!({"ops": [{"op": "create_peer"}]}))
+        .await;
+    assert_eq!(
+        (s, code(&body)),
+        (StatusCode::BAD_REQUEST, "invalid"),
+        "{body}"
+    );
+    d.post("/api/peers", json!({"label": "alice"})).await;
+    let (s, body) = d.post("/api/peers", json!({"label": "alice"})).await;
+    assert_eq!(
+        (s, code(&body)),
+        (StatusCode::CONFLICT, "conflict"),
+        "{body}"
+    );
+    let (s, body) = d
+        .post(
+            "/api/changes",
+            json!({"ops": [{"op": "create_peer", "label": "alice"}]}),
+        )
+        .await;
+    assert_eq!(
+        (s, code(&body)),
+        (StatusCode::CONFLICT, "conflict"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_batch_names_unnamed_peers_and_groups_them_by_ref() {
+    let d = Daemon::new().await;
+    let (s, body) = d
+        .post(
+            "/api/changes",
+            json!({"ops": [
+                {"op": "create_peer", "ref": "$a",
+                 "credentials": [{"kind": "ygg_key", "value": KEY}]},
+                {"op": "create_peer", "ref": "$b",
+                 "credentials": [{"kind": "ygg_key", "value": sibling_key("00")}]},
+                {"op": "create_peer", "ref": "$c",
+                 "credentials": [{"kind": "ip", "value": "10.0.0.5/32"}]},
+                {"op": "create_group", "ref": "$g", "label": "ops", "members": ["$a", "$b", "$c"]}
+            ]}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let names: Vec<String> = body["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            format!(
+                "{} {}",
+                c["item"].as_str().unwrap(),
+                c["name"].as_str().unwrap()
+            )
+        })
+        .collect();
+    let short = &KEY[..12];
+    assert_eq!(
+        names,
+        [
+            format!("peer {short}…"),
+            format!("peer {short}… (2)"),
+            "peer 10.0.0.5".to_string(),
+            "group ops".to_string(),
+        ]
+    );
+    let groups = d.state.db.list_groups().await.unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].id, body["refs"]["$g"]);
+    assert_eq!(groups[0].members.len(), 3);
+    let peers = d.state.db.list_peers().await.unwrap();
+    assert!(peers.iter().all(|p| p.groups == [groups[0].id.clone()]));
+}
+
+#[tokio::test]
+async fn a_batch_group_refuses_unknown_members_and_clashing_names_and_rolls_back() {
+    let d = Daemon::new().await;
+    let (s, _) = d.post("/api/peer-groups", json!({"label": "ops"})).await;
+    assert_eq!(s, StatusCode::CREATED);
+    for ops in [
+        json!([{"op": "create_peer", "label": "x"},
+               {"op": "create_group", "label": "ops"}]),
+        json!([{"op": "create_peer", "label": "x"},
+               {"op": "create_group", "label": "new", "members": ["$nope"]}]),
+        json!([{"op": "create_group", "label": "new", "members": ["no-such-peer"]}]),
+    ] {
+        let (s, body) = d.post("/api/changes", json!({"ops": ops})).await;
+        assert!(s.is_client_error(), "{body}");
+    }
+    assert!(d.state.db.list_peers().await.unwrap().is_empty());
+    assert_eq!(d.state.db.list_groups().await.unwrap().len(), 1);
+}

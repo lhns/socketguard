@@ -1,11 +1,10 @@
 import { useState } from "react";
-import { appEntries, appEntriesFromGrants, membershipsOf, mergeEntries } from "../access";
+import { appEntries, appEntriesFromGrants, mergeEntries } from "../access";
 import type { AppDetail, AppPort, Network, PortRef } from "../api";
 import { useCommit, useRevoke } from "../commit";
-import { errorText, formatBytes, portLabel, samePort } from "../lib";
-import { useNav } from "../nav";
+import { errorText, formatBytes, portLabel } from "../lib";
 import {
-  useActivity, useApp, useDeleteApp, useGrants, useMergeApp, useSettings, useShare, useSplitApp, useTags,
+  useActivity, useApp, useDeleteApp, useGrants, useMergeApp, useSettings, useShare, useSplitApp,
 } from "../queries";
 import AccessList, { type AccessHighlight } from "./AccessList";
 import AddAccess from "./AddAccess";
@@ -158,10 +157,8 @@ function OneApp({ app, highlight, onCollapse, onClose }: { app: AppDetail } & Co
 }
 
 function PortRow({ app, port }: { app: AppDetail; port: AppPort }) {
-  const nav = useNav();
-  const tags = useTags().data ?? [];
   const ref: PortRef = { port: port.port, proto: port.proto };
-  const portTags = membershipsOf(app.id, tags).filter((m) => m.port !== null && samePort(m.port, ref));
+  const [adding, setAdding] = useState(false);
   return (
     <li className="port-row">
       <span className="mono port-name">{portLabel(port)}</span>
@@ -170,11 +167,16 @@ function PortRow({ app, port }: { app: AppDetail; port: AppPort }) {
         {port.family === "dual" ? "IPv4+IPv6" : port.family === "v4" ? "IPv4" : "IPv6"}
       </span>
       <span className="port-tags">
-        {portTags.map((m) => (
-          <button key={m.tag.id} className="tag-pill" title="Show the tag" onClick={() => nav.go("apps", { tagId: m.tag.id })}>{m.tag.label}</button>
-        ))}
-        <TagPicker appIds={[app.id]} port={ref} compact />
+        <TagPicker appIds={[app.id]} port={ref} />
       </span>
+      {!adding && (
+        <button className="btn btn-sm" aria-label={`Add access to ${portLabel(port)}`} onClick={() => setAdding(true)}>Add access</button>
+      )}
+      {adding && (
+        <div className="port-form">
+          <AddAccess fixed={{ side: "targets", targets: [{ kind: "app", id: app.id }] }} port={ref} onDone={() => setAdding(false)} />
+        </div>
+      )}
     </li>
   );
 }

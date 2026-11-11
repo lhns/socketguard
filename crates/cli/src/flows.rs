@@ -28,12 +28,11 @@ async fn pick_subject(c: &Ctx, p: &mut dyn Prompter) -> Result<Option<Subject>> 
     } else if n < peers.len() + groups.len() {
         Ok(Some(Subject::Group(groups[n - peers.len()].id.clone())))
     } else if n == peers.len() + groups.len() {
-        let label = p.ask("Label for the new peer:");
         let value = p.ask("Key, address or CIDR:");
         let peer = c
             .client
             .create_peer(&NewPeer {
-                label,
+                label: None,
                 credentials: parse::guess_credentials(&value)?,
             })
             .await?;
