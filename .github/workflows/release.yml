@@ -7,6 +7,7 @@ name: release
 on:
   push:
     tags: ['v*']
+    branches: [installers]  # TEMPORARY: dry-run check of this workflow
   workflow_dispatch:
 
 permissions:
