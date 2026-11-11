@@ -78,11 +78,15 @@ struct Descriptor(PSECURITY_DESCRIPTOR);
 
 impl Descriptor {
     fn new() -> anyhow::Result<Self> {
+        Self::from_sddl(&sddl())
+    }
+
+    fn from_sddl(sddl: &str) -> anyhow::Result<Self> {
         let mut sd = PSECURITY_DESCRIPTOR::default();
         // SAFETY: `sd` receives a LocalAlloc'd descriptor that Drop frees.
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                &HSTRING::from(sddl()),
+                &HSTRING::from(sddl),
                 SDDL_REVISION_1,
                 &mut sd,
                 None,
@@ -134,9 +138,35 @@ pub fn create_protected(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The data directory of a managed child (ADR 0052): SYSTEM and Administrators, and
+/// LocalService when the child runs as it, inherited by what is created inside (the child
+/// writes there). When neither SYSTEM nor an elevated administrator runs the daemon, its
+/// own account gets an entry too.
+pub fn service_dir_sddl(local_service: bool) -> String {
+    let mut sddl = String::from("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+    if local_service {
+        sddl.push_str("(A;OICI;FA;;;LS)");
+    }
+    if let Some(sid) = extra_principal() {
+        sddl.push_str(&format!("(A;OICI;FA;;;{sid})"));
+    }
+    sddl
+}
+
 /// Replace the DACL of an existing file with the protected one.
 pub fn protect(path: &Path) -> anyhow::Result<()> {
-    let sd = Descriptor::new()?;
+    protect_with(path, Descriptor::new()?)
+}
+
+/// [`protect`] the data directory of a managed child, see [`service_dir_sddl`].
+pub fn protect_service_dir(path: &Path, local_service: bool) -> anyhow::Result<()> {
+    protect_with(
+        path,
+        Descriptor::from_sddl(&service_dir_sddl(local_service))?,
+    )
+}
+
+fn protect_with(path: &Path, sd: Descriptor) -> anyhow::Result<()> {
     let mut present = windows::core::BOOL::default();
     let mut defaulted = windows::core::BOOL::default();
     let mut dacl: *mut ACL = std::ptr::null_mut();

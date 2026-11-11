@@ -15,6 +15,7 @@
 
 mod addresses;
 mod batch;
+mod children;
 mod discovery;
 mod enforce;
 mod exposure;
@@ -33,7 +34,7 @@ use crate::firewall::{DesiredRuleset, DropEvent, Firewall};
 use crate::iface::{self, InterfaceManager};
 use crate::metrics::{CounterKey, Metrics};
 use crate::monitor::{self, SocketMonitor};
-use crate::networks;
+use crate::networks::{self, ManagedCtx};
 use crate::ruleset::LockoutRisk;
 use crate::state::{Database, NewActivity};
 use crate::AppState;
@@ -142,6 +143,9 @@ pub struct Engine {
     ifaces: Arc<dyn InterfaceManager>,
     /// Persisted ULA global ID handed to ULA backends.
     ula_global_id: [u8; 5],
+    /// What managed networks (ADR 0052) run on: the shipped files, the supervisor, the
+    /// state directory. `sync_children` is how the engine uses it.
+    managed: ManagedCtx,
     /// Interfaces already reported as unavailable (avoids a warning every poll).
     unavailable_ifaces: Mutex<HashSet<String>>,
     /// Networks whose last allocation failed (log once per outage).
@@ -199,6 +203,8 @@ impl Engine {
         )
     }
 
+    /// [`Engine::new`] over the given monitor, firewall and interfaces; managed networks
+    /// get the real supervisor and the files beside the executable.
     pub fn new_with_deps(
         config: &DaemonConfig,
         ula_global_id: [u8; 5],
@@ -206,9 +212,35 @@ impl Engine {
         firewall: Arc<dyn Firewall>,
         ifaces: Arc<dyn InterfaceManager>,
     ) -> anyhow::Result<Self> {
+        Self::new_with_ctx(
+            config,
+            ula_global_id,
+            monitor,
+            firewall,
+            ifaces,
+            ManagedCtx::system(&config.db_path),
+        )
+    }
+
+    /// [`Engine::new_with_deps`] with the context of managed networks (tests give it a
+    /// fake supervisor).
+    pub fn new_with_ctx(
+        config: &DaemonConfig,
+        ula_global_id: [u8; 5],
+        monitor: Box<dyn SocketMonitor>,
+        firewall: Arc<dyn Firewall>,
+        ifaces: Arc<dyn InterfaceManager>,
+        managed: ManagedCtx,
+    ) -> anyhow::Result<Self> {
         let mut backends = HashMap::new();
         for inst in &config.backends {
-            let network = networks::create(&inst.backend, ula_global_id, ifaces.clone())?;
+            let network = networks::create(
+                &inst.id,
+                &inst.backend,
+                ula_global_id,
+                ifaces.clone(),
+                &managed,
+            )?;
             backends.insert(
                 inst.id.clone(),
                 ActiveBackend {
@@ -223,6 +255,7 @@ impl Engine {
             ifaces,
             backends,
             ula_global_id,
+            managed,
         ))
     }
 
@@ -239,10 +272,32 @@ impl Engine {
             ifaces,
             backends,
             crate::networks::ip::ula::UlaBackend::random_global_id(),
+            ManagedCtx::inert(),
         );
         // Tests drive passes back to back: verify on every one unless they say otherwise.
         engine.verify_interval = Duration::ZERO;
         engine
+    }
+
+    /// Replace what managed networks run on (a fake supervisor, files in a temp directory)
+    /// — for tests only.
+    pub fn set_managed_ctx(&mut self, managed: ManagedCtx) {
+        self.managed = managed;
+    }
+
+    /// The shipped files; shared with `AppState::bundled`.
+    pub fn bundled(&self) -> Arc<crate::bundled::Bundled> {
+        self.managed.bundled.clone()
+    }
+
+    /// Use `bundled` as the shipped files (the API and the engine must agree) — for tests.
+    pub fn set_bundled(&mut self, bundled: Arc<crate::bundled::Bundled>) {
+        self.managed.bundled = bundled;
+    }
+
+    /// The supervisor that runs the children of managed networks.
+    pub fn children(&self) -> &Arc<crate::children::Supervisor> {
+        &self.managed.children
     }
 
     /// Override [`VERIFY_INTERVAL`] — for tests only.
@@ -261,6 +316,7 @@ impl Engine {
         ifaces: Arc<dyn InterfaceManager>,
         backends: HashMap<String, ActiveBackend>,
         ula_global_id: [u8; 5],
+        managed: ManagedCtx,
     ) -> Self {
         Self {
             monitor,
@@ -268,6 +324,7 @@ impl Engine {
             firewall,
             ifaces,
             ula_global_id,
+            managed,
             unavailable_ifaces: Mutex::default(),
             alloc_failing: Mutex::default(),
             alloc_lock: tokio::sync::Mutex::default(),
@@ -356,22 +413,27 @@ impl Engine {
             status,
             prefix,
             vlan_id: None,
-            // TODO(managed): the live state of the child process; until it runs, a managed
-            // network reports only what its config says.
-            managed: active
-                .config
-                .backend
-                .is_managed()
-                .then(|| socketguard_core::ManagedInfo {
-                    state: socketguard_core::ChildState::Unavailable,
-                    progress: None,
-                    detail: None,
-                    runs_as: None,
-                    version: None,
-                    address: None,
-                    peers: active.config.backend.peers().to_vec(),
-                    peers_connected: None,
-                }),
+            // The live state of the child process, from the network; a managed network
+            // whose kind does not report one yet shows only what its config says.
+            managed: active.config.backend.is_managed().then(|| {
+                let mut info = active
+                    .network
+                    .managed()
+                    .unwrap_or(socketguard_core::ManagedInfo {
+                        state: socketguard_core::ChildState::Unavailable,
+                        progress: None,
+                        detail: None,
+                        runs_as: None,
+                        version: None,
+                        address: None,
+                        peers: vec![],
+                        peers_connected: None,
+                    });
+                if info.peers.is_empty() {
+                    info.peers = active.config.backend.peers().to_vec();
+                }
+                info
+            }),
         }
     }
 
@@ -426,6 +488,7 @@ impl Engine {
             Err(e) => error!("Startup: could not apply the firewall ruleset: {e}"),
         }
         self.ensure_addresses_present(state).await;
+        self.sync_children(state).await;
         let pending = self.drops.clone();
         if let Err(e) = self.firewall.subscribe_drops(Box::new(move |ev| {
             debug!(
@@ -503,6 +566,9 @@ impl Engine {
             exposure,
         )
         .await;
+        // The onion services are gone; now the managed children go too (they would take
+        // the services with them, but a stopped child also costs nothing).
+        self.sync_children_and_wait(state).await;
         self.commit(state, removed, None, &[DaemonEvent::SettingsChanged])
             .await
     }
@@ -514,7 +580,12 @@ impl Engine {
         // Adopting: the next apply replaces whatever ruleset is installed.
         state.db.set_unadopted(false).await?;
         state.db.clear_fresh().await?;
+        // Children first, so the networks read "starting" and not "turned off" while the
+        // ruleset goes in; a child with a gate (managed Yggdrasil) stays held until the
+        // second sync, after the apply.
+        self.sync_children(state).await;
         let applied = self.apply_and_ensure(state).await;
+        self.sync_children(state).await;
         self.commit(state, applied, None, &[DaemonEvent::SettingsChanged])
             .await
     }
@@ -559,6 +630,7 @@ impl Engine {
         self.poll_counters().await;
         self.refresh_metric_counts(state).await;
         self.check_remote_admin(state, &current_sockets).await;
+        self.sync_children(state).await;
 
         if changed || created > 0 {
             self.emit(state, DaemonEvent::AppsChanged);

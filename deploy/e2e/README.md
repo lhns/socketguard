@@ -1,7 +1,8 @@
 # End-to-end tests
 
 - `ygg-e2e.sh`: Yggdrasil (below).
-- `tor-e2e.sh`: the Tor network (end of this file).
+- `tor-e2e.sh`: the Tor network (below).
+- `managed-tor-e2e.sh`: the Tor network with the Tor SocketGuard ships (end of this file).
 
 # Yggdrasil end-to-end test
 
@@ -42,3 +43,26 @@ running daemon (a reconcile pass must not undo `disable`) and across a daemon re
 
 Exit code 2 (with a `SKIP` line) means Tor could not bootstrap from this Docker network; the control-port
 logic is then only covered by the mock-server tests (`cargo test -p socketguard-daemon`).
+
+# Managed Tor end-to-end test
+
+`managed-tor-e2e.sh` checks the Tor that SocketGuard ships and runs itself (ADR 0052), with real Tor in
+Docker (image from `Dockerfile.tor`; needs internet access to the Tor network and to dist.torproject.org;
+about ten minutes with a warm build cache, longer for the first Rust build):
+
+1. builds the daemon, then lays out the pinned Tor Expert Bundle next to it with
+   `deploy/bundle/fetch.sh --skip-yggdrasil linux-x86_64` (the checksum is checked, the signature is not: the
+   image has no gpg);
+2. creates the system account `socketguard-net` with the command `service install` runs (a container has no
+   service manager, so the install itself is not run);
+3. checks that Tor ends when the process named by `__OwningControllerProcess` dies;
+4. starts the daemon with `{"type": "tor", "managed": true}`: tor runs as `socketguard-net`, its data directory
+   `<state>/tor` is private to it, the network goes up after the bootstrap, and a granted app gets an onion
+   service that a second client with the generated key can fetch (one without the key cannot);
+5. `kill -9` of the daemon ends Tor; a restart starts a new Tor and publishes the same name again;
+6. `disable` stops Tor and keeps `<state>/tor`; `enable` starts it again; a normal stop and
+   `socketguard-daemon --disable` leave no Tor behind.
+
+It removes its containers, network and image on exit. The build volumes (`sg-target`, `sg-cargo-registry`) are
+caches shared with the other scripts; `CLEAN_VOLUMES=1` removes them. Exit code 2 (a `SKIP` line) means Tor
+could not bootstrap from this Docker network. It is not part of CI (the other Docker tests are not either).

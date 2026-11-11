@@ -9,6 +9,7 @@
 
 use super::onion_key;
 use super::tor_control::{AuthOptions, Control, Endpoint, ServiceSpec};
+use super::tor_managed::ManagedTor;
 use super::{
     Capabilities, EnforcedAddress, EnforcedSubject, LocatorRequest, Network, NetworkEnforcement,
     NewLocator,
@@ -197,6 +198,9 @@ fn in_sync(
 pub struct TorNetwork {
     endpoint: Endpoint,
     opts: AuthOptions,
+    /// Set for a Tor SocketGuard runs itself (ADR 0052): its child's state decides whether
+    /// there is anything to talk to, and the endpoint and trust come from there.
+    managed: Option<ManagedTor>,
     check_every: Duration,
     state: Mutex<State>,
     /// Serializes control-port work, without holding `state` across I/O.
@@ -205,9 +209,29 @@ pub struct TorNetwork {
 
 impl TorNetwork {
     pub fn with_options(control: &str, opts: AuthOptions, check_every: Duration) -> Self {
+        Self::build(Endpoint::parse(control), opts, None, check_every)
+    }
+
+    /// The network of a Tor that SocketGuard runs.
+    pub fn managed(managed: ManagedTor, check_every: Duration) -> Self {
+        Self::build(
+            Endpoint::Tcp(String::new()),
+            AuthOptions::default(),
+            Some(managed),
+            check_every,
+        )
+    }
+
+    fn build(
+        endpoint: Endpoint,
+        opts: AuthOptions,
+        managed: Option<ManagedTor>,
+        check_every: Duration,
+    ) -> Self {
         Self {
-            endpoint: Endpoint::parse(control),
+            endpoint,
             opts,
+            managed,
             check_every,
             state: Mutex::new(State {
                 applied: HashMap::new(),
@@ -222,8 +246,21 @@ impl TorNetwork {
         }
     }
 
+    /// Managed: the child is not up, so there is nothing to connect to (and, since the
+    /// services die with it, nothing published).
+    fn child_down(&self) -> Option<&ManagedTor> {
+        self.managed.as_ref().filter(|m| !m.is_up())
+    }
+
     fn connect(&self) -> Result<Control> {
-        match Control::connect(&self.endpoint, &self.opts) {
+        if let Some(m) = self.child_down() {
+            return Err(anyhow!(m.reason(false)));
+        }
+        let attempt = match &self.managed {
+            Some(m) => m.connect(),
+            None => Control::connect(&self.endpoint, &self.opts),
+        };
+        match attempt {
             Ok(c) => Ok(c),
             Err(e) => {
                 set_status(
@@ -253,7 +290,19 @@ impl Network for TorNetwork {
     }
 
     fn status(&self) -> (NetworkStatus, Option<Ipv6Addr>) {
+        if let Some(m) = self.child_down() {
+            return (
+                NetworkStatus::Down {
+                    reason: m.reason(true),
+                },
+                None,
+            );
+        }
         (self.state.lock().unwrap().status.clone(), None)
+    }
+
+    fn managed(&self) -> Option<socketguard_core::ManagedInfo> {
+        self.managed.as_ref().map(ManagedTor::info)
     }
 
     /// Generate the service key and name here. Nothing reaches Tor until the first grant
@@ -273,6 +322,11 @@ impl Network for TorNetwork {
             return Ok(());
         };
         let _io = self.io.lock().unwrap();
+        if self.child_down().is_some() {
+            // The services of a Tor we run end with it.
+            self.state.lock().unwrap().applied.remove(&id);
+            return Ok(());
+        }
         // Forget the service only once Tor confirmed it is gone: if Tor is down it is
         // still published, and the caller tombstones it for a retry.
         self.connect()?.del_onion(&id)?;
@@ -306,6 +360,20 @@ impl Network for TorNetwork {
             .collect();
 
         let _io = self.io.lock().unwrap();
+        if let Some(m) = self.child_down() {
+            // The services of a Tor we run end with it, so none is published and none
+            // is left to remove; what is wanted waits for it to come up.
+            let mut st = self.state.lock().unwrap();
+            st.applied.clear();
+            st.checked = None;
+            st.desired = desired.clone();
+            st.unremoved.clear();
+            return if desired.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow!(m.reason(false)))
+            };
+        }
         let (applied, due) = {
             let mut st = self.state.lock().unwrap();
             st.desired = desired.clone();
@@ -407,6 +475,12 @@ impl Network for TorNetwork {
 
     fn disable(&self, addresses: &[Address]) -> Result<()> {
         let _io = self.io.lock().unwrap();
+        if self.child_down().is_some() {
+            let mut st = self.state.lock().unwrap();
+            st.applied.clear();
+            st.checked = None;
+            return Ok(());
+        }
         let mut ids: BTreeSet<String> = addresses
             .iter()
             .filter_map(|a| service_id(&a.locator))

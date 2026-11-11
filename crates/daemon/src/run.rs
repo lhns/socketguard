@@ -106,6 +106,7 @@ pub async fn run(
     networks::ip::dhcpv6::use_store(db.blocking_store());
     let engine = engine::Engine::new(&config, ula_global_id)?;
     engine.register_metrics(&opentelemetry::global::meter("socketguard"));
+    let bundled = engine.bundled();
 
     let (events_tx, _) = broadcast::channel::<api::DaemonEvent>(64);
 
@@ -115,7 +116,7 @@ pub async fn run(
         db,
         engine: tokio::sync::RwLock::new(engine),
         firewall_lock: tokio::sync::Mutex::new(()),
-        bundled: Arc::new(crate::bundled::Bundled::locate()),
+        bundled,
         events: events_tx,
     });
 
@@ -179,6 +180,13 @@ pub async fn run(
 
     // Wait for reconciliation loop to finish
     let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), recon_handle).await;
+
+    // The children of managed networks end with the daemon (gracefully, then by force).
+    // Their onion services end with them; the ruleset does not.
+    {
+        let children = state.engine.read().await.children().clone();
+        children.shutdown().await;
+    }
 
     // Stopping removes nothing: the ruleset and the addresses stay, so the host keeps its
     // protection while the daemon is down (ADR 0026). `--disable` removes them.
