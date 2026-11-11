@@ -27,7 +27,7 @@ CREATE TABLE onion_keys (
 /// can never be on an interface without the ruleset knowing about it.
 ///
 /// Existing app ids are not recomputed (the uid they now include was never stored): they
-/// stay as inert records and their programs reappear as new, pending apps.
+/// stay as inert records and their programs reappear as new apps.
 const MIGRATION_2_TO_3: &str = r#"
 ALTER TABLE apps ADD COLUMN identity_note TEXT;
 CREATE TABLE owned_addresses (

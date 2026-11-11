@@ -426,8 +426,6 @@ td {
 code { font-family: var(--font-mono); font-size: 12px; background: var(--bg-input); padding: 1px 5px; border-radius: 4px; }
 
 .banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.nav-count { margin-left: 6px; background: var(--yellow); color: #fff; border-radius: 10px; padding: 0 6px; font-size: 11px; }
-.nav-btn.active .nav-count { background: #fff; color: var(--accent); }
 
 .btn:disabled { opacity: 0.5; cursor: default; }
 .actions { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }

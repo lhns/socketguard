@@ -56,7 +56,6 @@ routes! {
     LIST_APPS = list_apps: GET "/api/apps",
     GET_APP = get_app: GET "/api/apps/{id}",
     DELETE_APP = delete_app: DELETE "/api/apps/{id}",
-    REVIEW_APP = review_app: POST "/api/apps/{id}/review",
     MOVE_APP = move_app: POST "/api/apps/{id}/move",
     SHARE_APP = share_app: GET "/api/apps/{id}/share",
     LIST_PEERS = list_peers: GET "/api/peers",

@@ -50,10 +50,6 @@ identity_note: string | null,
  */
 exe_missing: boolean, 
 /**
- * False = pending: no decision has been made about this app yet.
- */
-reviewed: boolean, 
-/**
  * An OS component (service or system process), so frontends can group it away from
  * the user's own apps.
  */

@@ -69,7 +69,7 @@ function DangerZone() {
       {s ? (
         <>
           <p>
-            Version {s.version} · {s.counts.apps} apps ({s.counts.pending_apps} pending) · {s.counts.peers} peers ·{" "}
+            Version {s.version} · {s.counts.apps} apps · {s.counts.peers} peers ·{" "}
             {s.counts.grants} grants
           </p>
           <p>

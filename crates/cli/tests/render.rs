@@ -45,7 +45,6 @@ fn nginx() -> App {
         interpreter_arg: None,
         identity_note: None,
         exe_missing: false,
-        reviewed: true,
         system: false,
         first_seen: t("2026-11-01T08:00:00Z"),
         last_seen: t("2026-11-09T12:30:00Z"),
@@ -89,7 +88,6 @@ fn redis() -> App {
         interpreter_arg: None,
         identity_note: None,
         exe_missing: false,
-        reviewed: false,
         system: false,
         first_seen: t("2026-11-09T09:00:00Z"),
         last_seen: t("2026-11-09T12:30:00Z"),
@@ -236,7 +234,6 @@ fn status() {
         unadopted: false,
         counts: Counts {
             apps: 2,
-            pending_apps: 1,
             addresses: 3,
             peers: 1,
             groups: 1,

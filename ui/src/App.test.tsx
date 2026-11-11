@@ -34,7 +34,7 @@ function setup(over: Parameters<typeof mockDaemon>[0] = {}) {
 }
 
 const navButtons = () =>
-  [...within(screen.getByRole("navigation", { name: "Main" })).getAllByRole("button")].map((b) => b.textContent?.replace(/\d+$/, ""));
+  [...within(screen.getByRole("navigation", { name: "Main" })).getAllByRole("button")].map((b) => b.textContent);
 
 describe("navigation", () => {
   it("is Apps, Reserved, Peers, Activity and Settings: no Access tab, no Simple/Advanced switch", async () => {

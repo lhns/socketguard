@@ -116,11 +116,11 @@ async fn polls_mutations_network_changes_and_disable_never_hang() {
         }));
     }
     {
-        // Grants (addresses, firewall), reviews, and forgetting the app that comes and goes.
+        // Grants (addresses, firewall), and forgetting the app that comes and goes.
         let (state, progress) = (state.clone(), progress.clone());
         let nginx = nginx.clone();
         tasks.push(tokio::spawn(async move {
-            for i in 0..ROUNDS {
+            for _ in 0..ROUNDS {
                 let engine = state.engine.read().await;
                 let grant = engine
                     .create_grant(
@@ -137,7 +137,6 @@ async fn polls_mutations_network_changes_and_disable_never_hang() {
                 if let Ok(g) = grant {
                     let _ = engine.delete_grant(&state, &g.grant.id).await;
                 }
-                let _ = engine.review_app(&state, &nginx, i % 2 == 0).await;
                 let redis = state
                     .db
                     .list_apps()

@@ -8,7 +8,7 @@ import {
   batch, detail, grantView, mkApp, mkGroup, mkPeer, mkReservation, mkTag, memoryStorage, mockDaemon, renderWithProviders, saved,
 } from "../test/helpers";
 
-const nginx = mkApp("a1", "nginx", [80, 443], { reviewed: false });
+const nginx = mkApp("a1", "nginx", [80, 443]);
 const redis = mkApp("a2", "redis-server", [6379]);
 const sshd = mkApp("a3", "sshd", [22]);
 const svc = mkApp("s1", "svchost (RpcSs)", [135], { system: true });
@@ -89,7 +89,7 @@ describe("Apps list", () => {
     expect(screen.queryByRole("button", { name: "Access" })).not.toBeInTheDocument();
   });
 
-  it("a search or a filter that matches a system service shows it; pending only filters", async () => {
+  it("a search that matches a system service shows it, and there is no pending filter", async () => {
     setup();
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
@@ -98,9 +98,7 @@ describe("Apps list", () => {
     expect(inList().getByRole("button", { name: "svchost (RpcSs)" })).toBeInTheDocument();
     expect(inList().queryByRole("button", { name: /^nginx/ })).not.toBeInTheDocument();
     await user.clear(screen.getByRole("searchbox", { name: "Filter apps" }));
-    await user.click(screen.getByRole("checkbox", { name: /Pending only/ }));
-    expect(inList().getByRole("button", { name: /^nginx/ })).toBeInTheDocument();
-    expect(inList().queryByRole("button", { name: "redis-server" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /Pending/ })).not.toBeInTheDocument();
   });
 
   it("a tag pill on an app filters the list by that tag, and the filter can be dropped", async () => {
@@ -157,7 +155,7 @@ describe("Inspector: one app", () => {
     await user.click(await inList().findByRole("button", { name: /^nginx/ }));
     const panel = inspector();
     expect(await within(panel).findByRole("heading", { name: /^nginx/ })).toBeInTheDocument();
-    expect(within(panel).getByText("pending")).toBeInTheDocument();
+    expect(within(panel).queryByText("pending")).not.toBeInTheDocument();
     // One section of rows: All ports first. Tag pill of the app; access: direct and through the tag, each once.
     const ports = within(panel).getByRole("heading", { name: "Ports" }).closest("section")!;
     const all = within(ports).getByText("All ports", { selector: ".port-name" }).closest("li")!;
@@ -296,13 +294,13 @@ describe("Inspector: one app", () => {
     ]);
   });
 
-  it("Keep closed marks the app reviewed through the same rule", async () => {
-    const d = setup();
+  it("has no review actions", async () => {
+    setup();
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await user.click(await inList().findByRole("button", { name: /^nginx/ }));
-    await user.click(await within(inspector()).findByRole("button", { name: "Keep closed" }));
-    await waitFor(() => expect(applied(d)).toEqual([[{ op: "review", app_id: "a1", reviewed: true }]]));
+    await within(inspector()).findByRole("button", { name: "Forget app" });
+    expect(within(inspector()).queryByRole("button", { name: /Keep closed|Mark (reviewed|pending)/ })).not.toBeInTheDocument();
   });
 
   it("Forget asks first", async () => {
@@ -323,8 +321,11 @@ describe("A program that moved", () => {
   const old = mkApp("o1", "nginx-old", [80], { process_name: "nginx", exe_missing: true });
   const gone = mkApp("o2", "nginx-gone", [80], { process_name: "nginx", exe_missing: false });
 
-  it("a pending app named like an app with a missing executable offers to take over, after a review", async () => {
-    const d = setup({ list_apps: () => [nginx, redis, old], changes: (a) => batch(a.req as ChangesRequest, false, [moved]) });
+  // The new app has no grants, so nothing speaks for it yet.
+  const closed = detail(nginx);
+
+  it("an app without grants named like an app with a missing executable offers to take over, after a review", async () => {
+    const d = setup({ list_apps: () => [nginx, redis, old], get_app: (a) => (a.id === "a1" ? closed : detail(old)), changes: (a) => batch(a.req as ChangesRequest, false, [moved]) });
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await user.click(await inList().findByRole("button", { name: /^nginx(?!-)/ }));
@@ -337,22 +338,21 @@ describe("A program that moved", () => {
     await waitFor(() => expect(applied(d)).toEqual([[{ op: "move_app", from: "o1", to: "a1", confirm_open: false }]]));
   });
 
-  it("is hidden when the other app's executable is still there, or the app is already reviewed", async () => {
-    setup({ list_apps: () => [nginx, redis, gone] });
+  it("is hidden when the other app's executable is still there", async () => {
+    setup({ list_apps: () => [nginx, redis, gone], get_app: () => closed });
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await user.click(await inList().findByRole("button", { name: /^nginx(?!-)/ }));
-    await within(inspector()).findByRole("button", { name: "Keep closed" });
+    await within(inspector()).findByRole("button", { name: "Forget app" });
     expect(screen.queryByRole("group", { name: "Moved program" })).not.toBeInTheDocument();
   });
 
-  it("is hidden for an app that was already reviewed", async () => {
-    const reviewed = { ...nginx, reviewed: true };
-    setup({ list_apps: () => [reviewed, old], get_app: () => detail(reviewed) });
+  it("is hidden for an app that has grants", async () => {
+    setup({ list_apps: () => [nginx, old] });
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await user.click(await inList().findByRole("button", { name: /^nginx(?!-)/ }));
-    await within(inspector()).findByRole("button", { name: "Mark pending again" });
+    await within(inspector()).findByRole("button", { name: "Forget app" });
     expect(screen.queryByRole("group", { name: "Moved program" })).not.toBeInTheDocument();
   });
 });
@@ -649,7 +649,7 @@ describe("Inspector: several apps", () => {
     ]]));
   });
 
-  it("adds access for all of them in one batch, and marks the pending ones reviewed", async () => {
+  it("adds access for all of them in one batch", async () => {
     const d = setup();
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
@@ -663,10 +663,7 @@ describe("Inspector: several apps", () => {
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0].map((o) => (o as { target: { id: string } }).target.id)).toEqual(["a1", "a2", "a3"]);
-
-    await user.click(within(inspector()).getByRole("button", { name: "Mark reviewed (1)" }));
-    await waitFor(() => expect(applied(d)).toHaveLength(2));
-    expect(applied(d)[1]).toEqual([{ op: "review", app_id: "a1", reviewed: true }]);
+    expect(within(inspector()).queryByRole("button", { name: /Mark reviewed/ })).not.toBeInTheDocument();
   });
 
   it("has no bulk bar and no dialog of its own", async () => {

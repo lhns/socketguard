@@ -106,7 +106,6 @@ export default function App() {
     }),
     [],
   );
-  const pending = status.data?.counts.pending_apps ?? 0;
 
   return (
     <NavContext.Provider value={nav}>
@@ -125,7 +124,6 @@ export default function App() {
                 onClick={() => nav.go(p.id)}
               >
                 {p.label}
-                {p.id === "apps" && pending > 0 && <span className="nav-count" aria-label={`${pending} pending`}>{pending}</span>}
               </button>
             ))}
           </nav>

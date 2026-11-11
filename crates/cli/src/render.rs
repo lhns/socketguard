@@ -332,11 +332,10 @@ pub fn status(s: &StatusResponse) -> String {
         "socketguard daemon {}\n\
          enforcement   {enforcement}\n\
          protect-host  {protect}\n\
-         apps          {} ({} pending), {} addresses\n\
+         apps          {}, {} addresses\n\
          peers         {}, groups {}, grants {}{}\n\n{}",
         s.version,
         c.apps,
-        c.pending_apps,
         c.addresses,
         c.peers,
         c.groups,
@@ -457,18 +456,14 @@ pub fn apps(apps: &[App]) -> String {
         return "no apps".to_string();
     }
     let mut out = table(
-        &["ID", "NAME", "PORTS", "STATE", "ADDRESSES"],
+        &["ID", "NAME", "PORTS", "KIND", "ADDRESSES"],
         apps.iter()
             .map(|a| {
                 vec![
                     short(&a.id).to_string(),
                     a.name.clone(),
                     app_ports(a),
-                    format!(
-                        "{}{}",
-                        if a.reviewed { "reviewed" } else { "pending" },
-                        if a.system { ", system" } else { "" }
-                    ),
+                    if a.system { "system" } else { "app" }.to_string(),
                     a.addresses.len().to_string(),
                 ]
             })
@@ -661,12 +656,7 @@ enum Origin {
 
 pub fn app_detail(d: &AppDetail, names: &Names) -> String {
     let app = &d.app;
-    let state = if app.reviewed {
-        "reviewed"
-    } else {
-        "pending (closed until granted)"
-    };
-    let mut head = format!("{}  ({})\n  state       {state}", app.name, app.id);
+    let mut head = format!("{}  ({})", app.name, app.id);
     if let Some(exe) = &app.exe_path {
         head.push_str(&format!("\n  executable  {exe}"));
     }

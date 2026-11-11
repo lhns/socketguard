@@ -23,8 +23,8 @@ use socketguard_core::api_types::{
     DisableRequest, Enforcement, EnforcementNotice, EnforcementStatus, ExposureQuery,
     LockoutRiskInfo, MemberQuery, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer,
     NewPortGroup, NewReservation, NewTag, NewTagMember, ParseCredentialsRequest,
-    ProtectHostRequest, ProtectHostResponse, ReserveRequest, ReviewRequest, SetMembers,
-    StatusResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
+    ProtectHostRequest, ProtectHostResponse, ReserveRequest, SetMembers, StatusResponse,
+    UpdateLabel, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
 use socketguard_core::{ActivityQuery, NewCredential, NewGrant};
@@ -38,7 +38,7 @@ use tracing::Span;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonEvent {
     AppsChanged,
-    /// A new, pending app; carries its id.
+    /// A new app; carries its id.
     AppDiscovered(String),
     PeersChanged,
     GrantsChanged,
@@ -87,7 +87,6 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::GET, "/api/apps"),
     (Method::GET, "/api/apps/{id}"),
     (Method::DELETE, "/api/apps/{id}"),
-    (Method::POST, "/api/apps/{id}/review"),
     (Method::POST, "/api/apps/{id}/move"),
     (Method::GET, "/api/apps/{id}/share"),
     (Method::GET, "/api/peers"),
@@ -160,7 +159,6 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("GET", "/api/apps") => get(apps_list),
         ("GET", "/api/apps/{id}") => get(app_get),
         ("DELETE", "/api/apps/{id}") => delete(app_delete),
-        ("POST", "/api/apps/{id}/review") => post(app_review),
         ("POST", "/api/apps/{id}/move") => post(app_move),
         ("GET", "/api/apps/{id}/share") => get(app_share),
         ("GET", "/api/peers") => get(peers_list),
@@ -418,8 +416,7 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequestParts<S> for ApiQuery<T> {
 
 async fn status(State(state): State<Shared>) -> ApiResult<Json<StatusResponse>> {
     let engine = state.engine.read().await;
-    let apps = engine.list_apps(&state, false).await?;
-    let pending_apps = apps.iter().filter(|a| !a.reviewed).count() as u32;
+    let apps = engine.list_apps(&state).await?;
     let addresses = state.db.list_addresses().await?.len() as u32;
     let config = state.config.read().await;
     Ok(Json(StatusResponse {
@@ -430,7 +427,6 @@ async fn status(State(state): State<Shared>) -> ApiResult<Json<StatusResponse>> 
         unadopted: state.db.unadopted().await?,
         counts: Counts {
             apps: apps.len() as u32,
-            pending_apps,
             addresses,
             peers: engine.list_peers(&state).await?.len() as u32,
             groups: engine.list_groups(&state).await?.len() as u32,
@@ -463,17 +459,9 @@ async fn sse_events(
 
 // ─── Apps ────────────────────────────────────────────────────────────────────
 
-#[derive(serde::Deserialize, Default)]
-struct AppsParams {
-    pending: Option<bool>,
-}
-
-async fn apps_list(
-    State(state): State<Shared>,
-    ApiQuery(q): ApiQuery<AppsParams>,
-) -> ApiResult<Response> {
+async fn apps_list(State(state): State<Shared>) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    let apps = engine.list_apps(&state, q.pending.unwrap_or(false)).await?;
+    let apps = engine.list_apps(&state).await?;
     Ok(Json(apps).into_response())
 }
 
@@ -492,16 +480,6 @@ async fn app_delete(State(state): State<Shared>, Path(id): Path<String>) -> ApiR
 async fn app_share(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
     let engine = state.engine.read().await;
     Ok(Json(engine.share(&state, &id).await?).into_response())
-}
-
-async fn app_review(
-    State(state): State<Shared>,
-    Path(id): Path<String>,
-    ApiJson(req): ApiJson<ReviewRequest>,
-) -> ApiResult<Response> {
-    let engine = state.engine.read().await;
-    engine.review_app(&state, &id, req.reviewed).await?;
-    Ok(Json(engine.get_app(&state, &id).await?).into_response())
 }
 
 async fn app_move(

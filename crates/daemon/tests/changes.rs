@@ -340,8 +340,7 @@ async fn a_batch_is_one_transaction_and_one_firewall_update() {
                  "subject": {"kind": "peer", "id": "$alice"}},
                 {"op": "add_grant", "target": app_target(&app_id), "network_id": "ygg",
                  "scope": {"kind": "port", "port": 80, "proto": "tcp"},
-                 "subject": {"kind": "peer", "id": "$alice"}},
-                {"op": "review", "app_id": app_id, "reviewed": true}
+                 "subject": {"kind": "peer", "id": "$alice"}}
             ]}),
         )
         .await;
@@ -357,11 +356,10 @@ async fn a_batch_is_one_transaction_and_one_firewall_update() {
     assert_eq!(d.state.db.list_tags().await.unwrap()[0].id, dev);
     let grants = d.state.db.list_grants().await.unwrap();
     assert_eq!(grants.len(), 2);
-    assert!(d.state.db.get_app(&app_id).await.unwrap().unwrap().reviewed);
 
     // The diff lists every change, with reach for the grants.
     let changes = body["changes"].as_array().unwrap();
-    assert_eq!(changes.len(), 6);
+    assert_eq!(changes.len(), 5);
     assert_eq!(changes[0]["item"], "peer");
     assert_eq!(changes[0]["id"], alice);
     let grant_changes: Vec<_> = changes.iter().filter(|c| c["item"] == "grant").collect();
@@ -746,7 +744,7 @@ async fn changes_reach_is_set_by_opening_edits_only() {
         .unwrap()
         .contains("alice"));
 
-    // Removing and reviewing never widen it.
+    // Removing never widens it.
     let (_, created) = d
         .post("/api/grants", {
             let mut g = grant.clone();
@@ -757,8 +755,7 @@ async fn changes_reach_is_set_by_opening_edits_only() {
     let (_, body) = d
         .post(
             "/api/changes",
-            dry(json!([{"op": "remove_grant", "grant_id": id(&created)},
-                       {"op": "review", "app_id": app_id, "reviewed": true}])),
+            dry(json!([{"op": "remove_grant", "grant_id": id(&created)}])),
         )
         .await;
     assert_eq!(body["changes_reach"], false, "{body}");

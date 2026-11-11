@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import ActivityPage from "./ActivityPage";
-import { mockDaemon, renderWithProviders, status } from "../test/helpers";
+import { mockDaemon, renderWithProviders } from "../test/helpers";
 import type { ActivityRecord } from "../api";
 
 const rec = (over: Partial<ActivityRecord>): ActivityRecord => ({
@@ -66,14 +66,12 @@ describe("Activity page", () => {
     await waitFor(() => expect((d.last("activity")?.args.query as { peer_id: string }).peer_id).toBe("p1"));
   });
 
-  it("links a banner to the pending apps", async () => {
+  it("has no banner about new apps", async () => {
     mockDaemon({ activity: () => [] });
-    const go = vi.fn();
-    const user = userEvent.setup();
-    renderWithProviders(<ActivityPage />, go);
-    expect(await screen.findByText(`${status.counts.pending_apps} new app needs a decision.`)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Review in Apps" }));
-    expect(go).toHaveBeenCalledWith("apps", { pendingOnly: true });
+    renderWithProviders(<ActivityPage />);
+    await screen.findByRole("option", { name: "alice" });
+    expect(screen.queryByText(/need a decision|needs a decision/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Review in Apps" })).not.toBeInTheDocument();
   });
 
   it("offers Load more when a page is full and passes the cursor", async () => {

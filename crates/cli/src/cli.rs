@@ -73,8 +73,6 @@ pub enum Command {
     Activity(ActivityArgs),
     /// Print every event the daemon pushes, one line each
     Watch,
-    /// New apps without a decision; interactive on a terminal
-    Pending,
     /// Print an app's addresses as connection strings (it has one once a grant names it)
     Share(ShareArgs),
     /// First-run setup: networks, remote-admin listeners, protect-host
@@ -117,21 +115,10 @@ pub enum AccessCmd {
 #[derive(Subcommand, Debug)]
 pub enum AppsCmd {
     /// List apps
-    List {
-        /// Only apps without a decision yet
-        #[arg(long)]
-        pending: bool,
-    },
+    List,
     /// Show an app: addresses, ports, grants with reach, counters
     Show { app: String },
-    /// Mark an app as reviewed (it stays closed until granted)
-    Review {
-        app: String,
-        /// Mark it pending again
-        #[arg(long)]
-        unreviewed: bool,
-    },
-    /// Forget an app, its addresses and grants (it reappears as pending if it listens again)
+    /// Forget an app, its addresses and grants (it reappears as a new app if it listens again)
     Rm { app: String },
     /// Move everything one app has (grants, tag memberships, addresses, reservation bindings)
     /// to another app, e.g. after an upgrade changed the executable path
@@ -666,13 +653,10 @@ mod tests {
 
     #[test]
     fn global_options_work_anywhere() {
-        let c = parse(&["--json", "apps", "list", "--pending", "--socket", "/x.sock"]).unwrap();
+        let c = parse(&["--json", "apps", "list", "--socket", "/x.sock"]).unwrap();
         assert!(c.json);
         assert_eq!(c.socket.as_deref(), Some("/x.sock"));
-        assert!(matches!(
-            c.command,
-            Command::Apps(AppsCmd::List { pending: true })
-        ));
+        assert!(matches!(c.command, Command::Apps(AppsCmd::List)));
     }
 
     #[test]

@@ -88,11 +88,7 @@ impl Harness {
     }
 
     async fn apps(&self) -> Vec<App> {
-        self.engine()
-            .await
-            .list_apps(&self.state, false)
-            .await
-            .unwrap()
+        self.engine().await.list_apps(&self.state).await.unwrap()
     }
 
     /// The only app.
@@ -303,7 +299,7 @@ async fn a_deleted_executable_is_noticed_when_a_new_app_shows_up() {
 }
 
 #[tokio::test]
-async fn discovery_creates_a_pending_app_with_an_address_on_every_network() {
+async fn discovery_creates_a_closed_app_with_an_address_on_every_network() {
     let h = Harness::new(
         vec![local_net(), lan_net(), ygg_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
@@ -314,7 +310,6 @@ async fn discovery_creates_a_pending_app_with_an_address_on_every_network() {
 
     let app = h.app().await;
     assert_eq!(app.name, "nginx");
-    assert!(!app.reviewed, "a new app is pending");
     assert_eq!(app.ports.len(), 1);
     assert!((app.ports[0].port, app.ports[0].listening) == (80, true));
     // Nothing is granted: only Local on loopback has an address.
@@ -995,7 +990,7 @@ async fn peers_validate_and_stay_unique() {
 }
 
 #[tokio::test]
-async fn review_and_delete_app() {
+async fn delete_app() {
     let h = Harness::new(
         vec![lan_net(), ygg_net()],
         vec![listener("nginx", 80, Protocol::Tcp)],
@@ -1003,29 +998,7 @@ async fn review_and_delete_app() {
     .await;
     h.reconcile().await;
     let app = h.app().await;
-    assert_eq!(
-        h.engine()
-            .await
-            .list_apps(&h.state, true)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-    h.engine()
-        .await
-        .review_app(&h.state, &app.id, true)
-        .await
-        .unwrap();
-    assert!(h
-        .engine()
-        .await
-        .list_apps(&h.state, true)
-        .await
-        .unwrap()
-        .is_empty());
-    assert!(h.app().await.reviewed);
-    let e = h.engine().await.review_app(&h.state, "nope", true).await;
+    let e = h.engine().await.delete_app(&h.state, "nope").await;
     assert!(matches!(e, Err(EngineError::NotFound(_))));
 
     h.grant(&app.id, Subject::Anyone).await;
@@ -1046,10 +1019,9 @@ async fn review_and_delete_app() {
     assert!(!rs.scopes.iter().any(|s| s.id == "managed"));
     assert_eq!(h.activity(ActivityKind::AppRemoved).await.len(), 1);
 
-    // It reappears as pending when it listens again.
+    // It reappears as a new app when it listens again.
     h.reconcile().await;
     let again = h.app().await;
-    assert!(!again.reviewed);
     assert_eq!(again.id, app.id);
 }
 
