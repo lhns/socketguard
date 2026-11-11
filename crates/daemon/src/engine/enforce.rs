@@ -70,14 +70,8 @@ impl Engine {
             let Some(info) = snapshot.networks.iter().find(|n| n.id == id) else {
                 continue;
             };
-            let mut enforcement = networks::enforcement_for(
-                info,
-                snapshot,
-                &model,
-                &address_info,
-                &secrets,
-                &binds,
-            );
+            let mut enforcement =
+                networks::enforcement_for(info, snapshot, &model, &address_info, &secrets, &binds);
             if disabled {
                 enforcement.addresses.clear();
             }

@@ -668,7 +668,10 @@ async fn an_unnamed_port_group_is_named_after_its_ports() {
         (json!(""), "80/tcp (3)"),
     ] {
         let (s, g) = d
-            .post("/api/port-groups", json!({"label": label, "ports": [tcp(80)]}))
+            .post(
+                "/api/port-groups",
+                json!({"label": label, "ports": [tcp(80)]}),
+            )
             .await;
         assert_eq!(s, StatusCode::CREATED, "{g}");
         assert_eq!(g["label"], want);
@@ -676,7 +679,10 @@ async fn an_unnamed_port_group_is_named_after_its_ports() {
 
     // An explicit label that is taken stays a conflict.
     let (s, b) = d
-        .post("/api/port-groups", json!({"label": "80/tcp", "ports": [tcp(8080)]}))
+        .post(
+            "/api/port-groups",
+            json!({"label": "80/tcp", "ports": [tcp(8080)]}),
+        )
         .await;
     assert_eq!((s, code(&b)), (StatusCode::CONFLICT, "conflict"));
 

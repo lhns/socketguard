@@ -14,6 +14,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
 use tracing::info;
 
+/// An app, its new process details (if it was seen listening) and the ports it listens on.
+type PendingSighting<'a> = (&'a AppId, Option<Touch<'a>>, Vec<(PortRef, AddrFamily)>);
+
 /// How stale the last sighting of an unchanged app may get before a poll writes it again.
 /// A commit can take over a second on a protected database file, so an idle host writes
 /// nothing for minutes.
@@ -89,7 +92,7 @@ impl Engine {
             .collect();
         let mut changed = false;
         // What goes to the database, in one transaction; nothing when nothing changed.
-        let mut writes: Vec<(&AppId, Option<Touch<'_>>, Vec<(PortRef, AddrFamily)>)> = Vec::new();
+        let mut writes: Vec<PendingSighting<'_>> = Vec::new();
 
         for (id, l) in &live {
             let ports: Vec<(PortRef, AddrFamily)> = l.ports.iter().map(|(p, f)| (*p, *f)).collect();

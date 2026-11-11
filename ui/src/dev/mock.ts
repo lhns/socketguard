@@ -5,7 +5,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
   Address, App, AppDetail, BatchChange, ChangeOp, EffectiveAccess, GrantReach, GrantView, Network, Peer, PeerGroup, PortRange, ReservationView, Scope, PortGroup, Subject, Tag,
 } from "../api";
-import { ALL_SCOPE, sameScope } from "../lib";
+import { ALL_SCOPE, rangeLabel, sameScope } from "../lib";
 
 const T0 = "2026-01-01T00:00:00Z";
 const networks: Network[] = [
@@ -293,12 +293,12 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
       case "create_port_group": {
         const ports = op.ports as PortRange[];
         if (ports.length === 0) throw { code: "invalid", message: `operation ${out.length}: a port group needs at least one port` };
-        const label = (op.label as string | undefined)?.trim() || ports.map((r) => (r.start === r.end ? `${r.start}/${r.proto}` : `${r.start}-${r.end}/${r.proto}`)).join(", ");
+        const label = (op.label as string | undefined)?.trim() || ports.map(rangeLabel).join(", ");
         if (portGroups.some((x) => x.label === label)) throw { code: "conflict", message: `operation ${out.length}: port group ${label} already exists` };
         const sg: PortGroup = { id: uid("sg"), label, ports, apps: [], created_at: T0 };
         if (op.ref) refs[op.ref as string] = sg.id;
         portGroups = [...portGroups, sg];
-        out.push({ kind: "create", item: "port_group", name: sg.label, detail: ports.map((r) => (r.start === r.end ? `${r.start}/${r.proto}` : `${r.start}-${r.end}/${r.proto}`)).join(", "), id: sg.id, opens_to_anyone: false });
+        out.push({ kind: "create", item: "port_group", name: sg.label, detail: ports.map(rangeLabel).join(", "), id: sg.id, opens_to_anyone: false });
         for (const appId of (op.apps as string[] | undefined) ?? []) {
           portGroups = portGroups.map((g) => (g.id === sg.id ? { ...g, apps: [...g.apps, appId] } : g));
           widenOf(appId, sg, !!op.confirm_open, "attach");

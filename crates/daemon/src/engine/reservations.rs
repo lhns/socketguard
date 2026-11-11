@@ -13,8 +13,8 @@ use crate::AppState;
 use chrono::Utc;
 use socketguard_core::api_types::{ChangeOp, ChangesRequest, ChangesResponse};
 use socketguard_core::{
-    new_id, reservation_members, Address, Binding, BindingTarget, Grant, Model,
-    Reservation, ReservationView, Row, Scope, Subject, Target,
+    new_id, reservation_members, Address, Binding, BindingTarget, Grant, Model, Reservation,
+    ReservationView, Row, Scope, Subject, Target,
 };
 use std::collections::HashSet;
 
@@ -572,7 +572,8 @@ impl Engine {
             .iter()
             .filter(|n| n.kind == socketguard_core::NetworkKind::Tor)
         {
-            for ea in networks::enforcement_for(net, &snap, &model, &info, &secrets, &binds).addresses
+            for ea in
+                networks::enforcement_for(net, &snap, &model, &info, &secrets, &binds).addresses
             {
                 plans.insert(ea.id.clone(), networks::tor::plan(&ea));
             }
@@ -656,7 +657,7 @@ impl Engine {
 
     // ─── REST operations: one-operation batches ──────────────────────────────
 
-    async fn run_one(
+    pub(super) async fn run_one(
         &self,
         state: &AppState,
         op: ChangeOp,

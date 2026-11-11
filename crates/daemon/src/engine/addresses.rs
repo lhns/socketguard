@@ -16,11 +16,11 @@ use crate::networks::{LocatorRequest, NewLocator};
 use crate::state::{Database, OwnedAddress};
 use crate::AppState;
 use chrono::Utc;
+use futures_util::StreamExt;
 use socketguard_core::{
     classify_legacy, Binding, BindingTarget, LegacyClass, Model, Reservation, Row,
 };
 use socketguard_core::{new_id, Address, Locator, Scope};
-use futures_util::StreamExt;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
@@ -142,8 +142,11 @@ impl Engine {
         network_id: &str,
         addr: Ipv6Addr,
     ) -> bool {
-        self.add_to_interfaces(state, vec![(iface.to_string(), network_id.to_string(), addr)])
-            .await
+        self.add_to_interfaces(
+            state,
+            vec![(iface.to_string(), network_id.to_string(), addr)],
+        )
+        .await
             == 1
     }
 
@@ -161,7 +164,11 @@ impl Engine {
                 debug!("Not adding {addr} to {iface}: the applied ruleset does not cover it");
                 continue;
             }
-            if let Err(e) = state.db.claim_address(addr, &iface, Some(&network_id)).await {
+            if let Err(e) = state
+                .db
+                .claim_address(addr, &iface, Some(&network_id))
+                .await
+            {
                 warn!("Not adding {addr} to {iface}: cannot record it first: {e}");
                 continue;
             }

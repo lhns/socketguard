@@ -15,16 +15,11 @@ import {
   type AppDetail,
   type ApplyRequest,
   type ChangeOp,
-  type MoveAppRequest,
-  type NewBinding,
   type NewCredential,
   type NewGroup,
   type NewNetwork,
-  type NewPeer,
-  type NewReservation,
   type PortGroup,
   type ProtectHostRequest,
-  type ReserveRequest,
   type UpdateTag,
 } from "./api";
 
@@ -64,7 +59,6 @@ export const useGroups = () => useQuery({ queryKey: ["groups"], queryFn: api.lis
 export const useGrants = () => useQuery({ queryKey: ["grants"], queryFn: api.listGrants });
 export const useTags = () => useQuery({ queryKey: ["tags"], queryFn: api.listTags });
 export const usePortGroups = () => useQuery({ queryKey: ["portGroups"], queryFn: api.listPortGroups });
-export const useAddresses = () => useQuery({ queryKey: ["addresses"], queryFn: api.listAddresses });
 export const useReservations = () => useQuery({ queryKey: ["reservations"], queryFn: api.listReservations });
 export const useNetworks = () => useQuery({ queryKey: ["networks"], queryFn: api.listNetworks });
 export const useSettings = () => useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
@@ -171,21 +165,9 @@ const CHANGES_KEYS = keysOf(
 
 export const useDeleteApp = () =>
   useInvalidating((id: string) => api.deleteApp(id), keysOf("apps_changed", "grants_changed", "tags_changed", "activity"));
-export const useMoveApp = () =>
-  useInvalidating((v: { id: string; req: MoveAppRequest }) => api.moveApp(v.id, v.req), [...RESERVATION_KEYS, ...TAG_KEYS]);
 
-export const useCreateReservation = () =>
-  useInvalidating((req: NewReservation) => api.createReservation(req), RESERVATION_KEYS);
-export const useRenameReservation = () =>
-  useInvalidating((v: { id: string; label: string }) => api.renameReservation(v.id, v.label), RESERVATION_KEYS);
 export const useReleaseReservation = () =>
   useInvalidating((id: string) => api.releaseReservation(id), RESERVATION_KEYS);
-export const useAddBinding = () =>
-  useInvalidating((v: { id: string; req: NewBinding }) => api.addBinding(v.id, v.req), RESERVATION_KEYS);
-export const useRemoveBinding = () =>
-  useInvalidating((v: { id: string; bindingId: string }) => api.removeBinding(v.id, v.bindingId), RESERVATION_KEYS);
-export const useReserveAddress = () =>
-  useInvalidating((v: { id: string; req: ReserveRequest }) => api.reserveAddress(v.id, v.req), RESERVATION_KEYS);
 
 /** Many changes at once (ADR 0045). A dry run changes nothing, so it invalidates nothing. */
 export function useChanges() {
@@ -199,8 +181,6 @@ export function useChanges() {
   });
 }
 
-export const useCreatePeer = () =>
-  useInvalidating((req: NewPeer) => api.createPeer(req), PEER_KEYS);
 export const useRenamePeer = () =>
   useInvalidating((v: { id: string; label: string }) => api.updatePeer(v.id, v.label), PEER_KEYS);
 export const useDeletePeer = () =>

@@ -182,8 +182,7 @@ impl Database {
         if path != ":memory:" {
             precreate_protected(Path::new(path))?;
         }
-        let options =
-            SqliteConnectOptions::from_str(&format!("sqlite:{path}?mode=rwc"))?
+        let options = SqliteConnectOptions::from_str(&format!("sqlite:{path}?mode=rwc"))?
             .foreign_keys(true)
             // Readers go on while a write commits, on their own pooled connections.
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);

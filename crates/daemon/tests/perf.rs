@@ -13,9 +13,7 @@ use axum::http::{Method, StatusCode};
 use axum::Router;
 use common::{call, listener};
 use serde_json::{json, Value};
-use socketguard_core::config::{
-    BackendConfig, BackendInstanceConfig, DaemonConfig, TorAuth,
-};
+use socketguard_core::config::{BackendConfig, BackendInstanceConfig, DaemonConfig, TorAuth};
 use socketguard_core::{ListeningSocket, Protocol};
 use socketguard_daemon::api;
 use socketguard_daemon::engine::{ActiveBackend, Engine};
@@ -251,7 +249,12 @@ async fn populate(r: &Rig) -> Ids {
     println!("tags done");
     let mut pgs = Vec::new();
     for g in 0..4u64 {
-        let attach: Vec<&String> = app_ids.iter().skip(g as usize * 5 + 1).step_by(9).take(6).collect();
+        let attach: Vec<&String> = app_ids
+            .iter()
+            .skip(g as usize * 5 + 1)
+            .step_by(9)
+            .take(6)
+            .collect();
         pgs.push(
             r.create(
                 "/api/port-groups",
@@ -266,9 +269,7 @@ async fn populate(r: &Rig) -> Ids {
 
     // 60 grants: direct, tag, group subjects, a few Anyone. Peer 19 stays free for the
     // dry-run and add/revoke measurements.
-    let grant = |target: Value, scope: Value, subject: Value, open: bool| {
-        json!({"target": target, "scope": scope, "subject": subject, "confirm_open": open})
-    };
+    let grant = |target: Value, scope: Value, subject: Value, open: bool| json!({"target": target, "scope": scope, "subject": subject, "confirm_open": open});
     let started = Instant::now();
     let mut n = 0;
     while n < 60 {
@@ -368,8 +369,7 @@ impl Report {
         }
         let stmts = (self.sql.load(Ordering::Relaxed) - before) as f64 / runs() as f64;
         times.sort();
-        self.rows
-            .push((name.to_string(), times[runs() / 2], stmts));
+        self.rows.push((name.to_string(), times[runs() / 2], stmts));
     }
 }
 
@@ -506,8 +506,11 @@ async fn timings() {
         poll.await.unwrap();
     }
     during.sort();
-    rep.rows
-        .push(("GET /api/apps issued during a poll".into(), during[runs() / 2], 0.0));
+    rep.rows.push((
+        "GET /api/apps issued during a poll".into(),
+        during[runs() / 2],
+        0.0,
+    ));
 
     println!("\n{:<44} {:>12} {:>10}", "operation", "median", "SQL stmts");
     for (name, d, n) in &rep.rows {

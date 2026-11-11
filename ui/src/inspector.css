@@ -121,7 +121,6 @@
 .port-ranges .range-add { display: flex; gap: 6px; align-items: center; }
 .port-ranges .range-add .input { flex: 1; min-width: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-.row-group .tag-glyph { color: var(--accent); margin-right: 4px; font-weight: 700; }
 .member-list { max-height: 160px; overflow-y: auto; margin-bottom: 8px; }
 
 /* Toast with an action */

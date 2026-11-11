@@ -84,14 +84,12 @@ impl<'a> ReachCtx<'a> {
         // whether protect-host filters the interface (ADR 0044).
         let none = PortRangeSet::new();
         let app_listens_v4 = self.apps_of(grant).into_iter().any(|a| {
-            covered_ports(grant, &self.targets, a, self.port_groups, &none).is_some_and(
-                |covered| {
-                    a.ports
-                        .iter()
-                        .filter(|p| covered.contains(p.port_ref()))
-                        .any(|p| p.listening && p.family.has_v4())
-                },
-            )
+            covered_ports(grant, &self.targets, a, self.port_groups, &none).is_some_and(|covered| {
+                a.ports
+                    .iter()
+                    .filter(|p| covered.contains(p.port_ref()))
+                    .any(|p| p.listening && p.family.has_v4())
+            })
         });
         let mut reach = grant_reach(
             &grant.subject,

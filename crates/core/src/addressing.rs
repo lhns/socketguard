@@ -88,6 +88,9 @@ pub struct Serving {
     pub excluded: PortRangeSet,
 }
 
+/// What a row serves, and what it names before the exclusion of ports other apps listen on.
+type RowPorts = (ScopePorts, PortRangeSet);
+
 /// The model over a [`World`], with what it computes once.
 pub struct Model<'a> {
     pub w: World<'a>,
@@ -101,7 +104,7 @@ pub struct Model<'a> {
     automatic: Mutex<HashMap<&'a str, Arc<BTreeSet<Row>>>>,
     bound: OnceLock<BTreeSet<Row>>,
     grants_of: Mutex<HashMap<String, Arc<Vec<AppGrant>>>>,
-    rows: Mutex<HashMap<(String, Scope), Arc<(ScopePorts, PortRangeSet)>>>,
+    rows: Mutex<HashMap<(String, Scope), Arc<RowPorts>>>,
 }
 
 fn listening(app: &App) -> PortRangeSet {
@@ -146,7 +149,7 @@ impl<'a> Model<'a> {
 
     /// What a row of `app` serves (ports other apps listen on left out), and what it names
     /// before that exclusion. The same row has an address on each network.
-    fn row_ports(&self, app: &App, scope: &Scope) -> Arc<(ScopePorts, PortRangeSet)> {
+    fn row_ports(&self, app: &App, scope: &Scope) -> Arc<RowPorts> {
         let key = (app.id.clone(), scope.clone());
         if let Some(r) = self.rows.lock().unwrap().get(&key) {
             return r.clone();

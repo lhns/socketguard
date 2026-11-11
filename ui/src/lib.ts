@@ -36,8 +36,6 @@ export function subjectLabel(s: Subject, peers: Peer[] = [], groups: PeerGroup[]
 export const portLabel = (p: { port: number; proto: string }) => `${p.port}/${p.proto}`;
 
 /** Same port (or both All ports). */
-export const samePort = (a: PortRef | null, b: PortRef | null) =>
-  a === null || b === null ? a === b : a.port === b.port && a.proto === b.proto;
 
 export const ALL_SCOPE: Scope = { kind: "all" };
 
