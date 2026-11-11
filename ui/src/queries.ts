@@ -11,6 +11,8 @@ import {
   api,
   onDaemonEvent,
   type ActivityKind,
+  type App,
+  type AppDetail,
   type ApplyRequest,
   type ChangeOp,
   type MoveAppRequest,
@@ -20,6 +22,7 @@ import {
   type NewNetwork,
   type NewPeer,
   type NewReservation,
+  type PortGroup,
   type ProtectHostRequest,
   type ReserveRequest,
   type UpdateTag,
@@ -27,7 +30,9 @@ import {
 
 export function createQueryClient(): QueryClient {
   return new QueryClient({
-    defaultOptions: { queries: { retry: false, staleTime: 5_000, refetchOnWindowFocus: false } },
+    // Daemon events (and `daemon_connected` after a reconnect) mark what changed as stale, so data
+    // can stay fresh for a while without refetching.
+    defaultOptions: { queries: { retry: false, staleTime: 30_000, refetchOnWindowFocus: false } },
   });
 }
 
@@ -36,8 +41,24 @@ export function createQueryClient(): QueryClient {
 export const useStatus = () =>
   useQuery({ queryKey: ["status"], queryFn: api.status, refetchInterval: (q) => (q.state.error ? 5_000 : false) });
 export const useApps = () => useQuery({ queryKey: ["apps"], queryFn: api.listApps });
-export const useApp = (id: string | null) =>
-  useQuery({ queryKey: ["app", id], queryFn: () => api.getApp(id as string), enabled: id !== null });
+/** The detail before it arrives: what the loaded lists already know (`isPlaceholderData`).
+ * Grants, access and counters are empty until the real detail comes. */
+function partialDetail(qc: QueryClient, id: string | null): AppDetail | undefined {
+  const app = qc.getQueryData<App[]>(["apps"])?.find((a) => a.id === id);
+  if (!app) return undefined;
+  const portGroups = qc.getQueryData<PortGroup[]>(["portGroups"]) ?? [];
+  return { ...app, grants: [], access: [], tags: [], counters: [], port_groups: portGroups.filter((g) => g.apps.includes(app.id)) };
+}
+
+export const useApp = (id: string | null) => {
+  const qc = useQueryClient();
+  return useQuery({
+    queryKey: ["app", id],
+    queryFn: () => api.getApp(id as string),
+    enabled: id !== null,
+    placeholderData: () => partialDetail(qc, id),
+  });
+};
 export const usePeers = () => useQuery({ queryKey: ["peers"], queryFn: api.listPeers });
 export const useGroups = () => useQuery({ queryKey: ["groups"], queryFn: api.listGroups });
 export const useGrants = () => useQuery({ queryKey: ["grants"], queryFn: api.listGrants });
@@ -94,36 +115,64 @@ export function useActivity(filter: ActivityFilter) {
   });
 }
 
+// ─── Push events ────────────────────────────────────────────────────────────
+
+/** Which queries each daemon event makes stale. Only the query of an app that is open refetches
+ * (`app`: access, port groups, addresses); the others are marked stale for the next time. An
+ * event lists what it changes itself: the daemon sends the events of the things a change
+ * cascades to (deleting a peer sends peers_changed and grants_changed). */
+export const EVENT_INVALIDATIONS: Record<string, string[][]> = {
+  apps_changed: [["apps"], ["app"], ["status"]],
+  app_discovered: [["apps"], ["app"], ["status"]],
+  peers_changed: [["peers"], ["groups"], ["share"]],
+  grants_changed: [["grants"], ["apps"], ["app"], ["share"]],
+  tags_changed: [["tags"]],
+  port_groups_changed: [["portGroups"], ["app"]],
+  reservations_changed: [["reservations"], ["addresses"]],
+  addresses_changed: [["addresses"], ["reservations"], ["apps"], ["app"]],
+  networks_changed: [["networks"], ["status"]],
+  settings_changed: [["settings"], ["status"]],
+  activity: [["activity"]],
+  daemon_disconnected: [["status"]],
+  daemon_connected: [["status"], ["apps"], ["app"], ["peers"], ["groups"], ["grants"], ["tags"], ["portGroups"], ["reservations"], ["addresses"], ["networks"], ["settings"], ["activity"]],
+};
+
 // ─── Mutations ──────────────────────────────────────────────────────────────
 
-/** Mutations also invalidate directly; the SSE event follows and is idempotent. */
+/** Queries stale after a change. Used by the mutations and by the daemon events. An in-flight
+ * fetch is reused: a mutation and the event that follows it fetch a query once. */
+function invalidate(qc: QueryClient, keys: string[][]) {
+  for (const queryKey of keys) void qc.invalidateQueries({ queryKey }, { cancelRefetch: false });
+}
+
+/** The queries the given daemon events make stale (see EVENT_INVALIDATIONS). */
+const keysOf = (...events: string[]) => [...new Map(events.flatMap((e) => EVENT_INVALIDATIONS[e]).map((k) => [k[0], k])).values()];
+
+/** Mutations also invalidate directly (the SSE bridge may be down); the event that follows reuses
+ * the fetch. */
 function useInvalidating<V, R>(fn: (v: V) => Promise<R>, keys: string[][]) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: fn,
-    onSuccess: () => {
-      for (const queryKey of keys) void qc.invalidateQueries({ queryKey });
-    },
+    onSuccess: () => invalidate(qc, keys),
   });
 }
 
-const GRANT_KEYS = [["grants"], ["apps"], ["app"], ["activity"]];
-const PEER_KEYS = [["peers"], ["groups"], ["grants"], ["app"]];
-const GROUP_KEYS = [["groups"], ["peers"], ["grants"], ["app"], ["activity"]];
-const TAG_KEYS = [["tags"], ["grants"], ["apps"], ["app"], ["activity"]];
-const RESERVATION_KEYS = [["reservations"], ["addresses"], ["grants"], ["apps"], ["app"], ["activity"]];
-const NETWORK_KEYS = [["networks"], ["status"], ["apps"], ["app"], ["grants"], ["settings"]];
+const PEER_KEYS = keysOf("peers_changed");
+/** Deleting a peer or a group, a credential or a member changes grants too. */
+const PEER_GRANT_KEYS = keysOf("peers_changed", "grants_changed");
+const TAG_KEYS = keysOf("tags_changed", "grants_changed", "apps_changed", "activity");
+const RESERVATION_KEYS = keysOf("reservations_changed", "grants_changed", "apps_changed", "activity");
+const NETWORK_KEYS = keysOf("networks_changed", "apps_changed", "grants_changed", "settings_changed");
 /** A batch can touch anything. */
-const CHANGES_KEYS = [["grants"], ["apps"], ["app"], ["peers"], ["groups"], ["tags"], ["portGroups"], ["reservations"], ["addresses"], ["status"], ["activity"]];
+const CHANGES_KEYS = keysOf(
+  "apps_changed", "peers_changed", "grants_changed", "tags_changed", "port_groups_changed", "reservations_changed", "addresses_changed", "activity",
+);
 
 export const useDeleteApp = () =>
-  useInvalidating((id: string) => api.deleteApp(id), [...GRANT_KEYS, ["status"], ["tags"]]);
+  useInvalidating((id: string) => api.deleteApp(id), keysOf("apps_changed", "grants_changed", "tags_changed", "activity"));
 export const useMoveApp = () =>
-  useInvalidating((v: { id: string; req: MoveAppRequest }) => api.moveApp(v.id, v.req), [
-    ...GRANT_KEYS,
-    ...RESERVATION_KEYS,
-    ["tags"],
-  ]);
+  useInvalidating((v: { id: string; req: MoveAppRequest }) => api.moveApp(v.id, v.req), [...RESERVATION_KEYS, ...TAG_KEYS]);
 
 export const useCreateReservation = () =>
   useInvalidating((req: NewReservation) => api.createReservation(req), RESERVATION_KEYS);
@@ -145,7 +194,7 @@ export function useChanges() {
     mutationFn: (v: { ops: ChangeOp[]; dryRun: boolean }) => api.changes({ ops: v.ops, dry_run: v.dryRun }),
     onSuccess: (_r, v) => {
       if (v.dryRun) return;
-      for (const queryKey of CHANGES_KEYS) void qc.invalidateQueries({ queryKey });
+      invalidate(qc, CHANGES_KEYS);
     },
   });
 }
@@ -155,25 +204,25 @@ export const useCreatePeer = () =>
 export const useRenamePeer = () =>
   useInvalidating((v: { id: string; label: string }) => api.updatePeer(v.id, v.label), PEER_KEYS);
 export const useDeletePeer = () =>
-  useInvalidating((id: string) => api.deletePeer(id), PEER_KEYS);
+  useInvalidating((id: string) => api.deletePeer(id), PEER_GRANT_KEYS);
 export const useAddCredential = () =>
-  useInvalidating((v: { peerId: string; req: NewCredential }) => api.addCredential(v.peerId, v.req), PEER_KEYS);
+  useInvalidating((v: { peerId: string; req: NewCredential }) => api.addCredential(v.peerId, v.req), PEER_GRANT_KEYS);
 export const useRemoveCredential = () =>
   useInvalidating(
     (v: { peerId: string; credentialId: string }) => api.removeCredential(v.peerId, v.credentialId),
-    PEER_KEYS,
+    PEER_GRANT_KEYS,
   );
 export const useGenerateTorKey = () =>
-  useInvalidating((peerId: string) => api.generateTorKey(peerId), [...PEER_KEYS, ["share"]]);
+  useInvalidating((peerId: string) => api.generateTorKey(peerId), PEER_GRANT_KEYS);
 
 export const useCreateGroup = () =>
-  useInvalidating((req: NewGroup) => api.createGroup(req), GROUP_KEYS);
+  useInvalidating((req: NewGroup) => api.createGroup(req), PEER_KEYS);
 export const useRenameGroup = () =>
-  useInvalidating((v: { id: string; label: string }) => api.updateGroup(v.id, v.label), GROUP_KEYS);
+  useInvalidating((v: { id: string; label: string }) => api.updateGroup(v.id, v.label), PEER_KEYS);
 export const useDeleteGroup = () =>
-  useInvalidating((id: string) => api.deleteGroup(id), GROUP_KEYS);
+  useInvalidating((id: string) => api.deleteGroup(id), PEER_GRANT_KEYS);
 export const useSetGroupMembers = () =>
-  useInvalidating((v: { id: string; peerIds: string[] }) => api.setGroupMembers(v.id, v.peerIds), GROUP_KEYS);
+  useInvalidating((v: { id: string; peerIds: string[] }) => api.setGroupMembers(v.id, v.peerIds), PEER_GRANT_KEYS);
 
 export const useUpdateTag = () =>
   useInvalidating((v: { id: string; req: UpdateTag }) => api.updateTag(v.id, v.req), TAG_KEYS);
@@ -187,28 +236,9 @@ export const useDeleteNetwork = () =>
 export const useSetProtectHost = () =>
   useInvalidating((req: ProtectHostRequest) => api.setProtectHost(req), [["settings"], ["status"]]);
 export const useApplyState = () =>
-  useInvalidating((req: ApplyRequest) => api.applyState(req), [...CHANGES_KEYS, ["settings"], ["networks"]]);
+  useInvalidating((req: ApplyRequest) => api.applyState(req), [...CHANGES_KEYS, ...keysOf("settings_changed", "networks_changed")]);
 export const useSetEnabled = () =>
-  useInvalidating((enabled: boolean) => (enabled ? api.enable() : api.disable()), [["status"], ["apps"], ["app"]]);
-
-// ─── Push events ────────────────────────────────────────────────────────────
-
-/** Which queries each daemon event makes stale. */
-export const EVENT_INVALIDATIONS: Record<string, string[][]> = {
-  apps_changed: [["apps"], ["app"], ["status"]],
-  app_discovered: [["apps"], ["app"], ["status"]],
-  peers_changed: [["peers"], ["groups"], ["grants"], ["app"], ["share"]],
-  grants_changed: [["grants"], ["apps"], ["app"], ["share"]],
-  tags_changed: [["tags"], ["grants"], ["app"]],
-  port_groups_changed: [["portGroups"], ["grants"], ["apps"], ["app"]],
-  reservations_changed: [["reservations"], ["addresses"], ["grants"], ["apps"], ["app"]],
-  addresses_changed: [["addresses"], ["reservations"], ["apps"], ["app"]],
-  networks_changed: [["networks"], ["status"], ["app"]],
-  settings_changed: [["settings"], ["status"]],
-  activity: [["activity"]],
-  daemon_disconnected: [["status"]],
-  daemon_connected: [["status"], ["apps"], ["app"], ["peers"], ["groups"], ["grants"], ["tags"], ["portGroups"], ["reservations"], ["addresses"], ["networks"], ["settings"], ["activity"]],
-};
+  useInvalidating((enabled: boolean) => (enabled ? api.enable() : api.disable()), keysOf("apps_changed", "grants_changed"));
 
 let subscribed = false;
 
@@ -217,9 +247,7 @@ export function useDaemonEvents() {
   const qc = useQueryClient();
   useEffect(() => {
     const unlistens: Promise<() => void>[] = Object.entries(EVENT_INVALIDATIONS).map(([name, keys]) =>
-      onDaemonEvent(name, () => {
-        for (const queryKey of keys) void qc.invalidateQueries({ queryKey });
-      }),
+      onDaemonEvent(name, () => invalidate(qc, keys)),
     );
     if (!subscribed) {
       subscribed = true;

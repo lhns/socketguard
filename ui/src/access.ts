@@ -15,19 +15,35 @@ export function membershipsOf(appId: string, tags: Tag[]): { tag: Tag; scope: Sc
 export const sameSubject = (a: Subject, b: Subject) =>
   a.kind === b.kind && (a.kind === "anyone" || (b.kind !== "anyone" && a.id === b.id));
 
-/** How an app is reachable, for the list: grants on the app, grants on its tags, and whether any
- * of them opens it to Anyone. */
-export function accessSummary(appId: string, grants: GrantView[], tags: Tag[]) {
-  const tagIds = new Set(membershipsOf(appId, tags).map((m) => m.tag.id));
-  const mine = grants.filter(
-    (g) => (g.target.kind === "app" && g.target.id === appId) || (g.target.kind === "tag" && tagIds.has(g.target.id)),
+export interface AccessSummary { direct: number; viaTag: number; open: boolean; segment: boolean }
+
+/** How each app is reachable, for the list: grants on the app, grants on its tags, and whether
+ * any of them opens it to Anyone. One pass over the grants and tags for all apps. */
+export function accessSummaries(apps: { id: string }[], grants: GrantView[], tags: Tag[]): Map<string, AccessSummary> {
+  const byApp = new Map<string, GrantView[]>();
+  const byTag = new Map<string, GrantView[]>();
+  for (const g of grants) {
+    const m = g.target.kind === "app" ? byApp : g.target.kind === "tag" ? byTag : null;
+    if (m) m.set(g.target.id, [...(m.get(g.target.id) ?? []), g]);
+  }
+  const tagIds = new Map<string, Set<string>>();
+  for (const t of tags) for (const m of t.members) tagIds.set(m.app_id, (tagIds.get(m.app_id) ?? new Set()).add(t.id));
+  return new Map(
+    apps.map((a) => {
+      const direct = byApp.get(a.id) ?? [];
+      const viaTag = [...(tagIds.get(a.id) ?? [])].flatMap((id) => byTag.get(id) ?? []);
+      const mine = [...direct, ...viaTag];
+      return [
+        a.id,
+        {
+          direct: direct.length,
+          viaTag: viaTag.length,
+          open: mine.some((g) => g.subject.kind === "anyone" && g.network_id === null),
+          segment: mine.some((g) => g.subject.kind === "anyone" && g.network_id !== null),
+        },
+      ];
+    }),
   );
-  return {
-    direct: mine.filter((g) => g.target.kind === "app").length,
-    viaTag: mine.filter((g) => g.target.kind === "tag").length,
-    open: mine.some((g) => g.subject.kind === "anyone" && g.network_id === null),
-    segment: mine.some((g) => g.subject.kind === "anyone" && g.network_id !== null),
-  };
 }
 
 /** Does a grant with `grantScope` cover `port` (null = All ports)? A port-specific grant does
