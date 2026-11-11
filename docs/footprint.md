@@ -60,14 +60,17 @@ No log, PID or lock files are written. Telemetry is exported only when the `OTEL
 | Windows service, launchd service, installer | do not exist |
 | Registry keys, scheduled tasks, autostart entries, environment variables | none |
 
-## Network setup (ADR 0048, being built)
+## Network setup (ADR 0048)
+
+Everything `socketguard networks setup` changes is recorded in `setup-log.json` next to the config file and reversed by `socketguard networks setup <kind> --undo`.
 
 | Item | Removal |
 |---|---|
-| Packages installed through the package manager (Yggdrasil, Tor) | **gap: no undo specified** |
-| Services started | **gap** |
-| Lines added to Tor's `torrc`, with a backup copy | **gap** |
-| Tor network entry in the config file | removing the network |
+| Packages it installed through the package manager (never ones that were already there) | `--undo --uninstall-packages`; plain `--undo` only prints the command |
+| Services it started or enabled | `--undo` restores the previous state |
+| Lines appended to Tor's `torrc` (a one-time `.socketguard.bak` is kept) | `--undo` removes exactly those lines; **gap: the backup file stays** |
+| Tor network entry in the config file | `--undo`, or removing the network |
+| `setup-log.json` | **gap: nothing deletes it** |
 
 ## Failures of the removal paths themselves
 
