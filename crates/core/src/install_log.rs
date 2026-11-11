@@ -44,6 +44,10 @@ pub enum Change {
     AccessGroup { name: String, created: bool },
     /// A directory SocketGuard created. Removed only when empty.
     DirectoryCreated { path: String },
+    /// A directory SocketGuard created solely for a child process it runs (its own Tor or
+    /// Yggdrasil). `uninstall --purge` may remove the whole tree, but only when the path is
+    /// strictly inside the state directory.
+    OwnedDirectory { path: String },
     /// macOS: the `anchor` line of `/etc/pf.conf` and pf itself. Only what was missing was
     /// added and is undone.
     PfAnchor {
@@ -125,6 +129,47 @@ pub fn append(path: &std::path::Path, entry: Entry) -> Result<(), String> {
     let mut all = read_file(path)?;
     all.push(entry);
     write_file(path, &all)
+}
+
+/// `text` without the lines `lines` that were appended to it: the last occurrence of each,
+/// everything else byte for byte.
+pub fn remove_lines(text: &str, lines: &[String]) -> String {
+    let mut parts: Vec<&str> = text.split_inclusive('\n').collect();
+    for l in lines.iter().rev() {
+        if let Some(i) = parts
+            .iter()
+            .rposition(|p| p.trim_end_matches(['\r', '\n']) == l)
+        {
+            parts.remove(i);
+        }
+    }
+    parts.concat()
+}
+
+/// The config file text without the backend `id`; None if it was not there. Other keys are
+/// kept (the file is rewritten as pretty JSON).
+pub fn remove_backend_entry(text: &str, id: &str) -> Result<Option<String>, String> {
+    let mut doc: serde_json::Value =
+        serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(text))
+            .map_err(|e| format!("not JSON: {e}"))?;
+    let Some(list) = doc.get_mut("backends").and_then(|b| b.as_array_mut()) else {
+        return Ok(None);
+    };
+    let before = list.len();
+    list.retain(|b| {
+        let own = b["id"].as_str().map(str::to_string).or_else(|| {
+            serde_json::from_value::<crate::config::BackendInstanceConfig>(b.clone())
+                .ok()
+                .map(|i| i.id)
+        });
+        own.as_deref() != Some(id)
+    });
+    if list.len() == before {
+        return Ok(None);
+    }
+    let mut out = serde_json::to_string_pretty(&doc).expect("a document serialises");
+    out.push('\n');
+    Ok(Some(out))
 }
 
 #[cfg(test)]

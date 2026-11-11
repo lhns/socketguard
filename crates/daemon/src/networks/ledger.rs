@@ -102,3 +102,16 @@ pub async fn settle(db: &Database, passed: &Ledger, wanted: &BTreeSet<String>) -
     write(db, OWNED, &owned).await?;
     write(db, TOMBSTONES, &tombs).await
 }
+
+/// Services are gone (removed or never there): drop them from both lists.
+pub async fn forget(db: &Database, ids: &[String]) -> Result<()> {
+    let _g = LOCK.lock().await;
+    let mut owned = read(db, OWNED).await?;
+    let mut tombs = read(db, TOMBSTONES).await?;
+    for id in ids {
+        owned.remove(id);
+        tombs.remove(id);
+    }
+    write(db, OWNED, &owned).await?;
+    write(db, TOMBSTONES, &tombs).await
+}

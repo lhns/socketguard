@@ -141,7 +141,10 @@ impl<H: Host> ServiceManager for Systemd<'_, H> {
         Ok(())
     }
     fn stop(&mut self) -> Result<()> {
-        self.host.run_ok("systemctl", &["stop", SYSTEMD_UNIT])?;
+        // Nothing to stop when the unit is not there (a second uninstall).
+        if self.unit_path().exists() {
+            self.host.run_ok("systemctl", &["stop", SYSTEMD_UNIT])?;
+        }
         Ok(())
     }
     fn status(&mut self) -> Result<ServiceStatus> {

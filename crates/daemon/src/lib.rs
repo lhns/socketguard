@@ -1,14 +1,22 @@
+pub mod access;
 pub mod api;
+pub mod args;
+pub mod commands;
+pub mod disable;
 pub mod apply;
 pub mod config_file;
 pub mod engine;
 pub mod firewall;
 pub mod host;
 pub mod iface;
+pub mod install;
+pub mod legacy;
 pub mod metrics;
 pub mod monitor;
 pub mod networks;
+pub mod report;
 pub mod ruleset;
+pub mod run;
 pub mod service;
 pub mod setup;
 pub mod state;
@@ -17,6 +25,7 @@ pub mod telemetry;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod transport;
+pub mod uninstall;
 
 use tokio::sync::{broadcast, Mutex, RwLock};
 

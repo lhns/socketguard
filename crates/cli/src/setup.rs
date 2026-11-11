@@ -65,6 +65,8 @@ pub trait SetupRunner {
     fn read_file(&self, path: &Path) -> Result<Option<String>>;
     /// Replace the file through a temp file and a rename.
     fn write_file(&mut self, path: &Path, content: &str) -> Result<()>;
+    /// Delete a file; no error if it is not there.
+    fn remove_file(&mut self, path: &Path) -> Result<()>;
     /// Like `write_file`, for a new file that should get the permissions of `like`.
     fn write_file_like(&mut self, path: &Path, content: &str, _like: &Path) -> Result<()> {
         self.write_file(path, content)
@@ -123,73 +125,23 @@ impl Changes {
     }
 }
 
-/// One change `networks setup` made, with what is needed to reverse it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Change {
-    /// A package that setup itself installed (never one that was there before).
-    PackageInstalled {
-        manager: String,
-        package: String,
-        install: String,
-        uninstall: Vec<String>,
-    },
-    /// A service setup started (it was not running) or enabled.
-    ServiceStarted {
-        service: String,
-        previous_state: String,
-        previous_enabled: Option<bool>,
-        undo: Vec<String>,
-    },
-    /// Lines appended to another program's configuration file.
-    FileEdited {
-        path: String,
-        lines: Vec<String>,
-        backup: Option<String>,
-    },
-    /// The network entry written to SocketGuard's config file.
-    ConfigEntryWritten { path: String, id: String },
-    /// The network added to the running daemon.
-    NetworkAdded { id: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Entry {
-    pub time: String,
-    pub kind: SetupKind,
-    #[serde(flatten)]
-    pub change: Change,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct LogFile {
-    #[serde(default)]
-    entries: Vec<Entry>,
-}
+pub use socketguard_core::install_log::{Change, Entry};
 
 /// The setup log next to the config file.
 pub fn log_path(config: &Path) -> PathBuf {
-    config
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("setup-log.json")
+    socketguard_core::paths::setup_log_path(config)
 }
 
 fn read_log(r: &dyn SetupRunner, path: &Path) -> Result<Vec<Entry>> {
     match r.read_file(path)? {
         None => Ok(vec![]),
-        Some(t) => Ok(serde_json::from_str::<LogFile>(&t)
-            .with_context(|| format!("{} is not a setup log", path.display()))?
-            .entries),
+        Some(t) => socketguard_core::install_log::parse(&t)
+            .with_context(|| format!("{} is not a setup log", path.display())),
     }
 }
 
 fn write_log(r: &mut dyn SetupRunner, path: &Path, config: &Path, entries: &[Entry]) -> Result<()> {
-    let mut text = serde_json::to_string_pretty(&LogFile {
-        entries: entries.to_vec(),
-    })?;
-    text.push('\n');
-    r.write_file_like(path, &text, config)
+    r.write_file_like(path, &socketguard_core::install_log::render(entries), config)
 }
 
 struct Ctx<'a, R: SetupRunner, A: DaemonApi> {
@@ -221,11 +173,8 @@ impl<R: SetupRunner, A: DaemonApi> Ctx<'_, R, A> {
     /// Remember a change so `--undo` can reverse it; written at once, so a run that stops
     /// half way is still recorded.
     fn record(&mut self, change: Change) -> Result<()> {
-        self.log.push(Entry {
-            time: chrono::Utc::now().to_rfc3339(),
-            kind: self.kind,
-            change,
-        });
+        self.log
+            .push(Entry::now(Some(self.kind), change));
         write_log(
             &mut *self.run,
             &log_path(&self.config),
@@ -1017,20 +966,7 @@ pub struct UndoOptions {
     pub uninstall_packages: bool,
 }
 
-/// `text` without the lines `lines` that were appended to it: the last occurrence of each,
-/// everything else byte for byte.
-pub fn remove_lines(text: &str, lines: &[String]) -> String {
-    let mut parts: Vec<&str> = text.split_inclusive('\n').collect();
-    for l in lines.iter().rev() {
-        if let Some(i) = parts
-            .iter()
-            .rposition(|p| p.trim_end_matches(['\r', '\n']) == l)
-        {
-            parts.remove(i);
-        }
-    }
-    parts.concat()
-}
+pub use socketguard_core::install_log::remove_lines;
 
 /// Remove the backend `id` from the config file; false if it was not there.
 fn remove_config_entry(r: &mut dyn SetupRunner, path: &Path, id: &str) -> Result<bool> {
@@ -1075,6 +1011,8 @@ fn describe(e: &Entry) -> String {
         }
         Change::ConfigEntryWritten { path, id } => format!("remove the {id} entry from {path}"),
         Change::NetworkAdded { id } => format!("remove the {id} network from the daemon"),
+        // Recorded by `socketguard-daemon service install`; `uninstall` reverses them.
+        other => format!("{other:?} (undone by `socketguard-daemon uninstall`)"),
     }
 }
 
@@ -1109,7 +1047,7 @@ pub async fn undo<R: SetupRunner, A: DaemonApi>(
     let all = read_log(&*run, &log_file)?;
     let mine: Vec<Entry> = all
         .iter()
-        .filter(|e| e.kind == kind)
+        .filter(|e| e.kind == Some(kind))
         .rev()
         .cloned()
         .collect();
@@ -1136,7 +1074,7 @@ pub async fn undo<R: SetupRunner, A: DaemonApi>(
         run.say("Not confirmed; nothing changed.");
         return Ok(());
     }
-    let mut kept: Vec<Entry> = all.iter().filter(|e| e.kind != kind).cloned().collect();
+    let mut kept: Vec<Entry> = all.iter().filter(|e| e.kind != Some(kind)).cloned().collect();
     let mut failed = Vec::new();
     let mut keep_mine = Vec::new();
     for e in &mine {
@@ -1159,7 +1097,11 @@ pub async fn undo<R: SetupRunner, A: DaemonApi>(
                     }
                     Ok(true)
                 }
-                Change::FileEdited { path, lines, .. } => {
+                Change::FileEdited {
+                    path,
+                    lines,
+                    backup,
+                } => {
                     let p = Path::new(path);
                     if let Some(text) = run.read_file(p)? {
                         let new = remove_lines(&text, lines);
@@ -1167,8 +1109,19 @@ pub async fn undo<R: SetupRunner, A: DaemonApi>(
                             run.write_file(p, &new)?;
                         }
                     }
+                    // The one-time backup setup made is ours too.
+                    if let Some(b) = backup {
+                        run.remove_file(Path::new(b))?;
+                    }
                     Ok(true)
                 }
+                // Not network setup entries: `socketguard-daemon uninstall` owns them.
+                Change::ServiceRegistered { .. }
+                | Change::AccessGroup { .. }
+                | Change::DirectoryCreated { .. }
+                | Change::OwnedDirectory { .. }
+                | Change::PfAnchor { .. }
+                | Change::WfpEngineOption { .. } => Ok(false),
                 Change::PackageInstalled { uninstall, .. } => {
                     if opts.uninstall_packages {
                         if let Some((program, args)) = uninstall.split_first() {
@@ -1270,6 +1223,14 @@ impl SetupRunner for System {
             let _ = std::fs::remove_file(&tmp);
         }
         result.with_context(|| format!("cannot write {}", path.display()))
+    }
+
+    fn remove_file(&mut self, path: &Path) -> Result<()> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("cannot delete {}", path.display())),
+        }
     }
 
     fn write_file_like(&mut self, path: &Path, content: &str, like: &Path) -> Result<()> {
@@ -1427,6 +1388,10 @@ mod tests {
         }
         fn write_file(&mut self, path: &Path, content: &str) -> Result<()> {
             self.files.insert(path.to_path_buf(), content.to_string());
+            Ok(())
+        }
+        fn remove_file(&mut self, path: &Path) -> Result<()> {
+            self.files.remove(path);
             Ok(())
         }
         fn protocolinfo(&mut self, control: &str) -> Result<ControlAnswer> {
@@ -1931,7 +1896,7 @@ mod tests {
 
     fn log_of(f: &Fake) -> Vec<Entry> {
         let text = &f.files[Path::new("/var/lib/sg/setup-log.json")];
-        serde_json::from_str::<LogFile>(text).unwrap().entries
+        socketguard_core::install_log::parse(text).unwrap()
     }
 
     fn undo_opts() -> UndoOptions {
@@ -1991,7 +1956,7 @@ mod tests {
         assert!(matches!(kinds[3], Change::NetworkAdded { id } if id == "tor"));
         assert!(log
             .iter()
-            .all(|e| e.kind == SetupKind::Tor && !e.time.is_empty()));
+            .all(|e| e.kind == Some(SetupKind::Tor) && !e.time.is_empty()));
     }
 
     #[test]

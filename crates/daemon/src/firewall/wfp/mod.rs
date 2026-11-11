@@ -41,4 +41,4 @@ mod native;
 mod plan;
 
 #[cfg(target_os = "windows")]
-pub use native::WfpFirewall;
+pub use native::{restore_collect_net_events, WfpFirewall};

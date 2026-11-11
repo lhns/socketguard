@@ -69,7 +69,7 @@ impl Clock for SystemClock {
 }
 
 /// Every backend allocates single addresses.
-const ADDRESS_PREFIX_LEN: u8 = 128;
+pub const ADDRESS_PREFIX_LEN: u8 = 128;
 
 /// Raw drop events held between reconcile passes; the platform rate-limits them, this is
 /// only a bound.
