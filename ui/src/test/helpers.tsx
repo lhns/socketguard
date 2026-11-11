@@ -7,7 +7,7 @@ import { createQueryClient } from "../queries";
 import { NavContext, type Focus, type Page } from "../nav";
 import type {
   Address, AppDetail, App, BindingTarget, ChangesResponse, ReservationView, Enforcement, GrantView, Network, ParsedCredential, Peer, PeerGroup, Settings,
-  StatusResponse, Tag, NetworkSetup, SetupState,
+  StatusResponse, Tag, NetworkSetup, SetupState, KindSetup,
 } from "../api";
 
 export const networks: Network[] = [
@@ -17,24 +17,23 @@ export const networks: Network[] = [
 ];
 
 const state = (state: SetupState["state"], over: Partial<SetupState> = {}): SetupState => ({ state, found: {}, exposed: false, ...over });
+const kindSetup = (existing: SetupState, managed: Partial<KindSetup["managed"]> = {}): KindSetup => ({
+  managed: { available: true, version: "1.0.0", ...managed },
+  existing,
+});
 
-/** What `network_setup` answers by default: one LAN interface, nothing else installed. */
+/** What `network_setup` answers by default: one LAN interface, a bundled Tor and Yggdrasil, no existing node. */
 export const networkSetup: NetworkSetup = {
   lan: [
     { interface: "Ethernet 2", description: "Red Hat VirtIO Ethernet Adapter", has_ipv6_prefix: true, is_default_route: true, already_added: false },
     { interface: "Ethernet 3", has_ipv6_prefix: false, is_default_route: false, already_added: false },
   ],
-  yggdrasil: state("not_installed", {
-    missing: "Yggdrasil is not installed.",
-    download_link: "https://yggdrasil-network.github.io/installation.html",
-  }),
-  tor: state("not_installed", {
-    missing: "Tor is not installed. Windows has no package for it; download the Tor Expert Bundle, then come back here.",
-    download_link: "https://www.torproject.org/download/tor/",
-  }),
+  yggdrasil: kindSetup(state("absent"), { version: "0.5.12" }),
+  tor: kindSetup(state("absent"), { version: "0.4.8.12" }),
   local: state("ready"),
   config_path: "C:\\ProgramData\\SocketGuard\\socketguard.json",
 };
+export { kindSetup };
 export const setupState = state;
 
 export const app1: App = {
@@ -62,6 +61,7 @@ export const settings: Settings = { protect_host_interfaces: [] };
 export const status: StatusResponse = {
   version: "0.1.0", networks, protect_host_interfaces: [], disabled: false, unadopted: false,
   counts: { apps: 1, pending_apps: 1, addresses: 1, peers: 1, groups: 0, grants: 0 },
+  bundled: { versions: [] },
 };
 
 export const grantView = (over: Partial<GrantView> = {}): GrantView => ({

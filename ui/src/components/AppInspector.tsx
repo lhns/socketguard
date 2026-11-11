@@ -49,8 +49,9 @@ function OneApp({ app, partial, highlight, onCollapse, onClose }: { app: AppDeta
   const [moving, setMoving] = useState(false);
   const [forgetting, setForgetting] = useState(false);
 
-  const netById = (nid: string) => names.networks.find((n) => n.id === nid);
-  const onlyLocal = app.addresses.length > 0 && app.addresses.every((a) => netById(a.network_id)?.grants_apply === false);
+  // Access can be given wherever a network takes grants. An app nobody has opened yet has
+  // only its Local address, so this must not be read from the app's addresses.
+  const onlyLocal = names.networks.length > 0 && names.networks.every((n) => n.grants_apply === false);
   const hasV4 = app.ports.some((p) => p.listening && p.family !== "v6");
 
   return (
