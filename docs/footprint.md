@@ -54,7 +54,9 @@ Default locations (ADR 0050): Windows `%ProgramData%\SocketGuard`, Linux `/etc/s
 | Directories created by SocketGuard | the config and state directories | `uninstall`, only if the install record says SocketGuard created them and they are empty |
 | Unix socket `/run/socketguard.sock` | | graceful stop; `uninstall --purge` |
 | Named pipe `\\.\pipe\socketguard` | Windows | process exit |
-| UI storage: webview profile of `com.socketguard.desktop`, localStorage `socketguard.columns` | per user | the UI's "Remove SocketGuard" flow clears the signed-in user's own storage. **Gap:** the profiles of other users on the machine cannot be removed by an elevated system command; they stay under each user's profile (see the paths in the UI section below) |
+| UI storage: webview profile of `com.socketguard.desktop`, localStorage `socketguard.columns` | per user | the UI's "Remove SocketGuard" flow clears the signed-in user's own storage. **Gap:** the profiles of other users on the machine cannot be removed by an elevated system command; they stay under each user's profile (paths below) |
+
+Per-user UI storage (the webview profile of `com.socketguard.desktop`; the UI's "Remove SocketGuard" flow empties the signed-in user's profile through `clear_local_ui_settings`, which leaves the empty folder): Windows `%LOCALAPPDATA%\com.socketguard.desktop\EBWebView`; Linux `~/.local/share/com.socketguard.desktop`; macOS `~/Library/WebKit/com.socketguard.desktop` and `~/Library/Caches/com.socketguard.desktop` (the Linux and macOS paths come from the webview defaults and are not verified).
 
 No log or PID files are written. Telemetry is exported only when the `OTEL_*` variables are set.
 

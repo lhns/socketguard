@@ -616,4 +616,3 @@ fn locator_text(l: &Locator) -> String {
         Locator::Onion { hostname } => hostname.clone(),
     }
 }
-

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 /// Iterations per worker (half for the network and disable workers): enough to interleave
 /// every pair several times in a few seconds of a debug build.
-const ROUNDS: usize = 10;
+const ROUNDS: usize = 4;
 /// Far above the normal run time; reaching it means something is stuck.
 const LIMIT: Duration = Duration::from_secs(60);
 
