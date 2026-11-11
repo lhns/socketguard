@@ -263,19 +263,31 @@ async fn an_address_for_a_group_goes_when_the_group_is_detached() {
     let app_id = d.app_id().await;
     let gid = create_group(&d, "passive", passive()).await;
     attach(&d, &gid, &app_id, false).await;
-    // Splitting needs the attachment, and a port or a group.
-    let path = format!("/api/apps/{app_id}/split");
-    let split = |body: Value| d.post(&path, body);
-    let (s, _) = split(json!({"network_id": "ygg", "group": "nope"})).await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
-    let (s, b) = split(json!({"network_id": "ygg", "group": gid, "port": 80})).await;
-    assert_eq!((s, code(&b)), (StatusCode::BAD_REQUEST, "invalid"));
-    let (s, a) = split(json!({"network_id": "ygg", "group": gid})).await;
-    assert_eq!(s, StatusCode::CREATED, "{a}");
-    assert_eq!(a["scope"], group_scope(&gid));
-    let (s, b) = split(json!({"network_id": "ygg", "group": gid})).await;
-    assert_eq!((s, code(&b)), (StatusCode::CONFLICT, "conflict"));
+    // A grant that names the group gives the group its own address.
+    let (s, g) = d
+        .post(
+            "/api/grants",
+            json!({"target": app_target(&app_id), "scope": group_scope(&gid),
+                   "subject": {"kind": "anyone"}, "confirm_open": true}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{g}");
+    let addrs = d.get("/api/addresses").await.1;
+    let a = addrs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["network_id"] == "ygg" && a["scope"] == group_scope(&gid))
+        .expect("the group has an address")
+        .clone();
     let ip: std::net::Ipv6Addr = a["locator"]["addr"].as_str().unwrap().parse().unwrap();
+    // Detaching is refused while the grant uses the group there, and allowed after.
+    let (s, b) = d
+        .delete(&format!("/api/socket-groups/{gid}/apps/{app_id}"))
+        .await;
+    assert_eq!((s, code(&b)), (StatusCode::CONFLICT, "conflict"));
+    d.delete(&format!("/api/grants/{}", g["id"].as_str().unwrap()))
+        .await;
     assert!(d
         .state
         .db

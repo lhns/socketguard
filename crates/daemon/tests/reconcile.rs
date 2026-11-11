@@ -6,8 +6,8 @@ use socketguard_core::config::{
 };
 use socketguard_core::ListeningSocket;
 use socketguard_core::{
-    ActivityKind, ActivityQuery, AddressMode, App, CredentialKind, NetworkStatus, NewCredential,
-    NewGrant, PortRef, Protocol, Reach, Scope, Subject, Target,
+    ActivityKind, ActivityQuery, App, CredentialKind, NetworkStatus, NewCredential, NewGrant,
+    PortRef, Protocol, Reach, Scope, Subject, Target,
 };
 use socketguard_daemon::api::DaemonEvent;
 use socketguard_daemon::engine::{Engine, EngineError, GrantFilter, ProtectHostError};
@@ -88,7 +88,11 @@ impl Harness {
     }
 
     async fn apps(&self) -> Vec<App> {
-        self.state.db.list_apps().await.unwrap()
+        self.engine()
+            .await
+            .list_apps(&self.state, false)
+            .await
+            .unwrap()
     }
 
     /// The only app.
@@ -98,8 +102,9 @@ impl Harness {
         apps.into_iter().next().unwrap()
     }
 
-    /// The address of `app` on `network` (the only one).
-    fn addr_on(app: &App, network: &str) -> Ipv6Addr {
+    /// The address of the only app on `network` (the only one there).
+    async fn addr_on(&self, network: &str) -> Ipv6Addr {
+        let app = self.app().await;
         let found: Vec<_> = app
             .addresses
             .iter()
@@ -107,6 +112,13 @@ impl Harness {
             .collect();
         assert_eq!(found.len(), 1, "one address on {network}: {found:?}");
         found[0].locator.ipv6().unwrap()
+    }
+
+    /// Open the only app to Anyone, which gives it an address on every network that takes
+    /// grants (an address exists only once a grant names the row).
+    async fn open(&self) -> socketguard_core::GrantView {
+        let app = self.app().await;
+        self.grant(&app.id, Subject::Anyone).await
     }
 
     /// The last ruleset applied to the firewall.
@@ -252,6 +264,11 @@ async fn discovery_creates_a_pending_app_with_an_address_on_every_network() {
     assert!(!app.reviewed, "a new app is pending");
     assert_eq!(app.ports.len(), 1);
     assert!((app.ports[0].port, app.ports[0].listening) == (80, true));
+    // Nothing is granted: only Local on loopback has an address.
+    assert_eq!(app.addresses.len(), 1);
+    assert_eq!(app.addresses[0].network_id, "local");
+    h.open().await;
+    let app = h.app().await;
     assert_eq!(app.addresses.len(), 3);
     assert!(app.addresses.iter().all(|a| a.scope == Scope::All));
     let nets: Vec<_> = app
@@ -264,18 +281,19 @@ async fn discovery_creates_a_pending_app_with_an_address_on_every_network() {
     // Addresses are on their interfaces, each from its network's prefix.
     let adds = net_adds(&h);
     assert_eq!(adds.len(), 3);
-    let ygg_addr = Harness::addr_on(&app, "ygg");
+    let ygg_addr = h.addr_on("ygg").await;
     assert!(adds.contains(&("ygg0".to_string(), ygg_addr)));
     assert!(ygg_addr.to_string().starts_with("300:1:2:3:"));
-    assert!(Harness::addr_on(&app, "lan")
+    assert!(h
+        .addr_on("lan")
+        .await
         .to_string()
         .starts_with("2001:db8:1:2:"));
 
-    // One ruleset: nothing is granted, so no rules, but every address is denied by the
-    // managed scope and the Yggdrasil interface has its overlay scope.
+    // The last ruleset denies every address by the managed scope and the Yggdrasil
+    // interface has its overlay scope.
     let fw = applied(&h.fw_calls);
-    assert_eq!(fw.len(), 1);
-    assert!(fw[0].rules.is_empty());
+    let fw = [fw.last().unwrap().clone()];
     let scope_ids: Vec<_> = fw[0].scopes.iter().map(|s| s.id.as_str()).collect();
     assert_eq!(scope_ids, ["managed", "overlay:ygg0"]);
     let ScopeMatch::Destinations(dsts) = &fw[0].scopes[0].matcher else {
@@ -302,6 +320,7 @@ async fn reconcile_is_idempotent() {
     )
     .await;
     h.reconcile().await;
+    h.open().await;
     h.clear_calls();
     h.reconcile().await;
     assert!(
@@ -490,230 +509,6 @@ async fn an_upgraded_binary_is_still_the_same_app() {
     assert_eq!(h.apps().await.len(), 1);
 }
 
-// ─── Address layouts ─────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn per_port_mode_gives_each_port_its_own_address() {
-    let h = Harness::new(
-        vec![ygg_net()],
-        vec![
-            listener("nginx", 80, Protocol::Tcp),
-            listener("nginx", 443, Protocol::Tcp),
-        ],
-    )
-    .await;
-    h.engine()
-        .await
-        .set_address_mode(&h.state, AddressMode::PerPort)
-        .await
-        .unwrap();
-    h.reconcile().await;
-
-    let app = h.app().await;
-    assert_eq!(app.addresses.len(), 2);
-    let mut served: Vec<_> = app.addresses.iter().map(|a| a.scope.clone()).collect();
-    served.sort_by_key(|p| format!("{p:?}"));
-    assert_eq!(served, [Scope::port(tcp(443)), Scope::port(tcp(80))]);
-    assert_eq!(net_adds(&h).len(), 2);
-
-    // A port that appears later gets its own address; the others stay.
-    let before: Vec<_> = app.addresses.iter().map(|a| a.id.clone()).collect();
-    h.set_sockets(vec![
-        listener("nginx", 80, Protocol::Tcp),
-        listener("nginx", 443, Protocol::Tcp),
-        listener("nginx", 8080, Protocol::Tcp),
-    ]);
-    h.reconcile().await;
-    let app = h.app().await;
-    assert_eq!(app.addresses.len(), 3);
-    assert!(before
-        .iter()
-        .all(|id| app.addresses.iter().any(|a| a.id == *id)));
-    assert!(app
-        .addresses
-        .iter()
-        .any(|a| a.scope == Scope::port(tcp(8080))));
-
-    // Switching back affects new apps and ports only.
-    h.engine()
-        .await
-        .set_address_mode(&h.state, AddressMode::PerApp)
-        .await
-        .unwrap();
-    h.reconcile().await;
-    assert_eq!(h.app().await.addresses.len(), 3);
-}
-
-#[tokio::test]
-async fn per_app_mode_keeps_one_address_when_ports_appear() {
-    let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
-    h.reconcile().await;
-    h.set_sockets(vec![
-        listener("nginx", 80, Protocol::Tcp),
-        listener("nginx", 443, Protocol::Tcp),
-    ]);
-    h.reconcile().await;
-    let app = h.app().await;
-    assert_eq!(app.ports.len(), 2);
-    assert_eq!(app.addresses.len(), 1);
-}
-
-#[tokio::test]
-async fn split_and_merge() {
-    let h = Harness::new(
-        vec![ygg_net()],
-        vec![
-            listener("nginx", 80, Protocol::Tcp),
-            listener("nginx", 443, Protocol::Tcp),
-        ],
-    )
-    .await;
-    h.reconcile().await;
-    let app = h.app().await;
-    let all_addr = app.addresses[0].clone();
-    h.grant(&app.id, Subject::Anyone).await;
-
-    // Split 443 onto its own address.
-    let mut events = h.state.events.subscribe();
-    let split = h
-        .engine()
-        .await
-        .split(&h.state, &app.id, "ygg", Scope::port(tcp(443)))
-        .await
-        .unwrap();
-    assert_eq!(split.scope, Scope::port(tcp(443)));
-    assert!(drain(&mut events).contains(&DaemonEvent::AppsChanged));
-    let split_ip = split.locator.ipv6().unwrap();
-    assert!(h.net.addresses("ygg0").contains(&split_ip));
-    assert_eq!(h.app().await.addresses.len(), 2);
-
-    // Addresses overlap: the "all" address keeps serving 443, the new one serves only 443.
-    let rs = h.last_ruleset();
-    let by_dst = |ip: Ipv6Addr| -> Vec<u16> {
-        let mut v: Vec<u16> = rs
-            .rules
-            .iter()
-            .filter(|r| r.dst == IpAddr::V6(ip))
-            .map(|r| r.ports.start)
-            .collect();
-        v.sort();
-        v
-    };
-    assert_eq!(by_dst(all_addr.locator.ipv6().unwrap()), [80, 443]);
-    assert_eq!(by_dst(split_ip), [443]);
-
-    // Splitting again, or an unknown port, is refused.
-    let e = h
-        .engine()
-        .await
-        .split(&h.state, &app.id, "ygg", Scope::port(tcp(443)))
-        .await;
-    assert!(matches!(e, Err(EngineError::Conflict(_))), "{e:?}");
-    let e = h
-        .engine()
-        .await
-        .split(&h.state, &app.id, "ygg", Scope::port(tcp(1)))
-        .await;
-    assert!(matches!(e, Err(EngineError::Invalid(_))));
-    let e = h
-        .engine()
-        .await
-        .split(&h.state, &app.id, "nope", Scope::port(tcp(80)))
-        .await;
-    assert!(matches!(e, Err(EngineError::NotFound(_))));
-    let e = h
-        .engine()
-        .await
-        .split(&h.state, &app.id, "ygg", Scope::All)
-        .await;
-    assert!(matches!(e, Err(EngineError::Invalid(_))));
-
-    // Merge: the app's all-ports address stays, the narrower one leaves the interface.
-    let merged = h
-        .engine()
-        .await
-        .merge(
-            &h.state,
-            &app.id,
-            "ygg",
-            &[all_addr.id.clone(), split.id.clone()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(merged.id, all_addr.id);
-    assert_eq!(merged.scope, Scope::All);
-    let app = h.app().await;
-    assert_eq!(app.addresses.len(), 1);
-    assert!(!h.net.addresses("ygg0").contains(&split_ip));
-    let rs = h.last_ruleset();
-    let mut ports: Vec<u16> = rs.rules.iter().map(|r| r.ports.start).collect();
-    ports.sort();
-    assert_eq!(ports, [80, 443]);
-    assert!(rs
-        .rules
-        .iter()
-        .all(|r| r.dst == all_addr.locator.ipv6().map(IpAddr::V6).unwrap()));
-
-    // Merging needs at least one address, each listed once.
-    let e = h.engine().await.merge(&h.state, &app.id, "ygg", &[]).await;
-    assert!(matches!(e, Err(EngineError::Invalid(_))));
-    let e = h
-        .engine()
-        .await
-        .merge(
-            &h.state,
-            &app.id,
-            "ygg",
-            &[all_addr.id.clone(), all_addr.id.clone()],
-        )
-        .await;
-    assert!(matches!(e, Err(EngineError::Invalid(_))));
-}
-
-#[tokio::test]
-async fn merge_creates_the_all_address_when_the_app_has_only_port_addresses() {
-    let h = Harness::new(
-        vec![ygg_net()],
-        vec![
-            listener("nginx", 80, Protocol::Tcp),
-            listener("nginx", 443, Protocol::Tcp),
-        ],
-    )
-    .await;
-    h.reconcile().await;
-    let app = h.app().await;
-    h.grant(&app.id, Subject::Anyone).await;
-    let all_addr = app.addresses[0].clone();
-    let split = h
-        .engine()
-        .await
-        .split(&h.state, &app.id, "ygg", Scope::port(tcp(443)))
-        .await
-        .unwrap();
-    // Take the all-ports address away by merging it out... it is the one a merge keeps, so
-    // delete it directly to get an app with port addresses only.
-    h.state.db.delete_address(&all_addr.id).await.unwrap();
-    assert_eq!(h.app().await.addresses.len(), 1);
-    let merged = h
-        .engine()
-        .await
-        .merge(&h.state, &app.id, "ygg", std::slice::from_ref(&split.id))
-        .await
-        .unwrap();
-    assert_eq!(merged.scope, Scope::All);
-    let app = h.app().await;
-    assert_eq!(
-        app.addresses.len(),
-        1,
-        "the port address went, an all-ports one came"
-    );
-    assert_eq!(app.addresses[0].id, merged.id);
-    assert!(h
-        .net
-        .addresses("ygg0")
-        .contains(&merged.locator.ipv6().unwrap()));
-}
-
 #[tokio::test]
 async fn allocation_is_retried_until_it_succeeds() {
     let ygg = ygg_net();
@@ -724,6 +519,7 @@ async fn allocation_is_retried_until_it_succeeds() {
     .await;
     h.nets["ygg"].set_failing(true);
     h.reconcile().await;
+    h.open().await;
 
     // The app exists and has the addresses that worked.
     let app = h.app().await;
@@ -734,7 +530,7 @@ async fn allocation_is_retried_until_it_succeeds() {
     h.reconcile().await;
     let app = h.app().await;
     assert_eq!(app.addresses.len(), 2);
-    let ygg_addr = Harness::addr_on(&app, "ygg");
+    let ygg_addr = h.addr_on("ygg").await;
     assert!(h.net.addresses("ygg0").contains(&ygg_addr));
     assert!(applied(&h.fw_calls).last().unwrap().scopes.iter().any(
         |s| matches!(&s.matcher, ScopeMatch::Destinations(d) if d.contains(&IpAddr::V6(ygg_addr)))
@@ -771,9 +567,10 @@ async fn a_grant_to_a_yggdrasil_key_peer_gives_a_rule_with_iif() {
     assert_eq!(rs.rules.len(), 1);
     let r = &rs.rules[0];
     assert_eq!(r.iif.as_deref(), Some("ygg0"));
-    assert_eq!(r.dst, IpAddr::V6(Harness::addr_on(&app, "ygg")));
+    assert_eq!(r.dst, IpAddr::V6(h.addr_on("ygg").await));
     assert_eq!(r.ports.start, 80);
     assert_eq!(r.sources, Sources::Nets(vec![KEY_ADDR.parse().unwrap()]));
+    let app = h.app().await;
     assert!(r.id.starts_with(&format!(
         "a:{}:80:tcp:{}",
         app.addresses
@@ -830,14 +627,13 @@ async fn an_ip_suffix_peer_follows_a_prefix_change() {
         rs.rules[0].sources,
         Sources::Nets(vec!["2001:db8:1:2::a:b/128".parse().unwrap()])
     );
-    let old = Harness::addr_on(&app, "lan");
+    let old = h.addr_on("lan").await;
 
     // The router hands out a new /64.
     h.nets["lan"].set_prefix("2001:db8:9:9::");
     h.reconcile().await;
 
-    let app = h.app().await;
-    let new = Harness::addr_on(&app, "lan");
+    let new = h.addr_on("lan").await;
     assert_ne!(new, old);
     assert!(new.to_string().starts_with("2001:db8:9:9:"));
     assert_eq!(
@@ -1184,8 +980,9 @@ async fn a_drop_event_produces_blocked_activity() {
     let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.engine().await.startup_reconcile(&h.state).await;
     h.reconcile().await;
+    h.open().await;
     let app = h.app().await;
-    let dst = Harness::addr_on(&app, "ygg");
+    let dst = h.addr_on("ygg").await;
 
     let src: IpAddr = "200:5a::77".parse().unwrap();
     let long_ago = SystemTime::now() - Duration::from_secs(300);
@@ -1229,6 +1026,7 @@ async fn disable_removes_rules_and_addresses() {
     )
     .await;
     h.reconcile().await;
+    h.open().await;
     assert_eq!(
         h.net.addresses("lo").len() + h.net.addresses("ygg0").len(),
         2
@@ -1248,6 +1046,7 @@ async fn disable_removes_rules_and_addresses() {
 async fn disabled_stays_off_across_reconciles_and_startup_until_enabled() {
     let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
+    h.open().await;
     h.engine().await.disable(&h.state).await.unwrap();
     assert!(h.state.db.disabled().await);
     h.clear_calls();
@@ -1267,16 +1066,15 @@ async fn disabled_stays_off_across_reconciles_and_startup_until_enabled() {
     h.engine().await.enable(&h.state).await.unwrap();
     assert!(!h.state.db.disabled().await);
     assert_eq!(applied(&h.fw_calls).len(), 1);
-    assert_eq!(net_adds(&h).len(), 2);
+    assert_eq!(net_adds(&h).len(), 1, "only the opened app has an address");
 }
 
 #[tokio::test]
 async fn startup_reapplies_the_ruleset_and_restores_missing_addresses() {
     let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
-    let app = h.app().await;
-    h.grant(&app.id, Subject::Anyone).await;
-    let a = Harness::addr_on(&app, "ygg");
+    h.open().await;
+    let a = h.addr_on("ygg").await;
     h.net.drop_address("ygg0", a);
     h.clear_calls();
 
@@ -1291,7 +1089,24 @@ async fn startup_reapplies_the_ruleset_and_restores_missing_addresses() {
 #[tokio::test]
 async fn failed_apply_keeps_addresses_off_interfaces() {
     let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
+    h.reconcile().await;
     h.fw.set_failing(true);
+    let app = h.app().await;
+    // The grant is saved although the apply fails (and the address is created).
+    let _ = h
+        .engine()
+        .await
+        .create_grant(
+            &h.state,
+            &NewGrant {
+                target: Target::App(app.id),
+                scope: Scope::All,
+                network_id: None,
+                subject: Subject::Anyone,
+                confirm_open: true,
+            },
+        )
+        .await;
     h.reconcile().await;
     assert!(net_adds(&h).is_empty(), "nothing would deny the address");
     assert_eq!(h.app().await.addresses.len(), 1, "but it is recorded");
@@ -1305,7 +1120,8 @@ async fn failed_apply_keeps_addresses_off_interfaces() {
 async fn missing_address_is_re_added() {
     let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
-    let a = Harness::addr_on(&h.app().await, "ygg");
+    h.open().await;
+    let a = h.addr_on("ygg").await;
     h.net.drop_address("ygg0", a);
     h.reconcile().await;
     assert!(
@@ -1318,7 +1134,8 @@ async fn missing_address_is_re_added() {
 async fn missing_interface_is_skipped_then_recovers() {
     let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
-    let a = Harness::addr_on(&h.app().await, "ygg");
+    h.open().await;
+    let a = h.addr_on("ygg").await;
 
     // Yggdrasil is down: the tun is gone. Reconcile must not fail.
     h.net.set_interface_missing("ygg0", true);
@@ -1334,15 +1151,14 @@ async fn missing_interface_is_skipped_then_recovers() {
 async fn prefix_change_rehomes_keeping_the_interface_id() {
     let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
-    let app = h.app().await;
-    h.grant(&app.id, Subject::Anyone).await;
-    let old = Harness::addr_on(&app, "ygg");
+    h.open().await;
+    let old = h.addr_on("ygg").await;
     assert_eq!(old, "300:1:2:3::1".parse::<Ipv6Addr>().unwrap());
 
     h.nets["ygg"].set_prefix("300:9:9:9::");
     h.reconcile().await;
 
-    let new = Harness::addr_on(&h.app().await, "ygg");
+    let new = h.addr_on("ygg").await;
     assert_eq!(new, "300:9:9:9::1".parse::<Ipv6Addr>().unwrap());
     assert!(h.net.addresses("ygg0").contains(&new));
     assert!(!h.net.addresses("ygg0").contains(&old));
@@ -1380,6 +1196,8 @@ async fn adding_and_removing_a_network() {
     )
     .await;
     h.reconcile().await;
+    // A grant on every network names the row on a network that is added later too.
+    h.open().await;
     let app = h.app().await;
     assert_eq!(app.addresses.len(), 1);
 
@@ -1398,7 +1216,7 @@ async fn adding_and_removing_a_network() {
     }
     let app = h.app().await;
     assert_eq!(app.addresses.len(), 2);
-    let ygg_addr = Harness::addr_on(&app, "ygg");
+    let ygg_addr = h.addr_on("ygg").await;
     assert!(h.net.addresses("ygg0").contains(&ygg_addr));
     assert!(h
         .last_ruleset()
@@ -1427,7 +1245,11 @@ async fn adding_and_removing_a_network() {
     }
     assert!(h.net.addresses("ygg0").is_empty());
     assert_eq!(h.app().await.addresses.len(), 1);
-    assert!(h.state.db.list_grants().await.unwrap().is_empty());
+    assert_eq!(
+        h.state.db.list_grants().await.unwrap().len(),
+        1,
+        "only the grant on every network is left"
+    );
     assert!(!h
         .last_ruleset()
         .scopes
@@ -1850,11 +1672,30 @@ async fn a_network_that_cannot_initialise_is_down_not_fatal() {
         nets.into_iter().next().unwrap().status
     };
     state.engine.write().await.reconcile(&state).await.unwrap();
+    // A grant names the row, so the app wants an address there.
+    let app_id = state.db.list_apps().await.unwrap()[0].id.clone();
+    state
+        .engine
+        .read()
+        .await
+        .create_grant(
+            &state,
+            &NewGrant {
+                target: Target::App(app_id),
+                scope: Scope::All,
+                network_id: None,
+                subject: Subject::Anyone,
+                confirm_open: true,
+            },
+        )
+        .await
+        .unwrap();
+    state.engine.write().await.reconcile(&state).await.unwrap();
     match status().await {
         NetworkStatus::Down { reason } => assert!(reason.contains("no global or unique-local")),
         s => panic!("expected down, got {s:?}"),
     }
-    assert!(state.db.list_apps().await.unwrap()[0].addresses.is_empty());
+    assert!(state.db.list_addresses().await.unwrap().is_empty());
 
     // The router advertises a prefix; the next reconcile recovers (discovery cache is
     // not cleared by failures).
@@ -1862,8 +1703,10 @@ async fn a_network_that_cannot_initialise_is_down_not_fatal() {
         .unwrap();
     state.engine.write().await.reconcile(&state).await.unwrap();
     assert_eq!(status().await, NetworkStatus::Up);
-    let apps = state.db.list_apps().await.unwrap();
-    let addr = Harness::addr_on(&apps[0], "lan");
+    let addr = state.db.list_addresses().await.unwrap()[0]
+        .locator
+        .ipv6()
+        .unwrap();
     assert!(socketguard_daemon::networks::ip::same_prefix64(
         addr,
         "fd3e:1eec:520:582e::".parse().unwrap()
@@ -1884,8 +1727,9 @@ fn denied(h: &Harness, addr: Ipv6Addr) -> bool {
 async fn failed_removal_keeps_the_address_denied_and_is_retried() {
     let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
+    h.open().await;
     let app = h.app().await;
-    let a = Harness::addr_on(&app, "ygg");
+    let a = h.addr_on("ygg").await;
     assert!(h.net.addresses("ygg0").contains(&a));
     assert!(denied(&h, a));
 
@@ -1950,6 +1794,7 @@ async fn crash_leftover_retiring_address_is_removed_at_startup() {
 async fn orphaned_owned_address_is_swept() {
     let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
+    h.open().await;
     // An address we own that no app has any more (e.g. a crash between the DB update and
     // the removal).
     let orphan: Ipv6Addr = "300:1:2:3::beef".parse().unwrap();
@@ -1959,7 +1804,7 @@ async fn orphaned_owned_address_is_swept() {
         .claim_address(orphan, "ygg0", Some("ygg"))
         .await
         .unwrap();
-    let kept = Harness::addr_on(&h.app().await, "ygg");
+    let kept = h.addr_on("ygg").await;
 
     h.reconcile().await;
     assert!(!h.net.addresses("ygg0").contains(&orphan));
@@ -1977,7 +1822,8 @@ async fn orphaned_owned_address_is_swept() {
 async fn address_outside_the_applied_ruleset_is_never_added() {
     let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
-    let first = Harness::addr_on(&h.app().await, "ygg");
+    h.open().await;
+    let first = h.addr_on("ygg").await;
 
     // A second app appears, but the ruleset that would cover it cannot be applied.
     h.fw.set_failing(true);
@@ -1986,6 +1832,27 @@ async fn address_outside_the_applied_ruleset_is_never_added() {
     h.set_sockets(sockets);
     h.reconcile().await;
     assert_eq!(h.apps().await.len(), 2);
+    let redis = h
+        .apps()
+        .await
+        .into_iter()
+        .find(|a| a.name == "redis")
+        .unwrap();
+    let _ = h
+        .engine()
+        .await
+        .create_grant(
+            &h.state,
+            &NewGrant {
+                target: Target::App(redis.id),
+                scope: Scope::All,
+                network_id: None,
+                subject: Subject::Anyone,
+                confirm_open: true,
+            },
+        )
+        .await;
+    h.reconcile().await;
     assert_eq!(
         h.net.addresses("ygg0"),
         [first].into_iter().collect(),
@@ -2006,7 +1873,8 @@ async fn address_outside_the_applied_ruleset_is_never_added() {
 async fn disable_removes_owned_addresses_and_keeps_rows_until_confirmed() {
     let h = Harness::new(vec![ygg_net()], vec![listener("nginx", 80, Protocol::Tcp)]).await;
     h.reconcile().await;
-    let a = Harness::addr_on(&h.app().await, "ygg");
+    h.open().await;
+    let a = h.addr_on("ygg").await;
 
     h.net.set_remove_failing(true);
     h.clear_calls();
@@ -2059,6 +1927,7 @@ async fn fresh_database_does_not_replace_an_existing_ruleset_until_enabled() {
     assert_eq!(h.apps().await.len(), 1);
 
     // `enable` adopts the new state: the ruleset is replaced and the latch cleared.
+    h.open().await;
     h.engine().await.enable(&h.state).await.unwrap();
     assert!(!h.state.db.unadopted().await.unwrap());
     assert_eq!(applied(&h.fw_calls).len(), 1);

@@ -374,7 +374,7 @@ function RowName({ r }: { r: AppRow }) {
     <>
       {a.name}{" "}
       {!a.reviewed && <span className="badge badge-pending">pending</span>}
-      {a.identity_note === "unidentified" && <span className="badge reach reach-warn" title="Owner of the socket unknown">unidentified</span>}
+      {a.identity_note === "unidentified" && <span className="badge reach reach-warn" title="Owner of the port unknown">unidentified</span>}
     </>
   );
 }

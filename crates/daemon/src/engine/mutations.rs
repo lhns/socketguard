@@ -487,12 +487,12 @@ impl Engine {
             Scope::Group { id } => {
                 let group = cat
                     .socket_group(id)
-                    .ok_or_else(|| EngineError::NotFound(format!("socket group {id}")))?;
+                    .ok_or_else(|| EngineError::NotFound(format!("port group {id}")))?;
                 if group.is_attached_to(&app.id) {
                     Ok(())
                 } else {
                     Err(EngineError::Invalid(format!(
-                        "socket group {} is not attached to {}",
+                        "port group {} is not attached to {}",
                         group.label, app.name
                     )))
                 }
@@ -533,7 +533,7 @@ impl Engine {
                 // The grant's own scope needs no attachment, but the group must exist.
                 if let Some(gid) = req.scope.group_id() {
                     cat.socket_group(gid)
-                        .ok_or_else(|| EngineError::NotFound(format!("socket group {gid}")))?;
+                        .ok_or_else(|| EngineError::NotFound(format!("port group {gid}")))?;
                 }
                 format!("tag {}", tag.label)
             }

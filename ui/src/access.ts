@@ -31,7 +31,7 @@ export function accessSummary(appId: string, grants: GrantView[], tags: Tag[]) {
 }
 
 /** Does a grant with `grantScope` cover `port` (null = the whole app)? A port-specific grant does
- * not cover the whole app; a socket group is not resolved here and covers nothing. */
+ * not cover the whole app; a port group is not resolved here and covers nothing. */
 export const covers = (grantScope: Scope, port: PortRef | null) =>
   grantScope.kind === "all" || (port !== null && sameScope(grantScope, scopeOfPort(port)));
 
@@ -47,14 +47,17 @@ export interface NameCtx {
   peers: Peer[];
   groups: PeerGroup[];
   networks: Network[];
-  /** Names the socket groups in scopes; the ids show without it. */
+  /** Names the reservations in targets and origins; the ids show without it. */
+  reservations?: { id: string; label: string }[];
+  /** Names the port groups in scopes; the ids show without it. */
   socketGroups?: SocketGroup[];
 }
 
 export type EntryOrigin =
   | { kind: "direct" }
   | { kind: "tag"; id: string; label: string }
-  | { kind: "group"; id: string; label: string };
+  | { kind: "group"; id: string; label: string }
+  | { kind: "reservation"; id: string; label: string };
 
 /** One access: who or what, on which port and network, how well identified, and where it comes
  * from. The same shape serves "who can reach this" and "what can this reach". */
@@ -67,7 +70,7 @@ export interface AccessEntry {
   link?: { page: "apps" | "peers"; focus: Focus };
   subject?: Subject;
   scope: Scope;
-  /** The scope as shown ("80/tcp", "group passive"). */
+  /** The scope as shown ("80/tcp", "port group passive"). */
   scopeText: string;
   networkId: string | null;
   reach: GrantReach[];
@@ -92,8 +95,10 @@ const subjectKey = (s: Subject) => (s.kind === "anyone" ? "anyone" : `${s.kind}:
 const subjectLink = (s: Subject): AccessEntry["link"] =>
   s.kind === "peer" ? { page: "peers", focus: { peerId: s.id } } : s.kind === "group" ? { page: "peers", focus: { groupId: s.id } } : undefined;
 
-const targetLink = (t: Target): NonNullable<AccessEntry["link"]> =>
-  t.kind === "app" ? { page: "apps", focus: { appId: t.id } } : { page: "apps", focus: { tagId: t.id } };
+const targetLink = (t: Target): AccessEntry["link"] =>
+  t.kind === "app" ? { page: "apps", focus: { appId: t.id } }
+  : t.kind === "tag" ? { page: "apps", focus: { tagId: t.id } }
+  : undefined;
 
 /** Whole-app access first, then what only some ports have, each by name. */
 export const sortEntries = (entries: AccessEntry[]) =>
@@ -104,7 +109,7 @@ export const sortEntries = (entries: AccessEntry[]) =>
 /** Direct grants as entries: `side` is what the entry names (the subject, for "who can reach this"). */
 export function grantEntries(grants: GrantView[], side: "subject" | "target", ctx: NameCtx): AccessEntry[] {
   return grants.map((g) => {
-    const name = side === "subject" ? subjectName(g.subject, g.network_id, ctx) : targetLabel(g.target, ctx.apps, ctx.tags);
+    const name = side === "subject" ? subjectName(g.subject, g.network_id, ctx) : targetLabel(g.target, ctx.apps, ctx.tags, ctx.reservations);
     const who = side === "subject" ? subjectKey(g.subject) : `${g.target.kind}:${g.target.id}`;
     return {
       key: g.id,
@@ -140,10 +145,12 @@ export function appEntries(appId: string, access: EffectiveAccess[], grants: Gra
     const origin: EntryOrigin =
       a.origin.kind === "tag"
         ? { kind: "tag", id: a.origin.tag_id, label: ctx.tags.find((t) => t.id === (a.origin as { tag_id: string }).tag_id)?.label ?? a.origin.tag_id.slice(0, 8) }
-        : { kind: "direct" };
+        : a.origin.kind === "reservation"
+          ? { kind: "reservation", id: a.origin.reservation_id, label: ctx.reservations?.find((r) => r.id === (a.origin as { reservation_id: string }).reservation_id)?.label ?? a.origin.reservation_id.slice(0, 8) }
+          : { kind: "direct" };
     out.push({
       key,
-      ident: `${subjectKey(a.subject)}|${scopeKey(scope)}|${a.network_id ?? "*"}|${origin.kind === "tag" ? origin.id : "direct"}`,
+      ident: `${subjectKey(a.subject)}|${scopeKey(scope)}|${a.network_id ?? "*"}|${origin.kind === "tag" || origin.kind === "reservation" ? origin.id : "direct"}`,
       name: subjectName(a.subject, a.network_id, ctx),
       link: subjectLink(a.subject),
       subject: a.subject,

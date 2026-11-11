@@ -519,7 +519,7 @@ impl Engine {
         for g in groups {
             let attached = cat
                 .socket_group(&g)
-                .ok_or_else(|| EngineError::NotFound(format!("socket group {g}")))?
+                .ok_or_else(|| EngineError::NotFound(format!("port group {g}")))?
                 .is_attached_to(to);
             if !attached {
                 if to_app.identity_note.as_deref() == Some("unidentified") {

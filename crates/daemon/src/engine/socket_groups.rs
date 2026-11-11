@@ -54,8 +54,15 @@ impl Catalog {
                 let (Some(app), Some(was)) = (self.app(id), before.app(id)) else {
                     return false;
                 };
+                // The grant as it was (it may have been moved to another target).
+                let was_total = before
+                    .grants
+                    .iter()
+                    .find(|g| g.id == grant.id)
+                    .map(|g| total(&targets_before, before, g, was))
+                    .unwrap_or_default();
                 !total(&targets, self, grant, app)
-                    .subtract(&total(&targets_before, before, grant, was))
+                    .subtract(&was_total)
                     .is_empty()
             });
             if widened {
@@ -147,7 +154,7 @@ impl Catalog {
 pub fn clean_ranges(ports: &[PortRange]) -> Result<Vec<PortRange>, EngineError> {
     if ports.is_empty() {
         return Err(EngineError::Invalid(
-            "a socket group needs at least one port or port range".into(),
+            "a port group needs at least one port or port range".into(),
         ));
     }
     for r in ports {
@@ -160,7 +167,7 @@ pub fn clean_ranges(ports: &[PortRange]) -> Result<Vec<PortRange>, EngineError> 
 fn check_takes_groups(app: &socketguard_core::App) -> Result<(), EngineError> {
     if app.identity_note.as_deref() == Some("unidentified") {
         return Err(EngineError::Invalid(format!(
-            "{} is an unidentified socket and takes no socket groups",
+            "{} is an unidentified socket and takes no port groups",
             app.name
         )));
     }
@@ -188,7 +195,7 @@ impl Engine {
             .db
             .get_socket_group(id)
             .await?
-            .ok_or_else(|| EngineError::NotFound(format!("socket group {id}")))
+            .ok_or_else(|| EngineError::NotFound(format!("port group {id}")))
     }
 
     // ─── Planning ────────────────────────────────────────────────────────────
@@ -203,10 +210,10 @@ impl Engine {
         apps: &[AppId],
         confirm_open: bool,
     ) -> Result<(SocketGroup, GroupPlan), EngineError> {
-        let label = Self::clean_label(label, "socket group")?;
+        let label = Self::clean_label(label, "port group")?;
         if cat.socket_groups.iter().any(|g| g.label == label) {
             return Err(EngineError::Conflict(format!(
-                "socket group {label} already exists"
+                "port group {label} already exists"
             )));
         }
         let mut attached: Vec<AppId> = Vec::new();
@@ -251,10 +258,10 @@ impl Engine {
     ) -> Result<(SocketGroup, GroupPlan), EngineError> {
         let current = cat
             .socket_group(id)
-            .ok_or_else(|| EngineError::NotFound(format!("socket group {id}")))?
+            .ok_or_else(|| EngineError::NotFound(format!("port group {id}")))?
             .clone();
         let label = label
-            .map(|l| Self::clean_label(l, "socket group"))
+            .map(|l| Self::clean_label(l, "port group"))
             .transpose()?;
         if let Some(l) = &label {
             if cat
@@ -263,7 +270,7 @@ impl Engine {
                 .any(|g| g.label == *l && g.id != id)
             {
                 return Err(EngineError::Conflict(format!(
-                    "socket group {l} already exists"
+                    "port group {l} already exists"
                 )));
             }
         }
@@ -305,12 +312,12 @@ impl Engine {
     ) -> Result<(SocketGroup, GroupPlan), EngineError> {
         let group = cat
             .socket_group(id)
-            .ok_or_else(|| EngineError::NotFound(format!("socket group {id}")))?
+            .ok_or_else(|| EngineError::NotFound(format!("port group {id}")))?
             .clone();
         let users = cat.group_users(id, None);
         if !users.is_empty() {
             return Err(EngineError::Conflict(format!(
-                "socket group {} is still used by {}",
+                "port group {} is still used by {}",
                 group.label,
                 join(&users)
             )));
@@ -342,7 +349,7 @@ impl Engine {
     ) -> Result<(SocketGroup, GroupPlan), EngineError> {
         let group = cat
             .socket_group(group_id)
-            .ok_or_else(|| EngineError::NotFound(format!("socket group {group_id}")))?
+            .ok_or_else(|| EngineError::NotFound(format!("port group {group_id}")))?
             .clone();
         check_takes_groups(
             cat.app(app_id)
@@ -383,7 +390,7 @@ impl Engine {
     ) -> Result<(SocketGroup, GroupPlan), EngineError> {
         let group = cat
             .socket_group(group_id)
-            .ok_or_else(|| EngineError::NotFound(format!("socket group {group_id}")))?
+            .ok_or_else(|| EngineError::NotFound(format!("port group {group_id}")))?
             .clone();
         let app_name = cat
             .app(app_id)
@@ -392,14 +399,14 @@ impl Engine {
             .clone();
         if !group.is_attached_to(app_id) {
             return Err(EngineError::NotFound(format!(
-                "socket group {} on app {app_name}",
+                "port group {} on app {app_name}",
                 group.label
             )));
         }
         let users = cat.group_users(group_id, Some(app_id));
         if !users.is_empty() {
             return Err(EngineError::Conflict(format!(
-                "socket group {} is still used on {app_name} by {}",
+                "port group {} is still used on {app_name} by {}",
                 group.label,
                 join(&users)
             )));
@@ -449,7 +456,7 @@ impl Engine {
             .db
             .apply_writes(&plan.writes)
             .await
-            .map_err(|e| Self::conflict_or_internal(e, "this socket group"))?;
+            .map_err(|e| Self::conflict_or_internal(e, "this port group"))?;
         let applied = self.apply_and_ensure(state).await;
         self.commit(
             state,
@@ -480,7 +487,7 @@ impl Engine {
             self.plan_create_group(&mut cat, new_id(), label, ports, apps, confirm_open)?;
         let activity = NewActivity::new(
             ActivityKind::SocketGroupAdded,
-            format!("Added socket group {}", group.label),
+            format!("Added port group {}", group.label),
         );
         self.run_group_plan(state, plan, activity).await?;
         self.get_socket_group(state, &group.id).await
@@ -498,7 +505,7 @@ impl Engine {
         let (group, plan) = self.plan_update_group(&mut cat, id, label, ports, confirm_open)?;
         let activity = NewActivity::new(
             ActivityKind::SocketGroupChanged,
-            format!("Changed socket group {}", group.label),
+            format!("Changed port group {}", group.label),
         );
         self.run_group_plan(state, plan, activity).await?;
         self.get_socket_group(state, id).await
@@ -509,7 +516,7 @@ impl Engine {
         let (group, plan) = self.plan_delete_group(&mut cat, id)?;
         let activity = NewActivity::new(
             ActivityKind::SocketGroupRemoved,
-            format!("Removed socket group {}", group.label),
+            format!("Removed port group {}", group.label),
         );
         self.run_group_plan(state, plan, activity).await
     }
@@ -528,7 +535,7 @@ impl Engine {
         }
         let activity = NewActivity::new(
             ActivityKind::SocketGroupChanged,
-            format!("Attached socket group {}", group.label),
+            format!("Attached port group {}", group.label),
         )
         .app(app_id);
         self.run_group_plan(state, plan, activity).await?;
@@ -545,7 +552,7 @@ impl Engine {
         let (group, plan) = self.plan_detach_group(&mut cat, group_id, app_id)?;
         let activity = NewActivity::new(
             ActivityKind::SocketGroupChanged,
-            format!("Detached socket group {}", group.label),
+            format!("Detached port group {}", group.label),
         )
         .app(app_id);
         self.run_group_plan(state, plan, activity).await?;

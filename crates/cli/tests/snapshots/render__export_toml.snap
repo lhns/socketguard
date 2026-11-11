@@ -6,7 +6,6 @@ version = 1
 socket_groups = []
 
 [settings]
-address_mode = "per_port"
 protect_host_interfaces = ["eth0"]
 
 [[peers]]
@@ -44,3 +43,21 @@ name = "nginx"
 
 [grants.scope]
 kind = "all"
+
+[[reservations]]
+label = "web"
+
+[[reservations.bindings]]
+kind = "app"
+
+[reservations.bindings.app]
+id = "5c0d"
+name = "nginx"
+
+[reservations.bindings.scope]
+kind = "all"
+
+[[reservations.grants]]
+
+[reservations.grants.subject]
+peer = "alice"

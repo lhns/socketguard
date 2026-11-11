@@ -105,6 +105,8 @@ pub struct GrantQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reservation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub peer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,

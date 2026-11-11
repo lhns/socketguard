@@ -13,14 +13,15 @@ import {
   type ActivityKind,
   type ApplyRequest,
   type ChangeOp,
-  type MergeRequest,
+  type MoveAppRequest,
+  type NewBinding,
   type NewCredential,
   type NewGroup,
   type NewNetwork,
   type NewPeer,
+  type NewReservation,
   type ProtectHostRequest,
-  type SplitRequest,
-  type UpdateSettings,
+  type ReserveRequest,
   type UpdateTag,
 } from "./api";
 
@@ -42,6 +43,8 @@ export const useGroups = () => useQuery({ queryKey: ["groups"], queryFn: api.lis
 export const useGrants = () => useQuery({ queryKey: ["grants"], queryFn: api.listGrants });
 export const useTags = () => useQuery({ queryKey: ["tags"], queryFn: api.listTags });
 export const useSocketGroups = () => useQuery({ queryKey: ["socketGroups"], queryFn: api.listSocketGroups });
+export const useAddresses = () => useQuery({ queryKey: ["addresses"], queryFn: api.listAddresses });
+export const useReservations = () => useQuery({ queryKey: ["reservations"], queryFn: api.listReservations });
 export const useNetworks = () => useQuery({ queryKey: ["networks"], queryFn: api.listNetworks });
 export const useSettings = () => useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
 export const useShare = (appId: string | null) =>
@@ -108,16 +111,32 @@ const GRANT_KEYS = [["grants"], ["apps"], ["app"], ["activity"]];
 const PEER_KEYS = [["peers"], ["groups"], ["grants"], ["app"]];
 const GROUP_KEYS = [["groups"], ["peers"], ["grants"], ["app"], ["activity"]];
 const TAG_KEYS = [["tags"], ["grants"], ["apps"], ["app"], ["activity"]];
+const RESERVATION_KEYS = [["reservations"], ["addresses"], ["grants"], ["apps"], ["app"], ["activity"]];
 const NETWORK_KEYS = [["networks"], ["status"], ["apps"], ["app"], ["grants"], ["settings"]];
 /** A batch can touch anything. */
 const CHANGES_KEYS = [["grants"], ["apps"], ["app"], ["peers"], ["groups"], ["tags"], ["status"], ["activity"]];
 
 export const useDeleteApp = () =>
   useInvalidating((id: string) => api.deleteApp(id), [...GRANT_KEYS, ["status"], ["tags"]]);
-export const useSplitApp = () =>
-  useInvalidating((v: { id: string; req: SplitRequest }) => api.splitApp(v.id, v.req), [["apps"], ["app"]]);
-export const useMergeApp = () =>
-  useInvalidating((v: { id: string; req: MergeRequest }) => api.mergeApp(v.id, v.req), [["apps"], ["app"]]);
+export const useMoveApp = () =>
+  useInvalidating((v: { id: string; req: MoveAppRequest }) => api.moveApp(v.id, v.req), [
+    ...GRANT_KEYS,
+    ...RESERVATION_KEYS,
+    ["tags"],
+  ]);
+
+export const useCreateReservation = () =>
+  useInvalidating((req: NewReservation) => api.createReservation(req), RESERVATION_KEYS);
+export const useRenameReservation = () =>
+  useInvalidating((v: { id: string; label: string }) => api.renameReservation(v.id, v.label), RESERVATION_KEYS);
+export const useReleaseReservation = () =>
+  useInvalidating((id: string) => api.releaseReservation(id), RESERVATION_KEYS);
+export const useAddBinding = () =>
+  useInvalidating((v: { id: string; req: NewBinding }) => api.addBinding(v.id, v.req), RESERVATION_KEYS);
+export const useRemoveBinding = () =>
+  useInvalidating((v: { id: string; bindingId: string }) => api.removeBinding(v.id, v.bindingId), RESERVATION_KEYS);
+export const useReserveAddress = () =>
+  useInvalidating((v: { id: string; req: ReserveRequest }) => api.reserveAddress(v.id, v.req), RESERVATION_KEYS);
 
 /** Many changes at once (ADR 0045). A dry run changes nothing, so it invalidates nothing. */
 export function useChanges() {
@@ -165,8 +184,6 @@ export const useAddNetwork = () =>
   useInvalidating((req: NewNetwork) => api.addNetwork(req), NETWORK_KEYS);
 export const useDeleteNetwork = () =>
   useInvalidating((v: { id: string; force: boolean }) => api.deleteNetwork(v.id, v.force), NETWORK_KEYS);
-export const useUpdateSettings = () =>
-  useInvalidating((req: UpdateSettings) => api.updateSettings(req), [["settings"], ["apps"], ["app"]]);
 export const useSetProtectHost = () =>
   useInvalidating((req: ProtectHostRequest) => api.setProtectHost(req), [["settings"], ["status"]]);
 export const useApplyState = () =>
@@ -184,11 +201,13 @@ export const EVENT_INVALIDATIONS: Record<string, string[][]> = {
   grants_changed: [["grants"], ["apps"], ["app"], ["share"]],
   tags_changed: [["tags"], ["grants"], ["app"]],
   socket_groups_changed: [["socketGroups"], ["grants"], ["apps"], ["app"]],
+  reservations_changed: [["reservations"], ["addresses"], ["grants"], ["apps"], ["app"]],
+  addresses_changed: [["addresses"], ["reservations"], ["apps"], ["app"]],
   networks_changed: [["networks"], ["status"], ["app"]],
   settings_changed: [["settings"], ["status"]],
   activity: [["activity"]],
   daemon_disconnected: [["status"]],
-  daemon_connected: [["status"], ["apps"], ["app"], ["peers"], ["groups"], ["grants"], ["tags"], ["socketGroups"], ["networks"], ["settings"], ["activity"]],
+  daemon_connected: [["status"], ["apps"], ["app"], ["peers"], ["groups"], ["grants"], ["tags"], ["socketGroups"], ["reservations"], ["addresses"], ["networks"], ["settings"], ["activity"]],
 };
 
 let subscribed = false;

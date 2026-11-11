@@ -1,6 +1,11 @@
 //! The addresses of apps and reservations on each network and their presence on the
 //! interfaces: allocating, re-homing, sweeping (ADR 0047). Which addresses exist and are up
 //! is decided by [`Model`]; this module makes the database and the interfaces match it.
+//!
+//! A dormant address is taken off its interface and out of the ruleset but its row stays.
+//! For DHCPv6 that is all that happens: the lease is released only when the address is
+//! deleted (`remove_locator`), never when it merely goes dormant, so the server keeps the
+//! address reserved for us and the same one goes back on the interface with the next grant.
 
 use super::*;
 use crate::api::DaemonEvent;
@@ -601,6 +606,7 @@ fn locator_text(l: &Locator) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use socketguard_core::App;
 
     fn addr(scope: Scope) -> Address {
         Address::automatic(

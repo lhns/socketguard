@@ -1276,7 +1276,7 @@ mod tests {
         let got = db.get_address(&a.id).await.unwrap().unwrap();
         assert_eq!(got.scope, a.scope);
         assert_eq!(got.locator.ipv6(), Some("300:9::5".parse().unwrap()));
-        assert_eq!(db.get_app("a1").await.unwrap().unwrap().addresses.len(), 1);
+        assert_eq!(db.list_addresses().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1289,7 +1289,7 @@ mod tests {
         for i in 0..9 {
             let mut a = address(
                 ["a1", "a2", "a3"][i as usize % 3],
-                "n",
+                &format!("n{i}"),
                 &format!("fd00::{}", i + 1),
             );
             a.created_at = now() + Duration::seconds(i);

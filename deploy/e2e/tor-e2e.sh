@@ -102,11 +102,11 @@ PY
 nothing_published() { [ -z "$(detached)" ]; }
 one_published() { [ "$(detached | wc -l)" -eq 1 ]; }
 
-step "daemon gave the listener an onion address" retry 60 onion_of || exit 1
-ONION="$(onion_of)"
-echo "      onion: $ONION"
+# An address (here an onion service) exists only once a grant names the row (ADR 0047).
+step "daemon detected the listener" retry 60 app_id || exit 1
 APP_ID="$(app_id)"
 step "the tor network is up" sh -c "docker exec $NODE_A $SG networks list --json | jq -e '.[0].kind == \"tor\" and .[0].status.state == \"up\"' >/dev/null"
+step "no grant: the app has no address" sh -c "docker exec $NODE_A $SG apps show $APP_ID --json | jq -e '.addresses | length == 0' >/dev/null"
 step "no grant: nothing is published" nothing_published
 sleep 5
 step "no grant: still nothing after a reconcile pass" nothing_published
@@ -119,6 +119,9 @@ step "the daemon generates a Tor client key for the peer" A $SG peers tor-key bn
 step "the generated key is stored as a Tor client key" sh -c "docker exec $NODE_A $SG peers show bnode --json | jq -e '.credentials | length == 1 and .[0].kind == \"tor_client_key\" and (.[0].value | length == 52)' >/dev/null"
 step "grant the listener's port to that peer" A $SG grant "$APP_ID:$PORT" bnode --network tor
 step "the grant is verified on Tor" sh -c "docker exec $NODE_A $SG grants --app $APP_ID --json | jq -e '.[0].reach[0].reach == \"verified\"' >/dev/null"
+step "granted: the app got an onion address" retry 60 onion_of || exit 1
+ONION="$(onion_of)"
+echo "      onion: $ONION"
 AUTH_LINE="$(docker exec $NODE_A $SG share $APP_ID --network tor --json | jq -r '.[] | select(contains(":descriptor:x25519:"))')"
 [ "${AUTH_LINE%%:descriptor:x25519:*}" = "${ONION%.onion}" ] && [ ${#AUTH_LINE} -gt 100 ] || { fail "share prints the client authorization line (got: $AUTH_LINE)"; exit 1; }
 pass "share prints the client authorization line for B"
@@ -151,6 +154,7 @@ step "a third client without the key cannot fetch it" sh -c "! docker exec $NODE
 # ── Revoke ───────────────────────────────────────────────────────────────────
 step "revoke the grant" A $SG revoke "$APP_ID:$PORT" bnode
 step "revoked: the service is removed from Tor" retry 30 nothing_published
+step "revoked: the onion address is dormant (remembered, not up)" retry 10 sh -c "docker exec $NODE_A $SG apps show $APP_ID --json | jq -e '[.addresses[] | select(.up)] | length == 0' >/dev/null"
 step "revoked: B cannot fetch" retry 90 sh -c "! docker exec $NODE_B curl -fsS --max-time 30 --socks5-hostname 127.0.0.1:9050 http://$ONION:$PORT/"
 
 # ── Disable ──────────────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@ Ports
   6379/tcp  yes
 
 Addresses
-  none
+  none yet: a row gets an address when a grant names it
 
 Who can reach it
   nobody (closed)

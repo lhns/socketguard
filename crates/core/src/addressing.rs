@@ -2,7 +2,7 @@
 //! the daemon's state, used by the ruleset producer, the Tor enforcement, the interface
 //! pass and the API, so they cannot disagree.
 //!
-//! - A **row** is (app, scope): "All sockets", one socket or an attached socket group.
+//! - A **row** is (app, scope): "All ports", one socket or an attached port group.
 //! - A grant **names** a row: a grant on an app names (app, its scope); a grant on a tag
 //!   names each member's row. A grant on a reservation names no row.
 //! - An **automatic address** belongs to a row and is up while a grant that applies on its
@@ -153,11 +153,11 @@ impl<'a> Model<'a> {
                 return false;
             }
         }
-        !(row
+        let udp_only_row = row
             .scope
             .as_port()
-            .is_some_and(|p| p.proto == Protocol::Udp)
-            && !serves_udp(network))
+            .is_some_and(|p| p.proto == Protocol::Udp);
+        serves_udp(network) || !udp_only_row
     }
 
     /// The rows a grant that applies on `network` names.
@@ -862,7 +862,7 @@ mod tests {
         assert_eq!(
             c[&covered.id],
             LegacyClass::Reservation {
-                label: "a All sockets".into()
+                label: "a All ports".into()
             }
         );
         assert_eq!(c[&nothing.id], LegacyClass::Automatic);

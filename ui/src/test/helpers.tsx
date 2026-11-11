@@ -21,7 +21,7 @@ export const app1: App = {
   reviewed: false, system: false, first_seen: "2026-01-01T00:00:00Z", last_seen: "2026-01-01T00:00:00Z",
   ports: [{ port: 8080, proto: "tcp", listening: true, last_seen: "2026-01-01T00:00:00Z", family: "dual" }],
   addresses: [
-    { id: "ad1", app_id: "a1", network_id: "n-ygg", scope: { kind: "all" }, locator: { kind: "ipv6", addr: "302::1" }, created_at: "2026-01-01T00:00:00Z" },
+    { id: "ad1", app_id: "a1", network_id: "n-ygg", scope: { kind: "all" }, locator: { kind: "ipv6", addr: "302::1" }, created_at: "2026-01-01T00:00:00Z", reservation_id: null, up: true, excluded: [], notes: [] },
   ],
 };
 
@@ -37,7 +37,7 @@ export const noTags: Tag[] = [];
 
 /** A change's answer as the Tauri commands return it: the value and the 202 notice (or none). */
 export const saved = <T,>(value: T, enforcement: Enforcement | null = null) => ({ value, enforcement });
-export const settings: Settings = { address_mode: "per_app", protect_host_interfaces: [] };
+export const settings: Settings = { protect_host_interfaces: [] };
 export const status: StatusResponse = {
   version: "0.1.0", networks, protect_host_interfaces: [], disabled: false, unadopted: false,
   counts: { apps: 1, pending_apps: 1, addresses: 1, peers: 1, groups: 0, grants: 0 },
@@ -55,7 +55,7 @@ export const mkApp = (id: string, name: string, ports: number[] = [8080], over: 
   id, name, process_name: name, exe_path: `/usr/bin/${name}`, interpreter_arg: null, identity_note: null, reviewed: true,
   system: false, first_seen: T0, last_seen: T0,
   ports: ports.map((port) => ({ port, proto: "tcp" as const, listening: true, last_seen: T0, family: "dual" as const })),
-  addresses: [{ id: `${id}-y`, app_id: id, network_id: "n-ygg", scope: { kind: "all" }, locator: { kind: "ipv6", addr: `302::${id.length}` }, created_at: T0 }],
+  addresses: [{ id: `${id}-y`, app_id: id, network_id: "n-ygg", scope: { kind: "all" }, locator: { kind: "ipv6", addr: `302::${id.length}` }, created_at: T0, reservation_id: null, up: true, excluded: [], notes: [] }],
   ...over,
 });
 
@@ -118,6 +118,8 @@ export function mockDaemon(handlers: Handlers = {}) {
     list_tags: () => noTags,
     share_app: () => ({ tor: [] }),
     list_networks: () => networks,
+    list_reservations: () => [],
+    list_addresses: () => [],
     get_settings: () => settings,
     activity: () => [],
     subscribe_events: () => undefined,

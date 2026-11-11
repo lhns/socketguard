@@ -22,9 +22,13 @@ fn tcp(port: u16) -> PortRef {
 fn address(id: &str, net: &str, addr: &str, scope: Scope) -> Address {
     Address {
         id: id.into(),
-        app_id: "5c0d1f2a99887766".into(),
+        app_id: Some("5c0d1f2a99887766".into()),
         network_id: net.into(),
         scope,
+        reservation_id: None,
+        up: net == "ygg",
+        excluded: vec![],
+        notes: vec![],
         locator: Locator::Ipv6 {
             addr: addr.parse().unwrap(),
         },
@@ -382,6 +386,7 @@ fn share_onion_addresses() {
     onion.locator = Locator::Onion {
         hostname: "abcdefghijklmnop.onion".into(),
     };
+    onion.up = true;
     app.addresses = vec![onion];
     assert_eq!(
         render::share_lines(&app, Some("tor")),
@@ -438,7 +443,7 @@ fn diff_and_risks() {
             Change {
                 kind: ChangeKind::Update,
                 item: ChangeItem::Setting,
-                name: "address_mode".into(),
+                name: "protect_host_interfaces".into(),
                 detail: None,
                 opens_to_anyone: false,
             },
@@ -513,7 +518,6 @@ fn documents_round_trip_through_toml_and_json() {
     let doc = ExportDocument {
         version: EXPORT_VERSION,
         settings: Settings {
-            address_mode: AddressMode::PerPort,
             protect_host_interfaces: vec!["eth0".into()],
         },
         peers: vec![ExportPeer {
@@ -552,6 +556,20 @@ fn documents_round_trip_through_toml_and_json() {
                 subject: ExportSubject::Anyone,
             },
         ],
+        reservations: vec![ExportReservation {
+            label: "web".into(),
+            bindings: vec![ExportBinding::App {
+                app: ExportAppRef {
+                    id: "5c0d".into(),
+                    name: "nginx".into(),
+                },
+                scope: ExportScope::All,
+            }],
+            grants: vec![ExportReservationGrant {
+                network: None,
+                subject: ExportSubject::Peer("alice".into()),
+            }],
+        }],
     };
     let toml_text = document_text(&doc, false).unwrap();
     insta::assert_snapshot!("export_toml", toml_text);
@@ -567,4 +585,92 @@ fn documents_round_trip_through_toml_and_json() {
     );
     assert_eq!(parse_document(&json_text, Path::new("noext")).unwrap(), doc);
     assert!(parse_document("nonsense {", Path::new("x.json")).is_err());
+}
+
+fn web_reservation() -> ReservationView {
+    let binding = |id: &str, app: &str, port: u16| Binding {
+        id: id.into(),
+        reservation_id: "r1111111aaaa".into(),
+        target: BindingTarget::App {
+            app_id: app.into(),
+            scope: Scope::port(tcp(port)),
+        },
+    };
+    let mut ygg = address("e5f6a1b2c3d4", "ygg", "300:1:2:3::9", Scope::All);
+    ygg.app_id = None;
+    ygg.reservation_id = Some("r1111111aaaa".into());
+    ygg.excluded = vec!["6000-6010/tcp".parse().unwrap()];
+    let mut tor = ygg.clone();
+    tor.id = "f6a1b2c3d4e5".into();
+    tor.network_id = "tor".into();
+    tor.up = false;
+    tor.excluded = vec![];
+    tor.notes = vec!["port 80 is bound to two apps".into()];
+    ReservationView {
+        reservation: Reservation {
+            id: "r1111111aaaa".into(),
+            label: "web".into(),
+            bindings: vec![
+                binding("b1", "5c0d1f2a99887766", 80),
+                binding("b2", "9e8d7c6b00112233", 80),
+            ],
+            created_at: t("2026-11-09T12:00:00Z"),
+        },
+        addresses: vec![ygg, tor],
+        conflicts: vec![PortConflict {
+            ports: "80/tcp".parse().unwrap(),
+            bindings: vec!["b1".into(), "b2".into()],
+            served_app: Some("5c0d1f2a99887766".into()),
+        }],
+        grants: vec![],
+    }
+}
+
+#[test]
+fn reservations_and_addresses() {
+    let r = web_reservation();
+    let n = names().with_reservations(std::slice::from_ref(&r));
+    insta::assert_snapshot!(
+        "reservations",
+        render::reservations(std::slice::from_ref(&r), &n)
+    );
+    assert_eq!(render::reservations(&[], &n), "no reservations");
+    insta::assert_snapshot!("addresses", render::addresses(&r.addresses, &n));
+    assert!(render::addresses(&[], &n).contains("when a grant names it"));
+}
+
+#[test]
+fn grant_notes_and_reservation_access_are_shown() {
+    let mut g = grants();
+    g[0].reach[0].note = Some("bound to reservation web: grant the reservation".into());
+    let n = names().with_reservations(&[web_reservation()]);
+    let text = render::grants(&g, &n, true);
+    assert!(
+        text.contains("note (g1111111 on ygg): bound to reservation web"),
+        "{text}"
+    );
+    let mut d = AppDetail {
+        app: nginx(),
+        grants: vec![],
+        counters: vec![],
+        access: vec![EffectiveAccess {
+            grant_id: "g9".into(),
+            scope: Scope::All,
+            ports: vec![],
+            network_id: None,
+            subject: Subject::Anyone,
+            origin: AccessOrigin::Reservation {
+                reservation_id: "r1111111aaaa".into(),
+            },
+        }],
+        tags: vec![],
+        socket_groups: vec![],
+    };
+    d.app.addresses[0].reservation_id = Some("r1111111aaaa".into());
+    let text = render::app_detail(&d, &n);
+    assert!(
+        text.contains("Through reservations") && text.contains("reservation web"),
+        "{text}"
+    );
+    assert!(text.contains("up") && text.contains("closed"), "{text}");
 }

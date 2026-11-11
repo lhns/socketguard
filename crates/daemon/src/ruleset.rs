@@ -605,17 +605,18 @@ mod tests {
     fn address(id: &str, app: &str, net: &str, addr: &str, scope: Scope) -> Address {
         Address {
             id: id.into(),
-            app_id: app.into(),
-            network_id: net.into(),
-            scope,
-            locator: Locator::Ipv6 {
-                addr: addr.parse().unwrap(),
-            },
-            created_at: Utc::now(),
+            ..Address::automatic(
+                app,
+                scope,
+                net,
+                Locator::Ipv6 {
+                    addr: addr.parse().unwrap(),
+                },
+            )
         }
     }
 
-    fn app(id: &str, ports: &[u16], addresses: Vec<Address>) -> App {
+    fn app(id: &str, ports: &[u16]) -> App {
         App {
             id: id.into(),
             name: id.into(),
@@ -637,7 +638,7 @@ mod tests {
                     family: Default::default(),
                 })
                 .collect(),
-            addresses,
+            addresses: vec![],
         }
     }
 
@@ -671,18 +672,24 @@ mod tests {
         }
     }
 
+    /// A grant to a peer that does not exist: it names a row (so gives the row an address)
+    /// without letting anyone in.
+    fn names(id: &str, scope: Scope) -> Grant {
+        Grant {
+            scope,
+            ..grant(id, "web", Subject::Peer("nobody".into()))
+        }
+    }
+
     /// One app "web" on 8080 with an address on every network; no grants yet.
     fn base() -> Snapshot {
         Snapshot {
-            apps: vec![app(
-                "web",
-                &[8080],
-                vec![
-                    address("al", "web", "local", "fd00::1", Scope::All),
-                    address("an", "web", "lan", "2001:db8:1:2::100", Scope::All),
-                    address("ay", "web", "ygg", "300:1:2:3::100", Scope::All),
-                ],
-            )],
+            apps: vec![app("web", &[8080])],
+            addresses: vec![
+                address("al", "web", "local", "fd00::1", Scope::All),
+                address("an", "web", "lan", "2001:db8:1:2::100", Scope::All),
+                address("ay", "web", "ygg", "300:1:2:3::100", Scope::All),
+            ],
             networks: vec![local(), lan(), ygg()],
             ..Snapshot::default()
         }
@@ -706,17 +713,22 @@ mod tests {
     }
 
     #[test]
-    fn no_grants_means_no_rules_but_every_address_is_managed() {
+    fn without_grants_only_loopback_is_managed_and_dormant_addresses_stay_out() {
         let rs = build(&base());
         assert!(rs.rules.is_empty());
+        // Local on loopback is always up; the others are remembered but dormant.
+        assert_eq!(managed(&rs), vec![ip("fd00::1")]);
+        // Until one is still on its interface: it stays denied until it is gone.
+        let mut s = base();
+        s.owned = vec![ip("300:1:2:3::100")];
         assert_eq!(
-            managed(&rs),
-            vec![ip("fd00::1"), ip("2001:db8:1:2::100"), ip("300:1:2:3::100")]
-                .into_iter()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>()
+            managed(&build(&s)),
+            vec![ip("300:1:2:3::100"), ip("fd00::1")]
         );
+        // A grant names the row: the addresses on networks that take grants are managed.
+        s.owned.clear();
+        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        assert_eq!(managed(&build(&s)).len(), 3);
         let scope_ids: Vec<_> = rs.scopes.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(scope_ids, ["managed", "overlay:ygg0"]);
     }
@@ -844,8 +856,8 @@ mod tests {
     fn grant_port_and_network_narrow_the_rules() {
         let mut s = base();
         s.apps[0].ports = vec![
-            app("x", &[8080, 9090], vec![]).ports[0].clone(),
-            app("x", &[9090], vec![]).ports[0].clone(),
+            app("x", &[8080, 9090]).ports[0].clone(),
+            app("x", &[9090]).ports[0].clone(),
         ];
         s.grants = vec![
             Grant {
@@ -854,6 +866,8 @@ mod tests {
                 ..grant("narrow", "web", Subject::Anyone)
             },
             grant("other-app", "nope", Subject::Anyone),
+            // The address of "All ports" exists because a grant names it.
+            names("names", Scope::All),
         ];
         let rs = build(&s);
         assert_eq!(ids(&rs), ["a:ay:9090:tcp:narrow:ygg0"]);
@@ -866,17 +880,20 @@ mod tests {
     fn an_all_address_also_serves_the_ports_that_have_their_own_address() {
         let mut s = base();
         s.apps[0].ports = vec![
-            app("x", &[80], vec![]).ports[0].clone(),
-            app("x", &[443], vec![]).ports[0].clone(),
+            app("x", &[80]).ports[0].clone(),
+            app("x", &[443]).ports[0].clone(),
         ];
-        s.apps[0].addresses.push(address(
+        s.addresses.push(address(
             "ay2",
             "web",
             "ygg",
             "300:1:2:3::200",
             Scope::port(tcp(443)),
         ));
-        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        s.grants = vec![
+            grant("g", "web", Subject::Anyone),
+            names("n443", Scope::port(tcp(443))),
+        ];
         let rs = build(&s);
         let mut ygg_rules: Vec<_> = rs
             .rules
@@ -949,8 +966,8 @@ mod tests {
     #[test]
     fn ranges_leave_out_ports_another_app_listens_on() {
         let mut s = base();
-        s.apps[0].ports = app("x", &[50005], vec![]).ports;
-        s.apps.push(app("other", &[50003], vec![]));
+        s.apps[0].ports = app("x", &[50005]).ports;
+        s.apps.push(app("other", &[50003]));
         s.socket_groups = vec![group("passive", &["50000-50010/tcp"], &["web"])];
         s.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
@@ -965,7 +982,7 @@ mod tests {
             ]
         );
         // The one exclusion rule holds for a named port too: 50003 is the other app's.
-        s.apps[0].addresses.push(address(
+        s.addresses.push(address(
             "ap",
             "web",
             "ygg",
@@ -995,8 +1012,8 @@ mod tests {
     fn a_port_address_stops_serving_a_port_another_app_took_over() {
         // A had an address and a grant for 9000; it stopped listening there and B started.
         let mut s = base();
-        s.apps[0].ports = app("x", &[8080], vec![]).ports;
-        s.apps[0].addresses = vec![address(
+        s.apps[0].ports = app("x", &[8080]).ports;
+        s.addresses = vec![address(
             "ap",
             "web",
             "ygg",
@@ -1012,12 +1029,10 @@ mod tests {
             ["9000/tcp"],
             "nobody else has it"
         );
-        s.apps.push(app("other", &[9000], vec![]));
+        s.apps.push(app("other", &[9000]));
         assert!(rule_ports(&build(&s), "ap").is_empty());
         // Detected on its own app too, it stays.
-        s.apps[0]
-            .ports
-            .push(app("x", &[9000], vec![]).ports[0].clone());
+        s.apps[0].ports.push(app("x", &[9000]).ports[0].clone());
         assert_eq!(rule_ports(&build(&s), "ap"), ["9000/tcp"]);
         // A stale record (seen once, no longer listening) does not keep it.
         s.apps[0].ports.last_mut().expect("port").listening = false;
@@ -1027,31 +1042,37 @@ mod tests {
     #[test]
     fn a_group_address_serves_only_its_group_and_a_group_grant_only_its_ranges() {
         let mut s = base();
-        s.apps[0].ports = app("x", &[8080], vec![]).ports;
+        s.apps[0].ports = app("x", &[8080]).ports;
         s.socket_groups = vec![group("passive", &["50000-50010/tcp"], &["web"])];
-        s.apps[0].addresses = vec![address(
+        s.addresses = vec![address(
             "ag",
             "web",
             "ygg",
             "300:1:2:3::300",
             Scope::group("passive"),
         )];
-        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        s.grants = vec![
+            grant("g", "web", Subject::Anyone),
+            names("ng", Scope::group("passive")),
+        ];
         // The group address serves the group's range, not the detected 8080.
         assert_eq!(rule_ports(&build(&s), "ag"), ["50000-50010/tcp"]);
         // A grant for the group on an All address covers the range only.
-        s.apps[0].addresses = vec![address("ay", "web", "ygg", "300:1:2:3::100", Scope::All)];
-        s.grants = vec![Grant {
-            scope: Scope::group("passive"),
-            ..grant("g", "web", Subject::Anyone)
-        }];
+        s.addresses = vec![address("ay", "web", "ygg", "300:1:2:3::100", Scope::All)];
+        s.grants = vec![
+            Grant {
+                scope: Scope::group("passive"),
+                ..grant("g", "web", Subject::Anyone)
+            },
+            names("n", Scope::All),
+        ];
         assert_eq!(rule_ports(&build(&s), "ay"), ["50000-50010/tcp"]);
     }
 
     #[test]
     fn a_tag_grant_by_group_meets_the_members_scope() {
         let mut s = base();
-        s.apps[0].ports = app("x", &[8080], vec![]).ports;
+        s.apps[0].ports = app("x", &[8080]).ports;
         s.socket_groups = vec![
             group("passive", &["50000-50010/tcp"], &["web"]),
             group("wide", &["50005-60000/tcp"], &[]),
@@ -1067,11 +1088,14 @@ mod tests {
             excluded: vec![],
             created_at: Utc::now(),
         }];
-        s.grants = vec![Grant {
-            target: Target::Tag("t".into()),
-            scope: Scope::group("wide"),
-            ..grant("g", "web", Subject::Anyone)
-        }];
+        s.grants = vec![
+            Grant {
+                target: Target::Tag("t".into()),
+                scope: Scope::group("wide"),
+                ..grant("g", "web", Subject::Anyone)
+            },
+            names("n", Scope::All),
+        ];
         // The member's range narrowed to the grant's group.
         assert_eq!(rule_ports(&build(&s), "ay"), ["50005-50010/tcp"]);
     }
@@ -1088,6 +1112,7 @@ mod tests {
     fn address_of_an_unknown_network_is_denied_without_rules() {
         let mut s = base();
         s.networks.retain(|n| n.id != "ygg");
+        s.owned = vec![ip("300:1:2:3::100")];
         s.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
         assert_eq!(ids(&rs), ["a:an:8080:tcp:g:eth0"]);
@@ -1098,7 +1123,7 @@ mod tests {
     #[test]
     fn onion_locators_are_not_ip_rules() {
         let mut s = base();
-        s.apps[0].addresses.push(Address {
+        s.addresses.push(Address {
             locator: Locator::Onion {
                 hostname: "x.onion".into(),
             },
@@ -1353,7 +1378,7 @@ mod tests {
             last_seen: Utc::now(),
             family: Default::default(),
         }];
-        s.apps[0].addresses.clear();
+        s.addresses.clear();
         assert!(
             check_protect_host(&s, std::slice::from_ref(&l), std::slice::from_ref(&iface)).is_err()
         );
@@ -1386,7 +1411,7 @@ mod tests {
         ];
         a.protect_host = vec!["eth0".into(), "eth1".into()];
         let mut b = a.clone();
-        b.apps[0].addresses.reverse();
+        b.addresses.reverse();
         b.apps[0].ports.reverse();
         b.peers.reverse();
         b.grants.reverse();
@@ -1516,10 +1541,10 @@ mod tests {
     /// An sshd app, as the guard identifies it, with an address on the LAN network.
     fn sshd_snap(grants: Vec<Grant>) -> Snapshot {
         let id = app_identity(&listener("sshd", 22, "::")).id;
-        let mut a = app(&id, &[22], vec![]);
-        a.addresses = vec![address("ad", &id, "lan", "2001:db8:1:2::22", Scope::All)];
+        let a = app(&id, &[22]);
         Snapshot {
             apps: vec![a],
+            addresses: vec![address("ad", &id, "lan", "2001:db8:1:2::22", Scope::All)],
             networks: vec![lan()],
             grants: grants
                 .into_iter()
@@ -1592,7 +1617,7 @@ mod tests {
         // A grant on another app's port 22 address.
         let mut s = sshd_snap(vec![grant("g", "", Subject::Anyone)]);
         s.apps[0].id = "someone-else".into();
-        s.apps[0].addresses[0].app_id = "someone-else".into();
+        s.addresses[0].app_id = Some("someone-else".into());
         s.grants[0].target = Target::App("someone-else".into());
         assert!(check_protect_host(&s, &[listener("sshd", 22, "::")], &eth0()).is_err());
         // The address is on a network whose interface is not the protected one.
@@ -1604,10 +1629,10 @@ mod tests {
     #[test]
     fn lockout_rule_bound_to_another_interface_does_not_help() {
         let id = app_identity(&listener("sshd", 22, "::")).id;
-        let mut a = app(&id, &[22], vec![]);
-        a.addresses = vec![address("ad", &id, "ygg", "300:1:2:3::22", Scope::All)];
+        let a = app(&id, &[22]);
         let s = Snapshot {
             apps: vec![a],
+            addresses: vec![address("ad", &id, "ygg", "300:1:2:3::22", Scope::All)],
             networks: vec![ygg()],
             peers: vec![peer("admin", &[(CredentialKind::YggKey, KEY)])],
             grants: vec![Grant {

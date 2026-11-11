@@ -337,7 +337,7 @@ async fn validate(
     // Socket groups: valid ports, attached to apps that exist.
     let mut socket_group_apps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for g in &mut doc.socket_groups {
-        g.label = Engine::clean_label(&g.label, "socket group")?;
+        g.label = Engine::clean_label(&g.label, "port group")?;
         g.ports = crate::engine::clean_ranges(&g.ports)?;
         g.apps.sort_by(|a, b| a.id.cmp(&b.id));
         g.apps.dedup_by(|a, b| a.id == b.id);
@@ -348,11 +348,11 @@ async fn validate(
             )
             .is_some()
         {
-            return invalid(format!("socket group {} is listed twice", g.label));
+            return invalid(format!("port group {} is listed twice", g.label));
         }
         if let Some(a) = g.apps.iter().find(|a| !apps.contains_key(&a.id)) {
             return invalid(format!(
-                "socket group {} names unknown app {} ({})",
+                "port group {} names unknown app {} ({})",
                 g.label, a.id, a.name
             ));
         }
@@ -389,7 +389,7 @@ async fn validate(
                     .is_some_and(|attached| attached.contains(&app.id))
                 {
                     return invalid(format!(
-                        "grant for {} names socket group {label}, which the document does not attach to it",
+                        "grant for {} names port group {label}, which the document does not attach to it",
                         app.name
                     ));
                 }
@@ -1107,7 +1107,7 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
                                 .find(|x| x.label == *label)
                                 .map(|x| x.id.clone())
                                 .ok_or_else(|| {
-                                    EngineError::NotFound(format!("socket group {label}"))
+                                    EngineError::NotFound(format!("port group {label}"))
                                 })?,
                         },
                     },

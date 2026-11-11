@@ -14,14 +14,14 @@ use serde::Serialize;
 use socketguard_client::{Client, Error as ClientError, GrantQuery, Saved};
 use socketguard_core::api_types::{
     ApplyRequest, ApplyResponse, AttachSocketGroup, ChangesRequest, ChangesResponse, Enforcement,
-    ExportDocument, MergeRequest, NewGroup, NewNetwork, NewPeer, NewSocketGroup, NewTag,
-    ProtectHostRequest, ProtectHostResponse, ShareResponse, SplitRequest, StatusResponse,
-    TorKeyResponse, UpdateSettings, UpdateSocketGroup, UpdateTag,
+    ExportDocument, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewReservation,
+    NewSocketGroup, NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest, ShareResponse,
+    StatusResponse, TorKeyResponse, UpdateSocketGroup, UpdateTag,
 };
 use socketguard_core::{
     ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
-    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, Scope, Settings, SocketGroup, Tag,
-    TagMember,
+    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, ReservationView, Scope, Settings,
+    SocketGroup, Tag, TagMember,
 };
 
 /// Error shape the frontend branches on. API errors keep the daemon's code
@@ -122,13 +122,8 @@ async fn review_app(id: String, reviewed: bool) -> CmdResult<AppDetail> {
 }
 
 #[tauri::command]
-async fn split_app(id: String, req: SplitRequest) -> DoneResult<Address> {
-    Ok(client().split_app(&id, &req).await?.into())
-}
-
-#[tauri::command]
-async fn merge_app(id: String, req: MergeRequest) -> DoneResult<Address> {
-    Ok(client().merge_app(&id, &req).await?.into())
+async fn move_app(id: String, req: MoveAppRequest) -> DoneResult<AppDetail> {
+    Ok(client().move_app(&id, &req).await?.into())
 }
 
 #[tauri::command]
@@ -329,6 +324,53 @@ async fn detach_socket_group(id: String, app_id: String) -> DoneResult<SocketGro
     Ok(client().detach_socket_group(&id, &app_id).await?.into())
 }
 
+// ─── Addresses and reservations ──────────────────────────────────────────
+
+#[tauri::command]
+async fn list_addresses() -> CmdResult<Vec<Address>> {
+    Ok(client().list_addresses().await?)
+}
+
+#[tauri::command]
+async fn list_reservations() -> CmdResult<Vec<ReservationView>> {
+    Ok(client().list_reservations().await?)
+}
+
+#[tauri::command]
+async fn get_reservation(id: String) -> CmdResult<ReservationView> {
+    Ok(client().get_reservation(&id).await?)
+}
+
+#[tauri::command]
+async fn create_reservation(req: NewReservation) -> DoneResult<ReservationView> {
+    Ok(client().create_reservation(&req).await?.into())
+}
+
+#[tauri::command]
+async fn rename_reservation(id: String, label: String) -> DoneResult<ReservationView> {
+    Ok(client().rename_reservation(&id, &label).await?.into())
+}
+
+#[tauri::command]
+async fn release_reservation(id: String) -> DoneResult<()> {
+    Ok(client().release_reservation(&id).await?.into())
+}
+
+#[tauri::command]
+async fn add_binding(id: String, req: NewBinding) -> DoneResult<ReservationView> {
+    Ok(client().add_binding(&id, &req).await?.into())
+}
+
+#[tauri::command]
+async fn remove_binding(id: String, binding_id: String) -> DoneResult<ReservationView> {
+    Ok(client().remove_binding(&id, &binding_id).await?.into())
+}
+
+#[tauri::command]
+async fn reserve_address(id: String, req: ReserveRequest) -> DoneResult<ReservationView> {
+    Ok(client().reserve_address(&id, &req).await?.into())
+}
+
 // ─── Networks and settings ───────────────────────────────────────────────
 
 #[tauri::command]
@@ -349,11 +391,6 @@ async fn delete_network(id: String, force: bool) -> CmdResult<()> {
 #[tauri::command]
 async fn get_settings() -> CmdResult<Settings> {
     Ok(client().get_settings().await?)
-}
-
-#[tauri::command]
-async fn update_settings(req: UpdateSettings) -> CmdResult<Settings> {
-    Ok(client().update_settings(&req).await?)
 }
 
 #[tauri::command]
@@ -480,8 +517,7 @@ fn main() {
             get_app,
             delete_app,
             review_app,
-            split_app,
-            merge_app,
+            move_app,
             share_app,
             list_peers,
             create_peer,
@@ -519,8 +555,16 @@ fn main() {
             list_networks,
             add_network,
             delete_network,
+            list_addresses,
+            list_reservations,
+            get_reservation,
+            create_reservation,
+            rename_reservation,
+            release_reservation,
+            add_binding,
+            remove_binding,
+            reserve_address,
             get_settings,
-            update_settings,
             set_protect_host,
             activity,
             export_state,

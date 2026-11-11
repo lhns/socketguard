@@ -341,24 +341,29 @@ mod tests {
             last_seen: now,
             // 80 is outside the group; 50003 listens, 50004 was seen but is quiet.
             ports: vec![port(80, true), port(50003, true), port(50004, false)],
-            addresses: vec![Address {
-                id: "ad".into(),
-                app_id: "a".into(),
-                network_id: "n".into(),
-                scope: Scope::group("sg"),
-                locator: Locator::Onion {
+            addresses: vec![],
+        };
+        let address = Address {
+            id: "ad".into(),
+            ..Address::automatic(
+                "a",
+                Scope::group("sg"),
+                "n",
+                Locator::Onion {
                     hostname: "abc.onion".into(),
                 },
-                created_at: now,
-            }],
+            )
         };
         let snap = Snapshot {
             apps: vec![app],
+            networks: vec![info(NetworkKind::Tor)],
+            addresses: vec![address],
             socket_groups: vec![group],
             grants: vec![Grant {
                 id: "g".into(),
                 target: Target::App("a".into()),
-                scope: Scope::All,
+                // The grant names the group's row, which is what gives it an address.
+                scope: Scope::group("sg"),
                 network_id: None,
                 subject: Subject::Anyone,
                 created_at: now,

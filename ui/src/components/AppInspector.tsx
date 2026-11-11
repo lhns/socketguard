@@ -4,7 +4,7 @@ import type { AppDetail, AppPort, Network, PortRef } from "../api";
 import { useCommit, useRevoke } from "../commit";
 import { errorText, formatBytes, portLabel, scopeLabel } from "../lib";
 import {
-  useActivity, useApp, useDeleteApp, useGrants, useMergeApp, useSettings, useShare, useSplitApp,
+  useActivity, useApp, useDeleteApp, useGrants, useReservations, useSettings, useShare,
 } from "../queries";
 import AccessList, { type AccessHighlight } from "./AccessList";
 import AddAccess from "./AddAccess";
@@ -73,7 +73,7 @@ function OneApp({ app, highlight, onCollapse, onClose }: { app: AppDetail } & Co
     >
       {app.identity_note === "unidentified" && (
         <p className="hint">
-          SocketGuard cannot tell which program owns this socket, so it is identified by its port alone. It is closed until you
+          SocketGuard cannot tell which program owns this port, so it is identified by its port alone. It is closed until you
           grant access, like any other app.
         </p>
       )}
@@ -181,13 +181,12 @@ function PortRow({ app, port }: { app: AppDetail; port: AppPort }) {
   );
 }
 
-/** Each network once, with the address of the app on it; split a port off or merge them again there. */
+/** Each network once, with the addresses serving the app on it; an address is up while it is on its
+ * interface (or published, on Tor), and belongs to a reservation or to the app's own rows. */
 function Addresses({ app, networks }: { app: AppDetail; networks: Network[] }) {
-  const toast = useToast();
-  const split = useSplitApp();
-  const merge = useMergeApp();
+  const reservations = useReservations().data ?? [];
   if (app.addresses.length === 0) {
-    return <Section title="Addresses"><p className="muted">No addresses assigned yet.</p></Section>;
+    return <Section title="Addresses"><p className="muted">No addresses yet. An app gets one once a grant names it.</p></Section>;
   }
   const byNetwork = new Map<string, AppDetail["addresses"]>();
   for (const a of app.addresses) byNetwork.set(a.network_id, [...(byNetwork.get(a.network_id) ?? []), a]);
@@ -200,43 +199,17 @@ function Addresses({ app, networks }: { app: AppDetail; networks: Network[] }) {
             <li key={networkId} className="address-net">
               <strong>{net?.name ?? networkId}</strong>
               {net?.grants_apply === false && <span className="muted"> · this machine only</span>}
-              {list.map((a) => (
-                <div key={a.id} className="address-row">
-                  <span className="mono">{a.locator.kind === "ipv6" ? a.locator.addr : a.locator.hostname}</span>
-                  <span className="muted">{a.scope.kind === "all" ? (list.length > 1 ? "all other ports" : "all ports") : scopeLabel(a.scope, app.socket_groups)}</span>
-                  {a.scope.kind === "all" && app.ports.length > 1 &&
-                    app.ports.map((p) => (
-                      <button
-                        key={portLabel(p)}
-                        className="btn btn-sm"
-                        disabled={split.isPending}
-                        title={`Give ${portLabel(p)} its own address on ${net?.name ?? networkId}`}
-                        onClick={() =>
-                          split.mutate({ id: app.id, req: { network_id: networkId, port: p.port, proto: p.proto } }, {
-                            onSuccess: () => toast.success(`${portLabel(p)} has its own address`),
-                            onError: (e) => toast.error(errorText(e)),
-                          })
-                        }
-                      >
-                        Split {portLabel(p)}
-                      </button>
-                    ))}
-                </div>
-              ))}
-              {list.length > 1 && (
-                <button
-                  className="btn btn-sm"
-                  disabled={merge.isPending}
-                  onClick={() =>
-                    merge.mutate({ id: app.id, req: { network_id: networkId, address_ids: list.map((a) => a.id) } }, {
-                      onSuccess: () => toast.success("Addresses merged"),
-                      onError: (e) => toast.error(errorText(e)),
-                    })
-                  }
-                >
-                  Merge {list.length} addresses on {net?.name ?? networkId}
-                </button>
-              )}
+              {list.map((a) => {
+                const reservation = a.reservation_id ? reservations.find((r) => r.id === a.reservation_id) : undefined;
+                return (
+                  <div key={a.id} className="address-row">
+                    <span className="mono">{a.locator.kind === "ipv6" ? a.locator.addr : a.locator.hostname}</span>
+                    <span className="muted">{scopeLabel(a.scope, app.socket_groups)}</span>
+                    <span className={`badge ${a.up ? "reach reach-ok" : "reach reach-warn"}`}>{a.up ? "up" : "closed"}</span>
+                    {a.reservation_id && <span className="badge">reservation {reservation?.label ?? a.reservation_id.slice(0, 8)}</span>}
+                  </div>
+                );
+              })}
             </li>
           );
         })}

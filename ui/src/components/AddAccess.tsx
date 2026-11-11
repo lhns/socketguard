@@ -70,7 +70,7 @@ export default function AddAccess({ fixed, port, onDone }: Props) {
     };
     for (const t of targets) {
       if (t.kind === "app") addApp(t.id, null);
-      else for (const m of tags.find((x) => x.id === t.id)?.members ?? []) addApp(m.app_id, portOfScope(m.scope));
+      else if (t.kind === "tag") for (const m of tags.find((x) => x.id === t.id)?.members ?? []) addApp(m.app_id, portOfScope(m.scope));
     }
     return [...out.values()].sort((a, b) => a.port - b.port || a.proto.localeCompare(b.proto));
   }, [targets, apps, tags]);

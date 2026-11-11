@@ -460,7 +460,7 @@ impl Engine {
                 plan.define_ref(ref_, &group.id)?;
                 let activity = NewActivity::new(
                     ActivityKind::SocketGroupAdded,
-                    format!("Added socket group {}", group.label),
+                    format!("Added port group {}", group.label),
                 );
                 plan.push_group_plan(
                     gp,
@@ -486,7 +486,7 @@ impl Engine {
                 )?;
                 let activity = NewActivity::new(
                     ActivityKind::SocketGroupChanged,
-                    format!("Changed socket group {}", group.label),
+                    format!("Changed port group {}", group.label),
                 );
                 plan.push_group_plan(
                     gp,
@@ -501,7 +501,7 @@ impl Engine {
                 let (group, gp) = self.plan_delete_group(&mut plan.cat, &id)?;
                 let activity = NewActivity::new(
                     ActivityKind::SocketGroupRemoved,
-                    format!("Removed socket group {}", group.label),
+                    format!("Removed port group {}", group.label),
                 );
                 plan.push_group_plan(
                     gp,
@@ -526,7 +526,7 @@ impl Engine {
                         .map_or(app_id.clone(), |a| a.name.clone());
                     let activity = NewActivity::new(
                         ActivityKind::SocketGroupChanged,
-                        format!("Attached socket group {} to {app}", group.label),
+                        format!("Attached port group {} to {app}", group.label),
                     )
                     .app(app_id);
                     plan.push_group_plan(
@@ -547,7 +547,7 @@ impl Engine {
                     .map_or(app_id.clone(), |a| a.name.clone());
                 let activity = NewActivity::new(
                     ActivityKind::SocketGroupChanged,
-                    format!("Detached socket group {} from {app}", group.label),
+                    format!("Detached port group {} from {app}", group.label),
                 )
                 .app(app_id);
                 plan.push_group_plan(

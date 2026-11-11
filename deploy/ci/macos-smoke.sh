@@ -55,14 +55,16 @@ sg status
 python3 -m http.server "$PORT" --bind :: > "$TMP/http.log" 2>&1 &
 HPID=$!
 
-echo "== waiting for the listener to appear in apps list with an address"
+# Addresses exist only once a grant names a row (ADR 0047), except on Local over loopback,
+# which takes no grants: there every app keeps an address, so none is granted here.
+echo "== waiting for the listener to appear in apps list with an address that is up"
 found=""
 for _ in $(seq 30); do
   if sg --json apps list > "$TMP/apps.json" 2>/dev/null \
      && python3 -c '
 import json, sys
 apps = json.load(open(sys.argv[1]))
-sys.exit(0 if any(any(p["port"] == int(sys.argv[2]) for p in a["ports"]) and a["addresses"] for a in apps) else 1)
+sys.exit(0 if any(any(p["port"] == int(sys.argv[2]) for p in a["ports"]) and any(ad["up"] for ad in a["addresses"]) for a in apps) else 1)
 ' "$TMP/apps.json" "$PORT"
   then found=1; break; fi
   sleep 1

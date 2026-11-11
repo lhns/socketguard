@@ -3,7 +3,7 @@
 // It is not part of the production bundle.
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
-  App, AppDetail, BatchChange, ChangeOp, EffectiveAccess, GrantReach, GrantView, Network, Peer, PeerGroup, PortRange, Scope, SocketGroup, Subject, Tag,
+  Address, App, AppDetail, BatchChange, ChangeOp, EffectiveAccess, GrantReach, GrantView, Network, Peer, PeerGroup, PortRange, ReservationView, Scope, SocketGroup, Subject, Tag,
 } from "../api";
 import { ALL_SCOPE, sameScope } from "../lib";
 
@@ -41,19 +41,19 @@ own.forEach(([name, exe, ports], i) => {
     first_seen: T0, last_seen: T0,
     ports: ports.map(([port, proto]) => ({ port, proto, listening: true, last_seen: T0, family: i % 2 ? "dual" : "v6" })),
     addresses: [
-      { id: `${id}-y`, app_id: id, network_id: "n-ygg", scope: ALL_SCOPE, locator: { kind: "ipv6", addr: `302:a${i}::1` }, created_at: T0 },
-      { id: `${id}-l`, app_id: id, network_id: "n-lan", scope: ALL_SCOPE, locator: { kind: "ipv6", addr: `fd00:1::${i + 10}` }, created_at: T0 },
+      { id: `${id}-y`, app_id: id, network_id: "n-ygg", scope: ALL_SCOPE, locator: { kind: "ipv6", addr: `302:a${i}::1` }, created_at: T0, reservation_id: null, up: true, excluded: [], notes: [] },
+      { id: `${id}-l`, app_id: id, network_id: "n-lan", scope: ALL_SCOPE, locator: { kind: "ipv6", addr: `fd00:1::${i + 10}` }, created_at: T0, reservation_id: null, up: true, excluded: [], notes: [] },
     ],
   });
 });
-apps[0].addresses.push({ id: "a1-y2", app_id: "a1", network_id: "n-ygg", scope: { kind: "port", port: 443, proto: "tcp" }, locator: { kind: "ipv6", addr: "302:a0::2" }, created_at: T0 });
+apps[0].addresses.push({ id: "a1-y2", app_id: "a1", network_id: "n-ygg", scope: { kind: "port", port: 443, proto: "tcp" }, locator: { kind: "ipv6", addr: "302:a0::2" }, created_at: T0, reservation_id: null, up: true, excluded: [], notes: [] });
 sys.forEach((name, i) => {
   const id = `s${i + 1}`;
   apps.push({
     id, name, process_name: name, exe_path: null, interpreter_arg: null, identity_note: null, reviewed: true, system: true,
     first_seen: T0, last_seen: T0,
     ports: [{ port: 100 + i, proto: "tcp", listening: true, last_seen: T0, family: "v6" }],
-    addresses: [{ id: `${id}-y`, app_id: id, network_id: "n-ygg", scope: ALL_SCOPE, locator: { kind: "ipv6", addr: `302:b${i}::1` }, created_at: T0 }],
+    addresses: [{ id: `${id}-y`, app_id: id, network_id: "n-ygg", scope: ALL_SCOPE, locator: { kind: "ipv6", addr: `302:b${i}::1` }, created_at: T0, reservation_id: null, up: true, excluded: [], notes: [] }],
   });
 });
 
@@ -98,7 +98,34 @@ let grants: G[] = [
   { id: "gr6", target: { kind: "app", id: "a5" }, scope: { kind: "port", port: 3000, proto: "tcp" }, network_id: null, subject: { kind: "anyone" } },
   { id: "gr7", target: { kind: "tag", id: "t4" }, scope: ALL_SCOPE, network_id: "n-lan", subject: { kind: "peer", id: "p4" } },
   { id: "gr8", target: { kind: "app", id: "a7" }, scope: ALL_SCOPE, network_id: null, subject: { kind: "peer", id: "p2" } },
+  { id: "gr9", target: { kind: "reservation", id: "r1" }, scope: ALL_SCOPE, network_id: "n-ygg", subject: { kind: "peer", id: "p1" } },
 ];
+
+// Reservations (ADR 0047): r1 binds two rows and has a port conflict (nobody is served on 3000/tcp).
+const resAddress = (id: string, reservation_id: string, network_id: string, addr: string): Address => ({
+  id, network_id, locator: { kind: "ipv6", addr }, created_at: T0, app_id: null, scope: ALL_SCOPE, reservation_id, up: true, excluded: [], notes: [],
+});
+const bindings: ReservationView["bindings"] = [
+  { id: "b1", reservation_id: "r1", target: { kind: "app", app_id: "a1", scope: ALL_SCOPE } },
+  { id: "b2", reservation_id: "r1", target: { kind: "app", app_id: "a5", scope: { kind: "port", port: 3000, proto: "tcp" } } },
+  { id: "b3", reservation_id: "r2", target: { kind: "app", app_id: "a2", scope: ALL_SCOPE } },
+];
+const reservations: ReservationView[] = [
+  {
+    id: "r1", label: "front", created_at: T0, bindings: bindings.filter((b) => b.reservation_id === "r1"),
+    addresses: [resAddress("ra1", "r1", "n-ygg", "302:ffff::1")],
+    conflicts: [{ ports: { start: 3000, end: 3000, proto: "tcp" }, bindings: ["b1", "b2"], served_app: null }],
+    grants: [],
+  },
+  {
+    id: "r2", label: "database", created_at: T0, bindings: bindings.filter((b) => b.reservation_id === "r2"),
+    addresses: [resAddress("ra2", "r2", "n-lan", "fd00:1::200")],
+    conflicts: [], grants: [],
+  },
+];
+const reservationView = (r: ReservationView): ReservationView => ({
+  ...r, grants: grants.filter((g) => g.target.kind === "reservation" && g.target.id === r.id).map(view),
+});
 
 // ─── Derived views ──────────────────────────────────────────────────────────
 
@@ -258,6 +285,9 @@ export function installMock() {
         case "list_groups": return groups;
         case "list_grants": return grants.map(view);
         case "list_tags": return tags;
+        case "list_reservations": return reservations.map(reservationView);
+        case "get_reservation": return reservationView(reservations.find((r) => r.id === a.id)!);
+        case "list_addresses": return [...apps.flatMap((x) => x.addresses), ...reservations.flatMap((r) => r.addresses)];
         case "list_socket_groups": return socketGroups;
         case "get_socket_group": return socketGroups.find((g) => g.id === a.id);
         case "create_socket_group": {
@@ -278,7 +308,7 @@ export function installMock() {
           socketGroups = socketGroups.map((g) => (g.id === a.id ? { ...g, apps: g.apps.filter((x) => x !== a.appId) } : g));
           return done(socketGroups.find((g) => g.id === a.id));
         case "list_networks": return networks;
-        case "get_settings": return { address_mode: "per_app", protect_host_interfaces: ["eth0"] };
+        case "get_settings": return { protect_host_interfaces: ["eth0"] };
         case "activity": return [];
         case "share_app": return { tor: [] };
         case "subscribe_events": return undefined;

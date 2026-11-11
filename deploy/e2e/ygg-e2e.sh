@@ -55,18 +55,18 @@ JSON
 daemon_start
 
 # ── Allocation ───────────────────────────────────────────────────────────────
-# The listener's address, and whether that address is inside A's subnet.
-# The CLI drives the model: find the listener's app, then its address on the ygg network.
+# An address exists only once a grant names the listener's row (ADR 0047): first the app is
+# found and shown to have none, then a grant creates its address on the ygg network.
 sock_addr() { app_address ygg addr; }
 in_subnet() { A python3 -c 'import ipaddress,sys; sys.exit(0 if ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv[2]) else 1)' "$1" "$2"; }
 on_ygg0()   { A ip -6 -j addr show dev ygg0 | jq -e --arg a "$1" '[.[].addr_info[].local] | index($a)' >/dev/null; }
+# No address of the app is up (revoked, or never granted).
+none_up()   { docker exec "$NODE_A" $SG apps show "$APP_ID" --json | jq -e '[.addresses[] | select(.up)] | length == 0' >/dev/null; }
+all_up()    { docker exec "$NODE_A" $SG apps show "$APP_ID" --json | jq -e '[.addresses[] | select(.network_id == "ygg")] | length > 0 and all(.up)' >/dev/null; }
 
-step "daemon detected the listener" retry 40 sock_addr || exit 1
-ADDR="$(sock_addr)"
-echo "      the listener got $ADDR"
+step "daemon detected the listener" retry 40 app_id || exit 1
+APP_ID="$(app_id)"
 B_KEY="$(B yggdrasilctl -json -endpoint "$SOCK" getSelf | jq -r .key)"
-step "address is inside A's 3xx::/64 subnet" in_subnet "$ADDR" "$SUBNET"
-step "address is configured on ygg0" retry 10 on_ygg0 "$ADDR"
 
 # ── Reachability ─────────────────────────────────────────────────────────────
 fetch_from_b() { B curl -fsS --max-time 5 "http://[$ADDR]:$PORT/" | grep -q sg-e2e-ok; }
@@ -78,14 +78,20 @@ table_exists() { A nft list table inet socketguard >/dev/null; }
 step "B reaches A over Yggdrasil (ping, always allowed)" retry 90 ping_node_from_b || exit 1
 step "the daemon installed the nftables table" table_exists
 
-# Secure by default: nothing is granted, so the allocated address is denied.
-step "closed by default: B cannot fetch the allocated address" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
-step "closed address is still configured on ygg0" on_ygg0 "$ADDR"
+# Secure by default: nothing is granted, so the app has no address and the wildcard
+# listener is denied on the node address.
+step "no grant: the app has no address" sh -c "docker exec $NODE_A $SG apps show $APP_ID --json | jq -e '.addresses | length == 0' >/dev/null"
+step "closed by default: B cannot fetch via the node address" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
 
-APP_ID="$(app_id)"
 step "add a peer holding B's Yggdrasil key" A $SG peers add --label bnode --key "$B_KEY"
 step "grant the listener's port to that peer" A $SG grant "$APP_ID:$PORT" bnode --network ygg
 step "the grant is verified on the overlay" sh -c "docker exec $NODE_A $SG grants --app $APP_ID --json | jq -e '.[0].reach[0].reach == \"verified\"' >/dev/null"
+step "granted: the app got an address" retry 40 sock_addr || exit 1
+ADDR="$(sock_addr)"
+echo "      the listener got $ADDR"
+step "address is inside A's 3xx::/64 subnet" in_subnet "$ADDR" "$SUBNET"
+step "address is configured on ygg0" retry 10 on_ygg0 "$ADDR"
+step "the address is reported up" retry 10 all_up
 step "granted: B can fetch from the new address" retry 30 fetch_from_b
 
 # The listener is bound to ::, so it also answers on A's own node address; the overlay
@@ -127,10 +133,18 @@ step "enabled: the node address is closed again" sh -c "! docker exec $NODE_B cu
 
 step "revoke the grant" A $SG revoke "$APP_ID:$PORT" bnode
 step "revoked: B cannot fetch" retry 30 sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
-step "blocked attempts are listed by 'activity --blocked'" retry 150 sh -c "docker exec $NODE_B curl -s --max-time 2 http://[$ADDR]:$PORT/ >/dev/null; docker exec $NODE_A $SG activity --blocked --json | jq -e 'length > 0' >/dev/null"
+# Nothing names the row any more: the address is taken down (dormant, remembered), not kept closed.
+step "revoked: the address left ygg0" retry 30 sh -c "! docker exec $NODE_A ip -6 -j addr show dev ygg0 | jq -e --arg a '$ADDR' '[.[].addr_info[].local] | index(\$a)' >/dev/null"
+step "revoked: no address of the app is up" retry 10 none_up
+# The address is gone, so attempts are blocked on the node address (the wildcard listener).
+step "blocked attempts are listed by 'activity --blocked'" retry 150 sh -c "docker exec $NODE_B curl -s --max-time 2 http://[$NODE_ADDR]:$PORT/ >/dev/null; docker exec $NODE_A $SG activity --blocked --json | jq -e 'length > 0' >/dev/null"
+# A new grant brings the same address back, so the rest of the test (stop, disable) has one up.
+step "grant to the peer again" A $SG grant "$APP_ID:$PORT" bnode --network ygg
+step "granted again: the same address is back on ygg0" retry 30 on_ygg0 "$ADDR"
+step "granted again: B can fetch" retry 30 fetch_from_b
 step "stop the daemon again" daemon_stop
-step "stopped: revoked stays closed" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
 step "stopped: the table stays" table_exists
+step "stopped: the grant stays in force" fetch_from_b
 
 # ── Disable ──────────────────────────────────────────────────────────────────
 step "daemon --disable succeeds" A sh -c "SOCKETGUARD_CONFIG=/etc/sg.json $DAEMON --disable"

@@ -9,9 +9,9 @@ use socketguard_core::api_types::{
     ShareResponse, StatusResponse, TorKeyResponse,
 };
 use socketguard_core::{
-    AccessOrigin, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Locator, Network,
-    NetworkKind, NetworkStatus, ParsedCredential, Peer, PeerGroup, Reach, Scope, Settings,
-    SocketGroup, Subject, Tag, Target,
+    ranges_text, AccessOrigin, ActivityRecord, Address, App, AppDetail, BindingTarget, Credential,
+    GrantView, Locator, Network, NetworkKind, NetworkStatus, ParsedCredential, Peer, PeerGroup,
+    Reach, ReservationView, Scope, Settings, SocketGroup, Subject, Tag, Target,
 };
 use std::collections::HashMap;
 
@@ -23,6 +23,7 @@ pub struct Names {
     pub groups: HashMap<String, String>,
     pub tags: HashMap<String, String>,
     pub socket_groups: HashMap<String, String>,
+    pub reservations: HashMap<String, String>,
 }
 
 impl Names {
@@ -30,6 +31,7 @@ impl Names {
         Self {
             tags: HashMap::new(),
             socket_groups: HashMap::new(),
+            reservations: HashMap::new(),
             apps: apps
                 .iter()
                 .map(|a| (a.id.clone(), a.name.clone()))
@@ -54,7 +56,16 @@ impl Names {
         self
     }
 
-    /// The names of `groups` (socket groups) too.
+    /// The names of `reservations` too.
+    pub fn with_reservations(mut self, reservations: &[ReservationView]) -> Self {
+        self.reservations = reservations
+            .iter()
+            .map(|r| (r.reservation.id.clone(), r.reservation.label.clone()))
+            .collect();
+        self
+    }
+
+    /// The names of `groups` (port groups) too.
     pub fn with_socket_groups(mut self, groups: &[SocketGroup]) -> Self {
         self.socket_groups = groups
             .iter()
@@ -67,7 +78,7 @@ impl Names {
         label(&self.apps, id)
     }
 
-    /// A scope for people: `All sockets`, `80/tcp`, `group <label>`.
+    /// A scope for people: `All ports`, `80/tcp`, `group <label>`.
     pub fn scope(&self, s: &Scope) -> String {
         match s {
             Scope::Group { id } => format!("group {}", label(&self.socket_groups, id)),
@@ -79,11 +90,37 @@ impl Names {
         label(&self.tags, id)
     }
 
-    /// What a grant covers: an app's name, or `tag:<label>`.
+    pub fn reservation(&self, id: &str) -> String {
+        label(&self.reservations, id)
+    }
+
+    /// What a grant covers: an app's name, `tag:<label>` or `reservation:<label>`.
     pub fn target(&self, t: &Target) -> String {
         match t {
             Target::App(id) => self.app(id),
             Target::Tag(id) => format!("tag:{}", self.tag(id)),
+            Target::Reservation(id) => format!("reservation:{}", self.reservation(id)),
+        }
+    }
+
+    /// An app row as typed in commands: `app`, `app:80/tcp`, `app:socket-group=<label>`.
+    pub fn row(&self, app_id: &str, scope: &Scope) -> String {
+        match scope {
+            Scope::All => self.app(app_id),
+            Scope::Group { id } => format!(
+                "{}:socket-group={}",
+                self.app(app_id),
+                label(&self.socket_groups, id)
+            ),
+            Scope::Port { port, proto } => format!("{}:{port}/{proto}", self.app(app_id)),
+        }
+    }
+
+    /// A binding as typed in commands: a row, or `tag:<label>`.
+    pub fn binding(&self, t: &BindingTarget) -> String {
+        match t {
+            BindingTarget::App { app_id, scope } => self.row(app_id, scope),
+            BindingTarget::Tag { tag_id } => format!("tag:{}", self.tag(tag_id)),
         }
     }
 
@@ -217,6 +254,20 @@ fn app_ports(app: &App) -> String {
     }
 }
 
+/// Why a reach is what it is, one line per note, below a table of grants.
+fn reach_notes(grants: &[GrantView]) -> Vec<String> {
+    grants
+        .iter()
+        .flat_map(|g| {
+            g.reach.iter().filter_map(move |r| {
+                r.note
+                    .as_ref()
+                    .map(|n| format!("note ({} on {}): {n}", short(&g.grant.id), r.network_id))
+            })
+        })
+        .collect()
+}
+
 fn reach_summary(g: &GrantView) -> String {
     if g.reach.is_empty() {
         return "-".to_string();
@@ -308,8 +359,7 @@ pub fn networks(nets: &[Network]) -> String {
 
 pub fn settings(s: &Settings) -> String {
     format!(
-        "address-mode   {}\nprotect-host   {}",
-        s.address_mode,
+        "protect-host   {}",
         protect_host(&s.protect_host_interfaces)
     )
 }
@@ -344,20 +394,102 @@ pub fn apps(apps: &[App]) -> String {
     out
 }
 
-fn addresses_table(addrs: &[Address], groups: &[SocketGroup]) -> String {
-    table(
-        &["ID", "NETWORK", "ADDRESS", "PORTS"],
-        addrs
-            .iter()
-            .map(|a| {
-                vec![
-                    short(&a.id).to_string(),
-                    a.network_id.clone(),
-                    locator(&a.locator),
-                    a.scope.describe(groups),
-                ]
-            })
-            .collect(),
+/// `up` when the address is on its interface (or published), else `closed`: nothing grants
+/// the row it serves, or the network is down.
+fn up_label(up: bool) -> &'static str {
+    if up {
+        "up"
+    } else {
+        "closed"
+    }
+}
+
+/// What an address serves: its ports, or the reservation it belongs to.
+fn address_serves(a: &Address, groups: &[SocketGroup], names: &Names) -> String {
+    match &a.reservation_id {
+        Some(r) => format!("reservation {}", names.reservation(r)),
+        None => a.scope.describe(groups),
+    }
+}
+
+/// Lines under an address table: ports left out, and why a Tor service is not as expected.
+fn address_notes(addrs: &[Address]) -> Vec<String> {
+    let mut out = Vec::new();
+    for a in addrs {
+        if !a.excluded.is_empty() {
+            out.push(format!(
+                "{}: leaves out {} (another app listens there)",
+                short(&a.id),
+                ranges_text(&a.excluded)
+            ));
+        }
+        for n in &a.notes {
+            out.push(format!("{}: {n}", short(&a.id)));
+        }
+    }
+    out
+}
+
+fn with_lines(mut body: String, lines: Vec<String>) -> String {
+    if !lines.is_empty() {
+        body.push_str("\n\n");
+        body.push_str(&lines.join("\n"));
+    }
+    body
+}
+
+fn addresses_table(addrs: &[Address], groups: &[SocketGroup], names: &Names) -> String {
+    with_lines(
+        table(
+            &["ID", "NETWORK", "ADDRESS", "PORTS", "STATE"],
+            addrs
+                .iter()
+                .map(|a| {
+                    vec![
+                        short(&a.id).to_string(),
+                        a.network_id.clone(),
+                        locator(&a.locator),
+                        address_serves(a, groups, names),
+                        up_label(a.up).to_string(),
+                    ]
+                })
+                .collect(),
+        ),
+        address_notes(addrs),
+    )
+}
+
+/// Every address of the host (`addresses list`): whose it is, what it serves, its state.
+pub fn addresses(addrs: &[Address], names: &Names) -> String {
+    if addrs.is_empty() {
+        return "no addresses yet: an app row gets one when a grant names it".to_string();
+    }
+    with_lines(
+        table(
+            &["ID", "NETWORK", "ADDRESS", "OWNER", "PORTS", "STATE"],
+            addrs
+                .iter()
+                .map(|a| {
+                    let (owner, ports) = match (&a.reservation_id, &a.app_id) {
+                        (Some(r), _) => (
+                            format!("reservation {}", names.reservation(r)),
+                            Scope::All.describe(&[]),
+                        ),
+                        (None, Some(app)) => (names.app(app), names.scope(&a.scope)),
+                        (None, None) => ("-".to_string(), names.scope(&a.scope)),
+                    };
+                    vec![
+                        short(&a.id).to_string(),
+                        a.network_id.clone(),
+                        locator(&a.locator),
+                        owner,
+                        ports,
+                        up_label(a.up).to_string(),
+                    ]
+                })
+                .collect(),
+        ),
+        address_notes(addrs),
     )
 }
 
@@ -378,10 +510,10 @@ fn socket_groups_table(groups: &[SocketGroup]) -> String {
     )
 }
 
-/// The socket groups as a table.
+/// The port groups as a table.
 pub fn socket_groups(groups: &[SocketGroup], names: &Names) -> String {
     if groups.is_empty() {
-        return "no socket groups".to_string();
+        return "no port groups".to_string();
     }
     table(
         &["ID", "LABEL", "PORTS", "APPS"],
@@ -416,7 +548,7 @@ pub fn grants(grants: &[GrantView], names: &Names, with_app: bool) -> String {
         header.push("APP");
     }
     header.extend(["PORT", "NETWORK", "WHO", "REACH"]);
-    table(
+    let t = table(
         &header,
         grants
             .iter()
@@ -430,7 +562,15 @@ pub fn grants(grants: &[GrantView], names: &Names, with_app: bool) -> String {
                 row
             })
             .collect(),
-    )
+    );
+    with_lines(t, reach_notes(grants))
+}
+
+/// Which kind of access `app_detail` lists in a section of its own.
+#[derive(Clone, Copy)]
+enum Origin {
+    Tag,
+    Reservation,
 }
 
 pub fn app_detail(d: &AppDetail, names: &Names) -> String {
@@ -482,14 +622,14 @@ pub fn app_detail(d: &AppDetail, names: &Names) -> String {
         )
     };
     let addrs = if app.addresses.is_empty() {
-        "none".to_string()
+        "none yet: a row gets an address when a grant names it".to_string()
     } else {
-        addresses_table(&app.addresses, &d.socket_groups)
+        addresses_table(&app.addresses, &d.socket_groups, names)
     };
     let mut parts = vec![head, section("Ports", ports), section("Addresses", addrs)];
     if !d.socket_groups.is_empty() {
         parts.push(section(
-            "Socket groups",
+            "Port groups",
             socket_groups_table(&d.socket_groups),
         ));
     }
@@ -501,24 +641,32 @@ pub fn app_detail(d: &AppDetail, names: &Names) -> String {
             grants(&d.grants, names, false)
         },
     ));
-    let via_tags: Vec<_> = d
-        .access
-        .iter()
-        .filter_map(|a| match &a.origin {
-            AccessOrigin::Tag { tag_id } => Some((tag_id, a)),
-            _ => None,
-        })
-        .collect();
-    if !via_tags.is_empty() {
+    for (title, first, which) in [
+        ("Through tags", "TAG", Origin::Tag),
+        ("Through reservations", "RESERVATION", Origin::Reservation),
+    ] {
+        let via: Vec<_> = d
+            .access
+            .iter()
+            .filter_map(|a| match (&a.origin, which) {
+                (AccessOrigin::Tag { tag_id }, Origin::Tag) => Some((names.tag(tag_id), a)),
+                (AccessOrigin::Reservation { reservation_id }, Origin::Reservation) => {
+                    Some((names.reservation(reservation_id), a))
+                }
+                _ => None,
+            })
+            .collect();
+        if via.is_empty() {
+            continue;
+        }
         parts.push(section(
-            "Through tags",
+            title,
             table(
-                &["TAG", "PORT", "NETWORK", "WHO"],
-                via_tags
-                    .into_iter()
-                    .map(|(tag_id, a)| {
+                &[first, "PORT", "NETWORK", "WHO"],
+                via.into_iter()
+                    .map(|(label, a)| {
                         vec![
-                            names.tag(tag_id),
+                            label,
                             names.scope(&a.scope),
                             a.network_id.clone().unwrap_or_else(|| "all".to_string()),
                             match (&a.subject, &a.network_id) {
@@ -553,13 +701,14 @@ pub fn app_detail(d: &AppDetail, names: &Names) -> String {
     parts.join("\n\n")
 }
 
-/// Connection strings per TCP port of the app, optionally limited to one network: first
+/// Connection strings per TCP port of the app (for its addresses that are up), optionally limited to one network: first
 /// `[addr]:port`, then a URL for the well-known web ports.
 pub fn share_lines(app: &App, network: Option<&str>) -> Vec<String> {
     let mut plain = Vec::new();
     let mut urls = Vec::new();
     for a in &app.addresses {
-        if network.is_some_and(|n| n != a.network_id) {
+        // A closed address (no grant names its row now) does not accept connections.
+        if !a.up || network.is_some_and(|n| n != a.network_id) {
             continue;
         }
         // The ports the address serves among the app's detected ones; a socket group's
@@ -797,8 +946,10 @@ fn change_line(c: &Change) -> String {
         ChangeItem::Grant => "grant",
         ChangeItem::Tag => "tag",
         ChangeItem::TagMember => "tag member",
-        ChangeItem::SocketGroup => "socket group",
+        ChangeItem::SocketGroup => "port group",
         ChangeItem::App => "app",
+        ChangeItem::Reservation => "reservation",
+        ChangeItem::Binding => "binding",
     };
     let mut line = format!("{sign} {item} {}", c.name);
     if let Some(d) = &c.detail {
@@ -824,7 +975,10 @@ pub fn batch(r: &ChangesResponse) -> String {
                 let reach: Vec<String> = b
                     .reach
                     .iter()
-                    .map(|g| format!("{}: {}", g.network_id, reach_label(g.reach)))
+                    .map(|g| match &g.note {
+                        Some(n) => format!("{}: {} - {n}", g.network_id, reach_label(g.reach)),
+                        None => format!("{}: {}", g.network_id, reach_label(g.reach)),
+                    })
                     .collect();
                 line.push_str(&format!("  [{}]", reach.join(", ")));
             }
@@ -843,15 +997,7 @@ fn tag_members(t: &Tag, names: &Names) -> String {
     }
     t.members
         .iter()
-        .map(|m| match &m.scope {
-            Scope::All => names.app(&m.app_id),
-            Scope::Group { id } => format!(
-                "{}:socket-group={}",
-                names.app(&m.app_id),
-                label(&names.socket_groups, id)
-            ),
-            Scope::Port { port, proto } => format!("{}:{port}/{proto}", names.app(&m.app_id)),
-        })
+        .map(|m| names.row(&m.app_id, &m.scope))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -903,6 +1049,85 @@ pub fn tag_detail(t: &Tag, names: &Names, grants_on_tag: &[GrantView]) -> String
         grants(grants_on_tag, names, true)
     };
     format!("{head}\n\n{}", section("Grants on this tag", grants))
+}
+
+// ─── Reservations ────────────────────────────────────────────────────────────
+
+/// A reservation: its bindings, its address on each network, what it cannot serve, and the
+/// grants on it.
+pub fn reservation_detail(r: &ReservationView, names: &Names) -> String {
+    let res = &r.reservation;
+    let mut out = format!("{}  ({})", res.label, res.id);
+    let bindings: Vec<String> = res
+        .bindings
+        .iter()
+        .map(|b| names.binding(&b.target))
+        .collect();
+    out.push_str(&format!(
+        "\n  bindings   {}",
+        if bindings.is_empty() {
+            "none".to_string()
+        } else {
+            bindings.join(", ")
+        }
+    ));
+    if r.addresses.is_empty() {
+        out.push_str("\n  addresses  none yet: it gets one when a grant names it");
+    }
+    for (i, a) in r.addresses.iter().enumerate() {
+        out.push_str(&format!(
+            "\n  {}  {}  {}  {}",
+            if i == 0 { "addresses" } else { "         " },
+            a.network_id,
+            locator(&a.locator),
+            up_label(a.up)
+        ));
+        if !a.excluded.is_empty() {
+            out.push_str(&format!(
+                "\n             {}: leaves out {} (another app listens there)",
+                a.network_id,
+                ranges_text(&a.excluded)
+            ));
+        }
+        for n in &a.notes {
+            out.push_str(&format!("\n             {}: {n}", a.network_id));
+        }
+    }
+    for c in &r.conflicts {
+        let claimed: Vec<String> = c
+            .bindings
+            .iter()
+            .filter_map(|id| res.bindings.iter().find(|b| &b.id == id))
+            .map(|b| names.binding(&b.target))
+            .collect();
+        let outcome = match &c.served_app {
+            Some(app) => format!("served for {}", names.app(app)),
+            None => "closed".to_string(),
+        };
+        out.push_str(&format!(
+            "\n  conflict   {} claimed by {}: {outcome}",
+            c.ports,
+            claimed.join(", ")
+        ));
+    }
+    if !r.grants.is_empty() {
+        out.push_str(&format!(
+            "\n\n{}",
+            section("Grants", grants(&r.grants, names, false))
+        ));
+    }
+    out
+}
+
+/// The reservations, one block each.
+pub fn reservations(rs: &[ReservationView], names: &Names) -> String {
+    if rs.is_empty() {
+        return "no reservations".to_string();
+    }
+    rs.iter()
+        .map(|r| reservation_detail(r, names))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 // ─── Tor keys and sharing ────────────────────────────────────────────────────

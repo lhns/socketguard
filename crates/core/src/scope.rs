@@ -356,7 +356,7 @@ impl Scope {
     /// For people: `All sockets`, `80/tcp`, `group <label>` (the id if the group is unknown).
     pub fn describe(&self, groups: &[SocketGroup]) -> String {
         match self {
-            Scope::All => "All sockets".to_string(),
+            Scope::All => "All ports".to_string(),
             Scope::Port { port, proto } => format!("{port}/{proto}"),
             Scope::Group { id } => format!(
                 "group {}",

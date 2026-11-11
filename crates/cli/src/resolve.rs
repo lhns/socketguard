@@ -46,6 +46,15 @@ impl Named for socketguard_core::Tag {
     }
 }
 
+impl Named for socketguard_core::ReservationView {
+    fn id(&self) -> &str {
+        &self.reservation.id
+    }
+    fn name(&self) -> &str {
+        &self.reservation.label
+    }
+}
+
 impl Named for socketguard_core::SocketGroup {
     fn id(&self) -> &str {
         &self.id

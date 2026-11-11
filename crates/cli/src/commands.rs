@@ -16,14 +16,15 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use socketguard_client::{ApiEvent, Client, Error as ApiError, GrantQuery, Saved};
 use socketguard_core::api_types::{
-    error_code, ApplyRequest, ChangeOp, ChangesRequest, Enforcement, LockoutRiskInfo, MergeRequest,
-    NewGroup, NewNetwork, NewPeer, NewSocketGroup, NewTag, ProtectHostRequest, ProtectHostResponse,
-    SplitRequest, UpdateSettings, UpdateSocketGroup, UpdateTag,
+    error_code, ApplyRequest, ChangeOp, ChangesRequest, Enforcement, LockoutRiskInfo,
+    MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewReservation, NewSocketGroup,
+    NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest, UpdateSocketGroup, UpdateTag,
 };
 use socketguard_core::config::TorAuth;
 use socketguard_core::{
-    ActivityKind, ActivityQuery, ActivityRecord, App, BackendConfig, CredentialKind, GrantView,
-    NewCredential, NewGrant, Peer, PeerGroup, Scope, SocketGroup, Subject, Tag, TagMember, Target,
+    ActivityKind, ActivityQuery, ActivityRecord, App, BackendConfig, BindingTarget, CredentialKind,
+    GrantView, NewCredential, NewGrant, Peer, PeerGroup, ReservationView, Scope, SocketGroup,
+    Subject, Tag, TagMember, Target,
 };
 
 /// What every command needs: the client and the output mode.
@@ -51,6 +52,8 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Groups(cmd) => groups(&c, cmd).await,
         Command::Tags(cmd) => tags(&c, cmd).await,
         Command::SocketGroups(cmd) => socket_groups(&c, cmd).await,
+        Command::Reservations(cmd) => reservations(&c, cmd).await,
+        Command::Addresses(cmd) => addresses(&c, cmd).await,
         Command::Grant(a) => grant(&c, a).await,
         Command::Revoke(a) => revoke(&c, a).await,
         Command::Grants(a) => grants(&c, a).await,
@@ -162,19 +165,29 @@ impl Ctx {
             &self.client.list_groups().await?,
         )
         .with_tags(&self.client.list_tags().await?)
+        .with_reservations(&self.client.list_reservations().await?)
         .with_socket_groups(&self.client.list_socket_groups().await?))
+    }
+
+    async fn reservation(&self, query: &str) -> Result<ReservationView> {
+        Ok(resolve(
+            "reservation",
+            &self.client.list_reservations().await?,
+            query,
+        )?
+        .clone())
     }
 
     async fn socket_group(&self, query: &str) -> Result<SocketGroup> {
         Ok(resolve(
-            "socket group",
+            "port group",
             &self.client.list_socket_groups().await?,
             query,
         )?
         .clone())
     }
 
-    /// A scope as typed, with a socket group resolved by label.
+    /// A scope as typed, with a port group resolved by label.
     async fn scope(&self, spec: &parse::ScopeSpec) -> Result<Scope> {
         Ok(match spec {
             parse::ScopeSpec::All => Scope::All,
@@ -336,15 +349,6 @@ async fn settings(c: &Ctx, cmd: SettingsCmd) -> Result<()> {
             let s = c.client.get_settings().await?;
             c.print(&s, || render::settings(&s))
         }
-        SettingsCmd::AddressMode { mode } => {
-            let s = c
-                .client
-                .update_settings(&UpdateSettings {
-                    address_mode: Some(mode.into()),
-                })
-                .await?;
-            c.print(&s, || render::settings(&s))
-        }
     }
 }
 
@@ -454,87 +458,43 @@ async fn apps(c: &Ctx, cmd: AppsCmd) -> Result<()> {
                 ),
             )
         }
-        AppsCmd::Split {
-            app,
-            network,
-            port,
-            socket_group,
-        } => {
-            let app = c.app(&app).await?;
-            let (req, what) = match (port, socket_group) {
-                (Some(port), None) => {
-                    let port = parse::parse_port(&port)?;
-                    (
-                        SplitRequest {
-                            network_id: network,
-                            port: Some(port.port),
-                            proto: Some(port.proto),
-                            group: None,
-                        },
-                        port.to_string(),
-                    )
-                }
-                (None, Some(label)) => {
-                    let g = c.socket_group(&label).await?;
-                    (
-                        SplitRequest {
-                            network_id: network,
-                            port: None,
-                            proto: None,
-                            group: Some(g.id),
-                        },
-                        format!("socket group {}", g.label),
-                    )
-                }
-                _ => bail!("give a port, or --socket-group <label>"),
+        AppsCmd::Move { from, to, yes } => {
+            let from = c.app(&from).await?;
+            let to = c.app(&to).await?;
+            if from.id == to.id {
+                bail!("{} is both the source and the target", from.name);
+            }
+            let mut req = MoveAppRequest {
+                to: to.id.clone(),
+                confirm_open: yes,
             };
-            let saved = c.client.split_app(&app.id, &req).await?;
+            let saved = match c.client.move_app(&from.id, &req).await {
+                Err(e) if e.is_confirmation_required() => {
+                    prompt::Stdin.confirm_or_yes(
+                        false,
+                        &format!(
+                            "Moving {} to {} opens an app to anyone. Continue?",
+                            from.name, to.name
+                        ),
+                        &format!(
+                            "moving {} to {} would open an app to anyone; repeat with --yes to confirm",
+                            from.name, to.name
+                        ),
+                    )?;
+                    req.confirm_open = true;
+                    c.client.move_app(&from.id, &req).await?
+                }
+                other => other?,
+            };
             c.warn_pending(&saved.enforcement);
-            let a = saved.value;
-            c.print(&a, || {
+            let detail = saved.value;
+            let names = c.names().await?;
+            c.print(&detail, || {
                 format!(
-                    "{what} of {} now also has its own address {}",
-                    app.name,
-                    render::locator(&a.locator)
-                )
-            })
-        }
-        AppsCmd::Merge {
-            app,
-            network,
-            address_ids,
-        } => {
-            let app = c.app(&app).await?;
-            let own: Vec<String> = c
-                .client
-                .get_app(&app.id)
-                .await?
-                .app
-                .addresses
-                .into_iter()
-                .map(|a| a.id)
-                .collect();
-            let ids = address_ids
-                .iter()
-                .map(|q| Ok(resolve("address", &own, q)?.clone()))
-                .collect::<Result<Vec<_>>>()?;
-            let saved = c
-                .client
-                .merge_app(
-                    &app.id,
-                    &MergeRequest {
-                        network_id: network,
-                        address_ids: ids,
-                    },
-                )
-                .await?;
-            c.warn_pending(&saved.enforcement);
-            let a = saved.value;
-            c.print(&a, || {
-                format!(
-                    "merged into {} ({})",
-                    short(&a.id),
-                    render::locator(&a.locator)
+                    "moved {} to {}\n\n{}",
+                    from.name,
+                    to.name,
+                    render::app_detail(&detail, &names)
                 )
             })
         }
@@ -549,10 +509,17 @@ async fn share(c: &Ctx, a: ShareArgs) -> Result<()> {
     tor.tor
         .retain(|t| a.network.as_deref().is_none_or(|n| n == t.network_id));
     lines.extend(render::tor_share(&tor));
-    if lines.is_empty() && !c.json {
-        bail!("{} has no address to share yet", app.name);
-    }
-    c.print(&lines, || lines.join("\n"))
+    c.print(&lines, || {
+        if lines.is_empty() {
+            format!(
+                "{} has no address that is up: a row gets an address when a grant names it \
+                 (socketguard grant {} <peer>)",
+                app.name, app.name
+            )
+        } else {
+            lines.join("\n")
+        }
+    })
 }
 
 // ─── Peers and groups ────────────────────────────────────────────────────────
@@ -883,14 +850,14 @@ async fn tags(c: &Ctx, cmd: TagsCmd) -> Result<()> {
     }
 }
 
-// ─── Socket groups ───────────────────────────────────────────────────────────
+// ─── Port groups ───────────────────────────────────────────────────────────
 
 fn confirm_group_open(group: &str) -> Result<()> {
     prompt::Stdin.confirm_or_yes(
         false,
-        &format!("This opens apps to anyone through socket group {group}. Continue?"),
+        &format!("This opens apps to anyone through port group {group}. Continue?"),
         &format!(
-            "socket group {group} would open an app to anyone, because a grant to anyone covers it; repeat with --yes to confirm"
+            "port group {group} would open an app to anyone, because a grant to anyone covers it; repeat with --yes to confirm"
         ),
     )
 }
@@ -971,7 +938,7 @@ async fn socket_groups(c: &Ctx, cmd: SocketGroupsCmd) -> Result<()> {
         SocketGroupsCmd::Rm { group } => {
             let g = c.socket_group(&group).await?;
             let saved = c.client.delete_socket_group(&g.id).await?;
-            c.done_saved(saved, format!("removed socket group {}", g.label))
+            c.done_saved(saved, format!("removed port group {}", g.label))
         }
         SocketGroupsCmd::Attach { group, app, yes } => {
             let g = c.socket_group(&group).await?;
@@ -986,7 +953,7 @@ async fn socket_groups(c: &Ctx, cmd: SocketGroupsCmd) -> Result<()> {
             c.warn_pending(&saved.enforcement);
             let g = saved.value;
             c.print(&g, || {
-                format!("socket group {} attached to {}", g.label, app.name)
+                format!("port group {} attached to {}", g.label, app.name)
             })
         }
         SocketGroupsCmd::Detach { group, app } => {
@@ -996,7 +963,202 @@ async fn socket_groups(c: &Ctx, cmd: SocketGroupsCmd) -> Result<()> {
             c.warn_pending(&saved.enforcement);
             let g = saved.value;
             c.print(&g, || {
-                format!("socket group {} detached from {}", g.label, app.name)
+                format!("port group {} detached from {}", g.label, app.name)
+            })
+        }
+    }
+}
+
+// ─── Reservations and addresses ──────────────────────────────────────────────
+
+impl Ctx {
+    /// A binding as typed: `<app>[:port[/proto]]`, `<app>:socket-group=<label>` or `tag:<label>`.
+    async fn binding_target(&self, text: &str) -> Result<BindingTarget> {
+        Ok(match parse::parse_target_spec(text) {
+            (TargetSpec::App(q), scope) => BindingTarget::App {
+                app_id: self.app(&q).await?.id,
+                scope: self.scope(&scope).await?,
+            },
+            (TargetSpec::Tag(q), parse::ScopeSpec::All) => BindingTarget::Tag {
+                tag_id: self.tag(&q).await?.id,
+            },
+            (TargetSpec::Tag(_), _) => {
+                bail!("a tag is bound whole: {text:?} has a port; bind the apps' rows instead")
+            }
+            (TargetSpec::Reservation(_), _) => {
+                bail!("a reservation cannot be bound to a reservation")
+            }
+        })
+    }
+
+    async fn binding_targets(&self, texts: &[String]) -> Result<Vec<BindingTarget>> {
+        let mut out = Vec::new();
+        for t in texts {
+            out.push(self.binding_target(t).await?);
+        }
+        Ok(out)
+    }
+}
+
+/// Ask before binding rows to a reservation that is open to anyone.
+fn confirm_binding_open(label: &str) -> Result<()> {
+    prompt::Stdin.confirm_or_yes(
+        false,
+        &format!("Reservation {label} is open to anyone: the rows bound to it will be too. Continue?"),
+        &format!(
+            "reservation {label} is open to anyone, so this opens the rows; repeat with --yes to confirm"
+        ),
+    )
+}
+
+async fn reservations(c: &Ctx, cmd: ReservationsCmd) -> Result<()> {
+    match cmd {
+        ReservationsCmd::List => {
+            let r = c.client.list_reservations().await?;
+            let names = c.names().await?;
+            c.print(&r, || render::reservations(&r, &names))
+        }
+        ReservationsCmd::Add { label, bindings } => {
+            let saved = c
+                .client
+                .create_reservation(&NewReservation {
+                    label,
+                    bindings: c.binding_targets(&bindings).await?,
+                    confirm_open: false,
+                })
+                .await?;
+            c.warn_pending(&saved.enforcement);
+            let r = saved.value;
+            let names = c.names().await?;
+            c.print(&r, || {
+                format!(
+                    "added reservation {}\n\n{}",
+                    r.reservation.label,
+                    render::reservation_detail(&r, &names)
+                )
+            })
+        }
+        ReservationsCmd::Rename {
+            reservation,
+            new_label,
+        } => {
+            let res = c.reservation(&reservation).await?;
+            let saved = c
+                .client
+                .rename_reservation(&res.reservation.id, &new_label)
+                .await?;
+            c.warn_pending(&saved.enforcement);
+            let r = saved.value;
+            c.print(&r, || {
+                format!(
+                    "renamed {} to {}",
+                    res.reservation.label, r.reservation.label
+                )
+            })
+        }
+        ReservationsCmd::Bind {
+            reservation,
+            targets,
+            yes,
+        } => {
+            let res = c.reservation(&reservation).await?;
+            let mut last = res.clone();
+            let mut confirmed = yes;
+            for target in c.binding_targets(&targets).await? {
+                let mut req = NewBinding {
+                    target,
+                    confirm_open: confirmed,
+                };
+                let saved = match c.client.add_binding(&res.reservation.id, &req).await {
+                    Err(e) if e.is_confirmation_required() => {
+                        confirm_binding_open(&res.reservation.label)?;
+                        confirmed = true;
+                        req.confirm_open = true;
+                        c.client.add_binding(&res.reservation.id, &req).await?
+                    }
+                    other => other?,
+                };
+                c.warn_pending(&saved.enforcement);
+                last = saved.value;
+            }
+            let names = c.names().await?;
+            c.print(&last, || render::reservation_detail(&last, &names))
+        }
+        ReservationsCmd::Unbind {
+            reservation,
+            targets,
+        } => {
+            let res = c.reservation(&reservation).await?;
+            let mut last = res.clone();
+            for target in c.binding_targets(&targets).await? {
+                let binding = res
+                    .reservation
+                    .bindings
+                    .iter()
+                    .find(|b| b.target == target)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "{} is not bound to {}; see `socketguard reservations list`",
+                            targets_text(&targets, &target),
+                            res.reservation.label
+                        )
+                    })?;
+                let saved = c
+                    .client
+                    .remove_binding(&res.reservation.id, &binding.id)
+                    .await?;
+                c.warn_pending(&saved.enforcement);
+                last = saved.value;
+            }
+            let names = c.names().await?;
+            c.print(&last, || render::reservation_detail(&last, &names))
+        }
+        ReservationsCmd::Release { reservation } => {
+            let res = c.reservation(&reservation).await?;
+            let saved = c.client.release_reservation(&res.reservation.id).await?;
+            c.done_saved(
+                saved,
+                format!(
+                    "released reservation {}: its addresses and the grants on it are gone",
+                    res.reservation.label
+                ),
+            )
+        }
+    }
+}
+
+/// The text the user typed for `target`, for an error message (they are parsed in order).
+fn targets_text(_texts: &[String], target: &BindingTarget) -> String {
+    match target {
+        BindingTarget::App { app_id, .. } => short(app_id).to_string(),
+        BindingTarget::Tag { tag_id } => format!("tag {}", short(tag_id)),
+    }
+}
+
+async fn addresses(c: &Ctx, cmd: AddressesCmd) -> Result<()> {
+    match cmd {
+        AddressesCmd::List => {
+            let a = c.client.list_addresses().await?;
+            let names = c.names().await?;
+            c.print(&a, || render::addresses(&a, &names))
+        }
+        AddressesCmd::Reserve { address, label } => {
+            let all = c.client.list_addresses().await?;
+            let ids: Vec<String> = all.iter().map(|a| a.id.clone()).collect();
+            let id = resolve("address", &ids, &address)?;
+            let saved = c
+                .client
+                .reserve_address(id, &ReserveRequest { label })
+                .await?;
+            c.warn_pending(&saved.enforcement);
+            let r = saved.value;
+            let names = c.names().await?;
+            c.print(&r, || {
+                format!(
+                    "reserved as {}\n\n{}",
+                    r.reservation.label,
+                    render::reservation_detail(&r, &names)
+                )
             })
         }
     }
@@ -1050,40 +1212,56 @@ impl Ctx {
         Ok(match spec {
             TargetSpec::App(q) => Target::App(self.app(q).await?.id),
             TargetSpec::Tag(q) => Target::Tag(self.tag(q).await?.id),
+            TargetSpec::Reservation(q) => {
+                Target::Reservation(self.reservation(q).await?.reservation.id)
+            }
         })
     }
 
-    /// The targets named by positional/`--app`/`--tag` texts, crossed with `--port` and
-    /// `--socket-group` for those that carry no scope of their own.
-    async fn targets(
-        &self,
-        targets: &[String],
-        tags: &[String],
-        ports: &[String],
-        socket_groups: &[String],
-    ) -> Result<Vec<(Target, Scope, String)>> {
+    /// The targets named by the texts of a command, crossed with `--port` and
+    /// `--socket-group` for those that carry no scope of their own. A reservation takes
+    /// neither: it is always granted whole.
+    async fn targets(&self, texts: &TargetTexts<'_>) -> Result<Vec<(Target, Scope, String)>> {
         let mut extra: Vec<parse::ScopeSpec> = Vec::new();
-        for p in ports {
+        for p in texts.ports {
             extra.push(parse::ScopeSpec::Port(parse::parse_port(p)?));
         }
-        for g in socket_groups {
+        for g in texts.socket_groups {
             extra.push(parse::ScopeSpec::Group(g.clone()));
         }
         if extra.is_empty() {
             extra.push(parse::ScopeSpec::All);
         }
         let mut specs: Vec<(TargetSpec, parse::ScopeSpec, String)> = Vec::new();
-        for t in targets {
+        for t in texts.targets {
             let (spec, scope) = parse::parse_target_spec(t);
             specs.push((spec, scope, t.clone()));
         }
-        for t in tags {
+        for t in texts.tags {
             let (label, scope) = parse::parse_target(t);
             specs.push((TargetSpec::Tag(label), scope, format!("tag:{t}")));
+        }
+        for r in texts.reservations {
+            // The label is taken whole, so that a colon in it is not read as a port.
+            specs.push((
+                TargetSpec::Reservation(r.clone()),
+                parse::ScopeSpec::All,
+                format!("reservation:{r}"),
+            ));
         }
         let mut out = Vec::new();
         for (spec, own, text) in specs {
             let target = self.target(&spec).await?;
+            if matches!(spec, TargetSpec::Reservation(_)) {
+                if own != parse::ScopeSpec::All {
+                    bail!(
+                        "{text:?}: a reservation is granted whole (All ports); \
+                         give no port or port group"
+                    );
+                }
+                out.push((target, Scope::All, text));
+                continue;
+            }
             let scopes = if own != parse::ScopeSpec::All {
                 vec![own]
             } else {
@@ -1096,22 +1274,23 @@ impl Ctx {
         Ok(out)
     }
 
-    async fn grant_spec(
-        &self,
-        targets: &[String],
-        tags: &[String],
-        ports: &[String],
-        socket_groups: &[String],
-        to: &[String],
-        networks: &[String],
-    ) -> Result<GrantSpec> {
+    async fn subjects(&self, to: &[String]) -> Result<Vec<Subject>> {
         let mut subjects = Vec::new();
         for s in to {
             subjects.push(self.subject(&parse::parse_subject(s)).await?);
         }
+        Ok(subjects)
+    }
+
+    async fn grant_spec(
+        &self,
+        texts: &TargetTexts<'_>,
+        to: &[String],
+        networks: &[String],
+    ) -> Result<GrantSpec> {
         Ok(GrantSpec {
-            targets: self.targets(targets, tags, ports, socket_groups).await?,
-            subjects,
+            targets: self.targets(texts).await?,
+            subjects: self.subjects(to).await?,
             networks: if networks.is_empty() {
                 vec![None]
             } else {
@@ -1121,23 +1300,35 @@ impl Ctx {
     }
 }
 
+/// The target texts of `grant` and `revoke`, as typed.
+struct TargetTexts<'a> {
+    /// Positional or `--app` texts: `<app>[:scope]`, `tag:<label>`, `reservation:<label>`.
+    targets: &'a [String],
+    tags: &'a [String],
+    reservations: &'a [String],
+    ports: &'a [String],
+    socket_groups: &'a [String],
+}
+
 /// Whether `grant`/`revoke` got the flag form (several targets, subjects or ports).
-fn uses_flags(
-    apps: &[String],
-    tags: &[String],
-    ports: &[String],
-    socket_groups: &[String],
-    to: &[String],
-) -> bool {
-    !(apps.is_empty()
-        && tags.is_empty()
-        && ports.is_empty()
-        && socket_groups.is_empty()
+fn uses_flags(texts: &TargetTexts<'_>, to: &[String]) -> bool {
+    !(texts.targets.is_empty()
+        && texts.tags.is_empty()
+        && texts.reservations.is_empty()
+        && texts.ports.is_empty()
+        && texts.socket_groups.is_empty()
         && to.is_empty())
 }
 
 async fn grant(c: &Ctx, a: GrantArgs) -> Result<()> {
-    let flags = uses_flags(&a.apps, &a.tags, &a.ports, &a.socket_groups, &a.to);
+    let flag_texts = TargetTexts {
+        targets: &a.apps,
+        tags: &a.tags,
+        reservations: &a.reservations,
+        ports: &a.ports,
+        socket_groups: &a.socket_groups,
+    };
+    let flags = uses_flags(&flag_texts, &a.to);
     let (targets, to) = match (&a.target, &a.subject) {
         (Some(t), Some(s)) if !flags => (vec![t.clone()], vec![s.clone()]),
         (None, None) if flags => (a.apps.clone(), a.to.clone()),
@@ -1145,19 +1336,21 @@ async fn grant(c: &Ctx, a: GrantArgs) -> Result<()> {
             bail!("give either <target> <subject> or the --app/--tag/--to flags, not both")
         }
         _ => bail!(
-            "give <app> <subject>, or --to with --app and/or --tag \
+            "give <app> <subject>, or --to with --app, --tag and/or --reservation \
              (e.g. grant --app web --app api --port 80 --to alice)"
         ),
     };
-    if flags && (a.to.is_empty() || a.apps.is_empty() && a.tags.is_empty()) {
-        bail!("--to and at least one of --app or --tag are needed");
+    if flags
+        && (a.to.is_empty() || a.apps.is_empty() && a.tags.is_empty() && a.reservations.is_empty())
+    {
+        bail!("--to and at least one of --app, --tag or --reservation are needed");
     }
     let spec = c
         .grant_spec(
-            &targets,
-            &a.tags,
-            &a.ports,
-            &a.socket_groups,
+            &TargetTexts {
+                targets: &targets,
+                ..flag_texts
+            },
             &to,
             &a.networks,
         )
@@ -1274,13 +1467,15 @@ pub fn find_target_grants<'a>(
 
 async fn revoke(c: &Ctx, a: RevokeArgs) -> Result<()> {
     let all = c.client.list_grants(&GrantQuery::default()).await?;
-    let flags = uses_flags(&a.apps, &a.tags, &a.ports, &a.socket_groups, &a.to);
+    let flags = uses_flags(&revoke_texts(&a), &a.to);
     if flags {
         if a.target.is_some() || a.subject.is_some() {
-            bail!("give either <target> <subject> or the --app/--tag/--to flags, not both");
+            bail!(
+                "give either <target> <subject> or the --app/--tag/--reservation/--to flags, not both"
+            );
         }
-        if a.to.is_empty() || a.apps.is_empty() && a.tags.is_empty() {
-            bail!("--to and at least one of --app or --tag are needed");
+        if a.to.is_empty() || a.apps.is_empty() && a.tags.is_empty() && a.reservations.is_empty() {
+            bail!("--to and at least one of --app, --tag or --reservation are needed");
         }
         return revoke_many(c, &a, &all).await;
     }
@@ -1295,6 +1490,9 @@ async fn revoke(c: &Ctx, a: RevokeArgs) -> Result<()> {
         }
         Some(subject) => {
             let (spec, scope) = parse::parse_target_spec(target);
+            if matches!(spec, TargetSpec::Reservation(_)) && scope != parse::ScopeSpec::All {
+                bail!("{target:?}: a reservation is granted whole (All ports); give no port");
+            }
             let scope = c.scope(&scope).await?;
             let wanted = c.target(&spec).await?;
             let subject = c.subject(&parse::parse_subject(subject)).await?;
@@ -1322,17 +1520,23 @@ async fn revoke(c: &Ctx, a: RevokeArgs) -> Result<()> {
     c.done_saved(saved, format!("revoked grant {}", short(&id)))
 }
 
+fn revoke_texts(a: &RevokeArgs) -> TargetTexts<'_> {
+    TargetTexts {
+        targets: &a.apps,
+        tags: &a.tags,
+        reservations: &a.reservations,
+        ports: &a.ports,
+        socket_groups: &a.socket_groups,
+    }
+}
+
 /// `revoke --app ... --to ...`: every grant the combinations name, in one batch.
 async fn revoke_many(c: &Ctx, a: &RevokeArgs, all: &[GrantView]) -> Result<()> {
-    let spec = c
-        .grant_spec(&[], &a.tags, &a.ports, &a.socket_groups, &a.to, &[])
-        .await?;
-    // `--app` goes through the same spelling as the positional target.
-    let mut targets = c.targets(&a.apps, &[], &a.ports, &a.socket_groups).await?;
-    targets.extend(spec.targets);
+    let targets = c.targets(&revoke_texts(a)).await?;
+    let subjects = c.subjects(&a.to).await?;
     let mut ids: Vec<String> = Vec::new();
     for (target, scope, text) in &targets {
-        for subject in &spec.subjects {
+        for subject in &subjects {
             let found: Vec<&GrantView> = if a.networks.is_empty() {
                 find_target_grants(all, target, scope, subject, None)
             } else {
@@ -1379,6 +1583,10 @@ async fn grants(c: &Ctx, a: GrantsArgs) -> Result<()> {
         app: c.opt_app(a.app.as_deref()).await?,
         tag: match a.tag.as_deref() {
             Some(q) => Some(c.tag(q).await?.id),
+            None => None,
+        },
+        reservation: match a.reservation.as_deref() {
+            Some(q) => Some(c.reservation(q).await?.reservation.id),
             None => None,
         },
         peer: c.opt_peer(a.peer.as_deref()).await?,

@@ -3,4 +3,4 @@
 /**
  * What a grant applies to (ADR 0043).
  */
-export type Target = { "kind": "app", "id": string } | { "kind": "tag", "id": string };
+export type Target = { "kind": "app", "id": string } | { "kind": "tag", "id": string } | { "kind": "reservation", "id": string };

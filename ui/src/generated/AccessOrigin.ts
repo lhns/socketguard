@@ -3,4 +3,4 @@
 /**
  * Why an effective access exists, for display.
  */
-export type AccessOrigin = { "kind": "direct" } | { "kind": "tag", tag_id: string, } | { "kind": "group", group_id: string, };
+export type AccessOrigin = { "kind": "direct" } | { "kind": "tag", tag_id: string, } | { "kind": "group", group_id: string, } | { "kind": "reservation", reservation_id: string, };

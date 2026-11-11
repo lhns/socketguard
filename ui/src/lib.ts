@@ -45,7 +45,7 @@ export const ALL_SCOPE: Scope = { kind: "all" };
 export const scopeOfPort = (p: PortRef | null): Scope =>
   p === null ? ALL_SCOPE : { kind: "port", port: p.port, proto: p.proto };
 
-/** The port of a port scope; null for the whole app and for a socket group. */
+/** The port of a port scope; null for the whole app and for a port group. */
 export const portOfScope = (s: Scope): PortRef | null =>
   s.kind === "port" ? { port: s.port, proto: s.proto } : null;
 
@@ -55,11 +55,11 @@ export const sameScope = (a: Scope, b: Scope) =>
   : a.kind === "port" ? b.kind === "port" && a.port === b.port && a.proto === b.proto
   : b.kind === "group" && a.id === b.id;
 
-/** "all ports", "80/tcp" or "group <label>" (the id when the group is not in `groups`). */
+/** "all ports", "80/tcp" or "port group <label>" (the id when the group is not in `groups`). */
 export const scopeLabel = (s: Scope, groups: SocketGroup[] = []): string =>
   s.kind === "all" ? "all ports"
   : s.kind === "port" ? portLabel(s)
-  : `group ${groups.find((g) => g.id === s.id)?.label ?? s.id}`;
+  : `port group ${groups.find((g) => g.id === s.id)?.label ?? s.id}`;
 
 /** Key for grouping by scope. */
 export const scopeKey = (s: Scope) => (s.kind === "all" ? "*" : s.kind === "port" ? portLabel(s) : `group:${s.id}`);
@@ -86,8 +86,16 @@ export function errorField(e: unknown): ErrorField {
   return "other";
 }
 
-export function targetLabel(t: Target, apps: App[] = [], tags: Tag[] = []): string {
+export function targetLabel(
+  t: Target,
+  apps: App[] = [],
+  tags: Tag[] = [],
+  reservations: { id: string; label: string }[] = [],
+): string {
   if (t.kind === "app") return apps.find((a) => a.id === t.id)?.name ?? `app ${t.id.slice(0, 8)}`;
+  if (t.kind === "reservation") {
+    return `reservation ${reservations.find((r) => r.id === t.id)?.label ?? t.id.slice(0, 8)}`;
+  }
   return `tag ${tags.find((x) => x.id === t.id)?.label ?? t.id.slice(0, 8)}`;
 }
 

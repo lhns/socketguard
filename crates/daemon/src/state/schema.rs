@@ -961,4 +961,91 @@ mod tests {
         drop(db);
         let _ = std::fs::remove_file(&path);
     }
+
+    #[tokio::test]
+    async fn v7_database_migrates_to_v8_keeping_addresses_and_onion_keys() {
+        let path = temp_db_path("v7-to-v8");
+        {
+            let opts = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true);
+            let mut c = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::raw_sql(SCHEMA).execute(&mut c).await.unwrap();
+            for sql in &MIGRATIONS[..6] {
+                sqlx::raw_sql(sql).execute(&mut c).await.unwrap();
+            }
+            finish_6_to_7(&mut c).await.unwrap();
+            sqlx::query("PRAGMA user_version = 7")
+                .execute(&mut c)
+                .await
+                .unwrap();
+            sqlx::raw_sql(
+                "INSERT INTO apps (id, name, process_name, reviewed, first_seen, last_seen) \
+                 VALUES ('a', 'n', 'p', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'); \
+                 INSERT INTO addresses (id, app_id, network_id, port, proto, socket_group, \
+                                        locator_kind, locator, created_at) VALUES \
+                 ('all', 'a', 'ygg', NULL, NULL, NULL, 'ipv6', '300:1::1', '2026-01-01T00:00:00Z'), \
+                 ('p80', 'a', 'ygg', 80, 'tcp', NULL, 'ipv6', '300:1::2', '2026-01-01T00:00:01Z'), \
+                 ('dup', 'a', 'ygg', 80, 'tcp', NULL, 'ipv6', '300:1::3', '2026-01-01T00:00:02Z'), \
+                 ('lo', 'a', 'local', NULL, NULL, NULL, 'ipv6', 'fd00::1', '2026-01-01T00:00:03Z'), \
+                 ('onion', 'a', 'tor', 80, 'tcp', NULL, 'onion', 'abc.onion', '2026-01-01T00:00:04Z'); \
+                 INSERT INTO onion_keys (address_id, private_key) VALUES \
+                 ('onion', 'secret'), ('dup', 'gone'); \
+                 INSERT INTO settings (key, value) VALUES ('address_mode', 'per_port');",
+            )
+            .execute(&mut c)
+            .await
+            .unwrap();
+        }
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        let v: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+
+        // Every address stays, automatic; a second address for the same row is dropped.
+        let ids: Vec<String> = db
+            .list_addresses()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(ids, ["all", "p80", "lo", "onion"]);
+        for a in db.list_addresses().await.unwrap() {
+            assert_eq!(a.app_id.as_deref(), Some("a"));
+            assert_eq!(a.reservation_id, None);
+        }
+        // The onion key survived the rebuild of the table; the dropped address's did not.
+        let keys = db.onion_keys().await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys["onion"], "secret");
+        // The address mode is gone; the classification is pending for the daemon.
+        assert_eq!(db.get_setting("address_mode").await.unwrap(), None);
+        assert_eq!(
+            db.get_setting("classify_addresses")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("pending")
+        );
+        // A reservation's address belongs to no app, so it survives forgetting one.
+        let res = socketguard_core::Reservation {
+            id: "r".into(),
+            label: "res".into(),
+            bindings: vec![],
+            created_at: chrono::Utc::now(),
+        };
+        db.insert_reservation(&res).await.unwrap();
+        db.assign_address("p80", "r").await.unwrap();
+        assert!(db.delete_app("a").await.unwrap());
+        let left = db.list_addresses().await.unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].reservation_id.as_deref(), Some("r"));
+        db.migrate().await.expect("idempotent");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
 }
