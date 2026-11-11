@@ -224,15 +224,28 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
             config,
             torrc,
             pause,
+            undo,
+            uninstall_packages,
         } => {
             let opts = crate::setup::Options {
                 yes,
                 dry_run,
-                config,
+                config: config.clone(),
                 torrc,
             };
-            let result =
-                crate::setup::run(kind.into(), &opts, &mut crate::setup::System, &c.client).await;
+            let result = if undo {
+                let u = crate::setup::UndoOptions {
+                    yes,
+                    dry_run,
+                    config,
+                    uninstall_packages,
+                };
+                crate::setup::undo(kind.into(), &u, &mut crate::setup::System, &c.client)
+                    .await
+                    .map(|()| Default::default())
+            } else {
+                crate::setup::run(kind.into(), &opts, &mut crate::setup::System, &c.client).await
+            };
             let outcome = match result {
                 Ok(changes) => {
                     if !changes.list().is_empty() {

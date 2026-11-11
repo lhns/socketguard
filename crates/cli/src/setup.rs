@@ -9,6 +9,7 @@
 //! itself; the port is only asked to agree.
 
 use anyhow::{anyhow, bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use socketguard_core::api_types::NewNetwork;
 use socketguard_core::config::{BackendConfig, TorAuth};
@@ -64,6 +65,14 @@ pub trait SetupRunner {
     fn read_file(&self, path: &Path) -> Result<Option<String>>;
     /// Replace the file through a temp file and a rename.
     fn write_file(&mut self, path: &Path, content: &str) -> Result<()>;
+    /// Like `write_file`, for a new file that should get the permissions of `like`.
+    fn write_file_like(&mut self, path: &Path, content: &str, _like: &Path) -> Result<()> {
+        self.write_file(path, content)
+    }
+    /// Whether the service starts at boot, if the system can tell.
+    fn service_enabled(&mut self, _name: &str) -> Option<bool> {
+        None
+    }
     /// PROTOCOLINFO at `control` (`host:port` or `unix:/path`); an error if nothing answers.
     fn protocolinfo(&mut self, control: &str) -> Result<ControlAnswer>;
     fn sleep(&mut self, d: Duration);
@@ -79,6 +88,7 @@ pub trait DaemonApi {
     async fn setup(&self) -> Result<NetworkSetup>;
     async fn networks(&self) -> Result<Vec<Network>>;
     async fn add(&self, req: &NewNetwork) -> Result<Network>;
+    async fn remove(&self, id: &str) -> Result<()>;
 }
 
 impl DaemonApi for socketguard_client::Client {
@@ -90,6 +100,9 @@ impl DaemonApi for socketguard_client::Client {
     }
     async fn add(&self, req: &NewNetwork) -> Result<Network> {
         Ok(self.add_network(req).await?)
+    }
+    async fn remove(&self, id: &str) -> Result<()> {
+        Ok(self.delete_network(id, false).await?)
     }
 }
 
@@ -110,6 +123,75 @@ impl Changes {
     }
 }
 
+/// One change `networks setup` made, with what is needed to reverse it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Change {
+    /// A package that setup itself installed (never one that was there before).
+    PackageInstalled {
+        manager: String,
+        package: String,
+        install: String,
+        uninstall: Vec<String>,
+    },
+    /// A service setup started (it was not running) or enabled.
+    ServiceStarted {
+        service: String,
+        previous_state: String,
+        previous_enabled: Option<bool>,
+        undo: Vec<String>,
+    },
+    /// Lines appended to another program's configuration file.
+    FileEdited {
+        path: String,
+        lines: Vec<String>,
+        backup: Option<String>,
+    },
+    /// The network entry written to SocketGuard's config file.
+    ConfigEntryWritten { path: String, id: String },
+    /// The network added to the running daemon.
+    NetworkAdded { id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Entry {
+    pub time: String,
+    pub kind: SetupKind,
+    #[serde(flatten)]
+    pub change: Change,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct LogFile {
+    #[serde(default)]
+    entries: Vec<Entry>,
+}
+
+/// The setup log next to the config file.
+pub fn log_path(config: &Path) -> PathBuf {
+    config
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("setup-log.json")
+}
+
+fn read_log(r: &dyn SetupRunner, path: &Path) -> Result<Vec<Entry>> {
+    match r.read_file(path)? {
+        None => Ok(vec![]),
+        Some(t) => Ok(serde_json::from_str::<LogFile>(&t)
+            .with_context(|| format!("{} is not a setup log", path.display()))?
+            .entries),
+    }
+}
+
+fn write_log(r: &mut dyn SetupRunner, path: &Path, config: &Path, entries: &[Entry]) -> Result<()> {
+    let mut text = serde_json::to_string_pretty(&LogFile {
+        entries: entries.to_vec(),
+    })?;
+    text.push('\n');
+    r.write_file_like(path, &text, config)
+}
+
 struct Ctx<'a, R: SetupRunner, A: DaemonApi> {
     kind: SetupKind,
     opts: &'a Options,
@@ -117,6 +199,9 @@ struct Ctx<'a, R: SetupRunner, A: DaemonApi> {
     api: &'a A,
     changes: Changes,
     step: usize,
+    /// The daemon's config file; the setup log lives next to it.
+    config: PathBuf,
+    log: Vec<Entry>,
 }
 
 impl<R: SetupRunner, A: DaemonApi> Ctx<'_, R, A> {
@@ -131,6 +216,22 @@ impl<R: SetupRunner, A: DaemonApi> Ctx<'_, R, A> {
             self.run.say(&format!("{n}. {text}"));
             true
         }
+    }
+
+    /// Remember a change so `--undo` can reverse it; written at once, so a run that stops
+    /// half way is still recorded.
+    fn record(&mut self, change: Change) -> Result<()> {
+        self.log.push(Entry {
+            time: chrono::Utc::now().to_rfc3339(),
+            kind: self.kind,
+            change,
+        });
+        write_log(
+            &mut *self.run,
+            &log_path(&self.config),
+            &self.config,
+            &self.log,
+        )
     }
 
     fn skip(&mut self, text: &str) {
@@ -180,6 +281,8 @@ pub async fn run<R: SetupRunner, A: DaemonApi>(
         "cannot ask the daemon what is installed; start the daemon (and use --socket if it \
          listens elsewhere)",
     )?;
+    let config = config_file(opts.config.as_deref(), &setup)?;
+    let log = read_log(&*runner, &log_path(&config))?;
     let mut c = Ctx {
         kind,
         opts,
@@ -187,6 +290,8 @@ pub async fn run<R: SetupRunner, A: DaemonApi>(
         api,
         changes: Changes::default(),
         step: 0,
+        config: config.clone(),
+        log: log.clone(),
     };
     if !opts.yes && !opts.dry_run {
         // Show the steps first (a dry run of the same code), then ask.
@@ -201,6 +306,8 @@ pub async fn run<R: SetupRunner, A: DaemonApi>(
             api,
             changes: Changes::default(),
             step: 0,
+            config,
+            log,
         };
         preview.run.say("These are the steps:");
         match steps(&mut preview, &setup).await {
@@ -216,6 +323,17 @@ pub async fn run<R: SetupRunner, A: DaemonApi>(
     Ok(c.changes)
 }
 
+/// The config file to write: the option, else what the daemon reports. Never a guess.
+fn config_file(option: Option<&Path>, setup: &NetworkSetup) -> Result<PathBuf> {
+    match (option, &setup.config_path) {
+        (Some(p), _) => Ok(p.to_path_buf()),
+        (None, Some(p)) => Ok(PathBuf::from(p)),
+        (None, None) => {
+            manual("tell the command which config file the daemon uses: --config <path>")
+        }
+    }
+}
+
 async fn steps<R: SetupRunner, A: DaemonApi>(
     c: &mut Ctx<'_, R, A>,
     setup: &NetworkSetup,
@@ -229,7 +347,7 @@ async fn steps<R: SetupRunner, A: DaemonApi>(
     let state = install(c, state).await?;
     match c.kind {
         SetupKind::Yggdrasil => yggdrasil(c, state).await,
-        SetupKind::Tor => tor(c, state, setup.config_path.as_deref()).await,
+        SetupKind::Tor => tor(c, state).await,
     }
 }
 
@@ -262,6 +380,15 @@ async fn install<R: SetupRunner, A: DaemonApi>(
     c.changes
         .0
         .push(format!("installed {} ({})", c.kind, cmd.command_line()));
+    c.record(Change::PackageInstalled {
+        manager: cmd.manager.into(),
+        package: cmd.package.into(),
+        install: cmd.command_line(),
+        uninstall: std::iter::once(cmd.program)
+            .chain(cmd.uninstall.iter().copied())
+            .map(String::from)
+            .collect(),
+    })?;
     // The daemon may have an old PATH; its detection also looks in the install directory.
     let state = c.wait_for(|s| s.state != SetupStatus::NotInstalled).await?;
     if state.state == SetupStatus::NotInstalled {
@@ -288,6 +415,22 @@ fn yggdrasil_start(os: &str) -> Option<(&'static str, Vec<&'static str>)> {
     }
 }
 
+/// The command that puts a service back as it was before setup started it.
+fn service_stop(os: &str, unit: &str, was_enabled: Option<bool>) -> Vec<String> {
+    let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    match os {
+        "windows" => v(&["sc.exe", "stop", unit]),
+        "macos" => v(&[
+            "launchctl",
+            "unload",
+            "/Library/LaunchDaemons/yggdrasil.plist",
+        ]),
+        // Enabled by setup (it was not before): disable as well.
+        _ if was_enabled == Some(false) => v(&["systemctl", "disable", "--now", unit]),
+        _ => v(&["systemctl", "stop", unit]),
+    }
+}
+
 async fn yggdrasil<R: SetupRunner, A: DaemonApi>(
     c: &mut Ctx<'_, R, A>,
     mut state: SetupState,
@@ -301,10 +444,23 @@ async fn yggdrasil<R: SetupRunner, A: DaemonApi>(
         match yggdrasil_start(c.run.os()) {
             Some((program, args)) => {
                 if c.announce(&format!("start Yggdrasil: {program} {}", args.join(" "))) {
+                    let unit = if c.run.os() == "windows" {
+                        "Yggdrasil"
+                    } else {
+                        "yggdrasil"
+                    };
+                    let was_enabled = c.run.service_enabled(unit);
                     c.run
                         .run(program, &args)
                         .or_else(|e| manual(format!("could not start Yggdrasil ({e}); start its service yourself, then run this command again")))?;
                     c.changes.0.push("started the Yggdrasil service".into());
+                    let undo = service_stop(c.run.os(), unit, was_enabled);
+                    c.record(Change::ServiceStarted {
+                        service: unit.into(),
+                        previous_state: "stopped".into(),
+                        previous_enabled: was_enabled,
+                        undo,
+                    })?;
                     state = c.wait_for(|s| s.state != SetupStatus::NotRunning).await?;
                 }
             }
@@ -352,6 +508,7 @@ async fn add_network<R: SetupRunner, A: DaemonApi>(
         .await
         .context("the daemon did not accept the network")?;
     c.changes.0.push(format!("added the {} network", n.id));
+    c.record(Change::NetworkAdded { id: n.id.clone() })?;
     if let NetworkStatus::Down { reason } = &n.status {
         c.run
             .say(&format!("note: the network is down for now: {reason}"));
@@ -580,6 +737,20 @@ fn tor_restart(r: &dyn SetupRunner) -> Option<Vec<(&'static str, Vec<&'static st
     }
 }
 
+/// The service unit Tor runs as (Debian: tor@default).
+fn tor_unit(r: &dyn SetupRunner) -> &'static str {
+    if r.os() == "linux"
+        && r.read_file(Path::new(DEBIAN_DEFAULTS))
+            .ok()
+            .flatten()
+            .is_some()
+    {
+        "tor@default"
+    } else {
+        "tor"
+    }
+}
+
 fn same_path(a: &str, b: &str) -> bool {
     let norm = |s: &str| {
         let s = s.replace('\\', "/");
@@ -592,18 +763,8 @@ fn same_path(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
-async fn tor<R: SetupRunner, A: DaemonApi>(
-    c: &mut Ctx<'_, R, A>,
-    state: SetupState,
-    daemon_config: Option<&str>,
-) -> Result<()> {
-    let config_path: PathBuf = match (&c.opts.config, daemon_config) {
-        (Some(p), _) => p.clone(),
-        (None, Some(p)) => PathBuf::from(p),
-        (None, None) => {
-            return manual("tell the command which config file the daemon uses: --config <path>")
-        }
-    };
+async fn tor<R: SetupRunner, A: DaemonApi>(c: &mut Ctx<'_, R, A>, state: SetupState) -> Result<()> {
+    let config_path = c.config.clone();
     // Tor that works with the default settings needs nothing but the network.
     if state.state == SetupStatus::Ready {
         c.skip("Tor's control port works with SocketGuard's defaults");
@@ -648,10 +809,17 @@ async fn tor<R: SetupRunner, A: DaemonApi>(
                 torrc.display()
             )) {
                 let bak = PathBuf::from(format!("{}.socketguard.bak", torrc.display()));
-                if c.run.read_file(&bak)?.is_none() {
+                let had_backup = c.run.read_file(&bak)?.is_some();
+                if !had_backup {
                     c.run.write_file(&bak, &text)?;
                 }
                 c.run.write_file(&torrc, &append_lines(&text, lines))?;
+                c.record(Change::FileEdited {
+                    path: torrc.display().to_string(),
+                    lines: lines.clone(),
+                    backup: (!had_backup).then(|| bak.display().to_string()),
+                })?;
+                let was_running = c.run.protocolinfo(control).is_ok();
                 c.changes
                     .0
                     .push(format!("added {} to {}", lines.join(", "), torrc.display()));
@@ -667,6 +835,17 @@ async fn tor<R: SetupRunner, A: DaemonApi>(
                             })?;
                         }
                         c.changes.0.push("restarted Tor".into());
+                        if !was_running {
+                            let unit = tor_unit(&*c.run);
+                            let was_enabled = c.run.service_enabled(unit);
+                            let undo = service_stop(c.run.os(), unit, was_enabled);
+                            c.record(Change::ServiceStarted {
+                                service: unit.into(),
+                                previous_state: "stopped".into(),
+                                previous_enabled: was_enabled,
+                                undo,
+                            })?;
+                        }
                     }
                     None => {
                         return manual(
@@ -746,6 +925,10 @@ async fn tor<R: SetupRunner, A: DaemonApi>(
             "wrote the Tor network to {}",
             config_path.display()
         ));
+        c.record(Change::ConfigEntryWritten {
+            path: config_path.display().to_string(),
+            id: backend.default_id(),
+        })?;
     }
     c.announce("add the Tor network to the daemon");
     add_network(c, backend).await?;
@@ -822,6 +1005,214 @@ fn write_config_entry(
     Ok(true)
 }
 
+// ─── Undo ───────────────────────────────────────────────────────────────────
+
+/// `networks setup <kind> --undo`.
+#[derive(Debug, Clone, Default)]
+pub struct UndoOptions {
+    pub yes: bool,
+    pub dry_run: bool,
+    pub config: Option<PathBuf>,
+    /// Run the uninstall commands of packages setup installed; else only print them.
+    pub uninstall_packages: bool,
+}
+
+/// `text` without the lines `lines` that were appended to it: the last occurrence of each,
+/// everything else byte for byte.
+pub fn remove_lines(text: &str, lines: &[String]) -> String {
+    let mut parts: Vec<&str> = text.split_inclusive('\n').collect();
+    for l in lines.iter().rev() {
+        if let Some(i) = parts
+            .iter()
+            .rposition(|p| p.trim_end_matches(['\r', '\n']) == l)
+        {
+            parts.remove(i);
+        }
+    }
+    parts.concat()
+}
+
+/// Remove the backend `id` from the config file; false if it was not there.
+fn remove_config_entry(r: &mut dyn SetupRunner, path: &Path, id: &str) -> Result<bool> {
+    let Some(text) = r.read_file(path)? else {
+        return Ok(false);
+    };
+    let mut doc: Value = serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text))
+        .with_context(|| format!("{} is not JSON", path.display()))?;
+    let Some(list) = doc.get_mut("backends").and_then(Value::as_array_mut) else {
+        return Ok(false);
+    };
+    let before = list.len();
+    list.retain(|b| {
+        let own = b["id"].as_str().map(str::to_string).or_else(|| {
+            serde_json::from_value::<socketguard_core::config::BackendInstanceConfig>(b.clone())
+                .ok()
+                .map(|i| i.id)
+        });
+        own.as_deref() != Some(id)
+    });
+    if list.len() == before {
+        return Ok(false);
+    }
+    let mut out = serde_json::to_string_pretty(&doc)?;
+    out.push('\n');
+    r.write_file(path, &out)?;
+    Ok(true)
+}
+
+fn describe(e: &Entry) -> String {
+    match &e.change {
+        Change::PackageInstalled {
+            uninstall, package, ..
+        } => {
+            format!("package {package} (uninstall: {})", uninstall.join(" "))
+        }
+        Change::ServiceStarted { service, undo, .. } => {
+            format!("stop service {service} again ({})", undo.join(" "))
+        }
+        Change::FileEdited { path, lines, .. } => {
+            format!("remove \"{}\" from {path}", lines.join("\" and \""))
+        }
+        Change::ConfigEntryWritten { path, id } => format!("remove the {id} entry from {path}"),
+        Change::NetworkAdded { id } => format!("remove the {id} network from the daemon"),
+    }
+}
+
+/// Reverse what an earlier run of `networks setup <kind>` did, newest change first, using
+/// the setup log. Packages are only printed unless `uninstall_packages`.
+pub async fn undo<R: SetupRunner, A: DaemonApi>(
+    kind: SetupKind,
+    opts: &UndoOptions,
+    run: &mut R,
+    api: &A,
+) -> Result<()> {
+    if !opts.dry_run && !run.is_elevated() {
+        bail!(
+            "undoing a setup changes the system and needs administrator rights: {}",
+            if run.os() == "windows" {
+                "run it from an elevated terminal (Run as administrator)"
+            } else {
+                "run it with sudo"
+            }
+        );
+    }
+    let config = match &opts.config {
+        Some(p) => p.clone(),
+        None => {
+            let setup = api.setup().await.context(
+                "cannot ask the daemon where its config file is; start it or give --config <path>",
+            )?;
+            config_file(None, &setup)?
+        }
+    };
+    let log_file = log_path(&config);
+    let all = read_log(&*run, &log_file)?;
+    let mine: Vec<Entry> = all
+        .iter()
+        .filter(|e| e.kind == kind)
+        .rev()
+        .cloned()
+        .collect();
+    if mine.is_empty() {
+        run.say(&format!(
+            "Nothing to undo: setup has not changed anything for {kind} ({}).",
+            log_file.display()
+        ));
+        return Ok(());
+    }
+    run.say("These are the steps:");
+    for (i, e) in mine.iter().enumerate() {
+        run.say(&format!(
+            "{}. {}{}",
+            i + 1,
+            if opts.dry_run { "would: " } else { "" },
+            describe(e)
+        ));
+    }
+    if opts.dry_run {
+        return Ok(());
+    }
+    if !opts.yes && !run.confirm("Proceed?") {
+        run.say("Not confirmed; nothing changed.");
+        return Ok(());
+    }
+    let mut kept: Vec<Entry> = all.iter().filter(|e| e.kind != kind).cloned().collect();
+    let mut failed = Vec::new();
+    let mut keep_mine = Vec::new();
+    for e in &mine {
+        let result: Result<bool> = async {
+            match &e.change {
+                Change::NetworkAdded { id } => {
+                    if api.networks().await?.iter().any(|n| &n.id == id) {
+                        api.remove(id).await?;
+                    }
+                    Ok(true)
+                }
+                Change::ConfigEntryWritten { path, id } => {
+                    remove_config_entry(run, Path::new(path), id)?;
+                    Ok(true)
+                }
+                Change::ServiceStarted { undo, .. } => {
+                    if let Some((program, args)) = undo.split_first() {
+                        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                        run.run(program, &args)?;
+                    }
+                    Ok(true)
+                }
+                Change::FileEdited { path, lines, .. } => {
+                    let p = Path::new(path);
+                    if let Some(text) = run.read_file(p)? {
+                        let new = remove_lines(&text, lines);
+                        if new != text {
+                            run.write_file(p, &new)?;
+                        }
+                    }
+                    Ok(true)
+                }
+                Change::PackageInstalled { uninstall, .. } => {
+                    if opts.uninstall_packages {
+                        if let Some((program, args)) = uninstall.split_first() {
+                            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                            run.run(program, &args)?;
+                        }
+                        Ok(true)
+                    } else {
+                        run.say(&format!(
+                            "   not run; to remove the package yourself: {} (or run this again with --uninstall-packages)",
+                            uninstall.join(" ")
+                        ));
+                        Ok(false)
+                    }
+                }
+            }
+        }
+        .await;
+        match result {
+            Ok(true) => run.say(&format!("done: {}", describe(e))),
+            Ok(false) => keep_mine.push(e.clone()),
+            Err(err) => {
+                run.say(&format!("failed: {}: {err:#}", describe(e)));
+                failed.push(describe(e));
+                keep_mine.push(e.clone());
+            }
+        }
+    }
+    // What is left in the log keeps its order.
+    keep_mine.reverse();
+    kept.extend(keep_mine);
+    kept.sort_by(|a, b| a.time.cmp(&b.time));
+    if kept.is_empty() {
+        write_log(run, &log_file, &config, &[])?;
+    } else {
+        write_log(run, &log_file, &config, &kept)?;
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        manual(format!("these could not be undone: {}", failed.join("; ")))
+    }
+}
+
 // ─── The real system ────────────────────────────────────────────────────────
 
 /// [`SetupRunner`] for this machine.
@@ -879,6 +1270,25 @@ impl SetupRunner for System {
             let _ = std::fs::remove_file(&tmp);
         }
         result.with_context(|| format!("cannot write {}", path.display()))
+    }
+
+    fn write_file_like(&mut self, path: &Path, content: &str, like: &Path) -> Result<()> {
+        self.write_file(path, content)?;
+        if let Ok(m) = std::fs::metadata(like) {
+            let _ = std::fs::set_permissions(path, m.permissions());
+        }
+        Ok(())
+    }
+
+    fn service_enabled(&mut self, name: &str) -> Option<bool> {
+        if self.os() != "linux" {
+            return None;
+        }
+        std::process::Command::new("systemctl")
+            .args(["is-enabled", "--quiet", name])
+            .status()
+            .ok()
+            .map(|s| s.success())
     }
 
     fn protocolinfo(&mut self, control: &str) -> Result<ControlAnswer> {
@@ -993,6 +1403,9 @@ mod tests {
         control: HashMap<String, ControlAnswer>,
         /// A command that makes the control port appear.
         answer: bool,
+        enabled: Option<bool>,
+        /// The control port stays silent for this many asks (Tor not running yet).
+        silent: usize,
     }
 
     impl SetupRunner for Fake {
@@ -1017,11 +1430,18 @@ mod tests {
             Ok(())
         }
         fn protocolinfo(&mut self, control: &str) -> Result<ControlAnswer> {
+            if self.silent > 0 {
+                self.silent -= 1;
+                bail!("no answer");
+            }
             self.control
                 .get(control)
                 .cloned()
                 .filter(|_| self.answer)
                 .context("no answer")
+        }
+        fn service_enabled(&mut self, _: &str) -> Option<bool> {
+            self.enabled
         }
         fn sleep(&mut self, _: Duration) {}
         fn say(&mut self, line: &str) {
@@ -1063,6 +1483,10 @@ mod tests {
         }
         async fn networks(&self) -> Result<Vec<Network>> {
             Ok(self.networks.borrow().clone())
+        }
+        async fn remove(&self, id: &str) -> Result<()> {
+            self.networks.borrow_mut().retain(|n| n.id != id);
+            Ok(())
         }
         async fn add(&self, req: &NewNetwork) -> Result<Network> {
             self.added.borrow_mut().push(req.clone());
@@ -1501,5 +1925,236 @@ mod tests {
             .said
             .iter()
             .any(|l| l.contains("would: add \"ControlPort 9051\"")));
+    }
+
+    // ─── The setup log and --undo ───────────────────────────────────────────
+
+    fn log_of(f: &Fake) -> Vec<Entry> {
+        let text = &f.files[Path::new("/var/lib/sg/setup-log.json")];
+        serde_json::from_str::<LogFile>(text).unwrap().entries
+    }
+
+    fn undo_opts() -> UndoOptions {
+        UndoOptions {
+            yes: true,
+            ..Default::default()
+        }
+    }
+
+    /// A Tor setup on a torrc without a control port, where Tor was not running.
+    fn tor_setup() -> (Fake, Daemon, &'static str) {
+        let torrc = "# mine\r\nDataDirectory /var/lib/tor\r\nSocksPort 9050\r\n";
+        let mut f = Fake {
+            os: "linux",
+            elevated: true,
+            answer: true,
+            silent: 1,
+            enabled: Some(false),
+            ..Default::default()
+        };
+        f.files.insert(PathBuf::from("/t/torrc"), torrc.into());
+        f.control.insert(
+            "127.0.0.1:9051".into(),
+            answer("/var/lib/tor/control_auth_cookie"),
+        );
+        let d = daemon(st(SetupStatus::Ready), st(SetupStatus::NotConfigured));
+        (f, d, torrc)
+    }
+
+    fn tor_opts() -> Options {
+        Options {
+            torrc: Some(PathBuf::from("/t/torrc")),
+            ..opts()
+        }
+    }
+
+    #[test]
+    fn setup_logs_each_change_with_what_is_needed_to_reverse_it() {
+        let (mut f, d, _) = tor_setup();
+        block(run(SetupKind::Tor, &tor_opts(), &mut f, &d)).unwrap();
+        let log = log_of(&f);
+        let kinds: Vec<&Change> = log.iter().map(|e| &e.change).collect();
+        assert!(matches!(
+            kinds[0],
+            Change::FileEdited { path, lines, backup }
+                if path == "/t/torrc"
+                && lines == &["ControlPort 9051", "CookieAuthentication 1"]
+                && backup.as_deref() == Some("/t/torrc.socketguard.bak")
+        ));
+        assert!(matches!(
+            kinds[1],
+            Change::ServiceStarted { service, previous_state, previous_enabled: Some(false), undo }
+                if service == "tor" && previous_state == "stopped"
+                && undo == &["systemctl", "disable", "--now", "tor"]
+        ));
+        assert!(matches!(kinds[2], Change::ConfigEntryWritten { id, .. } if id == "tor"));
+        assert!(matches!(kinds[3], Change::NetworkAdded { id } if id == "tor"));
+        assert!(log
+            .iter()
+            .all(|e| e.kind == SetupKind::Tor && !e.time.is_empty()));
+    }
+
+    #[test]
+    fn a_package_setup_installed_is_logged_and_one_that_was_there_is_not() {
+        let mut offer = st(SetupStatus::NotInstalled);
+        offer.install = Some(socketguard_core::setup::InstallOffer {
+            manager: "winget".into(),
+            command: String::new(),
+            link: None,
+        });
+        let d = daemon(offer, st(SetupStatus::Ready));
+        let mut f = Fake {
+            os: "windows",
+            elevated: true,
+            programs: vec!["winget"],
+            ..Default::default()
+        };
+        let _ = block(run(SetupKind::Yggdrasil, &opts(), &mut f, &d));
+        let log = log_of(&f);
+        assert!(matches!(
+            &log[0].change,
+            Change::PackageInstalled { manager, package, uninstall, .. }
+                if manager == "winget" && package == "YggdrasilNetwork.Yggdrasil"
+                && uninstall == &["winget", "uninstall", "--id", "YggdrasilNetwork.Yggdrasil", "-e"]
+        ));
+
+        // Already installed: only the network is logged, never a package.
+        let d = daemon(st(SetupStatus::Ready), st(SetupStatus::Ready));
+        let mut f = Fake {
+            os: "windows",
+            elevated: true,
+            programs: vec!["winget"],
+            ..Default::default()
+        };
+        block(run(SetupKind::Yggdrasil, &opts(), &mut f, &d)).unwrap();
+        let log = log_of(&f);
+        assert_eq!(log.len(), 1);
+        assert!(matches!(&log[0].change, Change::NetworkAdded { id } if id == "yggdrasil"));
+        block(undo(SetupKind::Yggdrasil, &undo_opts(), &mut f, &d)).unwrap();
+        assert!(
+            f.commands.is_empty(),
+            "nothing is uninstalled: {:?}",
+            f.commands
+        );
+        assert!(d.networks.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_started_yggdrasil_service_is_logged() {
+        let d = daemon(st(SetupStatus::NotRunning), st(SetupStatus::Ready));
+        let mut f = Fake {
+            os: "linux",
+            elevated: true,
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let _ = block(run(SetupKind::Yggdrasil, &opts(), &mut f, &d));
+        let log = log_of(&f);
+        assert!(matches!(
+            &log[0].change,
+            Change::ServiceStarted { service, previous_enabled: Some(true), undo, .. }
+                if service == "yggdrasil" && undo == &["systemctl", "stop", "yggdrasil"]
+        ));
+    }
+
+    #[test]
+    fn undo_reverses_every_change_and_is_idempotent() {
+        let (mut f, d, torrc) = tor_setup();
+        block(run(SetupKind::Tor, &tor_opts(), &mut f, &d)).unwrap();
+        f.commands.clear();
+        assert_ne!(f.files[Path::new("/t/torrc")], torrc);
+
+        block(undo(SetupKind::Tor, &undo_opts(), &mut f, &d)).unwrap();
+        // The torrc is as it was, byte for byte (CRLF kept), the entry and network are gone,
+        // the service is put back.
+        assert_eq!(f.files[Path::new("/t/torrc")], torrc);
+        let doc: Value =
+            serde_json::from_str(&f.files[Path::new("/var/lib/sg/socketguard.json")]).unwrap();
+        assert!(doc["backends"].as_array().unwrap().is_empty());
+        assert!(d.networks.borrow().is_empty());
+        assert_eq!(f.commands, ["systemctl disable --now tor"]);
+        assert!(log_of(&f).is_empty());
+
+        // Again: nothing happens.
+        f.commands.clear();
+        let before = f.files.clone();
+        block(undo(SetupKind::Tor, &undo_opts(), &mut f, &d)).unwrap();
+        assert!(f.commands.is_empty());
+        assert_eq!(f.files, before);
+        assert!(f.said.last().unwrap().starts_with("Nothing to undo"));
+    }
+
+    #[test]
+    fn undo_removes_only_the_lines_setup_added() {
+        let text = "ControlPort 9051\nSocksPort 9050\nControlPort 9051\nCookieAuthentication 1\n";
+        let lines = vec![
+            "ControlPort 9051".to_string(),
+            "CookieAuthentication 1".to_string(),
+        ];
+        // The last ControlPort is the one that was appended; the user's own stays.
+        assert_eq!(
+            remove_lines(text, &lines),
+            "ControlPort 9051\nSocksPort 9050\n"
+        );
+        assert_eq!(remove_lines("a\r\nb\r\n", &["c".into()]), "a\r\nb\r\n");
+    }
+
+    #[test]
+    fn undo_only_prints_the_uninstall_command_unless_asked() {
+        let mut offer = st(SetupStatus::NotInstalled);
+        offer.install = Some(socketguard_core::setup::InstallOffer {
+            manager: "winget".into(),
+            command: String::new(),
+            link: None,
+        });
+        let d = daemon(offer, st(SetupStatus::Ready));
+        let mut f = Fake {
+            os: "windows",
+            elevated: true,
+            programs: vec!["winget"],
+            ..Default::default()
+        };
+        let _ = block(run(SetupKind::Yggdrasil, &opts(), &mut f, &d));
+        f.commands.clear();
+        block(undo(SetupKind::Yggdrasil, &undo_opts(), &mut f, &d)).unwrap();
+        assert!(f.commands.is_empty());
+        assert!(f
+            .said
+            .iter()
+            .any(|l| l.contains("winget uninstall --id YggdrasilNetwork.Yggdrasil -e")));
+        assert_eq!(log_of(&f).len(), 1, "still logged: it was not removed");
+
+        let o = UndoOptions {
+            uninstall_packages: true,
+            ..undo_opts()
+        };
+        block(undo(SetupKind::Yggdrasil, &o, &mut f, &d)).unwrap();
+        assert_eq!(
+            f.commands,
+            ["winget uninstall --id YggdrasilNetwork.Yggdrasil -e"]
+        );
+        assert!(log_of(&f).is_empty());
+    }
+
+    #[test]
+    fn undo_needs_administrator_rights_and_a_dry_run_changes_nothing() {
+        let (mut f, d, _) = tor_setup();
+        block(run(SetupKind::Tor, &tor_opts(), &mut f, &d)).unwrap();
+        let edited = f.files.clone();
+        f.elevated = false;
+        let err = block(undo(SetupKind::Tor, &undo_opts(), &mut f, &d)).unwrap_err();
+        assert!(err.to_string().contains("sudo"));
+        let dry = UndoOptions {
+            dry_run: true,
+            ..undo_opts()
+        };
+        f.commands.clear();
+        block(undo(SetupKind::Tor, &dry, &mut f, &d)).unwrap();
+        assert_eq!(f.files, edited);
+        assert!(f.commands.is_empty());
+        assert!(f
+            .said
+            .iter()
+            .any(|l| l.contains("would: remove \"ControlPort 9051\"")));
     }
 }

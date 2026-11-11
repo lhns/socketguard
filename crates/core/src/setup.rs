@@ -127,8 +127,12 @@ pub struct NetworkSetup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallCommand {
     pub manager: &'static str,
+    /// The package as the manager names it.
+    pub package: &'static str,
     pub program: &'static str,
     pub args: Vec<&'static str>,
+    /// The arguments (to `program`) that remove it again.
+    pub uninstall: Vec<&'static str>,
 }
 
 impl InstallCommand {
@@ -173,7 +177,9 @@ pub fn install_command(
     match (kind, os) {
         (SetupKind::Yggdrasil, "windows") if has("winget") => Some(InstallCommand {
             manager: "winget",
+            package: "YggdrasilNetwork.Yggdrasil",
             program: "winget",
+            uninstall: vec!["uninstall", "--id", "YggdrasilNetwork.Yggdrasil", "-e"],
             args: vec![
                 "install",
                 "--id",
@@ -187,19 +193,25 @@ pub fn install_command(
             if has("apt-get") {
                 Some(InstallCommand {
                     manager: "apt",
+                    package: "tor",
                     program: "apt-get",
+                    uninstall: vec!["remove", "-y", "tor"],
                     args: vec!["install", "-y", "tor"],
                 })
             } else if has("dnf") {
                 Some(InstallCommand {
                     manager: "dnf",
+                    package: "tor",
                     program: "dnf",
+                    uninstall: vec!["remove", "-y", "tor"],
                     args: vec!["install", "-y", "tor"],
                 })
             } else if has("pacman") {
                 Some(InstallCommand {
                     manager: "pacman",
+                    package: "tor",
                     program: "pacman",
+                    uninstall: vec!["-R", "--noconfirm", "tor"],
                     args: vec!["-S", "--noconfirm", "tor"],
                 })
             } else {

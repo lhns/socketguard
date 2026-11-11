@@ -460,6 +460,14 @@ pub enum NetworksCmd {
         /// Wait for a key at the end (for a console that closes by itself)
         #[arg(long)]
         pause: bool,
+        /// Reverse what an earlier setup of this kind changed, from the setup log next to the
+        /// config file
+        #[arg(long)]
+        undo: bool,
+        /// With --undo: also run the uninstall command of packages setup installed (they are
+        /// only printed otherwise)
+        #[arg(long, requires = "undo")]
+        uninstall_packages: bool,
     },
     /// Add a network (saved to the daemon's config file)
     Add {
