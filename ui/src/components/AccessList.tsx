@@ -81,6 +81,7 @@ export default function AccessList({ entries, direction, networks, onRevoke, hig
                   via group {e.origin.label}
                 </button>
               )}
+              {e.origin.kind === "reservation" && <span className="muted">via reservation {e.origin.label}</span>}
               {e.origin.kind === "direct" && e.grants.length > 0 && onRevoke && (
                 <button className="btn btn-danger btn-sm access-revoke" aria-label={`Revoke ${nameOf(e)}`} onClick={() => onRevoke(e)}>
                   Revoke

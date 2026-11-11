@@ -20,8 +20,8 @@ use anyhow::Result;
 use ip::{IpNetwork, Ipv6Backend, Prefix};
 use socketguard_core::config::BackendConfig;
 use socketguard_core::{
-    Address, AddressId, AppId, Credential, CredentialKind, Locator, Network as NetworkInfo,
-    NetworkKind, NetworkStatus, PortRangeSet, PortRef, Scope, Subject,
+    Address, AddressId, AppId, Credential, CredentialKind, Locator, Model, Network as NetworkInfo,
+    NetworkKind, NetworkStatus, PortRangeSet, PortRef, Scope, Subject, Target,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv6Addr};
@@ -196,6 +196,12 @@ pub fn bind_rank(ip: &IpAddr) -> u8 {
 /// Resolve the grants that apply to the addresses of `network` in `snap`: the input of
 /// [`Network::enforce`]. `secrets` are the stored locator secrets by address; `binds`
 /// where the app's listeners are bound.
+///
+/// An address that is not up is passed with no ports and no grants, so it stays
+/// unpublished. A reservation's address on Tor takes only the grants that target the
+/// reservation itself (ADR 0047): a grant on one bound row has no effect there. Its ports
+/// are those the reservation serves for each bound app, and each grant covers the ports
+/// that it covers on its own app.
 pub fn enforcement_for(
     network: &NetworkInfo,
     snap: &Snapshot,
@@ -204,38 +210,61 @@ pub fn enforcement_for(
 ) -> NetworkEnforcement {
     let peers: HashMap<&str, &socketguard_core::Peer> =
         snap.peers.iter().map(|p| (p.id.as_str(), p)).collect();
+    let model = Model::new(snap.world());
+    let info = model.address_info();
+    let apps: HashMap<&str, &socketguard_core::App> =
+        snap.apps.iter().map(|a| (a.id.as_str(), a)).collect();
     let mut addresses = Vec::new();
-    for app in &snap.apps {
-        let listening = PortRangeSet::from_ports(
-            app.ports
-                .iter()
-                .filter(|p| p.listening)
-                .map(|p| p.port_ref()),
-        );
-        // The exclusion rule of the firewall does not matter here: only ports the app
-        // itself listens on are published, and those always stay.
-        let none = PortRangeSet::new();
-        let app_grants = socketguard_core::grants_for_app(
-            &snap.grants,
-            &snap.tags,
-            app,
-            &snap.socket_groups,
-            &none,
-        );
-        for address in app.addresses.iter().filter(|a| a.network_id == network.id) {
-            let served =
-                socketguard_core::scope_ports(app, &address.scope, &snap.socket_groups, &none);
-            let ports: Vec<PortRef> = served.total().intersect(&listening).ports().collect();
-            let grants = app_grants
-                .iter()
-                .filter(|g| {
-                    g.grant
-                        .network_id
-                        .as_deref()
-                        .is_none_or(|n| n == network.id)
-                })
-                .map(|g| EnforcedGrant {
-                    ports: g.ports.total(),
+    for address in snap.addresses.iter().filter(|a| a.network_id == network.id) {
+        let mut out = EnforcedAddress {
+            id: address.id.clone(),
+            locator: address.locator.clone(),
+            ports: vec![],
+            binds: BTreeMap::new(),
+            secret: secrets.get(&address.id).cloned(),
+            grants: vec![],
+        };
+        let Some(state) = info.get(&address.id).filter(|s| s.up) else {
+            addresses.push(out);
+            continue;
+        };
+        let reservation = address.reservation_id.as_deref();
+        let mut ports: BTreeSet<PortRef> = BTreeSet::new();
+        for (app_id, served) in &state.served {
+            let Some(app) = apps.get(app_id.as_str()) else {
+                continue;
+            };
+            let listening = PortRangeSet::from_ports(
+                app.ports
+                    .iter()
+                    .filter(|p| p.listening)
+                    .map(|p| p.port_ref()),
+            );
+            let mine: Vec<PortRef> = served.total().intersect(&listening).ports().collect();
+            for p in &mine {
+                ports.insert(*p);
+                if let Some(bind) = binds.get(&(app.id.clone(), *p)) {
+                    out.binds.insert(*p, *bind);
+                }
+            }
+            for g in model.app_grants(app).iter().filter(|g| {
+                g.grant
+                    .network_id
+                    .as_deref()
+                    .is_none_or(|n| n == network.id)
+            }) {
+                if let Some(rid) = reservation {
+                    // Only grants on the reservation itself count for its onion address.
+                    let on_it = snap
+                        .grants
+                        .iter()
+                        .any(|x| x.id == g.grant.id && x.target == Target::Reservation(rid.into()));
+                    if !on_it {
+                        continue;
+                    }
+                }
+                out.grants.push(EnforcedGrant {
+                    ports: g.ports.total().intersect(&served.total()),
                     subject: match &g.grant.subject {
                         Subject::Anyone => EnforcedSubject::Anyone,
                         s => EnforcedSubject::Credentials(
@@ -245,20 +274,11 @@ pub fn enforcement_for(
                                 .collect(),
                         ),
                     },
-                })
-                .collect();
-            addresses.push(EnforcedAddress {
-                id: address.id.clone(),
-                locator: address.locator.clone(),
-                binds: ports
-                    .iter()
-                    .filter_map(|p| Some((*p, *binds.get(&(app.id.clone(), *p))?)))
-                    .collect(),
-                ports,
-                secret: secrets.get(&address.id).cloned(),
-                grants,
-            });
+                });
+            }
         }
+        out.ports = ports.into_iter().collect();
+        addresses.push(out);
     }
     NetworkEnforcement {
         addresses,
@@ -321,24 +341,29 @@ mod tests {
             last_seen: now,
             // 80 is outside the group; 50003 listens, 50004 was seen but is quiet.
             ports: vec![port(80, true), port(50003, true), port(50004, false)],
-            addresses: vec![Address {
-                id: "ad".into(),
-                app_id: "a".into(),
-                network_id: "n".into(),
-                scope: Scope::group("sg"),
-                locator: Locator::Onion {
+            addresses: vec![],
+        };
+        let address = Address {
+            id: "ad".into(),
+            ..Address::automatic(
+                "a",
+                Scope::group("sg"),
+                "n",
+                Locator::Onion {
                     hostname: "abc.onion".into(),
                 },
-                created_at: now,
-            }],
+            )
         };
         let snap = Snapshot {
             apps: vec![app],
+            networks: vec![info(NetworkKind::Tor)],
+            addresses: vec![address],
             socket_groups: vec![group],
             grants: vec![Grant {
                 id: "g".into(),
                 target: Target::App("a".into()),
-                scope: Scope::All,
+                // The grant names the group's row, which is what gives it an address.
+                scope: Scope::group("sg"),
                 network_id: None,
                 subject: Subject::Anyone,
                 created_at: now,

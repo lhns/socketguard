@@ -282,7 +282,16 @@ async fn patterns_add_matching_apps_now_and_new_ones_later_but_not_excluded_ones
         .filter(|r| r.contains(&grant_id))
         .count();
     assert!(with_rule >= 2, "both apps have rules");
-    assert!(new_app.addresses.len() == 3);
+    let new_addresses = d
+        .state
+        .db
+        .list_addresses()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.app_id.as_deref() == Some(new_app.id.as_str()))
+        .count();
+    assert_eq!(new_addresses, 3, "the tag grant names the new member's row");
 
     // Removing a matched app is remembered: a later pass does not add it back, and it is
     // not added by a pattern change either.

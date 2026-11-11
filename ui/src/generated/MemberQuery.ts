@@ -3,7 +3,7 @@ import type { Protocol } from "./Protocol";
 
 /**
  * Query of `DELETE /api/tags/{id}/members/{app_id}`: without `port` and `group` the
- * whole-app membership goes, with `port` (and `proto`) the membership of that port, with
+ * All-sockets membership goes, with `port` (and `proto`) the membership of that port, with
  * `group` (a socket group id) the membership by that group.
  */
 export type MemberQuery = { port?: number, proto?: Protocol, group?: string, };

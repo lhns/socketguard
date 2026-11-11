@@ -2,7 +2,7 @@
 source: crates/cli/tests/render.rs
 expression: "render::grants(&grants(), &names(), true)"
 ---
-ID        APP    PORT         NETWORK  WHO         REACH
-g1111111  nginx  80/tcp       ygg      alice       ygg: verified
-g2222222  nginx  All sockets  all      group:team  ygg: whole subnet, lan: IP only
-g3333333  nginx  443/tcp      all      anyone      ygg: open, local: not reachable
+ID        APP    PORT       NETWORK  WHO         REACH
+g1111111  nginx  80/tcp     ygg      alice       ygg: verified
+g2222222  nginx  All ports  all      group:team  ygg: whole subnet, lan: IP only
+g3333333  nginx  443/tcp    all      anyone      ygg: open, local: not reachable

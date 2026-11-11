@@ -98,9 +98,30 @@ impl Harness {
         self.state.db.list_apps().await.unwrap().remove(0)
     }
 
-    /// The service id of the app's onion address (derived from its stored key).
+    /// The service id of the app's onion address. An address exists only once a grant
+    /// names the row, so this names it with a grant to an empty group, which lets nobody
+    /// in and publishes nothing.
     async fn svc(&self) -> String {
-        match self.app().await.addresses.remove(0).locator {
+        if self.state.db.list_addresses().await.unwrap().is_empty() {
+            let group = self
+                .state
+                .engine
+                .read()
+                .await
+                .create_group(&self.state, "ghosts", &[])
+                .await
+                .unwrap();
+            self.grant(Subject::Group(group.id)).await;
+        }
+        match self
+            .state
+            .db
+            .list_addresses()
+            .await
+            .unwrap()
+            .remove(0)
+            .locator
+        {
             Locator::Onion { hostname } => hostname.trim_end_matches(".onion").to_string(),
             other => panic!("not an onion locator: {other:?}"),
         }
@@ -168,10 +189,11 @@ async fn discovery_grant_and_revoke_drive_the_control_port() {
     h.reconcile().await;
 
     // Discovery: an onion address with a stored key, and nothing published.
-    let app = h.app().await;
-    assert_eq!(app.addresses.len(), 1);
+    assert!(h.state.db.list_addresses().await.unwrap().is_empty());
     let svc = h.svc().await;
-    let key = h.state.db.onion_keys().await.unwrap()[&app.addresses[0].id].clone();
+    let addresses = h.state.db.list_addresses().await.unwrap();
+    assert_eq!(addresses.len(), 1, "named by a grant that lets nobody in");
+    let key = h.state.db.onion_keys().await.unwrap()[&addresses[0].id].clone();
     assert!(key.starts_with("ED25519-V3:"));
     assert_eq!(
         socketguard_daemon::networks::onion_key::service_id_of_secret(&key).unwrap(),
@@ -310,10 +332,15 @@ async fn an_unreachable_tor_still_gets_its_address_and_publishes_nothing() {
     let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
     h.tor.set_down(true);
     h.reconcile().await;
-    assert_eq!(h.app().await.addresses.len(), 1, "the key is local");
+    h.svc().await;
+    assert_eq!(
+        h.state.db.list_addresses().await.unwrap().len(),
+        1,
+        "the key is local"
+    );
     h.tor.set_down(false);
     h.reconcile().await;
-    assert_eq!(h.app().await.addresses.len(), 1);
+    assert_eq!(h.state.db.list_addresses().await.unwrap().len(), 1);
     assert!(h.tor.detached().is_empty());
 }
 
@@ -628,7 +655,7 @@ async fn removing_the_network_while_tor_is_down_is_refused_unless_forced() {
     );
     // Nothing was removed: the network, its address and the service are all still there.
     assert_eq!(h.state.engine.read().await.networks().len(), 1);
-    assert_eq!(h.app().await.addresses.len(), 1);
+    assert_eq!(h.state.db.list_addresses().await.unwrap().len(), 1);
     assert_eq!(h.tor.detached().len(), 1);
     assert!(!ledger(&h).await.owned.is_empty());
 
@@ -720,7 +747,7 @@ async fn a_generated_tor_key_authorizes_the_peer_and_share_hands_out_the_client_
     assert_eq!(key["credential"]["kind"], "tor_client_key");
 
     // Granted: the service is published for the generated key (and the pasted one).
-    h.grant(Subject::Peer(peer_id.clone())).await;
+    let peer_grant = h.grant(Subject::Peer(peer_id.clone())).await;
     h.reconcile().await;
     let add = h.tor.add_commands().join("\n");
     assert!(
@@ -782,8 +809,7 @@ async fn a_generated_tor_key_authorizes_the_peer_and_share_hands_out_the_client_
     );
 
     // A peer without a grant gets no line; unknown peers and apps are 404.
-    h.revoke(&h.state.db.list_grants().await.unwrap()[0].id)
-        .await;
+    h.revoke(&peer_grant).await;
     let (_, share) = call(
         &h,
         Method::GET,
@@ -796,4 +822,274 @@ async fn a_generated_tor_key_authorizes_the_peer_and_share_hands_out_the_client_
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _) = call(&h, Method::GET, "/api/apps/nope/share", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+// ─── Reservations on Tor (ADR 0047): opened as a whole ──────────────────────────
+
+use socketguard_core::BindingTarget;
+use socketguard_daemon::networks::tor_client_key;
+
+struct Web {
+    h: Harness,
+    ssh: String,
+    nginx: String,
+    rid: String,
+}
+
+fn tcp_socket(name: &str, port: u16) -> ListeningSocket {
+    ListeningSocket {
+        bind_address: "0.0.0.0".parse().unwrap(),
+        ..common::listener(name, port)
+    }
+}
+
+/// A reservation "web" over sshd:22 and nginx:443, nothing granted yet.
+async fn web() -> Web {
+    let h = Harness::new(vec![tcp_socket("sshd", 22), tcp_socket("nginx", 443)]).await;
+    h.reconcile().await;
+    let apps = h.state.db.list_apps().await.unwrap();
+    let id_of = |n: &str| {
+        apps.iter()
+            .find(|a| a.process_name == n)
+            .unwrap()
+            .id
+            .clone()
+    };
+    let (ssh, nginx) = (id_of("sshd"), id_of("nginx"));
+    let rid = h
+        .state
+        .engine
+        .read()
+        .await
+        .create_reservation(
+            &h.state,
+            "web",
+            vec![
+                BindingTarget::App {
+                    app_id: ssh.clone(),
+                    scope: Scope::All,
+                },
+                BindingTarget::App {
+                    app_id: nginx.clone(),
+                    scope: Scope::All,
+                },
+            ],
+            false,
+        )
+        .await
+        .unwrap()
+        .reservation
+        .id;
+    Web { h, ssh, nginx, rid }
+}
+
+impl Web {
+    async fn peer(&self, label: &str) -> (String, String) {
+        let key = tor_client_key::generate();
+        let peer = self
+            .h
+            .state
+            .engine
+            .read()
+            .await
+            .create_peer(
+                &self.h.state,
+                label,
+                &[NewCredential {
+                    kind: CredentialKind::TorClientKey,
+                    value: key.public.clone(),
+                    label: None,
+                }],
+            )
+            .await
+            .unwrap();
+        (peer.id, key.public)
+    }
+
+    async fn grant(&self, target: Target, scope: Scope, subject: Subject) -> String {
+        self.h
+            .state
+            .engine
+            .read()
+            .await
+            .create_grant(
+                &self.h.state,
+                &NewGrant {
+                    target,
+                    scope,
+                    network_id: None,
+                    subject,
+                    confirm_open: true,
+                },
+            )
+            .await
+            .unwrap()
+            .grant
+            .id
+    }
+
+    /// The hostname of the reservation's onion address, if it has one.
+    async fn reserved_onion(&self) -> Option<String> {
+        self.h
+            .state
+            .db
+            .list_addresses()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.reservation_id.as_deref() == Some(self.rid.as_str()))
+            .and_then(|a| match a.locator {
+                Locator::Onion { hostname } => {
+                    Some(hostname.trim_end_matches(".onion").to_string())
+                }
+                _ => None,
+            })
+    }
+
+    async fn reach_note(&self, grant_id: &str) -> (socketguard_core::Reach, Option<String>) {
+        let g = self
+            .h
+            .state
+            .engine
+            .read()
+            .await
+            .get_grant(&self.h.state, grant_id)
+            .await
+            .unwrap();
+        let r = &g.reach[0];
+        (r.reach, r.note.clone())
+    }
+}
+
+#[tokio::test]
+async fn a_client_granted_one_bound_row_is_not_admitted_on_tor() {
+    let w = web().await;
+    let (bob, _bob_key) = w.peer("bob").await;
+    let g = w
+        .grant(Target::App(w.nginx.clone()), Scope::All, Subject::Peer(bob))
+        .await;
+    // Nothing is published, no onion address of the reservation or of the row exists.
+    assert!(w.h.tor.detached().is_empty());
+    assert!(w.reserved_onion().await.is_none());
+    let onions: Vec<_> =
+        w.h.state
+            .db
+            .list_addresses()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|a| matches!(a.locator, Locator::Onion { .. }))
+            .collect();
+    assert!(
+        onions
+            .iter()
+            .all(|a| a.app_id.as_deref() != Some(w.nginx.as_str())),
+        "a bound row has no onion of its own"
+    );
+    let (reach, note) = w.reach_note(&g).await;
+    assert_eq!(reach, socketguard_core::Reach::NotReachable);
+    assert_eq!(
+        note.as_deref(),
+        Some("bound to reservation web: on Tor grant the reservation as a whole")
+    );
+}
+
+#[tokio::test]
+async fn holding_every_row_through_row_grants_still_does_not_admit_on_tor() {
+    let w = web().await;
+    let (carol, _) = w.peer("carol").await;
+    w.grant(
+        Target::App(w.ssh.clone()),
+        Scope::All,
+        Subject::Peer(carol.clone()),
+    )
+    .await;
+    w.grant(
+        Target::App(w.nginx.clone()),
+        Scope::All,
+        Subject::Peer(carol),
+    )
+    .await;
+    assert!(w.h.tor.detached().is_empty());
+    assert!(w.reserved_onion().await.is_none());
+}
+
+#[tokio::test]
+async fn a_grant_on_the_reservation_publishes_every_bound_port_for_its_client_only() {
+    let w = web().await;
+    let (alice, alice_key) = w.peer("alice").await;
+    let (bob, bob_key) = w.peer("bob").await;
+    w.grant(Target::App(w.nginx.clone()), Scope::All, Subject::Peer(bob))
+        .await;
+    w.grant(
+        Target::Reservation(w.rid.clone()),
+        Scope::All,
+        Subject::Peer(alice),
+    )
+    .await;
+    let svc = w
+        .reserved_onion()
+        .await
+        .expect("the reservation has an onion address");
+    assert_eq!(w.h.tor.detached(), [svc.as_str()]);
+    let add = w.h.tor.add_commands().pop().unwrap();
+    assert!(add.contains("Port=22,"), "{add}");
+    assert!(add.contains("Port=443,"), "{add}");
+    assert!(add.contains(&format!("ClientAuthV3={alice_key}")), "{add}");
+    assert!(!add.contains(&bob_key), "a row grant does not count: {add}");
+}
+
+#[tokio::test]
+async fn a_peer_group_granted_on_the_reservation_admits_every_member_key() {
+    let w = web().await;
+    let (a, a_key) = w.peer("a").await;
+    let (b, b_key) = w.peer("b").await;
+    let group =
+        w.h.state
+            .engine
+            .read()
+            .await
+            .create_group(&w.h.state, "team", &[a, b])
+            .await
+            .unwrap();
+    w.grant(
+        Target::Reservation(w.rid.clone()),
+        Scope::All,
+        Subject::Group(group.id),
+    )
+    .await;
+    let add = w.h.tor.add_commands().pop().unwrap();
+    assert!(add.contains(&format!("ClientAuthV3={a_key}")), "{add}");
+    assert!(add.contains(&format!("ClientAuthV3={b_key}")), "{add}");
+}
+
+#[tokio::test]
+async fn an_unbound_row_keeps_its_own_onion_and_a_dangling_grant_publishes_nothing() {
+    // An app outside any reservation: the grant names the row and the address exists, but
+    // with nobody to admit nothing is published (`up` is false).
+    let h = Harness::new(vec![tcp_socket("solo", 8080)]).await;
+    h.reconcile().await;
+    let app = h.app().await;
+    let group = h
+        .state
+        .engine
+        .read()
+        .await
+        .create_group(&h.state, "nobody", &[])
+        .await
+        .unwrap();
+    h.grant(Subject::Group(group.id)).await;
+    let addresses = h.state.db.list_addresses().await.unwrap();
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].app_id.as_deref(), Some(app.id.as_str()));
+    assert!(h.tor.detached().is_empty());
+    let views = h
+        .state
+        .engine
+        .read()
+        .await
+        .list_addresses(&h.state)
+        .await
+        .unwrap();
+    assert!(!views[0].up, "not published, so not up");
 }

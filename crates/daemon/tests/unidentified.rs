@@ -53,7 +53,19 @@ async fn an_unidentified_listener_is_an_app_of_its_own_and_system_apps_are_flagg
     assert!(!a.system);
     assert_eq!(a.ports.len(), 1);
     assert_eq!(a.ports[0].port, 9999);
-    assert_eq!(a.addresses.len(), 3, "addressed on every network, closed");
+    let own = d
+        .state
+        .db
+        .list_addresses()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|x| x.app_id.as_deref() == Some(a.id.as_str()))
+        .count();
+    assert_eq!(
+        own, 1,
+        "only loopback has an address until a grant names it"
+    );
 
     let nginx = apps.iter().find(|a| a.name == "nginx").unwrap();
     assert!(!nginx.system);

@@ -303,7 +303,12 @@ async fn errors_status_and_everything_else() {
         serde_json::json!([])
     );
 
-    // Share: connection strings, URL for web ports.
+    // Share: an app has no address until a grant names its row.
+    let share = env.ok(&["share", "nginx", "--network", "ygg"]).await.stdout;
+    assert!(share.contains("no address that is up"), "{share}");
+    env.ok(&["peers", "add", "--label", "erin", KEY]).await;
+    env.ok(&["grant", "nginx:80", "erin", "--network", "ygg"])
+        .await;
     let share = env.ok(&["share", "nginx", "--network", "ygg"]).await.stdout;
     let lines: Vec<&str> = share.lines().collect();
     assert_eq!(lines.len(), 2, "{share}");
@@ -313,32 +318,51 @@ async fn errors_status_and_everything_else() {
     );
     assert!(lines[1].starts_with("http://[300:1:2:3:"), "{share}");
 
-    // Split and merge.
-    env.ok(&["apps", "split", "nginx", "--network", "ygg", "80/tcp"])
-        .await;
-    let detail = env.ok(&["apps", "show", "nginx", "--json"]).await.json();
-    let ids: Vec<String> = detail["addresses"]
+    // Reservations: keep the address, bind, grant, rename, release.
+    let addresses = env.ok(&["addresses", "list", "--json"]).await.json();
+    let ygg = addresses
         .as_array()
         .unwrap()
         .iter()
-        .filter(|a| a["network_id"] == "ygg")
-        .map(|a| a["id"].as_str().unwrap()[..10].to_string())
-        .collect();
-    assert_eq!(ids.len(), 2);
-    let mut merge = vec!["apps", "merge", "nginx", "--network", "ygg"];
-    merge.extend(ids.iter().map(String::as_str));
-    env.ok(&merge).await;
+        .find(|a| a["network_id"] == "ygg")
+        .expect("an address on ygg")
+        .clone();
+    assert!(env
+        .ok(&["addresses", "list"])
+        .await
+        .stdout
+        .contains("nginx"));
+    let id = ygg["id"].as_str().unwrap()[..10].to_string();
+    env.ok(&["addresses", "reserve", &id, "web"]).await;
+    let listed = env.ok(&["reservations", "list"]).await.stdout;
+    assert!(
+        listed.contains("web") && listed.contains("nginx:80/tcp"),
+        "{listed}"
+    );
+    env.ok(&["grant", "reservation:web", "erin"]).await;
+    let e = env.fails(&["grant", "reservation:web:80", "erin"]).await;
+    assert!(e.stderr.contains("granted whole"), "{}", e.stderr);
+    env.ok(&["grants", "--reservation", "web"]).await;
+    env.ok(&["reservations", "rename", "web", "site"]).await;
+    env.ok(&["reservations", "unbind", "site", "nginx:80"])
+        .await;
+    env.ok(&["reservations", "bind", "site", "nginx:80"]).await;
+    env.ok(&["reservations", "release", "site"]).await;
+    assert_eq!(
+        env.ok(&["reservations", "list", "--json"]).await.json(),
+        serde_json::json!([])
+    );
+    env.ok(&["peers", "rm", "erin"]).await;
 
     // Review, settings, networks (and the config file).
     env.ok(&["apps", "review", "nginx", "--unreviewed"]).await;
     assert!(env.ok(&["pending"]).await.stdout.contains("nginx"));
     env.ok(&["apps", "review", "nginx"]).await;
-    env.ok(&["settings", "address-mode", "per-port"]).await;
     assert!(env
         .ok(&["settings", "show"])
         .await
         .stdout
-        .contains("per-port"));
+        .contains("protect-host"));
     let nets = env.ok(&["networks", "list", "--json"]).await.json();
     assert_eq!(nets.as_array().unwrap().len(), 3);
     env.ok(&["networks", "rm", "lan"]).await;

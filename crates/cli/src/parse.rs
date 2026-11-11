@@ -19,7 +19,7 @@ pub fn parse_port(s: &str) -> Result<PortRef> {
     Ok(PortRef { port, proto })
 }
 
-/// Which sockets of a target, by name as typed (a socket group by label).
+/// Which ports of a target, by name as typed (a port group by label).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopeSpec {
     All,
@@ -27,12 +27,12 @@ pub enum ScopeSpec {
     Group(String),
 }
 
-/// The marker of a socket group in `<app>:socket-group=<label>`.
+/// The marker of a port group in `<app>:socket-group=<label>`.
 pub const SOCKET_GROUP_MARKER: &str = ":socket-group=";
 
 /// `nginx`, `nginx:80`, `nginx:53/udp`, `nginx:socket-group=passive`. The text after the
 /// last `:` is a port only if it parses as one, so app names with a colon still work; the
-/// socket group marker is recognised anywhere, so group labels may contain colons too.
+/// port group marker is recognised anywhere, so group labels may contain colons too.
 pub fn parse_target(s: &str) -> (String, ScopeSpec) {
     if let Some(at) = s.rfind(SOCKET_GROUP_MARKER) {
         let label = &s[at + SOCKET_GROUP_MARKER.len()..];
@@ -50,7 +50,7 @@ pub fn parse_target(s: &str) -> (String, ScopeSpec) {
     (s.to_string(), ScopeSpec::All)
 }
 
-/// `80/tcp`, `50000-51000/udp`, repeated: the ports of a socket group, normalized.
+/// `80/tcp`, `50000-51000/udp`, repeated: the ports of a port group, normalized.
 pub fn parse_ranges(items: &[String]) -> Result<Vec<socketguard_core::PortRange>> {
     socketguard_core::parse_ranges(items).map_err(|e| anyhow!(e))
 }
@@ -60,19 +60,22 @@ pub fn parse_ranges(items: &[String]) -> Result<Vec<socketguard_core::PortRange>
 pub enum TargetSpec {
     App(String),
     Tag(String),
+    Reservation(String),
 }
 
-/// [`parse_target`] that also takes `tag:<label>[:port[/proto]]`.
+/// [`parse_target`] that also takes `tag:<label>[:port[/proto]]` and `reservation:<label>`.
+/// A reservation is always granted whole: a scope typed after its label is returned for the
+/// caller to refuse, with the label cut off before it.
 pub fn parse_target_spec(s: &str) -> (TargetSpec, ScopeSpec) {
-    match s.strip_prefix("tag:") {
-        Some(rest) => {
-            let (label, port) = parse_target(rest);
-            (TargetSpec::Tag(label), port)
-        }
-        None => {
-            let (app, port) = parse_target(s);
-            (TargetSpec::App(app), port)
-        }
+    if let Some(rest) = s.strip_prefix("tag:") {
+        let (label, port) = parse_target(rest);
+        (TargetSpec::Tag(label), port)
+    } else if let Some(rest) = s.strip_prefix("reservation:") {
+        let (label, port) = parse_target(rest);
+        (TargetSpec::Reservation(label), port)
+    } else {
+        let (app, port) = parse_target(s);
+        (TargetSpec::App(app), port)
     }
 }
 
@@ -235,6 +238,19 @@ mod tests {
             parse_target_spec("nginx:80").0,
             TargetSpec::App("nginx".into())
         );
+    }
+
+    #[test]
+    fn reservation_targets() {
+        assert_eq!(
+            parse_target_spec("reservation:web"),
+            (TargetSpec::Reservation("web".into()), ScopeSpec::All)
+        );
+        // A scope is parsed so that the caller can refuse it.
+        assert!(matches!(
+            parse_target_spec("reservation:web:80").1,
+            ScopeSpec::Port(_)
+        ));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! The schema (v7), its migrations and the archive of pre-v1 databases.
+//! The schema (v8), its migrations and the archive of pre-v1 databases.
 
 use super::protect::protect_files;
 use super::settings::FRESH_DB_KEY;
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Schema v1 -> v2: the service keys of onion addresses (ADR 0037).
 const MIGRATION_1_TO_2: &str = r#"
@@ -228,14 +228,87 @@ async fn finish_6_to_7(conn: &mut SqliteConnection) -> Result<()> {
     Ok(())
 }
 
+/// Schema v7 -> v8: addresses on demand and reservations (ADR 0047).
+///
+/// A reservation is a named object with bindings, an address per network (`addresses` gets
+/// a `reservation_id`) and grants that target it. `addresses.app_id` becomes nullable (a
+/// reservation's address belongs to no app, so forgetting an app leaves it), which SQLite
+/// can only do by rebuilding the table. `onion_keys` cascades from `addresses`, so its
+/// rows are copied aside and put back. Duplicate automatic addresses of one row (the
+/// oldest stays) would break the unique index and are dropped first.
+///
+/// Every existing address stays automatic; which of them are reservations is decided by
+/// [`Engine::classify_legacy_addresses`], which needs the networks, once the daemon starts
+/// (marker `classify_addresses`). The address mode setting is gone.
+const MIGRATION_7_TO_8: &str = r#"
+CREATE TABLE reservations (
+    id TEXT PRIMARY KEY,
+    label TEXT UNIQUE NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE reservation_bindings (
+    id TEXT PRIMARY KEY,
+    reservation_id TEXT NOT NULL REFERENCES reservations(id) ON DELETE CASCADE,
+    app_id TEXT REFERENCES apps(id) ON DELETE CASCADE,
+    port INTEGER,
+    proto TEXT,
+    socket_group TEXT,
+    tag_id TEXT REFERENCES tags(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX reservation_bindings_unique ON reservation_bindings (
+    reservation_id, COALESCE(app_id, ''), COALESCE(tag_id, ''), COALESCE(port, -1),
+    COALESCE(proto, ''), COALESCE(socket_group, '')
+);
+CREATE INDEX reservation_bindings_app ON reservation_bindings(app_id);
+
+CREATE TABLE onion_keys_bak AS SELECT address_id, private_key FROM onion_keys;
+DELETE FROM addresses WHERE rowid NOT IN (
+    SELECT MIN(rowid) FROM addresses
+    GROUP BY app_id, COALESCE(port, -1), COALESCE(proto, ''), COALESCE(socket_group, ''),
+             network_id
+);
+CREATE TABLE addresses_new (
+    id TEXT PRIMARY KEY,
+    app_id TEXT REFERENCES apps(id) ON DELETE CASCADE,
+    reservation_id TEXT REFERENCES reservations(id) ON DELETE CASCADE,
+    network_id TEXT NOT NULL,
+    port INTEGER,
+    proto TEXT,
+    socket_group TEXT,
+    locator_kind TEXT NOT NULL,
+    locator TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+INSERT INTO addresses_new (id, app_id, network_id, port, proto, socket_group, locator_kind,
+                           locator, created_at)
+    SELECT id, app_id, network_id, port, proto, socket_group, locator_kind, locator,
+           created_at FROM addresses;
+DROP TABLE addresses;
+ALTER TABLE addresses_new RENAME TO addresses;
+CREATE INDEX addresses_app ON addresses(app_id);
+CREATE UNIQUE INDEX addresses_row ON addresses (
+    app_id, COALESCE(port, -1), COALESCE(proto, ''), COALESCE(socket_group, ''), network_id
+) WHERE app_id IS NOT NULL;
+CREATE UNIQUE INDEX addresses_reservation ON addresses (reservation_id, network_id)
+    WHERE reservation_id IS NOT NULL;
+INSERT INTO onion_keys (address_id, private_key)
+    SELECT address_id, private_key FROM onion_keys_bak
+    WHERE address_id IN (SELECT id FROM addresses);
+DROP TABLE onion_keys_bak;
+
+DELETE FROM settings WHERE key = 'address_mode';
+INSERT OR REPLACE INTO settings (key, value) VALUES ('classify_addresses', 'pending');
+"#;
+
 /// `MIGRATIONS[n]` takes the schema from v(n+1) to v(n+2).
-const MIGRATIONS: [&str; 6] = [
+const MIGRATIONS: [&str; 7] = [
     MIGRATION_1_TO_2,
     MIGRATION_2_TO_3,
     MIGRATION_3_TO_4,
     MIGRATION_4_TO_5,
     MIGRATION_5_TO_6,
     MIGRATION_6_TO_7,
+    MIGRATION_7_TO_8,
 ];
 
 const SCHEMA: &str = r#"
@@ -384,11 +457,13 @@ impl Database {
                 .await?;
         }
         // `SCHEMA` is v1; MIGRATIONS[n] takes vN+1 to vN+2.
-        for sql in &MIGRATIONS[usize::try_from(version.max(1) - 1)?..] {
+        let first = usize::try_from(version.max(1) - 1)?;
+        for (n, sql) in MIGRATIONS.iter().enumerate().skip(first) {
             sqlx::raw_sql(sql).execute(&mut *tx).await?;
-        }
-        if version < 7 {
-            finish_6_to_7(&mut tx).await?;
+            // v6 -> v7 needs code before the next migration rebuilds `addresses`.
+            if n == 5 && version < 7 {
+                finish_6_to_7(&mut tx).await?;
+            }
         }
         if version != SCHEMA_VERSION {
             sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
@@ -443,6 +518,8 @@ mod tests {
                 "peer_group_members",
                 "peer_groups",
                 "peers",
+                "reservation_bindings",
+                "reservations",
                 "settings",
                 "socket_group_apps",
                 "socket_groups",
@@ -880,6 +957,93 @@ mod tests {
         db.insert_grant(&again)
             .await
             .expect("another group is another grant");
+        db.migrate().await.expect("idempotent");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn v7_database_migrates_to_v8_keeping_addresses_and_onion_keys() {
+        let path = temp_db_path("v7-to-v8");
+        {
+            let opts = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true);
+            let mut c = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::raw_sql(SCHEMA).execute(&mut c).await.unwrap();
+            for sql in &MIGRATIONS[..6] {
+                sqlx::raw_sql(sql).execute(&mut c).await.unwrap();
+            }
+            finish_6_to_7(&mut c).await.unwrap();
+            sqlx::query("PRAGMA user_version = 7")
+                .execute(&mut c)
+                .await
+                .unwrap();
+            sqlx::raw_sql(
+                "INSERT INTO apps (id, name, process_name, reviewed, first_seen, last_seen) \
+                 VALUES ('a', 'n', 'p', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'); \
+                 INSERT INTO addresses (id, app_id, network_id, port, proto, socket_group, \
+                                        locator_kind, locator, created_at) VALUES \
+                 ('all', 'a', 'ygg', NULL, NULL, NULL, 'ipv6', '300:1::1', '2026-01-01T00:00:00Z'), \
+                 ('p80', 'a', 'ygg', 80, 'tcp', NULL, 'ipv6', '300:1::2', '2026-01-01T00:00:01Z'), \
+                 ('dup', 'a', 'ygg', 80, 'tcp', NULL, 'ipv6', '300:1::3', '2026-01-01T00:00:02Z'), \
+                 ('lo', 'a', 'local', NULL, NULL, NULL, 'ipv6', 'fd00::1', '2026-01-01T00:00:03Z'), \
+                 ('onion', 'a', 'tor', 80, 'tcp', NULL, 'onion', 'abc.onion', '2026-01-01T00:00:04Z'); \
+                 INSERT INTO onion_keys (address_id, private_key) VALUES \
+                 ('onion', 'secret'), ('dup', 'gone'); \
+                 INSERT INTO settings (key, value) VALUES ('address_mode', 'per_port');",
+            )
+            .execute(&mut c)
+            .await
+            .unwrap();
+        }
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        let v: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+
+        // Every address stays, automatic; a second address for the same row is dropped.
+        let ids: Vec<String> = db
+            .list_addresses()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(ids, ["all", "p80", "lo", "onion"]);
+        for a in db.list_addresses().await.unwrap() {
+            assert_eq!(a.app_id.as_deref(), Some("a"));
+            assert_eq!(a.reservation_id, None);
+        }
+        // The onion key survived the rebuild of the table; the dropped address's did not.
+        let keys = db.onion_keys().await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys["onion"], "secret");
+        // The address mode is gone; the classification is pending for the daemon.
+        assert_eq!(db.get_setting("address_mode").await.unwrap(), None);
+        assert_eq!(
+            db.get_setting("classify_addresses")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("pending")
+        );
+        // A reservation's address belongs to no app, so it survives forgetting one.
+        let res = socketguard_core::Reservation {
+            id: "r".into(),
+            label: "res".into(),
+            bindings: vec![],
+            created_at: chrono::Utc::now(),
+        };
+        db.insert_reservation(&res).await.unwrap();
+        db.assign_address("p80", "r").await.unwrap();
+        assert!(db.delete_app("a").await.unwrap());
+        let left = db.list_addresses().await.unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].reservation_id.as_deref(), Some("r"));
         db.migrate().await.expect("idempotent");
         drop(db);
         let _ = std::fs::remove_file(&path);

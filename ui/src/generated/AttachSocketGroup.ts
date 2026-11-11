@@ -2,6 +2,6 @@
 
 /**
  * Body of `PUT /api/socket-groups/{id}/apps/{app_id}`. Attaching a group to an app widens
- * what the app's whole-app grants cover; where that reaches Anyone it needs `confirm_open`.
+ * what the grants covering the app's All sockets cover; where that reaches Anyone it needs `confirm_open`.
  */
 export type AttachSocketGroup = { confirm_open: boolean, };

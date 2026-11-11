@@ -18,17 +18,21 @@ import type { Enforcement } from "./generated/Enforcement";
 import type { ExportDocument } from "./generated/ExportDocument";
 import type { GrantView } from "./generated/GrantView";
 import type { LockoutRiskInfo } from "./generated/LockoutRiskInfo";
-import type { MergeRequest } from "./generated/MergeRequest";
+import type { MoveAppRequest } from "./generated/MoveAppRequest";
 import type { Network } from "./generated/Network";
+import type { NewBinding } from "./generated/NewBinding";
 import type { NewCredential } from "./generated/NewCredential";
 import type { NewGrant } from "./generated/NewGrant";
 import type { NewGroup } from "./generated/NewGroup";
 import type { NewNetwork } from "./generated/NewNetwork";
 import type { NewPeer } from "./generated/NewPeer";
+import type { NewReservation } from "./generated/NewReservation";
 import type { NewTag } from "./generated/NewTag";
 import type { ParsedCredential } from "./generated/ParsedCredential";
 import type { Peer } from "./generated/Peer";
 import type { PeerGroup } from "./generated/PeerGroup";
+import type { ReservationView } from "./generated/ReservationView";
+import type { ReserveRequest } from "./generated/ReserveRequest";
 import type { PortRef } from "./generated/PortRef";
 import type { ProtectHostRequest } from "./generated/ProtectHostRequest";
 import type { ProtectHostResponse } from "./generated/ProtectHostResponse";
@@ -39,28 +43,29 @@ import type { SocketGroup } from "./generated/SocketGroup";
 import type { UpdateSocketGroup } from "./generated/UpdateSocketGroup";
 import type { Settings } from "./generated/Settings";
 import type { ShareResponse } from "./generated/ShareResponse";
-import type { SplitRequest } from "./generated/SplitRequest";
 import type { StatusResponse } from "./generated/StatusResponse";
 import type { Tag } from "./generated/Tag";
 import type { TagMember } from "./generated/TagMember";
 import type { Target } from "./generated/Target";
 import type { TorKeyResponse } from "./generated/TorKeyResponse";
-import type { UpdateSettings } from "./generated/UpdateSettings";
 import type { UpdateTag } from "./generated/UpdateTag";
 
 export type {
   ActivityKind, ActivityQuery, ActivityRecord, Address, App, AppDetail, ApplyRequest, ApplyResponse,
   ChangeOp, ChangesRequest, ChangesResponse, Credential, Enforcement, ExportDocument, GrantView,
-  LockoutRiskInfo, MergeRequest, Network, NewCredential, NewGrant, NewGroup, NewNetwork, NewPeer,
-  NewTag, ParsedCredential, Peer, PeerGroup, PortRef, ProtectHostRequest, ProtectHostResponse,
+  LockoutRiskInfo, MoveAppRequest, Network, NewBinding, NewCredential, NewGrant, NewGroup, NewNetwork, NewPeer,
+  NewReservation, NewTag, ReservationView, ReserveRequest, ParsedCredential, Peer, PeerGroup, PortRef, ProtectHostRequest, ProtectHostResponse,
   AttachSocketGroup, NewSocketGroup, Scope, SocketGroup, UpdateSocketGroup,
-  Settings, ShareResponse, SplitRequest, StatusResponse, Tag, TagMember, Target, TorKeyResponse,
-  UpdateSettings, UpdateTag,
+  Settings, ShareResponse, StatusResponse, Tag, TagMember, Target, TorKeyResponse,
+  UpdateTag,
 };
 export type { AccessOrigin } from "./generated/AccessOrigin";
 export type { PortRange } from "./generated/PortRange";
 export type { AddrFamily } from "./generated/AddrFamily";
-export type { AddressMode } from "./generated/AddressMode";
+export type { Binding } from "./generated/Binding";
+export type { BindingTarget } from "./generated/BindingTarget";
+export type { PortConflict } from "./generated/PortConflict";
+export type { Reservation } from "./generated/Reservation";
 export type { AppPort } from "./generated/AppPort";
 export type { BatchChange } from "./generated/BatchChange";
 export type { Change } from "./generated/Change";
@@ -131,8 +136,7 @@ export const api = {
   getApp: (id: string) => call<AppDetail>("get_app", { id }),
   deleteApp: (id: string) => callSaved<null>("delete_app", { id }),
   reviewApp: (id: string, reviewed: boolean) => call<AppDetail>("review_app", { id, reviewed }),
-  splitApp: (id: string, req: SplitRequest) => callSaved<Address>("split_app", { id, req }),
-  mergeApp: (id: string, req: MergeRequest) => callSaved<Address>("merge_app", { id, req }),
+  moveApp: (id: string, req: MoveAppRequest) => callSaved<AppDetail>("move_app", { id, req }),
   shareApp: (id: string) => call<ShareResponse>("share_app", { id }),
   listPeers: () => call<Peer[]>("list_peers"),
   createPeer: (req: NewPeer) => call<Peer>("create_peer", { req }),
@@ -176,8 +180,21 @@ export const api = {
   listNetworks: () => call<Network[]>("list_networks"),
   addNetwork: (req: NewNetwork) => call<Network>("add_network", { req }),
   deleteNetwork: (id: string, force: boolean) => call<void>("delete_network", { id, force }),
+  listAddresses: () => call<Address[]>("list_addresses"),
+  listReservations: () => call<ReservationView[]>("list_reservations"),
+  getReservation: (id: string) => call<ReservationView>("get_reservation", { id }),
+  createReservation: (req: NewReservation) =>
+    callSaved<ReservationView>("create_reservation", { req }),
+  renameReservation: (id: string, label: string) =>
+    callSaved<ReservationView>("rename_reservation", { id, label }),
+  releaseReservation: (id: string) => callSaved<null>("release_reservation", { id }),
+  addBinding: (id: string, req: NewBinding) =>
+    callSaved<ReservationView>("add_binding", { id, req }),
+  removeBinding: (id: string, bindingId: string) =>
+    callSaved<ReservationView>("remove_binding", { id, bindingId }),
+  reserveAddress: (id: string, req: ReserveRequest) =>
+    callSaved<ReservationView>("reserve_address", { id, req }),
   getSettings: () => call<Settings>("get_settings"),
-  updateSettings: (req: UpdateSettings) => call<Settings>("update_settings", { req }),
   setProtectHost: (req: ProtectHostRequest) =>
     call<ProtectHostResponse>("set_protect_host", { req }),
   activity: (query: Partial<ActivityQuery>) =>

@@ -85,17 +85,6 @@ describe("Settings page", () => {
     expect(d.last("delete_network")?.args).toEqual({ id: "n-lan", force: false });
   });
 
-  it("changes the address mode", async () => {
-    const d = mockDaemon({ update_settings: () => ({ ...settings, address_mode: "per_port" }) });
-    const user = userEvent.setup();
-    renderWithProviders(<SettingsPage />);
-    const select = await screen.findByLabelText("Address mode");
-    await waitFor(() => expect(select).toHaveValue("per_app"));
-    await user.selectOptions(select, "per_port");
-    await waitFor(() => expect(d.count("update_settings")).toBe(1));
-    expect(d.last("update_settings")?.args.req).toEqual({ address_mode: "per_port" });
-  });
-
   it("previews an import as a diff before applying it", async () => {
     const d = mockDaemon({
       apply_state: (a) => ({

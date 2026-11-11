@@ -2,12 +2,11 @@
 
 use super::Database;
 use anyhow::Result;
-use socketguard_core::{AddressMode, Settings};
+use socketguard_core::Settings;
 use tracing::warn;
 
 /// Settings keys.
 const PROTECT_HOST_KEY: &str = "protect_host_interfaces";
-const ADDRESS_MODE_KEY: &str = "address_mode";
 /// Set by `disable` (API or `--disable`), cleared by `enable`: while set, the daemon puts
 /// no rules and no addresses back.
 const DISABLED_KEY: &str = "disabled";
@@ -112,21 +111,8 @@ impl Database {
         self.set_flag(UNADOPTED_KEY, unadopted).await
     }
 
-    pub async fn address_mode(&self) -> Result<AddressMode> {
-        Ok(self
-            .get_setting(ADDRESS_MODE_KEY)
-            .await?
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_default())
-    }
-
-    pub async fn set_address_mode(&self, mode: AddressMode) -> Result<()> {
-        self.set_setting(ADDRESS_MODE_KEY, mode.as_str()).await
-    }
-
     pub async fn settings(&self) -> Result<Settings> {
         Ok(Settings {
-            address_mode: self.address_mode().await?,
             protect_host_interfaces: self.protect_host().await?,
         })
     }
@@ -165,14 +151,11 @@ mod tests {
         assert_eq!(
             db.settings().await.unwrap(),
             Settings {
-                address_mode: AddressMode::PerApp,
                 protect_host_interfaces: vec![]
             }
         );
-        db.set_address_mode(AddressMode::PerPort).await.unwrap();
         db.set_protect_host(&["eth0".into()]).await.unwrap();
         let s = db.settings().await.unwrap();
-        assert_eq!(s.address_mode, AddressMode::PerPort);
         assert_eq!(s.protect_host_interfaces, ["eth0"]);
         let id = db.ula_global_id().await.unwrap();
         assert_eq!(db.ula_global_id().await.unwrap(), id);

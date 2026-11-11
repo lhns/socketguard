@@ -75,12 +75,11 @@ does not cause a 202. Every error has the [error body](#errors).
 | GET | `/api/status` | | `StatusResponse` | version, networks, protect-host interfaces, `disabled`, `unadopted` (an existing ruleset was found with an empty database and is left alone until `enable` or `disable`), counts |
 | GET | `/api/events` | | SSE stream | [events](#events) |
 | GET | `/api/apps` | query `pending=true` (optional) | `App[]` | `pending=true`: only apps without a decision |
-| GET | `/api/apps/{id}` | | `AppDetail` | app with addresses, ports, grants on it (with reach), `access` (every access with its origin: direct, tag or group, and what it covers on this app: `scope` and `ports`), its `tags`, the `socket_groups` attached to it and counters |
+| GET | `/api/apps/{id}` | | `AppDetail` | app with addresses (the ones serving its rows, each with `up`; none until a grant names a row), ports, grants on it (with reach), `access` (every access with its origin: direct, tag, group or reservation, and what it covers on this app: `scope` and `ports`), its `tags`, the port groups attached to it (`socket_groups`) and counters |
 | GET | `/api/apps/{id}/share` | | `ShareResponse` | per onion service and granted peer with a Tor client key the daemon generated: the `<onion>:descriptor:x25519:<key>` line for the client's `ClientOnionAuthDir`. Holds private keys |
 | DELETE | `/api/apps/{id}` | | 204 | forgets the app, its addresses and its grants; **it reappears as pending the next time it listens** |
 | POST | `/api/apps/{id}/review` | `ReviewRequest` | `AppDetail` | mark reviewed (or pending again); it stays closed until granted |
-| POST | `/api/apps/{id}/split` | `SplitRequest` | `Address` (201) | adds an address for one port (`port`, `proto`) or one attached socket group (`group`) on a network; the app's other addresses keep serving it too (addresses overlap, ADR 0047). 409 if it has one already |
-| POST | `/api/apps/{id}/merge` | `MergeRequest` | `Address` | folds the listed addresses of one network into the app's address for All sockets: it is created if missing, and the listed addresses with a narrower scope go. Returns that address |
+| POST | `/api/apps/{id}/move` | `MoveAppRequest` | `AppDetail` | `{"to": app id, "confirm_open"}`: moves the app's addresses, grants, tag memberships and reservation bindings to another app, for a program that came back under a new identity. Grants the target already has are skipped; a port group used by a moved item is attached to the target. Needs `"confirm_open": true` where an Anyone grant moves or the target gains access for Anyone (409 `confirmation_required` otherwise) |
 | GET | `/api/peers` | | `Peer[]` | |
 | POST | `/api/peers` | `NewPeer` | `Peer` (201) | credentials are validated and normalized; unique across peers. `label` is optional: an unnamed peer is named after its first credential (see below) |
 | GET | `/api/peers/{id}` | | `Peer` | |
@@ -96,8 +95,8 @@ does not cause a 202. Every error has the [error body](#errors).
 | PATCH | `/api/peer-groups/{id}` | `UpdateLabel` | `PeerGroup` | rename |
 | DELETE | `/api/peer-groups/{id}` | | 204 | also deletes the grants naming the group |
 | PUT | `/api/peer-groups/{id}/members` | `SetMembers` | `PeerGroup` | replaces the members |
-| GET | `/api/grants` | query `app`, `tag`, `peer`, `group` (all optional) | `GrantView[]` | `app`/`tag`: grants whose target is that app/tag; `peer` matches grants to the peer or to a group it is in |
-| POST | `/api/grants` | `NewGrant` | `GrantView` (201) | `target` is `{"kind": "app" or "tag", "id"}`. Anyone needs `"confirm_open": true` |
+| GET | `/api/grants` | query `app`, `tag`, `reservation`, `peer`, `group` (all optional) | `GrantView[]` | `app`/`tag`/`reservation`: grants whose target is that app/tag/reservation; `peer` matches grants to the peer or to a group it is in |
+| POST | `/api/grants` | `NewGrant` | `GrantView` (201) | `target` is `{"kind": "app", "tag" or "reservation", "id"}`; a reservation takes scope All only. Anyone needs `"confirm_open": true`. The grant creates the addresses of the rows it names (see [addresses](#addresses-and-reservations)) |
 | DELETE | `/api/grants/{id}` | | 204 | |
 | POST | `/api/changes` | `ChangesRequest` | `ChangesResponse` | [batch changes](#batch-changes): many operations, one transaction, one firewall update |
 | GET | `/api/tags` | | `Tag[]` | [tags](#tags) |
@@ -105,20 +104,28 @@ does not cause a 202. Every error has the [error body](#errors).
 | GET | `/api/tags/{id}` | | `Tag` | |
 | PATCH | `/api/tags/{id}` | `UpdateTag` | `Tag` | rename and/or replace the patterns; apps matching a new pattern join, none leaves. If any would join a tag that has a grant to Anyone, it needs `"confirm_open": true` (409 `confirmation_required` otherwise) |
 | DELETE | `/api/tags/{id}` | | 204 | also deletes the grants on the tag |
-| POST | `/api/tags/{id}/members` | `NewTagMember` | `Tag` | an app with a `scope` (all of it by default, one port, or a socket group attached to it); a manual addition clears an exclusion. On a tag that has a grant to Anyone it opens the app, so it needs `"confirm_open": true` |
-| DELETE | `/api/tags/{id}/members/{app_id}` | query `port`, `proto` or `group` (optional) | `Tag` | without them the All-sockets membership goes; with `port` (and `proto`) or `group` (a socket group id) the membership by that scope. Removing a whole app that a pattern matches records an exclusion (`excluded`) |
-| GET | `/api/socket-groups` | | `SocketGroup[]` | [socket groups](#socket-groups) |
+| POST | `/api/tags/{id}/members` | `NewTagMember` | `Tag` | an app with a `scope` (all of it by default, one port, or a port group attached to it); a manual addition clears an exclusion. On a tag that has a grant to Anyone it opens the app, so it needs `"confirm_open": true` |
+| DELETE | `/api/tags/{id}/members/{app_id}` | query `port`, `proto` or `group` (optional) | `Tag` | without them the All-ports membership goes; with `port` (and `proto`) or `group` (a port group id) the membership by that scope. Removing a whole app that a pattern matches records an exclusion (`excluded`) |
+| GET | `/api/socket-groups` | | `SocketGroup[]` | [port groups](#port-groups) (the route and type names keep "socket") |
 | POST | `/api/socket-groups` | `NewSocketGroup` | `SocketGroup` (201) | `label`, `ports` (`{start, end, proto}` ranges, normalized), optional `apps` to attach it to. Needs `"confirm_open": true` where attaching opens an app to Anyone |
 | GET | `/api/socket-groups/{id}` | | `SocketGroup` | |
 | PUT | `/api/socket-groups/{id}` | `UpdateSocketGroup` | `SocketGroup` | `label` and/or `ports`; new ports take effect everywhere the group is used (and need `confirm_open` where that opens an app to Anyone) |
-| DELETE | `/api/socket-groups/{id}` | | 204 | 409 `conflict`, naming what uses it, while a grant (on an app or a tag) or a tag member has the group as its scope; addresses that served it go with it |
-| PUT | `/api/socket-groups/{id}/apps/{app_id}` | `AttachSocketGroup` | `SocketGroup` | attach (idempotent). Widens what the grants and tag memberships that cover the app's All sockets cover; `confirm_open` is needed where a grant to Anyone covers the new ports |
-| DELETE | `/api/socket-groups/{id}/apps/{app_id}` | | `SocketGroup` | detach; 409 `conflict`, naming the users, while a grant on the app or a tag member of it has the group as its scope; the app's addresses that served the group go |
+| DELETE | `/api/socket-groups/{id}` | | 204 | 409 `conflict`, naming what uses it, while a grant (on an app or a tag), a tag member or a reservation binding has the group as its scope; addresses that served it go with it |
+| PUT | `/api/socket-groups/{id}/apps/{app_id}` | `AttachSocketGroup` | `SocketGroup` | attach (idempotent). Widens what the grants and tag memberships that cover the app's All ports cover; `confirm_open` is needed where a grant to Anyone covers the new ports |
+| DELETE | `/api/socket-groups/{id}/apps/{app_id}` | | `SocketGroup` | detach; 409 `conflict`, naming the users, while a grant on the app, a tag member of it or a reservation binding has the group as its scope; the app's addresses that served the group go |
+| GET | `/api/reservations` | | `ReservationView[]` | [reservations](#addresses-and-reservations) |
+| POST | `/api/reservations` | `NewReservation` | `ReservationView` (201) | `label`, optional `bindings` (`{"kind": "app", "app_id", "scope"?}` or `{"kind": "tag", "tag_id"}`), `confirm_open` |
+| GET | `/api/reservations/{id}` | | `ReservationView` | |
+| PUT | `/api/reservations/{id}` | `{"label"}` | `ReservationView` | rename |
+| DELETE | `/api/reservations/{id}` | | 204 | release: its addresses and the grants on it go |
+| POST | `/api/reservations/{id}/bindings` | `NewBinding` | `ReservationView` | `{"target", "confirm_open"}`; binding a row opens it where the reservation has a grant to Anyone, so that needs `confirm_open` |
+| DELETE | `/api/reservations/{id}/bindings/{binding_id}` | | `ReservationView` | |
+| GET | `/api/addresses` | | `Address[]` | every address, automatic and reserved, with `up` |
+| POST | `/api/addresses/{id}/reserve` | `ReserveRequest` | `ReservationView` (201) | `{"label"}`: turns an automatic address into a reservation with that row bound, keeping the address |
 | GET | `/api/networks` | | `Network[]` | |
 | POST | `/api/networks` | `NewNetwork` | `Network` (201) | a backend instance: `{"id"?, "type": "slaac", "interface": "eth0", ...}`; also written to the `backends` key of the config file (`SOCKETGUARD_CONFIG` or the default; created if missing), so it survives a restart |
 | DELETE | `/api/networks/{id}` | | 204 | its addresses leave the interfaces first; removed from the config file as well. Query `force=true`; a Tor network whose services cannot be removed is 409 `conflict` without it |
-| GET | `/api/settings` | | `Settings` | |
-| PUT | `/api/settings` | `UpdateSettings` | `Settings` | absent fields stay as they are |
+| GET | `/api/settings` | | `Settings` | only `protect_host_interfaces`; there is no address mode (`PUT /api/settings` is gone) |
 | PUT | `/api/settings/protect-host` | `ProtectHostRequest` | `ProtectHostResponse` | an empty list turns it off; refused with 409 `protect_host_refused` unless `force` |
 | GET | `/api/activity` | query `since`, `kind`, `app_id`, `peer_id`, `limit`, `before` | `ActivityRecord[]` | newest first; `since` is RFC 3339; `before` is a record id, for paging |
 | GET | `/api/export` | | `ExportDocument` | [export and apply](#export-and-apply) |
@@ -157,9 +164,11 @@ On a Tor network each address is one onion service, and its locator is
 kept (in the daemon's database), so the name never changes. An address is **not published** until
 a grant applies: a grant to Anyone publishes it openly; grants to peers publish it for their
 `tor_client_key`s only (Tor client authorization). Tor authorizes per service, not per port, so the
-published ports are the TCP ports covered by grants that are listening now (a socket group's range
+published ports are the TCP ports covered by grants that are listening now (a port group's range
 publishes only its listening ports), and a key granted fewer of them than that is
-left out until the port gets its own address (`split`). UDP is not served over Tor. A Tor control
+left out (a port with its own grant gets its own onion service). A reservation is opened as a whole on Tor: only a grant on
+the reservation itself admits a client to its onion address, and a grant on a single bound row
+has no effect there (its `GrantReach.note` says why; the reach is `not_reachable`). UDP is not served over Tor. A Tor control
 port that cannot be reached shows as the network's `status` `down`; nothing is published or
 removed until it is back.
 
@@ -191,8 +200,8 @@ Every non-2xx response is JSON, `ApiError`:
 | 400 | `invalid` | malformed JSON or query, unknown field values, invalid credential, empty label, port the app does not have, invalid document |
 | 400 | `local_network` | a grant on the Local network. Message: `Local is this machine only` |
 | 404 | `not_found` | unknown app, peer, group, grant, network, credential, route |
-| 409 | `conflict` | duplicate label, credential or grant; a second ULA or Yggdrasil network; a port that already has its own address |
-| 409 | `confirmation_required` | a grant to Anyone without `confirm_open`, or a new member of a tag that has a grant to Anyone without it; `disable` without `confirm` |
+| 409 | `conflict` | duplicate label, credential or grant; a second ULA or Yggdrasil network; an address that is already reserved |
+| 409 | `confirmation_required` | a grant to Anyone without `confirm_open`, or a new member of a tag, a new binding of a reservation or a moved app that opens something to Anyone without it; `disable` without `confirm` |
 | 409 | `protect_host_refused` | whole-host protection would cut off remote administration. `details`: `LockoutRiskInfo[]` (process, port, protocol, bind address, message). Repeat with `"force": true` to override |
 | 500 | `internal` | a bug or a failing system call; details are in the daemon log |
 
@@ -206,35 +215,49 @@ carries the meaning; `data` is empty unless stated. Clients re-fetch what change
 
 | Event | Meaning |
 |---|---|
-| `apps_changed` | apps, ports or addresses changed |
+| `apps_changed` | apps or ports changed |
+| `addresses_changed` | addresses appeared, went up or down, or were reserved |
 | `app_discovered` | a new, pending app; `data` is its id |
 | `peers_changed` | peers, credentials or groups changed |
 | `grants_changed` | grants (or what they resolve to) changed |
 | `tags_changed` | tags, their patterns or members changed |
-| `socket_groups_changed` | socket groups or their attachments changed |
+| `socket_groups_changed` | port groups or their attachments changed |
+| `reservations_changed` | reservations or their bindings changed |
 | `networks_changed` | a network was added, removed or changed state |
-| `settings_changed` | address mode or whole-host protection changed |
+| `settings_changed` | whole-host protection changed |
 | `activity` | new activity records |
 
 The client crate parses them into `ApiEvent`.
 
 The desktop UI's Tauri backend re-emits these events to the frontend under the same names and adds two UI-local ones, `daemon_connected` and `daemon_disconnected`, for its own connection to the stream; the daemon never sends them.
 
-## Scopes and socket groups
+## Scopes and port groups
 
-A **scope** (ADR 0047) says which sockets of an app a grant, a tag member or an address means. It is an object tagged by `kind`: `{"kind": "all"}` (the default when `scope` is absent), `{"kind": "port", "port": 80, "proto": "tcp"}`, or `{"kind": "group", "id": "<socket group id>"}`. The ports of a scope on an app:
+A **scope** (ADR 0047) says which ports of an app a grant, a tag member, a binding or an address means. It is an object tagged by `kind`: `{"kind": "all"}` (the default when `scope` is absent), `{"kind": "port", "port": 80, "proto": "tcp"}`, or `{"kind": "group", "id": "<port group id>"}`. The ports of a scope on an app:
 
-- `all` ("All sockets"): the app's detected ports and the ranges of every socket group attached to it,
+- `all` ("All ports"): the app's detected ports and the ranges of every port group attached to it,
 - `port`: that port, detected or not,
 - `group`: the group's ranges if it is attached to the app, else nothing. A grant or a tag member with a `group` scope on an app is refused (400) unless the group is attached to that app.
 
-### Socket groups
+### Port groups
 
-A **socket group** is a label with ports and port ranges (`{"start": 50000, "end": 51000, "proto": "tcp"}`; a single port has `start == end`), standalone and attached to any number of apps (`apps`). Its ports need not be detected: a granted range is open before anything listens in it. One exclusion rule holds for every scope: an address never serves a port that another app is listening on now and this app does not have itself (a wildcard listener answers on every local address); this applies to a named `port`, to a group and to ranges reached through `all`. A range is open to any listener inside it, not only to this app's processes. Adding ports to a group or attaching it to an app is a change of reach, like a new grant: dry runs list it and a grant to Anyone that covers the new ports needs `confirm_open`. An unidentified app (`unknown:<proto>/<port>`) takes no socket groups (400). Editing a group's ports takes effect everywhere. Detaching or deleting a group that a grant or tag member uses is a 409 whose message lists the users.
+A **port group** (`SocketGroup`, route `/api/socket-groups`) is a label with ports and port ranges (`{"start": 50000, "end": 51000, "proto": "tcp"}`; a single port has `start == end`), standalone and attached to any number of apps (`apps`). Its ports need not be detected: a granted range is open before anything listens in it. One exclusion rule holds for every scope: an address never serves a port that another app is listening on now and this app does not have itself (a wildcard listener answers on every local address); this applies to a named `port`, to a group and to ranges reached through `all`. The omitted ranges are reported as `Address.excluded`. A range is open to any listener inside it, not only to this app's processes. Adding ports to a group or attaching it to an app is a change of reach, like a new grant: dry runs list it and a grant to Anyone that covers the new ports needs `confirm_open`. An unidentified app (`unknown:<proto>/<port>`) takes no port groups (400). Editing a group's ports takes effect everywhere. Detaching or deleting a group that a grant, tag member or binding uses is a 409 whose message lists the users.
+
+### Addresses and reservations
+
+Addresses exist for what is open (ADR 0047). There is no address mode, and no split or merge.
+
+- An app has an address **only once a grant names one of its rows** (a row is the app with a scope: All ports, one port, or one port group). Per network there is one automatic address for the app (scope All) and one for each port or port group a grant names. A tag grant names the row of each member; a reservation grant names none. An app without grants has none ("no address yet").
+- An address overlaps the others: it serves every port of its app, and a grant decides who gets in. `Address.up` says whether it is on its interface (or published, on Tor) now. When the last grant naming it goes, it is taken down but remembered, so the row gets the same address back. Local on loopback takes no grants, so there every app keeps its address and it is always up. `GET /api/apps/{id}` lists the addresses serving the app's rows, each with `up`; `GET /api/addresses` lists all of them.
+- `Address` fields: `id`, `network_id`, `locator`, `created_at`, `app_id` (automatic addresses), `scope`, `reservation_id` (reservation addresses), and computed `up`, `excluded` (port ranges left out because another app listens there) and `notes` (Tor).
+- A **reservation** is a named object assembled from bindings: an app with a scope, or a tag. Grants can target it (`"kind": "reservation"`, scope All); the grant covers every bound row and follows the bindings as they change. It has one static address per network, created the first time a grant covers something it serves there and kept until the reservation is released; the daemon never deletes or changes it on its own. A row bound to a reservation gets no automatic address on IP networks. `POST /api/addresses/{id}/reserve` turns an automatic address into a reservation, keeping the address.
+- `ReservationView` is the reservation (`id`, `label`, `bindings`, `created_at`) plus `addresses` (one per network), `conflicts` and `grants`. Two bindings that claim the same ports are never resolved silently: a conflict is `{ports, bindings, served_app}`, where `served_app` is the app they are served for, or null if the ports are closed.
+- On Tor a reservation is opened as a whole: a grant on the reservation admits clients to its onion address; a grant on a single bound row has no effect there. `GrantReach.note` carries the reason.
+- `POST /api/apps/{id}/move` moves an app's addresses, grants, tag memberships and bindings to another app.
 
 ### Tags
 
-A tag (ADR 0043) is a label with members (an app with a scope) and optional glob `patterns` on the process name or the executable path. A grant whose `target` is a tag covers, for each member, the member's ports narrowed to the grant's own scope (which needs no attachment: a group in the grant means its ranges). Apps matching the patterns join when they are first seen; removing a matched app by hand keeps it out. `AppDetail.access` lists every access an app has with its `origin`: `direct`, `tag` (with `tag_id`) or `group` (with `group_id`), its `scope` and the `ports` it covers there. Export and apply (below) leave grants on tags out.
+A tag (ADR 0043) is a label with members (an app with a scope) and optional glob `patterns` on the process name or the executable path. A grant whose `target` is a tag covers, for each member, the member's ports narrowed to the grant's own scope (which needs no attachment: a group in the grant means its ranges). Apps matching the patterns join when they are first seen; removing a matched app by hand keeps it out. `AppDetail.access` lists every access an app has with its `origin`: `direct`, `tag` (with `tag_id`), `group` (with `group_id`) or `reservation`, its `scope` and the `ports` it covers there. Export and apply (below) leave grants on tags out.
 
 ## Batch changes
 
@@ -255,8 +278,15 @@ A tag (ADR 0043) is a label with members (an app with a scope) and optional glob
 | `add_tag_member` | `tag_id`, `app_id`, `scope?`, `confirm_open` (needed when the tag has a grant to Anyone) |
 | `remove_tag_member` | `tag_id`, `app_id`, `scope?` |
 | `review` | `app_id`, `reviewed` |
+| `create_reservation` | `label`, `bindings?`, `confirm_open`, `ref?` |
+| `reserve_address` | `address_id`, `label`, `ref?` |
+| `rename_reservation` | `reservation_id`, `label` |
+| `add_binding` | `reservation_id`, `target`, `confirm_open` (needed when the reservation has a grant to Anyone) |
+| `remove_binding` | `reservation_id`, `binding_id` |
+| `release_reservation` | `reservation_id` |
+| `move_app` | `from`, `to`, `confirm_open` |
 
-Socket group operations are planned like the rest: attaching a group to an app (or widening its ports) lists, as `reach`, the grants that now cover more, sets `changes_reach` where one lets its subject in, and needs `confirm_open` where one of them is a grant to Anyone (409 `confirmation_required` otherwise; `opens_to_anyone` marks the change). Detach and delete are refused like their routes while something uses the group, unless the same batch removed the users first. A `scope` of `{"kind": "group", "id": "$g"}` may use the ref of a group created earlier.
+A grant `target` may be a reservation (or the ref of one created earlier). Port group operations are planned like the rest: attaching a group to an app (or widening its ports) lists, as `reach`, the grants that now cover more, sets `changes_reach` where one lets its subject in, and needs `confirm_open` where one of them is a grant to Anyone (409 `confirmation_required` otherwise; `opens_to_anyone` marks the change). Detach and delete are refused like their routes while something uses the group, unless the same batch removed the users first. A `scope` of `{"kind": "group", "id": "$g"}` may use the ref of a group created earlier.
 
 A `ref` is a client-chosen name starting with `$` (`$new0`). Wherever an id goes in a later operation (a tag target, a subject, `tag_id`, `grant_id`), the ref stands for it; the response's `refs` maps each ref to the id it got. An `add_grant` to Anyone without `confirm_open` refuses the whole batch with 409 `confirmation_required`; so does an `add_tag_member` that adds a new member to a tag with a grant to Anyone (such a change has `opens_to_anyone`). The answer lists the `changes` (a diff: `kind`, `item`, `name`, `id`, and for grants the `reach` per network, for removed grants the reach that is lost). `changes_reach` is true when the batch gives someone access to something they could not reach before (a new grant, or a new member of a tag that has grants, with some network that lets the subject in); removals never set it. A new member's change lists the reach of the tag's grants and who they name. With `dry_run` nothing is saved or applied; the operations still run against the database's constraints, so a conflict shows.
 
@@ -268,22 +298,33 @@ A peer without a `label` (or with a blank one), in `POST /api/peers` and in `cre
 
     {
       "version": 1,
-      "settings": {"address_mode": "per_app", "protect_host_interfaces": []},
+      "settings": {"protect_host_interfaces": []},
       "peers":  [{"label": "alice", "credentials": [{"kind": "ygg_key", "value": "ba83...", "label": null}]}],
       "groups": [{"label": "team", "members": ["alice"]}],
       "socket_groups": [{"label": "passive", "apps": [{"id": "5c0d...", "name": "nginx"}],
                          "ports": [{"start": 50000, "end": 51000, "proto": "tcp"}]}],
       "grants": [{"app": {"id": "5c0d...", "name": "nginx"},
                   "scope": {"kind": "port", "port": 80, "proto": "tcp"}, "network": "ygg",
-                  "subject": {"peer": "alice"}}]
+                  "subject": {"peer": "alice"}}],
+      "reservations": [{"label": "public-web",
+                        "bindings": [{"kind": "app", "app": {"id": "5c0d...", "name": "nginx"},
+                                      "scope": {"kind": "port", "port": 80, "proto": "tcp"}},
+                                     {"kind": "tag", "label": "dev"}],
+                        "grants": [{"network": "ygg", "subject": {"peer": "alice"}}]}]
     }
 
 `subject` is `{"peer": label}`, `{"group": label}` or `"anyone"`; `scope` and `network` may be
-absent (All sockets, all networks). A grant names a socket group by label:
+absent (All ports, all networks). A grant names a port group by label:
 `"scope": {"kind": "group", "label": "passive"}`, and the document must attach that group to
-the grant's app. Socket groups match by label; applying creates, changes (ports, attached
+the grant's app. Port groups (`socket_groups`) match by label; applying creates, changes (ports, attached
 apps) and deletes them, detaching only after the grants that used them are removed. Apps are named by id, which is stable across restarts and
 upgrades (the name is for humans).
+
+`reservations` match by label. Each lists its bindings (an app with a `scope`, or a tag by label)
+and its grants (`network?` and `subject`; a grant on a reservation always covers all its rows).
+The addresses of reservations are not part of the document, so applying it elsewhere creates
+new ones. A document from before this change may carry `settings.address_mode`: it is still
+accepted and the field is ignored.
 
 `POST /api/apply {"document": ..., "dry_run": bool}` compares the document with the current
 state and returns the diff, then applies it unless `dry_run`:
@@ -292,8 +333,8 @@ state and returns the diff, then applies it unless `dry_run`:
       {"kind": "create", "item": "peer", "name": "carol", "detail": "1 credentials"},
       {"kind": "delete", "item": "grant", "name": "nginx 80/tcp on ygg to Anyone", "opens_to_anyone": true}]}
 
-- Peers and groups match by **label**; grants by (app id, port, network, subject). Settings are
-  the two `settings` fields. Items are created, updated (peer credentials, group members,
+- Peers, groups and reservations match by **label**; grants by (app id, port, network, subject).
+  The only setting is `protect_host_interfaces`. Items are created, updated (peer credentials, group members,
   settings) or deleted; **whatever the document lacks is deleted**. Grants have no mutable
   fields, so they are only created or deleted.
 - A grant to `"anyone"` in the document counts as confirmed (the file is explicit); the diff

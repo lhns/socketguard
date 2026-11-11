@@ -106,8 +106,16 @@ export function errorField(e: unknown): ErrorField {
   return "other";
 }
 
-export function targetLabel(t: Target, apps: App[] = [], tags: Tag[] = []): string {
+export function targetLabel(
+  t: Target,
+  apps: App[] = [],
+  tags: Tag[] = [],
+  reservations: { id: string; label: string }[] = [],
+): string {
   if (t.kind === "app") return apps.find((a) => a.id === t.id)?.name ?? `app ${t.id.slice(0, 8)}`;
+  if (t.kind === "reservation") {
+    return `reservation ${reservations.find((r) => r.id === t.id)?.label ?? t.id.slice(0, 8)}`;
+  }
   return `tag ${tags.find((x) => x.id === t.id)?.label ?? t.id.slice(0, 8)}`;
 }
 

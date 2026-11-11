@@ -9,8 +9,8 @@ use crate::state::NewActivity;
 use crate::AppState;
 use socketguard_core::api_types::{ShareResponse, TorKeyResponse, TorShare};
 use socketguard_core::{
-    grants_for_app, new_id, ActivityKind, Credential, CredentialKind, Locator, NetworkKind,
-    PortRangeSet, Subject,
+    grant_targets, grants_for_app, new_id, ActivityKind, Credential, CredentialKind, Locator,
+    NetworkKind, PortRangeSet, Subject, Target,
 };
 
 impl Engine {
@@ -36,7 +36,7 @@ impl Engine {
             .replace_generated_tor_key(peer_id, &credential, &key.private)
             .await
             .map_err(|e| Self::conflict_or_internal(e, "this Tor client key"))?;
-        let applied = self.apply_firewall(state).await;
+        let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::PeerChanged,
             format!("Generated a Tor client key for peer {}", peer.label),
@@ -70,13 +70,15 @@ impl Engine {
         let networks = self.networks();
         let grants = grants_for_app(
             &cat.grants,
-            &cat.tags,
+            &grant_targets(&cat.tags, &cat.reservations),
             app,
             &cat.socket_groups,
             &PortRangeSet::new(),
         );
+        let (views, _) = self.address_views(state).await?;
+        let addresses = Self::addresses_of_app(app, &views, &cat.reservations, &cat.tags);
         let mut tor: Vec<TorShare> = Vec::new();
-        for address in &app.addresses {
+        for address in &addresses {
             let Locator::Onion { hostname } = &address.locator else {
                 continue;
             };
@@ -90,6 +92,14 @@ impl Engine {
                 g.network_id
                     .as_deref()
                     .is_none_or(|n| n == address.network_id)
+                    && match &address.reservation_id {
+                        // A reservation's onion address admits only grants on the reservation.
+                        Some(r) => cat
+                            .grants
+                            .iter()
+                            .any(|x| x.id == g.id && x.target == Target::Reservation(r.clone())),
+                        None => true,
+                    }
             }) {
                 let peers: Vec<&socketguard_core::Peer> = match &grant.subject {
                     Subject::Anyone => vec![],

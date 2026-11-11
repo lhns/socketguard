@@ -285,21 +285,26 @@ impl Drop for Fixture {
     }
 }
 
+/// The automatic address of app "web" (scope All) on `network`.
+fn address(id: &str, network: &str, a: &str) -> Address {
+    Address {
+        id: id.into(),
+        ..Address::automatic(
+            "web",
+            Scope::All,
+            network,
+            Locator::Ipv6 {
+                addr: a.parse().unwrap(),
+            },
+        )
+    }
+}
+
 /// One app on port 8080 with an address on each veth (a LAN network on `sgv-a`, a
 /// Yggdrasil network on `ygg0`), whole-host protection of `sgv-a`, and, when `creds` is
 /// not empty, a peer holding those credentials with a grant to the app.
 fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
     let now = Utc::now();
-    let address = |id: &str, network: &str, a: &str| Address {
-        id: id.into(),
-        app_id: "web".into(),
-        network_id: network.into(),
-        scope: Scope::All,
-        locator: Locator::Ipv6 {
-            addr: a.parse().unwrap(),
-        },
-        created_at: now,
-    };
     let network = |id: &str, kind, iface: &str| Network {
         id: id.into(),
         kind,
@@ -359,11 +364,17 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
                 last_seen: now,
                 family: Default::default(),
             }],
-            addresses: vec![
-                address("lan-addr", "lan", MANAGED),
-                address("ygg-addr", "ygg", MANAGED_YGG),
-            ],
+            // Display only; the addresses are in `Snapshot::addresses`.
+            addresses: vec![],
         }],
+        addresses: vec![
+            address("lan-addr", "lan", MANAGED),
+            address("ygg-addr", "ygg", MANAGED_YGG),
+        ],
+        // The fixture puts both addresses on the veths. An address is up only while a grant
+        // names its row (ADR 0047), so without one it is dormant but still on the interface:
+        // `owned` keeps it denied, as the daemon does for addresses it has not yet removed.
+        owned: vec![MANAGED.parse().unwrap(), MANAGED_YGG.parse().unwrap()],
         networks: vec![
             network("lan", NetworkKind::Lan, "sgv-a"),
             network("ygg", NetworkKind::Yggdrasil, "ygg0"),
@@ -851,28 +862,11 @@ fn a_segment_grant_admits_its_own_prefix_and_not_the_other_segment() {
             ..snap.networks[0].clone()
         },
     ];
-    snap.apps[0].addresses = vec![
-        Address {
-            id: "a-addr".into(),
-            app_id: "web".into(),
-            network_id: "lan".into(),
-            scope: Scope::All,
-            locator: Locator::Ipv6 {
-                addr: MANAGED.parse().unwrap(),
-            },
-            created_at: now,
-        },
-        Address {
-            id: "b-addr".into(),
-            app_id: "web".into(),
-            network_id: "segb".into(),
-            scope: Scope::All,
-            locator: Locator::Ipv6 {
-                addr: B_ADDR.parse().unwrap(),
-            },
-            created_at: now,
-        },
+    snap.addresses = vec![
+        address("a-addr", "lan", MANAGED),
+        address("b-addr", "segb", B_ADDR),
     ];
+    snap.owned = vec![MANAGED.parse().unwrap(), B_ADDR.parse().unwrap()];
     snap.protect_host = vec!["sgv-a".into(), "sgc-a".into()];
     snap.grants = vec![Grant {
         id: "seg".into(),
@@ -1037,7 +1031,8 @@ fn a_router_cannot_deliver_another_segments_source_to_a_segment_grant() {
         prefix: Some("fd00:5a::".parse().unwrap()),
         ..snap.networks[0].clone()
     }];
-    snap.apps[0].addresses.truncate(1);
+    snap.addresses.truncate(1);
+    snap.owned.truncate(1);
     snap.grants = vec![Grant {
         id: "seg".into(),
         target: Target::App("web".into()),

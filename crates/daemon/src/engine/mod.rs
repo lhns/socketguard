@@ -20,12 +20,12 @@ mod enforce;
 mod firewall;
 mod mutations;
 mod queries;
+mod reservations;
 mod socket_groups;
 mod tags;
 mod torkeys;
 
 use addresses::disable_all;
-pub use addresses::plan_addresses;
 use enforce::disable_networks;
 pub use socket_groups::clean_ranges;
 
@@ -126,6 +126,8 @@ pub struct GrantFilter {
     pub app_id: Option<String>,
     /// Grants on this tag.
     pub tag_id: Option<String>,
+    /// Grants on this reservation.
+    pub reservation_id: Option<String>,
     /// Grants to this peer, directly or through one of its groups.
     pub peer_id: Option<String>,
     pub group_id: Option<String>,
@@ -145,6 +147,8 @@ pub struct Engine {
     unavailable_ifaces: Mutex<HashSet<String>>,
     /// Networks whose last allocation failed (log once per outage).
     alloc_failing: Mutex<HashSet<String>>,
+    /// Held while addresses are created, so two mutations never create the same one.
+    alloc_lock: tokio::sync::Mutex<()>,
     /// Owned addresses whose removal failed (log once per outage).
     removal_failing: Mutex<HashSet<Ipv6Addr>>,
     /// The ruleset last applied successfully, to skip no-op applies.
@@ -257,6 +261,7 @@ impl Engine {
             ula_global_id,
             unavailable_ifaces: Mutex::default(),
             alloc_failing: Mutex::default(),
+            alloc_lock: tokio::sync::Mutex::default(),
             removal_failing: Mutex::default(),
             last_applied: Mutex::default(),
             passes_since_apply: AtomicU32::new(0),
@@ -466,8 +471,8 @@ impl Engine {
             .await
     }
 
-    /// Reconcile: detect sockets, upsert apps and ports, give every app an address on
-    /// every network, apply the ruleset, put the addresses on the interfaces.
+    /// Reconcile: detect sockets, upsert apps and ports, create the addresses that grants
+    /// call for, apply the ruleset, put the addresses on the interfaces.
     pub async fn reconcile(&mut self, state: &AppState) -> anyhow::Result<()> {
         let process_filter = state.config.read().await.process_filter.clone();
 

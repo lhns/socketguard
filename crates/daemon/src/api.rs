@@ -20,13 +20,13 @@ use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use socketguard_core::api_types::{
     error_code, event_name, ApiError, ApplyRequest, AttachSocketGroup, ChangesRequest, Counts,
-    DisableRequest, EnforcementNotice, LockoutRiskInfo, MemberQuery, MergeRequest, NewGroup,
-    NewNetwork, NewPeer, NewSocketGroup, NewTag, NewTagMember, ParseCredentialsRequest,
-    ProtectHostRequest, ProtectHostResponse, ReviewRequest, SetMembers, SplitRequest,
-    StatusResponse, UpdateLabel, UpdateSettings, UpdateSocketGroup, UpdateTag,
+    DisableRequest, EnforcementNotice, LockoutRiskInfo, MemberQuery, MoveAppRequest, NewBinding,
+    NewGroup, NewNetwork, NewPeer, NewReservation, NewSocketGroup, NewTag, NewTagMember,
+    ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse, ReserveRequest,
+    ReviewRequest, SetMembers, StatusResponse, UpdateLabel, UpdateSocketGroup, UpdateTag,
 };
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
-use socketguard_core::{ActivityQuery, NewCredential, NewGrant, Protocol, Scope};
+use socketguard_core::{ActivityQuery, NewCredential, NewGrant};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
@@ -43,6 +43,8 @@ pub enum DaemonEvent {
     GrantsChanged,
     TagsChanged,
     SocketGroupsChanged,
+    ReservationsChanged,
+    AddressesChanged,
     NetworksChanged,
     SettingsChanged,
     Activity,
@@ -57,6 +59,8 @@ impl DaemonEvent {
             DaemonEvent::GrantsChanged => event_name::GRANTS_CHANGED,
             DaemonEvent::TagsChanged => event_name::TAGS_CHANGED,
             DaemonEvent::SocketGroupsChanged => event_name::SOCKET_GROUPS_CHANGED,
+            DaemonEvent::ReservationsChanged => event_name::RESERVATIONS_CHANGED,
+            DaemonEvent::AddressesChanged => event_name::ADDRESSES_CHANGED,
             DaemonEvent::NetworksChanged => event_name::NETWORKS_CHANGED,
             DaemonEvent::SettingsChanged => event_name::SETTINGS_CHANGED,
             DaemonEvent::Activity => event_name::ACTIVITY,
@@ -83,8 +87,7 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::GET, "/api/apps/{id}"),
     (Method::DELETE, "/api/apps/{id}"),
     (Method::POST, "/api/apps/{id}/review"),
-    (Method::POST, "/api/apps/{id}/split"),
-    (Method::POST, "/api/apps/{id}/merge"),
+    (Method::POST, "/api/apps/{id}/move"),
     (Method::GET, "/api/apps/{id}/share"),
     (Method::GET, "/api/peers"),
     (Method::POST, "/api/peers"),
@@ -119,11 +122,22 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::DELETE, "/api/socket-groups/{id}"),
     (Method::PUT, "/api/socket-groups/{id}/apps/{app_id}"),
     (Method::DELETE, "/api/socket-groups/{id}/apps/{app_id}"),
+    (Method::GET, "/api/reservations"),
+    (Method::POST, "/api/reservations"),
+    (Method::GET, "/api/reservations/{id}"),
+    (Method::PUT, "/api/reservations/{id}"),
+    (Method::DELETE, "/api/reservations/{id}"),
+    (Method::POST, "/api/reservations/{id}/bindings"),
+    (
+        Method::DELETE,
+        "/api/reservations/{id}/bindings/{binding_id}",
+    ),
+    (Method::GET, "/api/addresses"),
+    (Method::POST, "/api/addresses/{id}/reserve"),
     (Method::GET, "/api/networks"),
     (Method::POST, "/api/networks"),
     (Method::DELETE, "/api/networks/{id}"),
     (Method::GET, "/api/settings"),
-    (Method::PUT, "/api/settings"),
     (Method::PUT, "/api/settings/protect-host"),
     (Method::GET, "/api/activity"),
     (Method::GET, "/api/export"),
@@ -144,8 +158,7 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("GET", "/api/apps/{id}") => get(app_get),
         ("DELETE", "/api/apps/{id}") => delete(app_delete),
         ("POST", "/api/apps/{id}/review") => post(app_review),
-        ("POST", "/api/apps/{id}/split") => post(app_split),
-        ("POST", "/api/apps/{id}/merge") => post(app_merge),
+        ("POST", "/api/apps/{id}/move") => post(app_move),
         ("GET", "/api/apps/{id}/share") => get(app_share),
         ("GET", "/api/peers") => get(peers_list),
         ("POST", "/api/peers") => post(peer_create),
@@ -180,11 +193,19 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("DELETE", "/api/socket-groups/{id}") => delete(socket_group_delete),
         ("PUT", "/api/socket-groups/{id}/apps/{app_id}") => put(socket_group_attach),
         ("DELETE", "/api/socket-groups/{id}/apps/{app_id}") => delete(socket_group_detach),
+        ("GET", "/api/reservations") => get(reservations_list),
+        ("POST", "/api/reservations") => post(reservation_create),
+        ("GET", "/api/reservations/{id}") => get(reservation_get),
+        ("PUT", "/api/reservations/{id}") => put(reservation_rename),
+        ("DELETE", "/api/reservations/{id}") => delete(reservation_release),
+        ("POST", "/api/reservations/{id}/bindings") => post(binding_add),
+        ("DELETE", "/api/reservations/{id}/bindings/{binding_id}") => delete(binding_remove),
+        ("GET", "/api/addresses") => get(addresses_list),
+        ("POST", "/api/addresses/{id}/reserve") => post(address_reserve),
         ("GET", "/api/networks") => get(networks_list),
         ("POST", "/api/networks") => post(network_create),
         ("DELETE", "/api/networks/{id}") => delete(network_delete),
         ("GET", "/api/settings") => get(settings_get),
-        ("PUT", "/api/settings") => put(settings_put),
         ("PUT", "/api/settings/protect-host") => put(protect_host_put),
         ("GET", "/api/activity") => get(activity_list),
         ("GET", "/api/export") => get(export_get),
@@ -394,7 +415,7 @@ async fn status(State(state): State<Shared>) -> ApiResult<Json<StatusResponse>> 
     let engine = state.engine.read().await;
     let apps = engine.list_apps(&state, false).await?;
     let pending_apps = apps.iter().filter(|a| !a.reviewed).count() as u32;
-    let addresses = apps.iter().map(|a| a.addresses.len()).sum::<usize>() as u32;
+    let addresses = state.db.list_addresses().await?.len() as u32;
     Ok(Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         networks: engine.networks_described(),
@@ -469,38 +490,101 @@ async fn app_review(
     Ok(Json(engine.get_app(&state, &id).await?).into_response())
 }
 
-async fn app_split(
+async fn app_move(
     State(state): State<Shared>,
     Path(id): Path<String>,
-    ApiJson(req): ApiJson<SplitRequest>,
+    ApiJson(req): ApiJson<MoveAppRequest>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    let scope = match (req.port, req.proto, req.group) {
-        (Some(port), proto, None) => Scope::Port {
-            port,
-            proto: proto.unwrap_or(Protocol::Tcp),
-        },
-        (None, None, Some(group)) => Scope::Group { id: group },
-        _ => {
-            return Err(ApiErr::invalid(
-                "give a port (with proto) or a group, not both",
-            ))
-        }
-    };
-    let address = engine.split(&state, &id, &req.network_id, scope).await?;
-    Ok(saved(&engine, StatusCode::CREATED, Some(address)))
+    engine
+        .move_app(&state, &id, &req.to, req.confirm_open)
+        .await?;
+    Ok(saved(
+        &engine,
+        StatusCode::OK,
+        Some(engine.get_app(&state, &req.to).await?),
+    ))
 }
 
-async fn app_merge(
+// ─── Reservations and addresses ──────────────────────────────────────────────
+
+async fn reservations_list(State(state): State<Shared>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(engine.list_reservations(&state).await?).into_response())
+}
+
+async fn reservation_get(
     State(state): State<Shared>,
     Path(id): Path<String>,
-    ApiJson(req): ApiJson<MergeRequest>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    let address = engine
-        .merge(&state, &id, &req.network_id, &req.address_ids)
+    Ok(Json(engine.get_reservation(&state, &id).await?).into_response())
+}
+
+async fn reservation_create(
+    State(state): State<Shared>,
+    ApiJson(req): ApiJson<NewReservation>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let view = engine
+        .create_reservation(&state, &req.label, req.bindings, req.confirm_open)
         .await?;
-    Ok(saved(&engine, StatusCode::OK, Some(address)))
+    Ok(saved(&engine, StatusCode::CREATED, Some(view)))
+}
+
+async fn reservation_rename(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<UpdateLabel>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let view = engine.rename_reservation(&state, &id, &req.label).await?;
+    Ok(saved(&engine, StatusCode::OK, Some(view)))
+}
+
+async fn reservation_release(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    engine.release_reservation(&state, &id).await?;
+    Ok(saved(&engine, StatusCode::NO_CONTENT, None::<()>))
+}
+
+async fn binding_add(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<NewBinding>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let view = engine
+        .add_binding(&state, &id, req.target, req.confirm_open)
+        .await?;
+    Ok(saved(&engine, StatusCode::CREATED, Some(view)))
+}
+
+async fn binding_remove(
+    State(state): State<Shared>,
+    Path((id, binding_id)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let view = engine.remove_binding(&state, &id, &binding_id).await?;
+    Ok(saved(&engine, StatusCode::OK, Some(view)))
+}
+
+async fn addresses_list(State(state): State<Shared>) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    Ok(Json(engine.list_addresses(&state).await?).into_response())
+}
+
+async fn address_reserve(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<ReserveRequest>,
+) -> ApiResult<Response> {
+    let engine = state.engine.read().await;
+    let view = engine.reserve_address(&state, &id, &req.label).await?;
+    Ok(saved(&engine, StatusCode::CREATED, Some(view)))
 }
 
 // ─── Peers ───────────────────────────────────────────────────────────────────
@@ -629,6 +713,7 @@ async fn group_members(
 struct GrantParams {
     app: Option<String>,
     tag: Option<String>,
+    reservation: Option<String>,
     peer: Option<String>,
     group: Option<String>,
 }
@@ -644,6 +729,7 @@ async fn grants_list(
             GrantFilter {
                 app_id: q.app,
                 tag_id: q.tag,
+                reservation_id: q.reservation,
                 peer_id: q.peer,
                 group_id: q.group,
             },
@@ -922,17 +1008,6 @@ async fn persist_networks(state: &AppState, engine: &Engine) {
 
 async fn settings_get(State(state): State<Shared>) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    Ok(Json(engine.settings(&state).await?).into_response())
-}
-
-async fn settings_put(
-    State(state): State<Shared>,
-    ApiJson(req): ApiJson<UpdateSettings>,
-) -> ApiResult<Response> {
-    let engine = state.engine.read().await;
-    if let Some(mode) = req.address_mode {
-        engine.set_address_mode(&state, mode).await?;
-    }
     Ok(Json(engine.settings(&state).await?).into_response())
 }
 

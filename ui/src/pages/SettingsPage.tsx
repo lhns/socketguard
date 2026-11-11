@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { toDaemonError, type AddressMode, type LockoutRiskInfo } from "../api";
+import { toDaemonError, type LockoutRiskInfo } from "../api";
 import ConfirmDialog from "../components/ConfirmDialog";
 import ExportSection from "../components/ExportSection";
 import NetworksSection from "../components/NetworksSection";
 import { useToast } from "../components/Toast";
 import { errorText } from "../lib";
 import { useNav } from "../nav";
-import { useNetworks, useSetEnabled, useSetProtectHost, useSettings, useStatus, useUpdateSettings } from "../queries";
+import { useNetworks, useSetEnabled, useSetProtectHost, useSettings, useStatus } from "../queries";
 
 export default function SettingsPage() {
   const nav = useNav();
@@ -24,48 +24,10 @@ export default function SettingsPage() {
         onShowApp={(search) => nav.go("apps", { search })}
       />
 
-      <AddressMode mode={settings.data?.address_mode} />
-
       <ExportSection />
 
       <DangerZone />
     </div>
-  );
-}
-
-function AddressMode({ mode }: { mode: AddressMode | undefined }) {
-  const toast = useToast();
-  const update = useUpdateSettings();
-  return (
-    <section className="card" aria-label="Addresses">
-      <h2 className="card-title">Addresses</h2>
-      <p className="hint">
-        Each app gets its own address on every network, so a firewall rule can tell apps apart. One address per port gives every
-        listening port its own address instead.
-      </p>
-      <div className="form-row">
-        <label htmlFor="address-mode">Address mode</label>
-        <select
-          id="address-mode"
-          className="input"
-          value={mode ?? ""}
-          disabled={!mode || update.isPending}
-          onChange={(e) =>
-            update.mutate({ address_mode: e.target.value as AddressMode }, {
-              onSuccess: () => toast.success("Address mode changed"),
-              onError: (err) => toast.error(errorText(err)),
-            })
-          }
-        >
-          {!mode && <option value="">…</option>}
-          <option value="per_app">One address per app</option>
-          <option value="per_port">One address per port</option>
-        </select>
-      </div>
-      <p className="hint">
-        Which programs count as apps (the process filter) is set in the daemon&apos;s config file; the API does not expose it yet.
-      </p>
-    </section>
   );
 }
 

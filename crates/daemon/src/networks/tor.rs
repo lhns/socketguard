@@ -857,13 +857,14 @@ mod tests {
         n.enforce(&enforcement(vec![keyed])).unwrap();
         let gone = Address {
             id: "addr1".into(),
-            app_id: "app".into(),
-            network_id: "tor".into(),
-            locator: Locator::Onion {
-                hostname: "svc1.onion".into(),
-            },
-            scope: socketguard_core::Scope::All,
-            created_at: chrono::Utc::now(),
+            ..Address::automatic(
+                "app",
+                socketguard_core::Scope::All,
+                "tor",
+                Locator::Onion {
+                    hostname: "svc1.onion".into(),
+                },
+            )
         };
         mock.set_down(true);
         assert!(n.remove_locator(&gone).is_err());

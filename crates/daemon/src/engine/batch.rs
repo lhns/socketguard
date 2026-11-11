@@ -6,6 +6,7 @@
 //! against the real constraints and rolls back.
 
 use super::mutations::Catalog;
+use super::reservations::ResPlan;
 use super::socket_groups::GroupPlan;
 use super::*;
 use crate::api::DaemonEvent;
@@ -16,8 +17,8 @@ use socketguard_core::api_types::{
     BatchChange, Change, ChangeItem, ChangeKind, ChangeOp, ChangesRequest, ChangesResponse,
 };
 use socketguard_core::{
-    new_id, ActivityKind, Address, Credential, Grant, GrantReach, NewGrant, Peer, PeerGroup, Reach,
-    Scope, SocketGroup, Subject, TagMember, Target,
+    new_id, ActivityKind, Address, BindingTarget, Credential, Grant, GrantReach, NewGrant, Peer,
+    PeerGroup, Reach, Scope, SocketGroup, Subject, TagMember, Target,
 };
 use std::collections::BTreeMap;
 
@@ -97,6 +98,74 @@ impl Plan {
             },
             other => other.clone(),
         })
+    }
+
+    /// A binding target whose tag or socket group may be a `ref` of an earlier operation.
+    fn resolve_binding(&self, t: &BindingTarget) -> Result<BindingTarget, EngineError> {
+        Ok(match t {
+            BindingTarget::App { app_id, scope } => BindingTarget::App {
+                app_id: app_id.clone(),
+                scope: self.resolve_scope(scope)?,
+            },
+            BindingTarget::Tag { tag_id } => BindingTarget::Tag {
+                tag_id: self.resolve(tag_id)?,
+            },
+        })
+    }
+
+    /// Who is reachable through `grants`, for the detail of a change.
+    fn who(&self, grants: &[Grant]) -> Vec<String> {
+        grants
+            .iter()
+            .map(|g| match &g.subject {
+                Subject::Anyone => "Anyone".to_string(),
+                Subject::Peer(id) => self
+                    .cat
+                    .peer(id)
+                    .map_or_else(|| id.clone(), |p| p.label.clone()),
+                Subject::Group(id) => self
+                    .cat
+                    .group(id)
+                    .map_or_else(|| id.clone(), |g| format!("group {}", g.label)),
+            })
+            .collect()
+    }
+
+    /// Add the outcome of a reservation operation or `move_app`: its writes, the addresses
+    /// that leave, and who can now reach more.
+    fn push_res_plan(
+        &mut self,
+        rp: ResPlan,
+        (kind, item): (ChangeKind, ChangeItem),
+        name: String,
+        id: Option<String>,
+        activity: NewActivity,
+    ) {
+        let reach: Vec<GrantReach> = rp
+            .widened
+            .iter()
+            .flat_map(|g| self.grant_reach(g))
+            .collect();
+        self.changes_reach |= lets_in(&reach);
+        let who = self.who(&rp.widened);
+        self.changes.push(BatchChange {
+            change: Change {
+                kind,
+                item,
+                name,
+                detail: (!who.is_empty()).then(|| format!("reachable by {}", who.join(", "))),
+                opens_to_anyone: rp.opens_to_anyone(),
+            },
+            id,
+            reach,
+        });
+        self.activities.push(activity);
+        self.writes.extend(rp.writes);
+        self.removed.extend(rp.removed);
+        self.event(DaemonEvent::ReservationsChanged);
+        self.event(DaemonEvent::AddressesChanged);
+        self.event(DaemonEvent::GrantsChanged);
+        self.event(DaemonEvent::AppsChanged);
     }
 
     /// Add the outcome of a socket group operation: its writes, the addresses that leave, and
@@ -222,11 +291,7 @@ impl Engine {
             .apply_writes(&plan.writes)
             .await
             .map_err(|e| Self::conflict_or_internal(e, "a change of this batch"))?;
-        let applied = if plan.removed.is_empty() {
-            self.apply_firewall(state).await
-        } else {
-            self.apply_and_ensure(state).await
-        };
+        let applied = self.apply_and_ensure(state).await;
         if let Err(e) = state.db.insert_activity(&plan.activities).await {
             warn!("Could not record activity: {e}");
         }
@@ -395,7 +460,7 @@ impl Engine {
                 plan.define_ref(ref_, &group.id)?;
                 let activity = NewActivity::new(
                     ActivityKind::SocketGroupAdded,
-                    format!("Added socket group {}", group.label),
+                    format!("Added port group {}", group.label),
                 );
                 plan.push_group_plan(
                     gp,
@@ -421,7 +486,7 @@ impl Engine {
                 )?;
                 let activity = NewActivity::new(
                     ActivityKind::SocketGroupChanged,
-                    format!("Changed socket group {}", group.label),
+                    format!("Changed port group {}", group.label),
                 );
                 plan.push_group_plan(
                     gp,
@@ -436,7 +501,7 @@ impl Engine {
                 let (group, gp) = self.plan_delete_group(&mut plan.cat, &id)?;
                 let activity = NewActivity::new(
                     ActivityKind::SocketGroupRemoved,
-                    format!("Removed socket group {}", group.label),
+                    format!("Removed port group {}", group.label),
                 );
                 plan.push_group_plan(
                     gp,
@@ -461,7 +526,7 @@ impl Engine {
                         .map_or(app_id.clone(), |a| a.name.clone());
                     let activity = NewActivity::new(
                         ActivityKind::SocketGroupChanged,
-                        format!("Attached socket group {} to {app}", group.label),
+                        format!("Attached port group {} to {app}", group.label),
                     )
                     .app(app_id);
                     plan.push_group_plan(
@@ -482,7 +547,7 @@ impl Engine {
                     .map_or(app_id.clone(), |a| a.name.clone());
                 let activity = NewActivity::new(
                     ActivityKind::SocketGroupChanged,
-                    format!("Detached socket group {} from {app}", group.label),
+                    format!("Detached port group {} from {app}", group.label),
                 )
                 .app(app_id);
                 plan.push_group_plan(
@@ -503,6 +568,7 @@ impl Engine {
                 let target = match target {
                     Target::App(id) => Target::App(id.clone()),
                     Target::Tag(id) => Target::Tag(plan.resolve(id)?),
+                    Target::Reservation(id) => Target::Reservation(plan.resolve(id)?),
                 };
                 let subject = match subject {
                     Subject::Peer(id) => Subject::Peer(plan.resolve(id)?),
@@ -727,6 +793,157 @@ impl Engine {
                 });
                 plan.event(DaemonEvent::TagsChanged);
                 plan.event(DaemonEvent::GrantsChanged);
+            }
+            ChangeOp::CreateReservation {
+                ref_,
+                label,
+                bindings,
+                confirm_open,
+            } => {
+                let bindings: Vec<BindingTarget> = bindings
+                    .iter()
+                    .map(|b| plan.resolve_binding(b))
+                    .collect::<Result<_, _>>()?;
+                let (res, rp) = self.plan_create_reservation(
+                    &mut plan.cat,
+                    new_id(),
+                    label,
+                    &bindings,
+                    *confirm_open,
+                )?;
+                plan.define_ref(ref_, &res.id)?;
+                let activity = NewActivity::new(
+                    ActivityKind::ReservationAdded,
+                    format!("Added reservation {}", res.label),
+                );
+                plan.push_res_plan(
+                    rp,
+                    (ChangeKind::Create, ChangeItem::Reservation),
+                    res.label.clone(),
+                    Some(res.id.clone()),
+                    activity,
+                );
+            }
+            ChangeOp::ReserveAddress {
+                ref_,
+                address_id,
+                label,
+            } => {
+                let address_id = plan.resolve(address_id)?;
+                let (res, rp) = self.plan_reserve_address(&mut plan.cat, &address_id, label)?;
+                plan.define_ref(ref_, &res.id)?;
+                let activity = NewActivity::new(
+                    ActivityKind::ReservationAdded,
+                    format!("Reserved an address as {}", res.label),
+                );
+                plan.push_res_plan(
+                    rp,
+                    (ChangeKind::Create, ChangeItem::Reservation),
+                    res.label.clone(),
+                    Some(res.id.clone()),
+                    activity,
+                );
+            }
+            ChangeOp::RenameReservation {
+                reservation_id,
+                label,
+            } => {
+                let id = plan.resolve(reservation_id)?;
+                let (res, rp) = self.plan_rename_reservation(&mut plan.cat, &id, label)?;
+                let activity = NewActivity::new(
+                    ActivityKind::ReservationChanged,
+                    format!("Renamed a reservation to {}", res.label),
+                );
+                plan.push_res_plan(
+                    rp,
+                    (ChangeKind::Update, ChangeItem::Reservation),
+                    res.label.clone(),
+                    Some(res.id.clone()),
+                    activity,
+                );
+            }
+            ChangeOp::AddBinding {
+                reservation_id,
+                target,
+                confirm_open,
+            } => {
+                let id = plan.resolve(reservation_id)?;
+                let target = plan.resolve_binding(target)?;
+                let (binding, rp) =
+                    self.plan_add_binding(&mut plan.cat, &id, &target, *confirm_open)?;
+                let label = plan
+                    .cat
+                    .reservation(&id)
+                    .map_or(id.clone(), |r| r.label.clone());
+                let activity = NewActivity::new(
+                    ActivityKind::ReservationChanged,
+                    format!("Bound something to reservation {label}"),
+                );
+                plan.push_res_plan(
+                    rp,
+                    (ChangeKind::Create, ChangeItem::Binding),
+                    format!("binding of reservation {label}"),
+                    Some(binding.id),
+                    activity,
+                );
+            }
+            ChangeOp::RemoveBinding {
+                reservation_id,
+                binding_id,
+            } => {
+                let id = plan.resolve(reservation_id)?;
+                let (binding, rp) = self.plan_remove_binding(&mut plan.cat, &id, binding_id)?;
+                let label = plan
+                    .cat
+                    .reservation(&id)
+                    .map_or(id.clone(), |r| r.label.clone());
+                let activity = NewActivity::new(
+                    ActivityKind::ReservationChanged,
+                    format!("Unbound something from reservation {label}"),
+                );
+                plan.push_res_plan(
+                    rp,
+                    (ChangeKind::Delete, ChangeItem::Binding),
+                    format!("binding of reservation {label}"),
+                    Some(binding.id),
+                    activity,
+                );
+            }
+            ChangeOp::ReleaseReservation { reservation_id } => {
+                let id = plan.resolve(reservation_id)?;
+                let (res, rp) = self.plan_release_reservation(&mut plan.cat, &id)?;
+                let activity = NewActivity::new(
+                    ActivityKind::ReservationRemoved,
+                    format!("Released reservation {}", res.label),
+                );
+                plan.push_res_plan(
+                    rp,
+                    (ChangeKind::Delete, ChangeItem::Reservation),
+                    res.label.clone(),
+                    Some(res.id.clone()),
+                    activity,
+                );
+            }
+            ChangeOp::MoveApp {
+                from,
+                to,
+                confirm_open,
+            } => {
+                let rp = self.plan_move_app(&mut plan.cat, from, to, *confirm_open)?;
+                let name = |id: &str| plan.cat.app(id).map_or(id.to_string(), |a| a.name.clone());
+                let (a, b) = (name(from), name(to));
+                let activity = NewActivity::new(
+                    ActivityKind::AppMoved,
+                    format!("Moved the grants, tags and addresses of {a} to {b}"),
+                )
+                .app(to);
+                plan.push_res_plan(
+                    rp,
+                    (ChangeKind::Update, ChangeItem::App),
+                    format!("{a} moved to {b}"),
+                    Some(to.clone()),
+                    activity,
+                );
             }
             ChangeOp::Review { app_id, reviewed } => {
                 let app = plan

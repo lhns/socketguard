@@ -55,7 +55,7 @@ impl Engine {
             .apply_writes(&[Write::InsertTag(tag.clone())])
             .await
             .map_err(|e| Self::conflict_or_internal(e, &format!("tag {}", tag.label)))?;
-        let applied = self.apply_firewall(state).await;
+        let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(ActivityKind::TagAdded, format!("Added tag {}", tag.label));
         self.commit(
             state,
@@ -153,7 +153,7 @@ impl Engine {
                 .collect();
             state.db.apply_writes(&writes).await?;
         }
-        let applied = self.apply_firewall(state).await;
+        let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::TagChanged,
             format!("Changed tag {}", label.as_deref().unwrap_or(&tag.label)),
@@ -172,7 +172,7 @@ impl Engine {
     pub async fn delete_tag(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
         let tag = self.get_tag(state, id).await?;
         state.db.delete_tag(id).await?;
-        let applied = self.apply_firewall(state).await;
+        let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::TagRemoved,
             format!("Removed tag {}", tag.label),
@@ -221,7 +221,7 @@ impl Engine {
                 scope,
             }])
             .await?;
-        let applied = self.apply_firewall(state).await;
+        let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::TagChanged,
             format!("Added {} to tag {}", app.name, tag.label),
@@ -267,7 +267,7 @@ impl Engine {
                 exclude,
             }])
             .await?;
-        let applied = self.apply_firewall(state).await;
+        let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::TagChanged,
             format!("Removed an app from tag {}", tag.label),

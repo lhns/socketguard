@@ -1,6 +1,6 @@
 # SocketGuard
 
-Secure by default, without NAT. Every app on a host gets its own IPv6 address per network,
+Secure by default, without NAT. Every app you open gets its own IPv6 address per network,
 everything is closed until you grant access, and access is granted to *peers* (ideally
 identified by public key), not to IP strings.
 
@@ -12,13 +12,15 @@ overlay — but they also make source addresses provable: on Yggdrasil a packet'
 cryptographically bound to the sender's key. SocketGuard builds on that:
 
 - **Apps, not ports.** Listening processes are grouped into apps (interpreter-aware, stable
-  across upgrades). Each app gets an address per network; ports can be split onto their own
-  address or merged.
+  across upgrades). An app has no address until a grant names it; then it gets one per network,
+  plus one for each port or port group a grant names. When the last grant goes, the address leaves
+  the interface (it is remembered and comes back unchanged). A *reservation* is a named,
+  permanent address you assemble from ports of several apps and grant access to as a whole.
 - **Peers, not IPs.** A peer is a label plus credentials: a Yggdrasil key or address, an IP or
   CIDR, a Tor client key. Each grant shows per network whether it is `verified` by key,
   `IP only`, or `not reachable` there.
-- **Closed by default.** All SocketGuard addresses and the whole Yggdrasil interface deny
-  inbound traffic unless a grant allows it. Whole-host protection is opt-in, with a guard
+- **Closed by default.** Nothing closed has an address, and the whole Yggdrasil interface
+  denies inbound traffic unless a grant allows it. Whole-host protection is opt-in, with a guard
   against locking yourself out of SSH/RDP.
 - **Frozen on stop.** Stopping the daemon keeps rules and addresses in place;
   `socketguard disable` is the only way to remove them.
@@ -91,8 +93,9 @@ state; on stop everything stays in place until `socketguard disable` (or
 socketguard init                              # first-run setup (networks, sshd/RDP grants, protect-host)
 socketguard status                            # daemon, networks, protect-host, counts
 socketguard pending                           # new apps; interactive on a terminal
-socketguard apps list [--pending]             # also: show, review, rm, split, merge
-socketguard apps show nginx                   # addresses, ports, grants with reach, counters
+socketguard apps list [--pending]             # also: show, review, rm
+socketguard apps show nginx                   # addresses (up or not), ports, grants with reach, counters
+socketguard apps move old-nginx nginx [-y]    # a program that came back under a new identity: addresses, grants, tags and bindings move
 socketguard share nginx                       # [addr]:port and http(s):// URLs
 
 socketguard peers add --label alice <ygg-key> # bare values: 64 hex = ygg_key, IP/CIDR = ip
@@ -109,16 +112,23 @@ socketguard grant --app web --app api --port 80 --port 443 --to alice --to group
 socketguard revoke --app web --to alice
 
 socketguard tags add dev --match 'python*' --match node   # apps matching join now and when they start
-socketguard tags members add dev web:80                    # an app, one port or a socket group (web:socket-group=passive); also: members rm, show, list, patterns, rename, rm
+socketguard tags members add dev web:80                    # an app, one port or a port group (web:socket-group=passive); also: members rm, show, list, patterns, rename, rm
 socketguard grant tag:dev group:team                       # covers every member, present and future
 
-# Socket groups: ports and ranges that belong together (ADR 0047), attached to apps, usable as a scope
+# Port groups: ports and ranges that belong together (ADR 0047), attached to apps, usable as a scope
+# (the command is still `socket-groups`)
 socketguard socket-groups add passive 21/tcp 50000-51000/tcp --app ftpd   # also: list, set, rm, attach, detach
 socketguard grant ftpd:socket-group=passive alice          # or: grant --app ftpd --socket-group passive --to alice
-socketguard apps split ftpd --network ygg --socket-group passive   # an extra address for the group (or: apps split APP 80/tcp)
+
+# Addresses and reservations (ADR 0047): an address exists once a grant names its row
+socketguard addresses list                    # every address, automatic and reserved, up or not
+socketguard addresses reserve <address-id> web-public     # keep an automatic address under a name
+socketguard reservations add public-web web:80/tcp tag:dev   # targets: app[:port[/proto]|:socket-group=<label>] or tag:<label>
+socketguard reservations list                 # also: rename, bind, unbind, release (bind asks before opening to Anyone; -y)
+socketguard grant reservation:public-web alice   # covers every bound row, All ports; also --reservation <label>
 
 socketguard networks list                     # also: add <type> --interface X, rm <id>
-socketguard settings address-mode per-port    # or per-app; `settings show`
+socketguard settings show                     # whole-host protection
 socketguard protect-host on eth0              # refused if sshd/RDP would be cut off; --force
 socketguard activity --blocked [--follow]     # also: --app, --peer, --kind, --limit
 socketguard watch                             # every push event, one line each
@@ -130,7 +140,7 @@ socketguard enable
 socketguard completions bash                  # also: zsh, fish, powershell, elvish
 ```
 
-Reach is shown per network as `verified`, `whole subnet`, `IP only`, `open` or `not reachable`. Completions are static (subcommands and options, not app or peer names).
+Reach is shown per network as `verified`, `whole subnet`, `IP only`, `open` or `not reachable`; a note gives the reason where it is not what the grant suggests. Completions are static (subcommands and options, not app or peer names).
 
 ### Desktop app
 
@@ -173,7 +183,9 @@ Telemetry is exported over OTLP when the standard `OTEL_EXPORTER_OTLP_*` variabl
 A Tor network publishes each app as an onion service through Tor's control port, so peers behind
 NAT can reach it without any open port. Access is enforced by Tor client authorization: an app is
 not published until it is granted, and a grant to a peer holding a `tor_client_key` (the base32
-x25519 public key from `authorized_clients`) lets only that client in.
+x25519 public key from `authorized_clients`) lets only that client in. A reservation is opened
+as a whole on Tor: only a grant on the reservation itself admits clients to its onion address,
+and a grant on a single bound port has no effect there (the CLI shows the reason).
 
 ```bash
 # tor with: ControlPort 9051 and CookieAuthentication 1
@@ -225,7 +237,7 @@ and `deploy/e2e/tor-e2e.sh` for the Docker end-to-end test.
 ## Architecture decisions
 
 Architecture decisions are recorded as ADRs in [`docs/adr/`](docs/adr/); the current design is
-ADR 0026–0045.
+ADR 0026–0047.
 
 ## License
 

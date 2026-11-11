@@ -1,5 +1,11 @@
-//! The addresses apps get on each network and their presence on the interfaces: planning,
-//! allocating, re-homing, sweeping, `split` and `merge`.
+//! The addresses of apps and reservations on each network and their presence on the
+//! interfaces: allocating, re-homing, sweeping (ADR 0047). Which addresses exist and are up
+//! is decided by [`Model`]; this module makes the database and the interfaces match it.
+//!
+//! A dormant address is taken off its interface and out of the ruleset but its row stays.
+//! For DHCPv6 that is all that happens: the lease is released only when the address is
+//! deleted (`remove_locator`), never when it merely goes dormant, so the server keeps the
+//! address reserved for us and the same one goes back on the interface with the next grant.
 
 use super::*;
 use crate::api::DaemonEvent;
@@ -11,9 +17,9 @@ use crate::state::{Database, OwnedAddress};
 use crate::AppState;
 use chrono::Utc;
 use socketguard_core::{
-    new_id, scope_ports, Address, AddressId, AddressMode, App, AppPort, Locator, PortRangeSet,
-    PortRef, Protocol, Scope, SocketGroup,
+    classify_legacy, Binding, BindingTarget, LegacyClass, Model, Reservation, Row,
 };
+use socketguard_core::{new_id, Address, Locator, Scope};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
@@ -44,17 +50,21 @@ impl Engine {
     /// is confirmed. Run after the ruleset is applied; needs no ruleset itself.
     pub(super) async fn sweep_owned(&self, state: &AppState) {
         let db = &state.db;
-        let (owned, addresses) = match (db.list_owned_addresses().await, db.list_addresses().await)
-        {
+        let (owned, referenced) = match (
+            db.list_owned_addresses().await,
+            self.wanted_on_interfaces(state).await,
+        ) {
             (Ok(o), Ok(a)) => (o, a),
-            (Err(e), _) | (_, Err(e)) => {
-                // Never sweep on a guess: without the address list everything looks orphaned.
+            (Err(e), _) => {
+                // Never sweep on a guess: without the list everything looks orphaned.
                 warn!("Cannot sweep owned addresses: {e}");
                 return;
             }
+            (_, Err(e)) => {
+                warn!("Cannot sweep owned addresses: {e:#}");
+                return;
+            }
         };
-        let referenced: HashSet<Ipv6Addr> =
-            addresses.iter().filter_map(|a| a.locator.ipv6()).collect();
         let disabled = db.disabled().await;
         let due: Vec<OwnedAddress> = owned
             .into_iter()
@@ -144,83 +154,181 @@ impl Engine {
         }
     }
 
-    /// Give every app the addresses its layout calls for on every network; a failed
+    /// The IPv6 addresses that belong on an interface now: those that are up.
+    pub(super) async fn wanted_on_interfaces(
+        &self,
+        state: &AppState,
+    ) -> anyhow::Result<HashSet<Ipv6Addr>> {
+        let snap = self.gather_snapshot(state).await?;
+        let info = Model::new(snap.world()).address_info();
+        Ok(snap
+            .addresses
+            .iter()
+            .filter(|a| info.get(&a.id).is_some_and(|i| i.up))
+            .filter_map(|a| a.locator.ipv6())
+            .collect())
+    }
+
+    /// Create the addresses that grants call for and that do not exist yet: one per row a
+    /// grant names, one per reservation and network where a grant covers it. A failed
     /// allocation is retried on the next pass. Returns the number created.
     pub(super) async fn ensure_addresses(&self, state: &AppState) -> anyhow::Result<usize> {
-        let mode = state.db.address_mode().await?;
-        let groups = state.db.list_socket_groups().await?;
+        // Mutations run side by side; two must not both create the same address.
+        let _guard = self.alloc_lock.lock().await;
+        let snap = self.gather_snapshot(state).await?;
+        let model = Model::new(snap.world());
+        let mut wanted: Vec<(String, String, Address)> = Vec::new();
+        for (nid, row) in model.missing_automatic() {
+            let name = snap
+                .apps
+                .iter()
+                .find(|a| a.id == row.app_id)
+                .map_or(row.app_id.clone(), |a| a.name.clone());
+            let blank = Locator::Onion {
+                hostname: String::new(),
+            };
+            wanted.push((
+                nid.clone(),
+                name,
+                Address::automatic(&row.app_id, row.scope, &nid, blank),
+            ));
+        }
+        for (rid, nid) in model.missing_reserved() {
+            let name = snap
+                .reservations
+                .iter()
+                .find(|r| r.id == rid)
+                .map_or(rid.clone(), |r| format!("reservation {}", r.label));
+            let blank = Locator::Onion {
+                hostname: String::new(),
+            };
+            wanted.push((
+                nid.clone(),
+                name,
+                Address::of_reservation(&rid, &nid, blank),
+            ));
+        }
         let mut created = 0;
-        for app in state.db.list_apps().await? {
-            for nid in self.sorted_backend_ids() {
-                let active = &self.backends[nid];
-                let existing: Vec<&Address> = app
-                    .addresses
-                    .iter()
-                    .filter(|a| a.network_id == *nid)
-                    .collect();
-                let mut app_ports: Vec<PortRef> = app.ports.iter().map(AppPort::port_ref).collect();
-                if !active.network.capabilities().udp {
-                    app_ports.retain(|p| p.proto == Protocol::Tcp);
-                    if app_ports.is_empty() {
-                        continue; // nothing this network can serve
-                    }
+        let mut failed: HashSet<String> = HashSet::new();
+        for (nid, name, mut address) in wanted {
+            let Some(active) = self.backends.get(&nid) else {
+                continue;
+            };
+            if failed.contains(&nid) {
+                continue;
+            }
+            let owner = address
+                .app_id
+                .clone()
+                .or_else(|| address.reservation_id.clone())
+                .unwrap_or_default();
+            match self
+                .make_locator(active, &owner, &address.id, &address.scope)
+                .await
+            {
+                Ok(NewLocator { locator, secret }) => {
+                    self.alloc_failing.lock().unwrap().remove(&nid);
+                    address.locator = locator;
+                    address.created_at = Utc::now();
+                    state
+                        .db
+                        .insert_address_with_secret(&address, secret.as_deref())
+                        .await?;
+                    info!(
+                        "Assigned {} ({nid}) to {name}",
+                        locator_text(&address.locator)
+                    );
+                    created += 1;
                 }
-                for scope in plan_addresses(mode, &app, &groups, &app_ports, &existing) {
-                    let address_id = new_id();
-                    match self
-                        .make_locator(active, &app.id, &address_id, &scope)
-                        .await
-                    {
-                        Ok(NewLocator { locator, secret }) => {
-                            self.alloc_failing.lock().unwrap().remove(nid);
-                            let address = Address {
-                                id: address_id,
-                                app_id: app.id.clone(),
-                                network_id: nid.clone(),
-                                scope,
-                                locator,
-                                created_at: Utc::now(),
-                            };
-                            state
-                                .db
-                                .insert_address_with_secret(&address, secret.as_deref())
-                                .await?;
-                            info!(
-                                "Assigned {} ({nid}) to {} ({})",
-                                locator_text(&address.locator),
-                                app.name,
-                                app.id
-                            );
-                            created += 1;
-                        }
-                        Err(e) => {
-                            if self.alloc_failing.lock().unwrap().insert(nid.clone()) {
-                                warn!("Cannot allocate an address on '{nid}', will retry: {e}");
-                            }
-                            break;
-                        }
+                Err(e) => {
+                    if self.alloc_failing.lock().unwrap().insert(nid.clone()) {
+                        warn!("Cannot allocate an address on '{nid}', will retry: {e}");
                     }
+                    failed.insert(nid);
                 }
             }
         }
         Ok(created)
     }
 
-    /// Ask a network for the locator of a new address.
+    /// Ask a network for the locator of a new address. `owner` is the app, or the
+    /// reservation, the address is for.
     pub(super) async fn make_locator(
         &self,
         active: &ActiveBackend,
-        app_id: &str,
+        owner: &str,
         address_id: &str,
         scope: &Scope,
     ) -> anyhow::Result<NewLocator> {
         let net = active.network.clone();
         let req = LocatorRequest {
-            app_id: app_id.to_string(),
+            app_id: owner.to_string(),
             address_id: address_id.to_string(),
             scope: scope.clone(),
         };
         tokio::task::spawn_blocking(move || net.ensure_locator(&req)).await?
+    }
+
+    /// The v7 -> v8 migration left every address automatic. Now that the networks are
+    /// known, turn the ones that a grant covers without naming their row into
+    /// reservations with that row bound (ADR 0047), once. Returns how many.
+    pub async fn classify_legacy_addresses(&self, state: &AppState) -> anyhow::Result<usize> {
+        let db = &state.db;
+        if db.get_setting("classify_addresses").await?.as_deref() != Some("pending") {
+            return Ok(0);
+        }
+        let snap = self.gather_snapshot(state).await?;
+        let mut by_row: HashMap<Row, String> = HashMap::new();
+        let mut writes: Vec<crate::state::Write> = Vec::new();
+        let mut moved = 0;
+        for (address_id, class) in classify_legacy(snap.world()) {
+            let LegacyClass::Reservation { label } = class else {
+                continue;
+            };
+            let Some(a) = snap.addresses.iter().find(|a| a.id == address_id) else {
+                continue;
+            };
+            let Some(app_id) = a.app_id.clone() else {
+                continue;
+            };
+            let row = Row {
+                app_id: app_id.clone(),
+                scope: a.scope.clone(),
+            };
+            // One reservation per row, with an address on each network it had one.
+            let reservation_id = match by_row.get(&row) {
+                Some(id) => id.clone(),
+                None => {
+                    let id = new_id();
+                    writes.push(crate::state::Write::InsertReservation(Reservation {
+                        id: id.clone(),
+                        label,
+                        bindings: vec![Binding {
+                            id: new_id(),
+                            reservation_id: id.clone(),
+                            target: BindingTarget::App {
+                                app_id,
+                                scope: a.scope.clone(),
+                            },
+                        }],
+                        created_at: Utc::now(),
+                    }));
+                    by_row.insert(row, id.clone());
+                    id
+                }
+            };
+            writes.push(crate::state::Write::AssignAddress {
+                address_id,
+                reservation_id,
+            });
+            moved += 1;
+        }
+        db.apply_writes(&writes).await?;
+        db.set_setting("classify_addresses", "done").await?;
+        if moved > 0 {
+            info!("Turned {moved} existing address(es) into reservations");
+        }
+        Ok(moved)
     }
 
     /// Re-home stored addresses of prefix-based networks whose /64 changed: keep the
@@ -236,6 +344,17 @@ impl Engine {
                 return;
             }
         };
+        // Only addresses that are on an interface (or wanted there) move with the prefix;
+        // a remembered one just gets the new prefix in the database.
+        let owned: HashSet<Ipv6Addr> = state
+            .db
+            .list_owned_addresses()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|o| o.addr)
+            .collect();
+        let wanted = self.wanted_on_interfaces(state).await.unwrap_or_default();
         for network_id in self.sorted_backend_ids() {
             let active = &self.backends[network_id];
             let prefix = match active.network.current_prefix() {
@@ -259,16 +378,21 @@ impl Engine {
                 let new = with_prefix64(prefix.addr, iid_of(old));
                 info!("Prefix of backend '{network_id}' changed: moving {old} to {new}");
                 // Write ahead: the old address is retiring before the row stops naming it.
-                if let Err(e) = state
-                    .db
-                    .retire_address(old, iface, Some(network_id.as_str()))
-                    .await
-                {
-                    error!("Failed to record {old} as retiring: {e}");
-                    continue;
+                if owned.contains(&old) {
+                    if let Err(e) = state
+                        .db
+                        .retire_address(old, iface, Some(network_id.as_str()))
+                        .await
+                    {
+                        error!("Failed to record {old} as retiring: {e}");
+                        continue;
+                    }
                 }
                 match state.db.update_address_ipv6(&a.id, new).await {
-                    Ok(_) => moves.push((iface.to_string(), network_id.clone(), new)),
+                    Ok(_) if wanted.contains(&old) => {
+                        moves.push((iface.to_string(), network_id.clone(), new))
+                    }
+                    Ok(_) => {}
                     Err(e) => error!("Failed to save re-homed address: {e}"),
                 }
             }
@@ -300,9 +424,13 @@ impl Engine {
             return;
         }
         let mut expected: HashMap<String, Vec<(Ipv6Addr, String)>> = HashMap::new();
+        let wanted = self.wanted_on_interfaces(state).await.unwrap_or_default();
         for a in state.db.list_addresses().await.unwrap_or_default() {
             if let (Some(addr), Some(iface)) = (a.locator.ipv6(), self.interface_of(&a.network_id))
             {
+                if !wanted.contains(&addr) {
+                    continue;
+                }
                 expected
                     .entry(iface.to_string())
                     .or_default()
@@ -372,202 +500,6 @@ impl Engine {
                 .collect();
             self.remove_locators(state, nid, &of_network).await;
         }
-    }
-
-    /// Give a port or a socket group of an app its own address on a network. The app's
-    /// other addresses are not changed: addresses overlap, and the app's own address keeps
-    /// serving the port too (ADR 0047).
-    pub async fn split(
-        &self,
-        state: &AppState,
-        app_id: &str,
-        network_id: &str,
-        scope: Scope,
-    ) -> Result<Address, EngineError> {
-        let app = state
-            .db
-            .get_app(app_id)
-            .await?
-            .ok_or_else(|| EngineError::NotFound(format!("app {app_id}")))?;
-        let active = self
-            .backends
-            .get(network_id)
-            .ok_or_else(|| EngineError::NotFound(format!("network {network_id}")))?;
-        if scope.is_all() {
-            return Err(EngineError::Invalid(
-                "split needs a port or a socket group".into(),
-            ));
-        }
-        let cat = super::mutations::Catalog::load(state).await?;
-        Self::check_scope_on_app(&cat, &app, &scope)?;
-        if scope.as_port().is_some_and(|p| p.proto == Protocol::Udp)
-            && !active.network.capabilities().udp
-        {
-            return Err(EngineError::Invalid(format!(
-                "network {network_id} does not serve UDP ports"
-            )));
-        }
-        if app
-            .addresses
-            .iter()
-            .any(|a| a.network_id == network_id && a.scope == scope)
-        {
-            return Err(EngineError::Conflict(format!(
-                "{} already has its own address for {} on {network_id}",
-                app.name,
-                scope.describe(&cat.socket_groups)
-            )));
-        }
-        let address_id = new_id();
-        let NewLocator { locator, secret } = self
-            .make_locator(active, app_id, &address_id, &scope)
-            .await
-            .map_err(|e| EngineError::Conflict(format!("cannot allocate an address: {e}")))?;
-        let address = Address {
-            id: address_id,
-            app_id: app_id.to_string(),
-            network_id: network_id.to_string(),
-            scope,
-            locator,
-            created_at: Utc::now(),
-        };
-        state
-            .db
-            .insert_address_with_secret(&address, secret.as_deref())
-            .await?;
-        let applied = self.apply_and_ensure(state).await;
-        self.commit(state, applied, None, &[DaemonEvent::AppsChanged])
-            .await?;
-        Ok(address)
-    }
-
-    /// Fold the listed addresses of an app into its address for All sockets on a network:
-    /// that address is created if the app has none there, and the listed addresses with a
-    /// narrower scope go (the all-ports address serves what they served). Returns the
-    /// all-ports address.
-    pub async fn merge(
-        &self,
-        state: &AppState,
-        app_id: &str,
-        network_id: &str,
-        address_ids: &[AddressId],
-    ) -> Result<Address, EngineError> {
-        let app = state
-            .db
-            .get_app(app_id)
-            .await?
-            .ok_or_else(|| EngineError::NotFound(format!("app {app_id}")))?;
-        let active = self
-            .backends
-            .get(network_id)
-            .ok_or_else(|| EngineError::NotFound(format!("network {network_id}")))?;
-        let unique: BTreeSet<&AddressId> = address_ids.iter().collect();
-        if unique.is_empty() || unique.len() != address_ids.len() {
-            return Err(EngineError::Invalid(
-                "merge needs at least one address, each listed once".into(),
-            ));
-        }
-        let mut gone: Vec<Address> = Vec::new();
-        for id in address_ids {
-            let a = app
-                .addresses
-                .iter()
-                .find(|a| a.id == *id && a.network_id == network_id)
-                .ok_or_else(|| {
-                    EngineError::NotFound(format!("address {id} of this app on {network_id}"))
-                })?;
-            if !a.scope.is_all() {
-                gone.push(a.clone());
-            }
-        }
-        let existing = app
-            .addresses
-            .iter()
-            .find(|a| a.network_id == network_id && a.scope.is_all())
-            .cloned();
-        // The all-ports address is allocated before anything is taken away.
-        let (all, secret) = match existing {
-            Some(a) => (a, None),
-            None => {
-                let address_id = new_id();
-                let NewLocator { locator, secret } = self
-                    .make_locator(active, app_id, &address_id, &Scope::All)
-                    .await
-                    .map_err(|e| {
-                        EngineError::Conflict(format!("cannot allocate an address: {e}"))
-                    })?;
-                let address = Address {
-                    id: address_id,
-                    app_id: app_id.to_string(),
-                    network_id: network_id.to_string(),
-                    scope: Scope::All,
-                    locator,
-                    created_at: Utc::now(),
-                };
-                (address, secret)
-            }
-        };
-        let is_new = !app.addresses.iter().any(|a| a.id == all.id);
-        if is_new {
-            state
-                .db
-                .insert_address_with_secret(&all, secret.as_deref())
-                .await?;
-        }
-        // The others' addresses leave the interface (retiring, so still denied) before
-        // their rules go.
-        self.retire_addresses(state, &gone).await?;
-        self.remove_locators(state, network_id, &gone).await;
-        let deletes: Vec<crate::state::Write> = gone
-            .iter()
-            .map(|a| crate::state::Write::DeleteAddress(a.id.clone()))
-            .collect();
-        state.db.apply_writes(&deletes).await?;
-        let applied = self.apply_and_ensure(state).await;
-        self.commit(state, applied, None, &[DaemonEvent::AppsChanged])
-            .await?;
-        Ok(all)
-    }
-}
-
-/// Which new addresses an app needs on a network, given its detected `ports` and what it has
-/// there. Addresses overlap (ADR 0047): an `All` address serves every port, also those with
-/// an address of their own.
-///
-/// - Per app: one `All` address, only if there is none and nothing else serves the ports
-///   (an app that only has narrower addresses keeps them, but a port none of them serves
-///   gets an `All`).
-/// - Per port: a `Port` address for each port that no address serves yet.
-///
-/// Existing layouts are never rearranged.
-pub fn plan_addresses(
-    mode: AddressMode,
-    app: &App,
-    groups: &[SocketGroup],
-    ports: &[PortRef],
-    existing: &[&Address],
-) -> Vec<Scope> {
-    let has_all = existing.iter().any(|a| a.scope.is_all());
-    let none = PortRangeSet::new();
-    let served = existing.iter().fold(PortRangeSet::new(), |acc, a| {
-        acc.union(&scope_ports(app, &a.scope, groups, &none).total())
-    });
-    let unserved: Vec<PortRef> = ports
-        .iter()
-        .copied()
-        .filter(|p| !has_all && !served.contains(*p))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    match mode {
-        AddressMode::PerApp => {
-            if existing.is_empty() || (!has_all && !unserved.is_empty()) {
-                vec![Scope::All]
-            } else {
-                vec![]
-            }
-        }
-        AddressMode::PerPort => unserved.into_iter().map(Scope::port).collect(),
     }
 }
 
@@ -674,127 +606,17 @@ fn locator_text(l: &Locator) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn p(port: u16) -> PortRef {
-        PortRef {
-            port,
-            proto: Protocol::Tcp,
-        }
-    }
+    use socketguard_core::App;
 
     fn addr(scope: Scope) -> Address {
-        Address {
-            id: new_id(),
-            app_id: "a".into(),
-            network_id: "n".into(),
+        Address::automatic(
+            "a",
             scope,
-            locator: Locator::Ipv6 {
+            "n",
+            Locator::Ipv6 {
                 addr: "fd00::1".parse().unwrap(),
             },
-            created_at: Utc::now(),
-        }
-    }
-
-    fn app(ports: &[u16]) -> App {
-        let now = Utc::now();
-        App {
-            id: "a".into(),
-            name: "a".into(),
-            process_name: "a".into(),
-            exe_path: None,
-            interpreter_arg: None,
-            identity_note: None,
-            system: false,
-            reviewed: false,
-            first_seen: now,
-            last_seen: now,
-            ports: ports
-                .iter()
-                .map(|p| AppPort {
-                    port: *p,
-                    proto: Protocol::Tcp,
-                    listening: true,
-                    last_seen: now,
-                    family: Default::default(),
-                })
-                .collect(),
-            addresses: vec![],
-        }
-    }
-
-    fn group(ranges: &[&str]) -> SocketGroup {
-        SocketGroup {
-            id: "sg".into(),
-            label: "sg".into(),
-            ports: socketguard_core::parse_ranges(ranges).unwrap(),
-            apps: vec!["a".into()],
-            created_at: Utc::now(),
-        }
-    }
-
-    fn plan(mode: AddressMode, ports: &[u16], existing: &[&Address]) -> Vec<Scope> {
-        let ps: Vec<PortRef> = ports.iter().map(|p| self::p(*p)).collect();
-        plan_addresses(
-            mode,
-            &app(ports),
-            &[group(&["50000-50010/tcp"])],
-            &ps,
-            existing,
         )
-    }
-
-    #[test]
-    fn per_app_creates_one_all_address() {
-        assert_eq!(plan(AddressMode::PerApp, &[80, 443], &[]), vec![Scope::All]);
-        let all = addr(Scope::All);
-        assert!(plan(AddressMode::PerApp, &[80, 8080], &[&all]).is_empty());
-    }
-
-    #[test]
-    fn per_app_leaves_split_layouts_but_covers_new_ports() {
-        let all = addr(Scope::All);
-        let only = addr(Scope::port(p(80)));
-        assert!(plan(AddressMode::PerApp, &[80, 443], &[&all, &only]).is_empty());
-        // Narrow addresses and no All: a port none of them serves gets an All.
-        let both = addr(Scope::Group { id: "sg".into() });
-        assert!(plan(AddressMode::PerApp, &[50001], &[&both]).is_empty());
-        assert_eq!(
-            plan(AddressMode::PerApp, &[50001, 9], &[&both]),
-            vec![Scope::All]
-        );
-    }
-
-    #[test]
-    fn per_port_creates_one_address_per_unserved_port() {
-        assert_eq!(
-            plan(AddressMode::PerPort, &[80, 443, 80], &[]),
-            vec![Scope::port(p(80)), Scope::port(p(443))]
-        );
-        let only = addr(Scope::port(p(80)));
-        assert_eq!(
-            plan(AddressMode::PerPort, &[80, 443], &[&only]),
-            vec![Scope::port(p(443))]
-        );
-        // An existing All serves everything: nothing to add.
-        let all = addr(Scope::All);
-        assert!(plan(AddressMode::PerPort, &[80, 443], &[&all]).is_empty());
-        // A group address serves the detected ports inside its ranges.
-        let grp = addr(Scope::Group { id: "sg".into() });
-        assert_eq!(
-            plan(AddressMode::PerPort, &[50005, 80], &[&grp]),
-            vec![Scope::port(p(80))]
-        );
-    }
-
-    #[test]
-    fn udp_and_tcp_ports_are_distinct() {
-        let udp = PortRef {
-            port: 53,
-            proto: Protocol::Udp,
-        };
-        let ports = [p(53), udp];
-        let plan = plan_addresses(AddressMode::PerPort, &app(&[53]), &[], &ports, &[]);
-        assert_eq!(plan.len(), 2);
     }
 
     #[tokio::test]

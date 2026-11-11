@@ -29,7 +29,10 @@ async fn status_reports_networks_and_counts() {
     assert_eq!(body["networks"].as_array().unwrap().len(), 3);
     assert_eq!(body["counts"]["apps"], 1);
     assert_eq!(body["counts"]["pending_apps"], 1);
-    assert_eq!(body["counts"]["addresses"], 3);
+    assert_eq!(
+        body["counts"]["addresses"], 1,
+        "only loopback until a grant"
+    );
     assert_eq!(body["protect_host_interfaces"], json!([]));
 }
 
@@ -82,7 +85,7 @@ async fn apps_list_get_review_and_pending_filter() {
     assert_eq!(body["name"], "nginx");
     assert_eq!(body["grants"], json!([]));
     assert_eq!(body["counters"], json!([]));
-    assert_eq!(body["addresses"].as_array().unwrap().len(), 3);
+    assert_eq!(body["addresses"].as_array().unwrap().len(), 1);
 
     let (s, body) = d
         .post(
@@ -100,79 +103,6 @@ async fn apps_list_get_review_and_pending_filter() {
         .post("/api/apps/nope/review", json!({"reviewed": true}))
         .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn split_and_merge_and_errors() {
-    let d = Daemon::new().await;
-    let app_id = d.app_id().await;
-    let path = format!("/api/apps/{app_id}");
-
-    let (s, only) = d
-        .post(
-            &format!("{path}/split"),
-            json!({"network_id": "ygg", "port": 80, "proto": "tcp"}),
-        )
-        .await;
-    assert_eq!(s, StatusCode::CREATED, "{only}");
-    assert_eq!(
-        only["scope"],
-        json!({"kind": "port", "port": 80, "proto": "tcp"})
-    );
-
-    let (s, body) = d
-        .post(
-            &format!("{path}/split"),
-            json!({"network_id": "ygg", "port": 80, "proto": "tcp"}),
-        )
-        .await;
-    assert_eq!((s, code(&body)), (StatusCode::CONFLICT, "conflict"));
-    let (s, body) = d
-        .post(
-            &format!("{path}/split"),
-            json!({"network_id": "ygg", "port": 81, "proto": "tcp"}),
-        )
-        .await;
-    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
-    let (s, body) = d
-        .post(
-            &format!("{path}/split"),
-            json!({"network_id": "nope", "port": 80, "proto": "tcp"}),
-        )
-        .await;
-    assert_eq!((s, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
-
-    let detail = d.get(&path).await.1;
-    let ygg_ids: Vec<String> = detail["addresses"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|a| a["network_id"] == "ygg")
-        .map(id)
-        .collect();
-    assert_eq!(ygg_ids.len(), 2);
-    let (s, body) = d
-        .post(
-            &format!("{path}/merge"),
-            json!({"network_id": "ygg", "address_ids": []}),
-        )
-        .await;
-    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
-    let (s, merged) = d
-        .post(
-            &format!("{path}/merge"),
-            json!({"network_id": "ygg", "address_ids": ygg_ids}),
-        )
-        .await;
-    assert_eq!(s, StatusCode::OK, "{merged}");
-    let detail = d.get(&path).await.1;
-    let after = detail["addresses"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|a| a["network_id"] == "ygg")
-        .count();
-    assert_eq!(after, 1);
 }
 
 #[tokio::test]
@@ -705,38 +635,18 @@ async fn concurrent_network_changes_are_all_saved() {
 // ─── Settings, protect-host ──────────────────────────────────────────────────
 
 #[tokio::test]
-async fn settings_get_and_put() {
+async fn settings_have_only_protect_host() {
     let d = Daemon::new().await;
     let (s, body) = d.get("/api/settings").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["protect_host_interfaces"], json!([]));
+    assert!(body.get("address_mode").is_none());
+    let (s, _) = d.send(Method::PUT, "/api/settings", json!({})).await;
     assert_eq!(
-        (s, body["address_mode"].as_str()),
-        (StatusCode::OK, Some("per_app"))
+        s,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "the address mode setting is gone"
     );
-    let (s, body) = d
-        .send(
-            Method::PUT,
-            "/api/settings",
-            json!({"address_mode": "per_port"}),
-        )
-        .await;
-    assert_eq!(
-        (s, body["address_mode"].as_str()),
-        (StatusCode::OK, Some("per_port"))
-    );
-    let (s, body) = d.send(Method::PUT, "/api/settings", json!({})).await;
-    assert_eq!(
-        (s, body["address_mode"].as_str()),
-        (StatusCode::OK, Some("per_port")),
-        "absent = unchanged"
-    );
-    let (s, body) = d
-        .send(
-            Method::PUT,
-            "/api/settings",
-            json!({"address_mode": "bogus"}),
-        )
-        .await;
-    assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
 }
 
 #[tokio::test]
@@ -981,7 +891,7 @@ async fn export_has_the_documented_shape() {
     let (s, body) = d.get("/api/export").await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(body["version"], 1);
-    assert_eq!(body["settings"]["address_mode"], "per_app");
+    assert!(body["settings"].get("address_mode").is_none());
     assert_eq!(body["peers"][0]["label"], "alice");
     assert_eq!(body["peers"][0]["credentials"][0]["kind"], "ip");
     assert_eq!(
@@ -1019,7 +929,7 @@ async fn apply_dry_run_reports_and_changes_nothing() {
     let app = d.state.db.list_apps().await.unwrap().remove(0);
     let before = export(&d).await;
     let mut doc = before.clone();
-    doc.settings.address_mode = socketguard_core::AddressMode::PerPort;
+    doc.settings.protect_host_interfaces = vec!["eth0".into()];
     doc.peers.retain(|p| p.label != "bob");
     doc.peers.push(
         serde_json::from_value(
@@ -1048,7 +958,7 @@ async fn apply_dry_run_reports_and_changes_nothing() {
         .map(|c| format!("{:?} {:?} {}", c.kind, c.item, c.name))
         .collect();
     let has = |s: &str| assert!(summary.iter().any(|x| x.contains(s)), "{s} in {summary:#?}");
-    has("Update Setting address_mode");
+    has("Update Setting protect_host_interfaces");
     has("Create Peer carol");
     has("Delete Peer bob");
     has("Update Group team");
@@ -1066,11 +976,24 @@ async fn apply_dry_run_reports_and_changes_nothing() {
 }
 
 #[tokio::test]
+async fn apply_accepts_and_ignores_the_address_mode_of_an_old_document() {
+    let d = populated().await;
+    let mut doc = serde_json::to_value(export(&d).await).unwrap();
+    doc["settings"]["address_mode"] = json!("per_port");
+    let (s, body) = d
+        .post("/api/apply", json!({"document": doc, "dry_run": false}))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["changes"], json!([]), "the field changes nothing");
+    let settings = d.get("/api/settings").await.1;
+    assert!(settings.get("address_mode").is_none());
+}
+
+#[tokio::test]
 async fn apply_makes_the_state_match_the_document() {
     let d = populated().await;
     let app = d.state.db.list_apps().await.unwrap().remove(0);
     let mut doc = export(&d).await;
-    doc.settings.address_mode = socketguard_core::AddressMode::PerPort;
     // alice loses her laptop; carol gets it (a credential moves between peers); bob goes.
     doc.peers.retain(|p| p.label != "bob");
     doc.peers[0]
@@ -1094,10 +1017,6 @@ async fn apply_makes_the_state_match_the_document() {
     let again = apply_ok(&d, &doc, true).await;
     assert!(again.is_empty(), "{again:?}");
     let now = export(&d).await;
-    assert_eq!(
-        now.settings.address_mode,
-        socketguard_core::AddressMode::PerPort
-    );
     assert_eq!(
         now.peers
             .iter()

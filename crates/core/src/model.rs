@@ -4,7 +4,7 @@
 //! [`crate::identity`] (app identity).
 
 use crate::reach::GrantReach;
-use crate::scope::{Scope, SocketGroup};
+use crate::scope::{PortRange, Scope, SocketGroup};
 use crate::types::{AddrFamily, Protocol};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -96,12 +96,119 @@ impl std::fmt::Display for PortRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Address {
     pub id: AddressId,
-    pub app_id: AppId,
     pub network_id: NetworkId,
-    /// Which sockets of the app this address serves; addresses overlap (ADR 0047).
-    pub scope: Scope,
     pub locator: Locator,
     pub created_at: DateTime<Utc>,
+    /// Automatic addresses: the app whose row this is. None for a reservation's address.
+    #[serde(default)]
+    pub app_id: Option<AppId>,
+    /// Automatic addresses: which sockets of the app; addresses overlap (ADR 0047).
+    #[serde(default)]
+    pub scope: Scope,
+    /// The reservation this is the static address of, on its network (ADR 0047).
+    #[serde(default)]
+    pub reservation_id: Option<ReservationId>,
+    /// Computed for the API (false as stored): the address is on its interface or
+    /// published only while up.
+    #[serde(default)]
+    pub up: bool,
+    /// Computed: ports of its scope(s) left out because another app listens on them.
+    #[serde(default)]
+    pub excluded: Vec<PortRange>,
+    /// Computed, Tor: why the service is unpublished or leaves clients out.
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+impl Address {
+    /// An automatic address for a row of an app.
+    pub fn automatic(app_id: &str, scope: Scope, network_id: &str, locator: Locator) -> Address {
+        Address {
+            id: new_id(),
+            network_id: network_id.to_string(),
+            locator,
+            created_at: Utc::now(),
+            app_id: Some(app_id.to_string()),
+            scope,
+            reservation_id: None,
+            up: false,
+            excluded: vec![],
+            notes: vec![],
+        }
+    }
+
+    /// The address of a reservation on a network.
+    pub fn of_reservation(reservation_id: &str, network_id: &str, locator: Locator) -> Address {
+        Address {
+            app_id: None,
+            reservation_id: Some(reservation_id.to_string()),
+            ..Address::automatic("", Scope::All, network_id, locator)
+        }
+    }
+}
+
+pub type ReservationId = String;
+pub type BindingId = String;
+
+/// What a binding stands for: a row of an app, or the rows of the members of a tag.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BindingTarget {
+    App {
+        app_id: AppId,
+        #[serde(default)]
+        scope: Scope,
+    },
+    Tag {
+        tag_id: TagId,
+    },
+}
+
+/// One binding of a reservation; its own record so an outside port can be added later.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Binding {
+    pub id: BindingId,
+    pub reservation_id: ReservationId,
+    pub target: BindingTarget,
+}
+
+/// A named object that behaves like an app assembled from rows of several apps (ADR 0047):
+/// grants can target it, and it has one static address per network once a grant covers
+/// something it serves there. The daemon never deletes it or changes its addresses.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reservation {
+    pub id: ReservationId,
+    pub label: String,
+    pub bindings: Vec<Binding>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Ports that bindings of several apps claim, and what is done about them.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortConflict {
+    pub ports: PortRange,
+    /// The bindings that claim these ports.
+    pub bindings: Vec<BindingId>,
+    /// The app they are served for; None = closed.
+    pub served_app: Option<AppId>,
+}
+
+/// A reservation as the API shows it.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReservationView {
+    #[serde(flatten)]
+    pub reservation: Reservation,
+    /// Its static address on each network where it has one, with `up`, `excluded`, `notes`.
+    pub addresses: Vec<Address>,
+    /// Ports claimed by bindings of several apps, and who is served.
+    pub conflicts: Vec<PortConflict>,
+    /// Grants that target the reservation.
+    pub grants: Vec<GrantView>,
 }
 
 /// Where an address can be reached; network-specific. The interface ID of an IPv6 locator
@@ -294,6 +401,8 @@ pub enum Subject {
 pub enum Target {
     App(AppId),
     Tag(TagId),
+    /// A reservation: covers every bound row (ADR 0047). Its scope is always All.
+    Reservation(ReservationId),
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -374,50 +483,8 @@ pub struct NewGrant {
 // ─── Settings ────────────────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AddressMode {
-    #[default]
-    PerApp,
-    PerPort,
-}
-
-impl AddressMode {
-    /// The serialized (stored) spelling.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            AddressMode::PerApp => "per_app",
-            AddressMode::PerPort => "per_port",
-        }
-    }
-}
-
-/// The spelling for people, `per-app` and `per-port`.
-impl std::fmt::Display for AddressMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            AddressMode::PerApp => "per-app",
-            AddressMode::PerPort => "per-port",
-        })
-    }
-}
-
-/// Accepts both spellings, `per_app` and `per-app`.
-impl std::str::FromStr for AddressMode {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.replace('-', "_").as_str() {
-            "per_app" => Ok(AddressMode::PerApp),
-            "per_port" => Ok(AddressMode::PerPort),
-            _ => Err(format!("invalid address mode: {s}")),
-        }
-    }
-}
-
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
-    pub address_mode: AddressMode,
     pub protect_host_interfaces: Vec<String>,
 }
 
@@ -443,13 +510,17 @@ pub enum ActivityKind {
     SocketGroupAdded,
     SocketGroupChanged,
     SocketGroupRemoved,
+    ReservationAdded,
+    ReservationChanged,
+    ReservationRemoved,
+    AppMoved,
     ProtectHostChanged,
     Blocked,
     RemoteAdminExposed,
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 19] = [
+    pub const ALL: [ActivityKind; 23] = [
         ActivityKind::AppDiscovered,
         ActivityKind::AppRemoved,
         ActivityKind::GrantAdded,
@@ -466,6 +537,10 @@ impl ActivityKind {
         ActivityKind::SocketGroupAdded,
         ActivityKind::SocketGroupChanged,
         ActivityKind::SocketGroupRemoved,
+        ActivityKind::ReservationAdded,
+        ActivityKind::ReservationChanged,
+        ActivityKind::ReservationRemoved,
+        ActivityKind::AppMoved,
         ActivityKind::ProtectHostChanged,
         ActivityKind::Blocked,
         ActivityKind::RemoteAdminExposed,
@@ -489,6 +564,10 @@ impl ActivityKind {
             ActivityKind::SocketGroupAdded => "socket_group_added",
             ActivityKind::SocketGroupChanged => "socket_group_changed",
             ActivityKind::SocketGroupRemoved => "socket_group_removed",
+            ActivityKind::ReservationAdded => "reservation_added",
+            ActivityKind::ReservationChanged => "reservation_changed",
+            ActivityKind::ReservationRemoved => "reservation_removed",
+            ActivityKind::AppMoved => "app_moved",
             ActivityKind::ProtectHostChanged => "protect_host_changed",
             ActivityKind::Blocked => "blocked",
             ActivityKind::RemoteAdminExposed => "remote_admin_exposed",
@@ -595,12 +674,6 @@ mod tests {
                 format!("\"{}\"", k.as_str())
             );
         }
-        for mode in [AddressMode::PerApp, AddressMode::PerPort] {
-            assert_eq!(mode.as_str().parse::<AddressMode>().unwrap(), mode);
-            assert_eq!(mode.to_string().parse::<AddressMode>().unwrap(), mode);
-        }
-        assert_eq!(AddressMode::PerPort.to_string(), "per-port");
-        assert!("sometimes".parse::<AddressMode>().is_err());
     }
 
     #[test]

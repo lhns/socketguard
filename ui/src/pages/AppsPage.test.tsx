@@ -191,19 +191,17 @@ describe("Inspector: one app", () => {
     expect(row80).not.toHaveTextContent("alice");
   });
 
-  it("shows each network once, with merge where an app has two addresses on it and split where one serves all ports", async () => {
+  it("shows each network once, with each address, its scope and whether it is up", async () => {
     const two = {
       ...nginx,
       addresses: [
-        { id: "x1", app_id: "a1", network_id: "n-ygg", scope: { kind: "all" as const }, locator: { kind: "ipv6" as const, addr: "302::1" }, created_at: "t" },
-        { id: "x2", app_id: "a1", network_id: "n-ygg", scope: { kind: "port" as const, port: 443, proto: "tcp" as const }, locator: { kind: "ipv6" as const, addr: "302::2" }, created_at: "t" },
-        { id: "x3", app_id: "a1", network_id: "n-lan", scope: { kind: "all" as const }, locator: { kind: "ipv6" as const, addr: "fd00::1" }, created_at: "t" },
+        { id: "x1", app_id: "a1", network_id: "n-ygg", scope: { kind: "all" as const }, locator: { kind: "ipv6" as const, addr: "302::1" }, created_at: "t", reservation_id: null, up: true, excluded: [], notes: [] },
+        { id: "x2", app_id: "a1", network_id: "n-ygg", scope: { kind: "port" as const, port: 443, proto: "tcp" as const }, locator: { kind: "ipv6" as const, addr: "302::2" }, created_at: "t", reservation_id: null, up: true, excluded: [], notes: [] },
+        { id: "x3", app_id: "a1", network_id: "n-lan", scope: { kind: "all" as const }, locator: { kind: "ipv6" as const, addr: "fd00::1" }, created_at: "t", reservation_id: null, up: true, excluded: [], notes: [] },
       ],
     };
-    const d = setup({
+    setup({
       get_app: () => detail(two),
-      merge_app: () => saved({ id: "x1" }),
-      split_app: () => saved({ id: "x4" }),
     });
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
@@ -211,11 +209,10 @@ describe("Inspector: one app", () => {
     const section = (await within(inspector()).findByRole("heading", { name: "Addresses" })).closest("section")!;
     expect(within(section).getAllByText("Yggdrasil")).toHaveLength(1);
     expect(within(section).getAllByText("LAN")).toHaveLength(1);
-    await user.click(within(section).getByRole("button", { name: "Merge 2 addresses on Yggdrasil" }));
-    await waitFor(() => expect(d.last("merge_app")?.args).toMatchObject({ id: "a1", req: { network_id: "n-ygg", address_ids: ["x1", "x2"] } }));
-    const lan = within(within(section).getByText("LAN").closest("li")!);
-    await user.click(lan.getByRole("button", { name: "Split 80/tcp" }));
-    await waitFor(() => expect(d.last("split_app")?.args).toMatchObject({ id: "a1", req: { network_id: "n-lan", port: 80 } }));
+    expect(within(section).getByText("302::2")).toBeInTheDocument();
+    expect(within(section).getByText("443/tcp")).toBeInTheDocument();
+    expect(within(section).getAllByText("up")).toHaveLength(3);
+    expect(within(section).queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("Revoke closes at once, with an Undo toast that puts the grant back", async () => {
