@@ -265,6 +265,7 @@ describe("Add access", () => {
     await user.click(within(form).getByRole("button", { name: "Choose who…" }));
     await user.click(screen.getByRole("checkbox", { name: "alice" }));
     await user.keyboard("{Escape}");
+    await user.click(within(form).getByRole("button", { name: /^Whole (app|tag)$/ }));
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     const review = await within(form).findByRole("region", { name: "Review before applying" });
     expect(review).toHaveTextContent("alice to sshd");
@@ -285,13 +286,14 @@ describe("Add access", () => {
     await user.type(screen.getByRole("combobox", { name: "Search Who" }), "10.0.0.7");
     await user.click(await screen.findByRole("option", { name: /New peer from/ }));
     await user.keyboard("{Escape}");
-    await user.type(within(form).getByLabelText(/Label for new peer/), "gateway");
+    await user.click(within(form).getByRole("button", { name: /^Whole (app|tag)$/ }));
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0]).toMatchObject([
-      { op: "create_peer", ref: "$new0", label: "gateway", credentials: [{ kind: "ip", value: "10.0.0.7" }] },
+      { op: "create_peer", ref: "$new0", credentials: [{ kind: "ip", value: "10.0.0.7" }] },
       { op: "add_grant", target: { kind: "app", id: "a3" }, subject: { kind: "peer", id: "$new0" } },
     ]);
+    expect(applied(d)[0][0]).not.toHaveProperty("label");
   });
 
   it("Anyone asks for the confirmation before anything is saved, and sends it", async () => {
@@ -303,6 +305,7 @@ describe("Add access", () => {
     await user.click(within(form).getByRole("button", { name: "Choose who…" }));
     await user.click(screen.getByRole("checkbox", { name: /Anyone/ }));
     await user.keyboard("{Escape}");
+    await user.click(within(form).getByRole("button", { name: /^Whole (app|tag)$/ }));
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await user.click(within(await within(form).findByRole("region", { name: "Review before applying" })).getByRole("button", { name: "Apply" }));
     expect(applied(d)).toEqual([]);
@@ -321,9 +324,8 @@ describe("Add access", () => {
     await user.click(within(form).getByRole("button", { name: "Choose who…" }));
     await user.click(screen.getByRole("checkbox", { name: "bob" }));
     await user.keyboard("{Escape}");
-    await user.click(within(form).getByText("Limit to ports or networks (optional)"));
-    await user.click(within(form).getByRole("checkbox", { name: "All ports" }));
-    await user.click(within(form).getByRole("checkbox", { name: "443/tcp" }));
+    await user.click(within(form).getByRole("button", { name: "443/tcp" }));
+    await user.click(within(form).getByText("Limit to networks (optional)"));
     await user.click(within(form).getByRole("checkbox", { name: "LAN" }));
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
@@ -357,12 +359,12 @@ describe("Tags", () => {
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await user.click(await findTagRow("web"));
-    await user.click(await within(inspector()).findByRole("button", { name: "Members…" }));
+    await user.click(await within(inspector()).findByRole("button", { name: "Add or remove members" }));
     await user.click(screen.getByRole("checkbox", { name: "redis-server" }));
     await waitFor(() => expect(applied(d)).toEqual([[{ op: "remove_tag_member", tag_id: "t1", app_id: "a2" }]]));
     expect(await screen.findByRole("button", { name: "Undo" })).toBeInTheDocument();
 
-    await user.click(within(inspector()).getByRole("button", { name: "Members…" }));
+    await user.click(within(inspector()).getByRole("button", { name: "Add or remove members" }));
     await user.click(screen.getByRole("checkbox", { name: "sshd" }));
     const review = await within(inspector()).findByRole("region", { name: "Review before applying" });
     expect(review).toHaveTextContent("reachable by bob");
@@ -423,6 +425,7 @@ describe("Inspector: several tags", () => {
     await user.click(within(form).getByRole("button", { name: "Choose who…" }));
     await user.click(screen.getByRole("checkbox", { name: "alice" }));
     await user.keyboard("{Escape}");
+    await user.click(within(form).getByRole("button", { name: /^Whole (app|tag)$/ }));
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0].map((o) => (o as { target: { id: string } }).target.id)).toEqual(["t1", "t2"]);
@@ -448,7 +451,7 @@ describe("Inspector: several apps", () => {
     const panel = inspector();
     expect(within(panel).getByRole("button", { name: "web 2/3" })).toBeInTheDocument();
     expect(within(panel).getByRole("button", { name: "data 1/3" })).toBeInTheDocument();
-    await user.click(within(panel).getByRole("button", { name: "Tags…" }));
+    await user.click(within(panel).getByRole("button", { name: "Add or remove tags" }));
     const box = screen.getByRole("checkbox", { name: /^web/ }) as HTMLInputElement;
     expect(box.indeterminate).toBe(true);
     await user.click(box);
@@ -461,7 +464,7 @@ describe("Inspector: several apps", () => {
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await selectThree(user);
-    await user.click(within(inspector()).getByRole("button", { name: "Tags…" }));
+    await user.click(within(inspector()).getByRole("button", { name: "Add or remove tags" }));
     await user.type(screen.getByRole("combobox", { name: "Search Tags" }), "prod{Enter}");
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0]).toEqual([
@@ -502,6 +505,7 @@ describe("Inspector: several apps", () => {
     await user.click(within(form).getByRole("button", { name: "Choose who…" }));
     await user.click(screen.getByRole("checkbox", { name: "group team" }));
     await user.keyboard("{Escape}");
+    await user.click(within(form).getByRole("button", { name: /^Whole (app|tag)$/ }));
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0].map((o) => (o as { target: { id: string } }).target.id)).toEqual(["a1", "a2", "a3"]);
@@ -648,5 +652,142 @@ describe("Subject columns", () => {
     await addColumns(user, "alice");
     await user.click(await inList().findByRole("button", { name: "Expand ports of nginx" }));
     expect(inList().getByRole("button", { name: "80/tcp – alice: inherited" })).toBeInTheDocument();
+  });
+});
+
+describe("Add access: what to open", () => {
+  async function openNginx(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await inList().findByRole("button", { name: /^nginx/ }));
+    await user.click(await within(inspector()).findByRole("button", { name: "Add access…" }));
+    return screen.getByRole("form", { name: "Add access" });
+  }
+  async function chooseBob(user: ReturnType<typeof userEvent.setup>, form: HTMLElement) {
+    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
+    await user.click(screen.getByRole("checkbox", { name: "bob" }));
+    await user.keyboard("{Escape}");
+  }
+
+  it("preselects nothing: the whole app or a port must be chosen before the form is ready", async () => {
+    const d = setup();
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    const form = await openNginx(user);
+    const chips = within(within(form).getByRole("group", { name: "What to open" }));
+    for (const name of ["Whole app", "80/tcp", "443/tcp"]) expect(chips.getByRole("button", { name })).toHaveAttribute("aria-pressed", "false");
+    expect(within(form).getByText("Choose what to open")).toBeInTheDocument();
+    await chooseBob(user, form);
+    expect(within(form).getByRole("button", { name: "Add access" })).toBeDisabled();
+    await user.click(chips.getByRole("button", { name: "80/tcp" }));
+    expect(within(form).queryByText("Choose what to open")).not.toBeInTheDocument();
+    expect(within(form).getByRole("button", { name: "Add access" })).toBeEnabled();
+    expect(applied(d)).toEqual([]);
+  });
+
+  it("the whole app and ports exclude each other; several ports make one grant each", async () => {
+    const d = setup();
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    const form = await openNginx(user);
+    const chips = within(within(form).getByRole("group", { name: "What to open" }));
+    await chooseBob(user, form);
+    await user.click(chips.getByRole("button", { name: "80/tcp" }));
+    await user.click(chips.getByRole("button", { name: "443/tcp" }));
+    await user.click(chips.getByRole("button", { name: "Whole app" }));
+    expect(chips.getByRole("button", { name: "Whole app" })).toHaveAttribute("aria-pressed", "true");
+    expect(chips.getByRole("button", { name: "80/tcp" })).toHaveAttribute("aria-pressed", "false");
+    expect(chips.getByRole("button", { name: "443/tcp" })).toHaveAttribute("aria-pressed", "false");
+    await user.click(chips.getByRole("button", { name: "80/tcp" }));
+    expect(chips.getByRole("button", { name: "Whole app" })).toHaveAttribute("aria-pressed", "false");
+    await user.click(chips.getByRole("button", { name: "443/tcp" }));
+    await user.click(within(form).getByRole("button", { name: "Add access" }));
+    await waitFor(() => expect(applied(d)).toHaveLength(1));
+    expect(applied(d)[0].map((o) => (o as { port: unknown }).port)).toEqual([{ port: 80, proto: "tcp" }, { port: 443, proto: "tcp" }]);
+  });
+
+  it("a port row has its own Add access with that port chosen", async () => {
+    const d = setup();
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("button", { name: /^nginx/ }));
+    await user.click(await within(inspector()).findByRole("button", { name: "Add access to 443/tcp" }));
+    const form = screen.getByRole("form", { name: "Add access" });
+    const chips = within(within(form).getByRole("group", { name: "What to open" }));
+    expect(chips.getByRole("button", { name: "443/tcp" })).toHaveAttribute("aria-pressed", "true");
+    expect(chips.getByRole("button", { name: "80/tcp" })).toHaveAttribute("aria-pressed", "false");
+    expect(chips.getByRole("button", { name: "Whole app" })).toHaveAttribute("aria-pressed", "false");
+    await chooseBob(user, form);
+    await user.click(within(form).getByRole("button", { name: "Add access" }));
+    await waitFor(() => expect(applied(d)).toHaveLength(1));
+    expect(applied(d)[0]).toEqual([
+      { op: "add_grant", target: { kind: "app", id: "a1" }, port: { port: 443, proto: "tcp" }, subject: { kind: "peer", id: "p2" }, confirm_open: false },
+    ]);
+    // Cancel closes it again.
+    await user.click(within(inspector()).getByRole("button", { name: "Add access to 80/tcp" }));
+    await user.click(within(screen.getByRole("form", { name: "Add access" })).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("form", { name: "Add access" })).not.toBeInTheDocument();
+  });
+
+  it("pasting several values makes one new peer per value, without a name", async () => {
+    const d = setup();
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    const form = await openNginx(user);
+    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
+    await user.click(screen.getByRole("combobox", { name: "Search Who" }));
+    await user.paste("10.0.0.7 10.0.0.8");
+    await user.click(await screen.findByRole("option", { name: /2 new peers from/ }));
+    await user.keyboard("{Escape}");
+    const chosen = within(form).getByRole("list", { name: "Chosen subjects" });
+    expect(within(chosen).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(chosen).getByText("10.0.0.7")).toBeInTheDocument();
+    expect(within(chosen).getByText("10.0.0.8")).toBeInTheDocument();
+    expect(within(form).queryByLabelText(/Label for new peer/)).not.toBeInTheDocument();
+    await user.click(within(form).getByRole("button", { name: "Whole app" }));
+    await user.click(within(form).getByRole("button", { name: "Add access" }));
+    await waitFor(() => expect(applied(d)).toHaveLength(1));
+    const ops = applied(d)[0];
+    expect(ops.map((o) => o.op)).toEqual(["create_peer", "create_peer", "add_grant", "add_grant"]);
+    expect(ops[0]).toEqual({ op: "create_peer", ref: "$new0", credentials: [{ kind: "ip", value: "10.0.0.7", label: null }] });
+    expect(ops[1]).toEqual({ op: "create_peer", ref: "$new1", credentials: [{ kind: "ip", value: "10.0.0.8", label: null }] });
+  });
+});
+
+describe("Tag and close controls", () => {
+  it("an app has a + pill after its tags, and each port row has the same one with the port's tags", async () => {
+    const portTag = mkTag("t3", "frontend", []);
+    portTag.members = [{ app_id: "a1", port: { port: 443, proto: "tcp" } }];
+    setup({}, [web, data, portTag]);
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("button", { name: /^nginx/ }));
+    const panel = inspector();
+    const plus = await within(panel).findByRole("button", { name: "Add or remove tags" });
+    expect(plus).toHaveTextContent("+");
+    expect(plus).toHaveClass("tag-pill");
+    expect(within(panel).queryByRole("button", { name: "Tags…" })).not.toBeInTheDocument();
+    const row = within(panel).getByText("443/tcp").closest("li")!;
+    expect(within(row).getByRole("button", { name: "frontend" })).toHaveClass("tag-pill");
+    const portPlus = within(row).getByRole("button", { name: "Add or remove tags of 443/tcp" });
+    expect(portPlus).toHaveClass("tag-pill", "tag-pill-add");
+    await user.click(portPlus);
+    expect(await screen.findByRole("combobox", { name: "Search Tags of 443/tcp" })).toBeInTheDocument();
+  });
+
+  it("the inspector's × hides it and keeps the selection; a click or a tick shows it again", async () => {
+    setup();
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("checkbox", { name: "Select nginx" }));
+    await user.click(inList().getByRole("checkbox", { name: "Select sshd" }));
+    expect(await screen.findByRole("heading", { name: "2 apps selected" })).toBeInTheDocument();
+    await user.click(within(inspector()).getByRole("button", { name: "Close details" }));
+    expect(screen.queryByRole("region", { name: "Details" })).not.toBeInTheDocument();
+    expect(inList().getByRole("checkbox", { name: "Select nginx" })).toBeChecked();
+    expect(inList().getByRole("checkbox", { name: "Select sshd" })).toBeChecked();
+    await user.click(inList().getByRole("checkbox", { name: "Select redis-server" }));
+    expect(await screen.findByRole("heading", { name: "3 apps selected" })).toBeInTheDocument();
+    await user.click(within(inspector()).getByRole("button", { name: "Close details" }));
+    await user.click(inList().getByRole("button", { name: "sshd" }));
+    expect(await within(inspector()).findByRole("heading", { name: "sshd" })).toBeInTheDocument();
   });
 });

@@ -140,9 +140,8 @@ describe("pending enforcement (HTTP 202)", () => {
     const box = await screen.findByLabelText("Keys, addresses or IPs");
     await user.click(box);
     await user.paste("10.0.0.1");
-    await user.type(screen.getByLabelText("Label"), "bob");
     expect(screen.queryByText(/not enforced everywhere yet/)).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Create peer" }));
+    await user.click(await screen.findByRole("button", { name: "Create 1 peer" }));
     await waitFor(() => expect(d.count("changes")).toBe(2));
     const notice = await screen.findByRole("status");
     expect(notice).toHaveTextContent("Saved, but not enforced everywhere yet.");

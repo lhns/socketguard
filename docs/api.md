@@ -82,7 +82,7 @@ does not cause a 202. Every error has the [error body](#errors).
 | POST | `/api/apps/{id}/split` | `SplitRequest` | `Address` (201) | gives one port its own address on a network |
 | POST | `/api/apps/{id}/merge` | `MergeRequest` | `Address` | merges addresses of one network into the first listed |
 | GET | `/api/peers` | | `Peer[]` | |
-| POST | `/api/peers` | `NewPeer` | `Peer` (201) | credentials are validated and normalized; unique across peers |
+| POST | `/api/peers` | `NewPeer` | `Peer` (201) | credentials are validated and normalized; unique across peers. `label` is optional: an unnamed peer is named after its first credential (see below) |
 | GET | `/api/peers/{id}` | | `Peer` | |
 | PATCH | `/api/peers/{id}` | `UpdateLabel` | `Peer` | rename |
 | DELETE | `/api/peers/{id}` | | 204 | also deletes the grants naming the peer |
@@ -221,7 +221,8 @@ A tag (ADR 0043) is a label with members (an app, or one port of an app) and opt
 
 | `op` | Fields |
 |---|---|
-| `create_peer` | `label`, `credentials` (`NewCredential[]`), `ref?` |
+| `create_peer` | `label?`, `credentials` (`NewCredential[]`), `ref?` |
+| `create_group` | `label`, `members` (peer ids or refs of peers created earlier), `ref?` |
 | `create_tag` | `label`, `patterns`, `ref?` |
 | `add_grant` | `target`, `port?`, `network_id?`, `subject`, `confirm_open` |
 | `remove_grant` | `grant_id` |
@@ -230,6 +231,8 @@ A tag (ADR 0043) is a label with members (an app, or one port of an app) and opt
 | `review` | `app_id`, `reviewed` |
 
 A `ref` is a client-chosen name starting with `$` (`$new0`). Wherever an id goes in a later operation (a tag target, a subject, `tag_id`, `grant_id`), the ref stands for it; the response's `refs` maps each ref to the id it got. An `add_grant` to Anyone without `confirm_open` refuses the whole batch with 409 `confirmation_required`; so does an `add_tag_member` that adds a new member to a tag with a grant to Anyone (such a change has `opens_to_anyone`). The answer lists the `changes` (a diff: `kind`, `item`, `name`, `id`, and for grants the `reach` per network, for removed grants the reach that is lost). `changes_reach` is true when the batch gives someone access to something they could not reach before (a new grant, or a new member of a tag that has grants, with some network that lets the subject in); removals never set it. A new member's change lists the reach of the tag's grants and who they name. With `dry_run` nothing is saved or applied; the operations still run against the database's constraints, so a conflict shows.
+
+A peer without a `label` (or with a blank one), in `POST /api/peers` and in `create_peer`, is named after its first credential: the normalized value without a `/32` or `/128`, a key (Yggdrasil, Tor, WireGuard, TLS) shortened to its first 12 characters and `…`. A name that is taken gets ` (2)`, ` (3)`… (in a batch, names created earlier count as taken). No label and no credential is `invalid` ("a peer needs a name or a credential"); an explicit label that is taken stays a 409.
 
 ## Export and apply
 

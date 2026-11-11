@@ -35,7 +35,7 @@ running daemon (a reconcile pass must not undo `disable`) and across a daemon re
    listener on 8080; node B runs a client tor with `ClientOnionAuthDir` (socks 9050) and a second client
    tor without a key (socks 9060);
 2. with no grant, A publishes nothing (`GETINFO onions/detached` is empty);
-3. B's x25519 key (generated with python `cryptography`) is added with `peers add bnode --tor-key` and
+3. B's x25519 key (generated with python `cryptography`) is added with `peers add --label bnode --tor-key` and
    granted; the service is published and B fetches `http://<onion>:8080` with `curl --socks5-hostname`;
 4. the client without the key cannot; after `revoke` the service is gone (`DEL_ONION`);
 5. `disable` removes the service and keeps it off; `enable` publishes it again.

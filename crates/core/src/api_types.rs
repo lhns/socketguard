@@ -138,7 +138,11 @@ pub struct MergeRequest {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewPeer {
-    pub label: String,
+    /// Without a name (or with a blank one) the daemon names the peer after its first
+    /// credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub label: Option<String>,
     #[serde(default)]
     pub credentials: Vec<crate::model::NewCredential>,
 }
@@ -412,9 +416,21 @@ pub enum ChangeOp {
         #[serde(rename = "ref", default)]
         #[cfg_attr(feature = "ts", ts(optional, rename = "ref"))]
         ref_: Option<String>,
-        label: String,
+        /// Optional, as in `NewPeer`.
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        label: Option<String>,
         #[serde(default)]
         credentials: Vec<NewCredential>,
+    },
+    /// A group of existing peers or `ref`s of peers created earlier in the batch.
+    CreateGroup {
+        #[serde(rename = "ref", default)]
+        #[cfg_attr(feature = "ts", ts(optional, rename = "ref"))]
+        ref_: Option<String>,
+        label: String,
+        #[serde(default)]
+        members: Vec<PeerId>,
     },
     CreateTag {
         #[serde(rename = "ref", default)]

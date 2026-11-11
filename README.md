@@ -95,8 +95,8 @@ socketguard apps list [--pending]             # also: show, review, rm, split, m
 socketguard apps show nginx                   # addresses, ports, grants with reach, counters
 socketguard share nginx                       # [addr]:port and http(s):// URLs
 
-socketguard peers add alice <ygg-key>         # bare values: 64 hex = ygg_key, IP/CIDR = ip
-socketguard peers add bob --addr 2001:db8::7 --cred wg_key=<base64>
+socketguard peers add --label alice <ygg-key> # bare values: 64 hex = ygg_key, IP/CIDR = ip
+socketguard peers add --label bob --addr 2001:db8::7 --cred wg_key=<base64>
 socketguard peers list                        # also: show, rename, rm, cred add|rm
 socketguard groups add team alice bob         # also: list, show, rename, rm, members
 
@@ -173,9 +173,9 @@ x25519 public key from `authorized_clients`) lets only that client in.
 ```bash
 # tor with: ControlPort 9051 and CookieAuthentication 1
 socketguard networks add tor                    # --control 127.0.0.1:9051 [--password-env VAR | --password-stdin]
-socketguard peers add bob --tor-key <base32>    # the key bob's Tor client generated
+socketguard peers add --label bob --tor-key <base32>    # the key bob's Tor client generated
 # or let the daemon generate the key pair (the private key is stored like the onion keys):
-socketguard peers add bob && socketguard peers tor-key bob
+socketguard peers add --label bob && socketguard peers tor-key bob
 socketguard grant myapp:8080 bob
 socketguard apps show myapp                     # prints the .onion name
 socketguard share myapp                         # http://<id>.onion:8080, and for a generated key

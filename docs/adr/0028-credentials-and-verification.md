@@ -38,3 +38,7 @@ Access was granted to IP strings and rules matched only the source address, so a
 ## Amendment (ADRs 0044, 0045)
 
 `ip` credentials accept IPv4, for whole-host scopes (ADR 0044). All credential input goes through one core parser (ADR 0045).
+
+## Amendment (2026-11-11): peer names are optional
+
+Unnamed peers are named after their first credential. A peer's `label` is optional in `POST /api/peers` and in the batch's `create_peer`: when missing or blank, the daemon uses the first credential's normalized value (a /32 or /128 dropped, a key shortened to 12 characters and `…`), with ` (2)`, ` (3)`… if the name is taken. No label and no credential is refused. An explicit label that clashes is still a 409. The batch gained `create_group` (members may be refs), so a frontend can create peers and put them in a group in one transaction. The CLI takes the name as `peers add --label`.

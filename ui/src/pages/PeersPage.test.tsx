@@ -148,6 +148,7 @@ describe("Inspector: one peer", () => {
     await user.click(screen.getByRole("checkbox", { name: /^web/ }));
     await user.click(screen.getByRole("checkbox", { name: "nginx" }));
     await user.keyboard("{Escape}");
+    await user.click(within(form).getByRole("button", { name: /^Whole (app|tag)$/ }));
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0]).toEqual([
@@ -162,7 +163,7 @@ describe("Inspector: one peer", () => {
     renderWithProviders(<PeersPage />);
     await user.click(await rowButton("bob"));
     const p = within(await screen.findByRole("region", { name: "Peer details" }));
-    await user.click(await p.findByRole("button", { name: "Groups…" }));
+    await user.click(await p.findByRole("button", { name: "Add or remove groups" }));
     await user.click(screen.getByRole("checkbox", { name: /^team/ }));
     const review = await p.findByRole("region", { name: "Review before applying" });
     expect(review).toHaveTextContent("bob in group team");
@@ -178,7 +179,7 @@ describe("Inspector: one peer", () => {
     renderWithProviders(<PeersPage />);
     await user.click(await rowButton("bob"));
     const p = within(await screen.findByRole("region", { name: "Peer details" }));
-    await user.click(await p.findByRole("button", { name: "Groups…" }));
+    await user.click(await p.findByRole("button", { name: "Add or remove groups" }));
     await user.click(screen.getByRole("checkbox", { name: /^ops/ }));
     await waitFor(() => expect(d.last("set_group_members")?.args).toEqual({ id: "g2", peerIds: ["p2"] }));
     expect(screen.queryByRole("region", { name: "Review before applying" })).not.toBeInTheDocument();
@@ -190,7 +191,7 @@ describe("Inspector: one peer", () => {
     renderWithProviders(<PeersPage />);
     await user.click(await rowButton("bob"));
     const p = within(await screen.findByRole("region", { name: "Peer details" }));
-    await user.click(await p.findByRole("button", { name: "Groups…" }));
+    await user.click(await p.findByRole("button", { name: "Add or remove groups" }));
     await user.type(screen.getByRole("combobox", { name: "Search Groups" }), "staging{Enter}");
     await waitFor(() => expect(d.last("create_group")?.args.req).toEqual({ label: "staging", members: ["p2"] }));
   });
@@ -245,7 +246,7 @@ describe("Inspector: a group", () => {
     expect(p.getByRole("button", { name: "Revoke tag web" })).toBeInTheDocument();
     expect(p.getByRole("button", { name: "Show as column in Apps" })).toBeInTheDocument();
     // Removing the only member closes: at once.
-    await user.click(p.getByRole("button", { name: "Members…" }));
+    await user.click(p.getByRole("button", { name: "Add or remove members" }));
     await user.click(screen.getByRole("checkbox", { name: "alice" }));
     await waitFor(() => expect(d.last("set_group_members")?.args).toEqual({ id: "g1", peerIds: [] }));
     expect(await screen.findByRole("button", { name: "Undo" })).toBeInTheDocument();
@@ -302,7 +303,7 @@ describe("Inspector: several peers", () => {
     const p = await selectAll(user);
     expect(await p.findByRole("heading", { name: "2 peers selected" })).toBeInTheDocument();
     expect(p.getByRole("button", { name: "team 1/2" })).toBeInTheDocument();
-    await user.click(p.getByRole("button", { name: "Groups…" }));
+    await user.click(p.getByRole("button", { name: "Add or remove groups" }));
     expect(((screen.getByRole("checkbox", { name: /^team/ })) as HTMLInputElement).indeterminate).toBe(true);
     await user.keyboard("{Escape}");
     // The same access of both is one entry covering both; Revoke removes both grants.
@@ -322,6 +323,7 @@ describe("Inspector: several peers", () => {
     await user.click(within(form).getByRole("button", { name: "Choose apps or tags…" }));
     await user.click(screen.getByRole("checkbox", { name: "nginx" }));
     await user.keyboard("{Escape}");
+    await user.click(within(form).getByRole("button", { name: /^Whole (app|tag)$/ }));
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0].map((o) => (o as { subject: { id: string } }).subject.id)).toEqual(["p1", "p2"]);
@@ -363,20 +365,7 @@ describe("Add peers", () => {
     expect(help).not.toHaveAttribute("open");
   });
 
-  it("adds a peer with a key through the batch endpoint", async () => {
-    const d = setup();
-    const user = userEvent.setup();
-    renderWithProviders(<PeersPage />);
-    await paste(user, KEY);
-    await user.type(screen.getByLabelText("Label"), "dave");
-    await user.click(screen.getByRole("button", { name: "Create peer" }));
-    await waitFor(() => expect(applied(d)).toHaveLength(1));
-    expect(applied(d)[0]).toEqual([
-      { op: "create_peer", ref: "$new0", label: "dave", credentials: [{ kind: "ygg_key", value: KEY, label: null }] },
-    ]);
-  });
-
-  it("shows a chip per pasted value and adds all of them to one peer", async () => {
+  it("makes one peer per pasted value, sends no name and creates them in one batch", async () => {
     const d = setup();
     const user = userEvent.setup();
     renderWithProviders(<PeersPage />);
@@ -384,26 +373,55 @@ describe("Add peers", () => {
     const chips = await screen.findByRole("list", { name: "Parsed values" });
     await waitFor(() => expect(within(chips).getAllByRole("listitem")).toHaveLength(3));
     expect(within(chips).getAllByText("IP")).toHaveLength(2);
-    await user.type(screen.getByLabelText("Label"), "multi");
-    await user.click(screen.getByRole("button", { name: "Create peer" }));
+    expect(screen.queryByLabelText("Label")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /One peer per value/ })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Create 3 peers" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
-    expect(applied(d)[0]).toMatchObject([
-      { op: "create_peer", label: "multi", credentials: [{ value: "10.0.0.1" }, { value: "fd00::1" }, { value: KEY }] },
+    expect(applied(d)[0]).toEqual([
+      { op: "create_peer", ref: "$new0", credentials: [{ kind: "ip", value: "10.0.0.1", label: null }] },
+      { op: "create_peer", ref: "$new1", credentials: [{ kind: "ip", value: "fd00::1", label: null }] },
+      { op: "create_peer", ref: "$new2", credentials: [{ kind: "ygg_key", value: KEY, label: null }] },
     ]);
   });
 
-  it("can make one peer per pasted value, in one batch", async () => {
+  it("adds one peer with a key", async () => {
+    const d = setup();
+    const user = userEvent.setup();
+    renderWithProviders(<PeersPage />);
+    await paste(user, KEY);
+    await user.click(await screen.findByRole("button", { name: "Create 1 peer" }));
+    await waitFor(() => expect(applied(d)).toHaveLength(1));
+    expect(applied(d)[0]).toEqual([{ op: "create_peer", ref: "$new0", credentials: [{ kind: "ygg_key", value: KEY, label: null }] }]);
+  });
+
+  it("puts all the new peers into a new group in the same batch when Create group is ticked", async () => {
     const d = setup();
     const user = userEvent.setup();
     renderWithProviders(<PeersPage />);
     await paste(user, "10.0.0.1 10.0.0.2");
-    await user.click(screen.getByRole("checkbox", { name: /One peer per value/ }));
-    await user.click(screen.getByRole("button", { name: "Create peers" }));
+    expect(screen.queryByLabelText("Group name")).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Create group" })).not.toBeChecked();
+    await user.click(screen.getByRole("checkbox", { name: "Create group" }));
+    await user.type(screen.getByLabelText("Group name"), "lab");
+    await user.click(await screen.findByRole("button", { name: "Create 2 peers" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
-    expect(applied(d)[0]).toMatchObject([
-      { op: "create_peer", ref: "$new0", label: "10.0.0.1" },
-      { op: "create_peer", ref: "$new1", label: "10.0.0.2" },
+    expect(d.count("create_group")).toBe(0);
+    expect(applied(d)[0]).toEqual([
+      { op: "create_peer", ref: "$new0", credentials: [{ kind: "ip", value: "10.0.0.1", label: null }] },
+      { op: "create_peer", ref: "$new1", credentials: [{ kind: "ip", value: "10.0.0.2", label: null }] },
+      { op: "create_group", ref: "$group", label: "lab", members: ["$new0", "$new1"] },
     ]);
+  });
+
+  it("has Cancel in the footer and no second way out in the header", async () => {
+    setup();
+    const user = userEvent.setup();
+    renderWithProviders(<PeersPage />);
+    await openAdd(user);
+    expect(screen.queryByRole("button", { name: "Close details" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByLabelText("Keys, addresses or IPs")).not.toBeInTheDocument();
   });
 
   it("shows the parser's error at the values and sends nothing", async () => {
@@ -411,20 +429,48 @@ describe("Add peers", () => {
     const user = userEvent.setup();
     renderWithProviders(<PeersPage />);
     await paste(user, "not-an-ip");
-    await user.type(screen.getByLabelText("Label"), "dave");
-    await user.click(screen.getByRole("button", { name: "Create peer" }));
+    await user.click(screen.getByRole("button", { name: /^Create/ }));
     expect((await screen.findAllByRole("alert"))[0]).toHaveTextContent('cannot tell what "not-an-ip" is');
     expect(d.count("changes")).toBe(0);
   });
 
-  it("puts a label conflict at the label field", async () => {
-    setup({ changes: () => { throw { code: "conflict", message: "operation 0: peer label already in use", details: null }; } });
+  it("puts a group name conflict at the group name", async () => {
+    setup({ changes: () => { throw { code: "conflict", message: "operation 1: group lab already exists", details: null }; } });
     const user = userEvent.setup();
     renderWithProviders(<PeersPage />);
     await paste(user, "10.0.0.1");
-    await user.type(screen.getByLabelText("Label"), "alice");
-    await user.click(screen.getByRole("button", { name: "Create peer" }));
-    const err = await screen.findByText("peer label already in use");
-    expect(err.closest(".form-row")).toContainElement(screen.getByLabelText("Label"));
+    await user.click(screen.getByRole("checkbox", { name: "Create group" }));
+    await user.type(screen.getByLabelText("Group name"), "lab");
+    await user.click(await screen.findByRole("button", { name: "Create 1 peer" }));
+    const err = await screen.findByText("group lab already exists");
+    expect(err.closest(".form-row")).toContainElement(screen.getByLabelText("Group name"));
+  });
+});
+
+describe("Inspector close", () => {
+  it("× hides the inspector and keeps the rows ticked; ticking a row shows it again", async () => {
+    setup();
+    const user = userEvent.setup();
+    renderWithProviders(<PeersPage />);
+    await user.click(await inList().findByRole("checkbox", { name: "Select alice" }));
+    await user.click(inList().getByRole("checkbox", { name: "Select bob" }));
+    const region = await screen.findByRole("region", { name: "Peer details" });
+    await user.click(within(region).getByRole("button", { name: "Close details" }));
+    expect(screen.queryByRole("region", { name: "Peer details" })).not.toBeInTheDocument();
+    expect(inList().getByRole("checkbox", { name: "Select alice" })).toBeChecked();
+    expect(inList().getByRole("checkbox", { name: "Select bob" })).toBeChecked();
+    await user.click(inList().getByRole("checkbox", { name: "Select carol" }));
+    expect(await screen.findByRole("heading", { name: "3 peers selected" })).toBeInTheDocument();
+  });
+
+  it("a peer has a + pill for its groups", async () => {
+    setup();
+    const user = userEvent.setup();
+    renderWithProviders(<PeersPage />);
+    await user.click(await rowButton("alice"));
+    const p = within(await screen.findByRole("region", { name: "Peer details" }));
+    const plus = await p.findByRole("button", { name: "Add or remove groups" });
+    expect(plus).toHaveClass("tag-pill", "tag-pill-add");
+    expect(p.queryByRole("button", { name: "Groups…" })).not.toBeInTheDocument();
   });
 });

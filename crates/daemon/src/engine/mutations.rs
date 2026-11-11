@@ -7,8 +7,8 @@ use crate::state::{self, NewActivity};
 use crate::AppState;
 use chrono::Utc;
 use socketguard_core::{
-    new_id, normalize_credential, ActivityKind, AddressMode, App, Credential, Grant, GrantView,
-    NewCredential, NewGrant, Peer, PeerGroup, Subject, Tag, Target,
+    new_id, normalize_credential, ActivityKind, AddressMode, App, Credential, CredentialKind,
+    Grant, GrantView, NewCredential, NewGrant, Peer, PeerGroup, Subject, Tag, Target,
 };
 use std::collections::{BTreeSet, HashSet};
 
@@ -78,6 +78,41 @@ impl Engine {
         Ok(label.to_string())
     }
 
+    /// The name an unnamed peer gets: its first credential, without a /32 or /128 and
+    /// with keys shortened, made unique among `taken` by a ` (2)`, ` (3)`… suffix.
+    pub(super) fn default_peer_label(
+        first: Option<&Credential>,
+        taken: impl Fn(&str) -> bool,
+    ) -> Result<String, EngineError> {
+        let Some(c) = first else {
+            return Err(EngineError::Invalid(
+                "a peer needs a name or a credential".into(),
+            ));
+        };
+        let base = match c.kind {
+            CredentialKind::YggKey
+            | CredentialKind::TorClientKey
+            | CredentialKind::WgKey
+            | CredentialKind::TlsSpki => match c.value.char_indices().nth(12) {
+                Some((at, _)) => format!("{}…", &c.value[..at]),
+                None => c.value.clone(),
+            },
+            _ => c
+                .value
+                .strip_suffix("/32")
+                .or_else(|| c.value.strip_suffix("/128"))
+                .unwrap_or(&c.value)
+                .to_string(),
+        };
+        let mut name = base.clone();
+        let mut n = 2;
+        while taken(&name) {
+            name = format!("{base} ({n})");
+            n += 1;
+        }
+        Ok(name)
+    }
+
     pub(super) async fn new_credential(
         &self,
         state: &AppState,
@@ -117,7 +152,6 @@ impl Engine {
         label: &str,
         credentials: &[NewCredential],
     ) -> Result<Peer, EngineError> {
-        let label = Self::clean_label(label, "peer")?;
         let mut creds: Vec<Credential> = Vec::new();
         for input in credentials {
             let c = self.new_credential(state, input).await?;
@@ -129,6 +163,18 @@ impl Engine {
             }
             creds.push(c);
         }
+        let label = if label.trim().is_empty() {
+            let taken: Vec<String> = state
+                .db
+                .list_peers()
+                .await?
+                .into_iter()
+                .map(|p| p.label)
+                .collect();
+            Self::default_peer_label(creds.first(), |n| taken.iter().any(|t| t == n))?
+        } else {
+            Self::clean_label(label, "peer")?
+        };
         let peer = Peer {
             id: new_id(),
             label: label.clone(),

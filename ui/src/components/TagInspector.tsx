@@ -140,7 +140,7 @@ function Members({ tag }: { tag: Tag }) {
   return (
     <>
       {tag.members.length === 0 ? (
-        <p className="muted">No members. Add apps here, or select apps and use Tags… in their details.</p>
+        <p className="muted">No members. Add apps here, or select apps and use + next to Tags in their details.</p>
       ) : (
         <ul className="plain-list member-list">
           {tag.members.map((m) => (
@@ -152,7 +152,19 @@ function Members({ tag }: { tag: Tag }) {
         </ul>
       )}
       {tag.excluded.length > 0 && <p className="hint">Kept out by hand: {tag.excluded.map(appName).join(", ")}.</p>}
-      <Picker label={`Members of ${tag.label}`} trigger="Members…" items={items} onToggle={toggle} open={open} onOpenChange={setOpen} placeholder="Find an app" />
+      <div className="tag-row">
+        <Picker
+          label={`Members of ${tag.label}`}
+          trigger="+"
+          triggerClass="tag-pill tag-pill-add"
+          compactLabel="Add or remove members"
+          items={items}
+          onToggle={toggle}
+          open={open}
+          onOpenChange={setOpen}
+          placeholder="Find an app"
+        />
+      </div>
       <CommitPreview commit={commit} title="Joining this tag lets more in" />
     </>
   );
@@ -205,7 +217,7 @@ export function NewTagForm({ onCreated, onClose }: { onCreated: (label: string) 
   const failed = commit.state.phase === "error" ? splitOperationError(commit.state.message).text : null;
   const field = failed ? errorField({ code: "invalid", message: failed }) : null;
   return (
-    <Inspector label="New tag" title="New tag" onClose={onClose}>
+    <Inspector label="New tag" title="New tag">
       <form
         onSubmit={(e) => {
           e.preventDefault();
