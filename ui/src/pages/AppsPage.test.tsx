@@ -906,3 +906,34 @@ describe("Tag and close controls", () => {
     expect(await within(inspector()).findByRole("heading", { name: "sshd" })).toBeInTheDocument();
   });
 });
+
+describe("Addresses on the Local network", () => {
+  const addr = (id: string, network_id: string, addr: string, up: boolean) =>
+    ({ id, app_id: "l1", network_id, scope: { kind: "all" as const }, locator: { kind: "ipv6" as const, addr }, created_at: "2026-01-01T00:00:00Z", reservation_id: null, up, excluded: [], notes: [] });
+  const open = async (app: ReturnType<typeof mkApp>) => {
+    mockDaemon({ list_apps: () => [app], get_app: () => detail(app) });
+    renderWithProviders(<AppsPage />);
+    await userEvent.click(await inList().findByRole("button", { name: /^mydb/ }));
+    const row = (await within(inspector()).findByText("All ports", { selector: ".port-name" })).closest("li")!;
+    return within(row);
+  };
+
+  it("is 'this machine only': muted, with Copy, no up/closed badge and no Reserve", async () => {
+    const all = await open(mkApp("l1", "mydb", [5432], { addresses: [addr("l-lo", "n-local", "::1", true)] }));
+    const line = (await all.findByText("Local")).closest(".address-row") as HTMLElement;
+    expect(line).toHaveClass("muted");
+    expect(within(line).getByText("this machine only")).toBeInTheDocument();
+    expect(within(line).getByRole("button", { name: "Copy ::1" })).toBeInTheDocument();
+    expect(all.queryByText("up")).not.toBeInTheDocument();
+    expect(all.queryByText("closed")).not.toBeInTheDocument();
+    expect(all.queryByRole("button", { name: /^Reserve/ })).not.toBeInTheDocument();
+  });
+
+  it("a normal network address keeps its badge and Reserve…", async () => {
+    const all = await open(mkApp("l1", "mydb", [5432], { addresses: [addr("l-lo", "n-local", "::1", true), addr("l-y", "n-ygg", "302::9", true)] }));
+    expect(await all.findByText("up")).toBeInTheDocument();
+    expect(all.getByText("this machine only")).toBeInTheDocument();
+    expect(all.getAllByRole("button", { name: /^Reserve/ })).toHaveLength(1);
+    expect(all.getByRole("button", { name: "Reserve Yggdrasil address" })).toBeInTheDocument();
+  });
+});
