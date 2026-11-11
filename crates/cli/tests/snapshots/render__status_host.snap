@@ -11,6 +11,7 @@ config        /etc/socketguard/socketguard.json
 database      /var/lib/socketguard/socketguard.db
 socket        /run/socketguard/socketguard.sock
 service       not installed
+bundled       none (managed networks not included in this build)
 
 Networks
   no networks

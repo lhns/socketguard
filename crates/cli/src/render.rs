@@ -315,7 +315,23 @@ fn host_lines(s: &StatusResponse) -> String {
     ]
     .into_iter()
     .filter_map(|(k, v)| v.map(|v| format!("\n{k:<13} {v}")))
-    .collect()
+    .collect::<String>()
+        + &format!("\n{:<13} {}", "bundled", bundled(&s.bundled))
+}
+
+/// The third-party programs this build ships, or why there are none.
+fn bundled(b: &socketguard_core::setup::BundledInfo) -> String {
+    if b.dir.is_none() && b.versions.is_empty() {
+        return "none (managed networks not included in this build)".to_string();
+    }
+    if b.versions.is_empty() {
+        return "files found, no VERSIONS list".to_string();
+    }
+    b.versions
+        .iter()
+        .map(|v| format!("{} {}", v.name, v.version))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn status(s: &StatusResponse) -> String {
