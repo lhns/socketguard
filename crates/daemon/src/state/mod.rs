@@ -184,7 +184,9 @@ impl Database {
         }
         let options = SqliteConnectOptions::from_str(&format!("sqlite:{path}?mode=rwc"))?
             .foreign_keys(true)
-            // Readers go on while a write commits, on their own pooled connections.
+            // sqlx opens a file in the rollback-journal mode, where a commit locks readers
+            // out; WAL lets reads go on while one commits (the -wal and -shm files are
+            // protected like the database, see `protect_files`).
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
@@ -1231,6 +1233,20 @@ mod test_util {
 mod tests {
     use super::*;
     use crate::state::test_util::*;
+
+    /// Readers must not wait for a commit (a slow one on a protected file would hold up the
+    /// API): the file runs in WAL mode, over a pool with several connections.
+    #[tokio::test]
+    async fn the_database_file_runs_in_wal_mode() {
+        let path = temp_db_path("wal");
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+        db.pool.close().await;
+    }
     use socketguard_core::new_id;
 
     #[tokio::test]

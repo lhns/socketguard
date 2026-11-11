@@ -21,7 +21,7 @@ The pass also wrote to SQLite once per app and per port on every poll, although 
 - An `apps_lock` covers the pass's read-modify-write of apps and ports and the deletion of an app, so a pass never writes ports for an app that was just forgotten.
 - Mutations already ran under the read lock and side by side; their ordering rests on `alloc_lock` and `firewall_lock` as before.
 - Interface calls run on the blocking pool, up to four at a time. An address is still recorded as owned, and the ruleset that denies it applied, before it is added.
-- A poll writes only what changed: one transaction for the apps and ports that differ from the stored state, and a refresh of `last_seen` at most every five minutes for an unchanged app. Settings (the onion ledger saves on every pass) are written only when the value changes. The database runs in WAL mode with a pool of five connections, so reads do not wait for a commit.
+- A poll writes only what changed: one transaction for the apps and ports that differ from the stored state, and a refresh of `last_seen` at most every five minutes for an unchanged app. Settings (the onion ledger saves on every pass) are written only when the value changes. The database file is opened in WAL mode (sqlx opens it in the rollback-journal mode, where a commit locks readers out) with a pool of five connections, so reads do not wait for a commit.
 
 ## Consequences
 

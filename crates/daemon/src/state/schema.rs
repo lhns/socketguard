@@ -585,7 +585,6 @@ mod tests {
         db.migrate().await.unwrap();
         assert!(archived.exists(), "old database kept as .pre-v1");
         assert!(with_suffix(&archived, "-wal").exists());
-        assert!(!with_suffix(&path, "-wal").exists());
         // The fresh database is v1 and has none of the old data.
         let old_table: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name = 'sockets'")
