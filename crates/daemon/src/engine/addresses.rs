@@ -587,7 +587,7 @@ pub(super) async fn disable_all(
         match interfaces.get(&a.network_id) {
             // Adopt addresses from before ownership was recorded.
             Some(iface) => {
-                if let Err(e) = db.retire_address(ip, &iface, Some(&a.network_id)).await {
+                if let Err(e) = db.retire_address(ip, iface, Some(&a.network_id)).await {
                     warn!("Cannot record {ip} as retiring: {e}");
                 }
             }

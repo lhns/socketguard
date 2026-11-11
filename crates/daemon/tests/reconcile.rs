@@ -1682,6 +1682,8 @@ async fn a_network_that_cannot_initialise_is_down_not_fatal() {
         ..DaemonConfig::default()
     };
     let net = MockInterfaceManager::new(Default::default());
+    // The interface exists; only its prefix is missing.
+    net.add_interface("eth0");
     let fw = Arc::new(MockFirewall::new(Default::default()));
     let monitor = MockSocketMonitor::new(vec![listener("nginx", 80, Protocol::Tcp)]);
     let engine = Engine::new_with_deps(
