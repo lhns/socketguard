@@ -174,6 +174,8 @@ pub async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
                         backend: BackendConfig::Yggdrasil {
                             interface: None,
                             admin_endpoint: None,
+                            managed: false,
+                            peers: vec![],
                         },
                     })
                     .await?;

@@ -24,8 +24,8 @@ use socketguard_core::api_types::{
     DisableRequest, Enforcement, EnforcementNotice, ExportDocument, ExposureResponse, MemberQuery,
     MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation,
     NewTag, NewTagMember, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse,
-    ReserveRequest, ReviewRequest, SetMembers, ShareResponse, StatusResponse, TorKeyResponse,
-    UpdateLabel, UpdatePortGroup, UpdateTag,
+    ReserveRequest, ReviewRequest, SetMembers, SetPeers, ShareResponse, StatusResponse,
+    TorKeyResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::setup::NetworkSetup;
 use socketguard_core::{
@@ -640,6 +640,14 @@ impl Client {
     /// could not be applied, i.e. the network is not closed yet (ADR 0051).
     pub async fn add_network(&self, req: &NewNetwork) -> Result<Saved<Network>> {
         self.call_saved(&routes::ADD_NETWORK, &[], json(req)).await
+    }
+
+    /// Replace the peers of a managed Yggdrasil network (ADR 0052).
+    pub async fn set_peers(&self, id: &str, peers: &[String]) -> Result<Network> {
+        let req = SetPeers {
+            peers: peers.to_vec(),
+        };
+        self.call(&routes::SET_PEERS, &[id], None, json(&req)).await
     }
 
     /// Remove a network. With `force`, a Tor network goes even if its onion services

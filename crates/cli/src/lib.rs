@@ -11,7 +11,6 @@ pub mod prompt;
 pub mod render;
 pub mod resolve;
 pub mod routes;
-pub mod setup;
 
 pub use routes::CLI_ROUTES;
 
