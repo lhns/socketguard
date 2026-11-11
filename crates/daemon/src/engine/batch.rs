@@ -15,8 +15,8 @@ use socketguard_core::api_types::{
     BatchChange, Change, ChangeItem, ChangeKind, ChangeOp, ChangesRequest, ChangesResponse,
 };
 use socketguard_core::{
-    new_id, ActivityKind, Credential, Grant, GrantReach, NewGrant, Peer, Reach, Subject, TagMember,
-    Target,
+    new_id, ActivityKind, Credential, Grant, GrantReach, NewGrant, Peer, PeerGroup, Reach, Subject,
+    TagMember, Target,
 };
 use std::collections::BTreeMap;
 
@@ -174,12 +174,6 @@ impl Engine {
                 label,
                 credentials,
             } => {
-                let label = Self::clean_label(label, "peer")?;
-                if plan.cat.peers.iter().any(|p| p.label == label) {
-                    return Err(EngineError::Conflict(format!(
-                        "peer {label} already exists"
-                    )));
-                }
                 let mut creds: Vec<Credential> = Vec::new();
                 for input in credentials {
                     let c = self.new_credential(state, input).await?;
@@ -203,6 +197,18 @@ impl Engine {
                     }
                     creds.push(c);
                 }
+                let label = match label.as_deref().map(str::trim) {
+                    None | Some("") => Self::default_peer_label(creds.first(), |n| {
+                        plan.cat.peers.iter().any(|p| p.label == n)
+                    })?,
+                    Some(l) => {
+                        let l = Self::clean_label(l, "peer")?;
+                        if plan.cat.peers.iter().any(|p| p.label == l) {
+                            return Err(EngineError::Conflict(format!("peer {l} already exists")));
+                        }
+                        l
+                    }
+                };
                 let peer = Peer {
                     id: new_id(),
                     label: label.clone(),
@@ -223,6 +229,51 @@ impl Engine {
                 );
                 plan.cat.peers.push(peer.clone());
                 plan.writes.push(Write::InsertPeer(peer));
+                plan.event(DaemonEvent::PeersChanged);
+            }
+            ChangeOp::CreateGroup {
+                ref_,
+                label,
+                members,
+            } => {
+                let label = Self::clean_label(label, "group")?;
+                if plan.cat.groups.iter().any(|g| g.label == label) {
+                    return Err(EngineError::Conflict(format!(
+                        "group {label} already exists"
+                    )));
+                }
+                let mut ids = std::collections::BTreeSet::new();
+                for m in members {
+                    let id = plan.resolve(m)?;
+                    if plan.cat.peer(&id).is_none() {
+                        return Err(EngineError::NotFound(format!("peer {id}")));
+                    }
+                    ids.insert(id);
+                }
+                let group = PeerGroup {
+                    id: new_id(),
+                    label: label.clone(),
+                    members: ids.into_iter().collect(),
+                    created_at: Utc::now(),
+                };
+                plan.define_ref(ref_, &group.id)?;
+                for p in &mut plan.cat.peers {
+                    if group.members.contains(&p.id) {
+                        p.groups.push(group.id.clone());
+                    }
+                }
+                plan.activities.push(NewActivity::new(
+                    ActivityKind::GroupAdded,
+                    format!("Added group {label}"),
+                ));
+                plan.change(
+                    ChangeKind::Create,
+                    ChangeItem::Group,
+                    label,
+                    Some(group.id.clone()),
+                );
+                plan.cat.groups.push(group.clone());
+                plan.writes.push(Write::InsertGroup(group));
                 plan.event(DaemonEvent::PeersChanged);
             }
             ChangeOp::CreateTag {

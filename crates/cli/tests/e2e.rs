@@ -159,7 +159,9 @@ async fn reconcile(d: &StandardDaemon) {
 async fn peers_grants_and_revoke() {
     let env = Env::start().await;
 
-    let out = env.ok(&["peers", "add", "bnode", "--key", KEY]).await;
+    let out = env
+        .ok(&["peers", "add", "--label", "bnode", "--key", KEY])
+        .await;
     assert!(out.stdout.contains("added peer bnode"), "{}", out.stdout);
     let peers = env.ok(&["--json", "peers", "list"]).await.json();
     assert_eq!(peers[0]["label"], "bnode");
@@ -252,8 +254,16 @@ async fn errors_status_and_everything_else() {
     );
 
     // Peers: credentials guessed from bare values, groups, rename.
-    env.ok(&["peers", "add", "carol", KEY, "--addr", "2001:db8::7"])
-        .await;
+    env.ok(&[
+        "peers",
+        "add",
+        "--label",
+        "carol",
+        KEY,
+        "--addr",
+        "2001:db8::7",
+    ])
+    .await;
     let carol = env.ok(&["peers", "show", "carol", "--json"]).await.json();
     let kinds: Vec<&str> = carol["credentials"]
         .as_array()
@@ -263,7 +273,7 @@ async fn errors_status_and_everything_else() {
         .collect();
     assert_eq!(kinds.len(), 2, "{carol}");
     let e = env
-        .fails(&["peers", "add", "dave", "not-a-credential"])
+        .fails(&["peers", "add", "--label", "dave", "not-a-credential"])
         .await;
     assert!(e.stderr.contains("--cred kind=value"), "{}", e.stderr);
     let cred_id = carol["credentials"][1]["id"].as_str().unwrap().to_string();
@@ -386,7 +396,8 @@ async fn errors_status_and_everything_else() {
 #[tokio::test(flavor = "multi_thread")]
 async fn export_apply_and_disable() {
     let env = Env::start().await;
-    env.ok(&["peers", "add", "bnode", "--key", KEY]).await;
+    env.ok(&["peers", "add", "--label", "bnode", "--key", KEY])
+        .await;
     env.ok(&["grant", "nginx:80", "bnode"]).await;
 
     // TOML by default, JSON by extension or flag.
@@ -565,7 +576,7 @@ impl Prompter for Script {
 async fn ip_peer(env: &Env, label: &str, ip: &str) -> socketguard_core::Peer {
     env.client()
         .create_peer(&NewPeer {
-            label: label.into(),
+            label: Some(label.into()),
             credentials: socketguard_cli::parse::guess_credentials(ip).unwrap(),
         })
         .await

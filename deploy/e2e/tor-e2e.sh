@@ -114,7 +114,7 @@ step "no grant: still nothing after a reconcile pass" nothing_published
 # ── Keys for B ───────────────────────────────────────────────────────────────
 # The daemon generates B's key pair (ADR 0045) and `share` hands out the client's
 # ClientOnionAuthDir line, so B uses exactly what a user would copy.
-step "add a peer for B without credentials" A $SG peers add bnode
+step "add a peer for B without credentials" A $SG peers add --label bnode
 step "the daemon generates a Tor client key for the peer" A $SG peers tor-key bnode
 step "the generated key is stored as a Tor client key" sh -c "docker exec $NODE_A $SG peers show bnode --json | jq -e '.credentials | length == 1 and .[0].kind == \"tor_client_key\" and (.[0].value | length == 52)' >/dev/null"
 step "grant the listener's port to that peer" A $SG grant "$APP_ID:$PORT" bnode --network tor

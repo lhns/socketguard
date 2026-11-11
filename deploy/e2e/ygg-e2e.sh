@@ -83,7 +83,7 @@ step "closed by default: B cannot fetch the allocated address" sh -c "! docker e
 step "closed address is still configured on ygg0" on_ygg0 "$ADDR"
 
 APP_ID="$(app_id)"
-step "add a peer holding B's Yggdrasil key" A $SG peers add bnode --key "$B_KEY"
+step "add a peer holding B's Yggdrasil key" A $SG peers add --label bnode --key "$B_KEY"
 step "grant the listener's port to that peer" A $SG grant "$APP_ID:$PORT" bnode --network ygg
 step "the grant is verified on the overlay" sh -c "docker exec $NODE_A $SG grants --app $APP_ID --json | jq -e '.[0].reach[0].reach == \"verified\"' >/dev/null"
 step "granted: B can fetch from the new address" retry 30 fetch_from_b
