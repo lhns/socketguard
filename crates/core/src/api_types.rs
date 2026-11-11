@@ -105,6 +105,22 @@ pub struct StatusResponse {
     #[serde(default)]
     pub unadopted: bool,
     pub counts: Counts,
+    /// The config file the daemon loaded (or would create) (ADR 0050).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub config_path: Option<String>,
+    /// The database in use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub db_path: Option<String>,
+    /// The Unix socket or Windows pipe the API listens on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub socket: Option<String>,
+    /// Whether SocketGuard is registered as a system service (None: could not be told).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub service_installed: Option<bool>,
 }
 
 // ─── Apps ────────────────────────────────────────────────────────────────────
@@ -241,6 +257,50 @@ pub struct NetworkExposure {
     pub listeners: Vec<ExposedListener>,
     /// The services `socketguard networks setup` started for this network (its setup log).
     pub services_started_by_setup: Vec<String>,
+}
+
+impl NetworkExposure {
+    /// What stays reachable without the block, in plain words; None when the node does not
+    /// run (nothing is reachable over it).
+    pub fn sentence(&self) -> Option<String> {
+        if !self.node_running {
+            return None;
+        }
+        let programs = match self.listeners.len() {
+            0 => "no program listens on all addresses now".to_string(),
+            1 => "1 program on this PC is reachable over it".to_string(),
+            k => format!("{k} programs on this PC are reachable over it"),
+        };
+        let mut s = format!(
+            "{} keeps running. Without SocketGuard, {programs}",
+            self.network
+        );
+        if !self.listeners.is_empty() {
+            let list: Vec<String> = self
+                .listeners
+                .iter()
+                .map(|l| format!("{} (port {}/{})", l.app, l.port, l.proto))
+                .collect();
+            s.push_str(&format!(": {}", list.join(", ")));
+        }
+        s.push('.');
+        if self.services_started_by_setup.is_empty() {
+            s.push_str(" Stop its service yourself to close it.");
+        } else {
+            s.push_str(&format!(
+                " SocketGuard's setup started {}; `socketguard networks setup yggdrasil --undo --stop-service-only` stops it.",
+                self.services_started_by_setup.join(", ")
+            ));
+        }
+        Some(s)
+    }
+}
+
+impl ExposureResponse {
+    /// One sentence per network whose node keeps running.
+    pub fn sentences(&self) -> Vec<String> {
+        self.networks.iter().filter_map(|n| n.sentence()).collect()
+    }
 }
 
 /// Response of `GET /api/exposure` and the body of a `confirmation_required` answer to

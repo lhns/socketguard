@@ -120,6 +120,15 @@ pub trait Network: Send + Sync {
     fn ensure_locator(&self, req: &LocatorRequest) -> Result<NewLocator>;
     /// Release the locator of an address that is going away.
     fn remove_locator(&self, address: &Address) -> Result<()>;
+    /// Give back the lease behind `addr`, an IP address of this network that is being
+    /// given up (retired, removed, disabled, uninstalled): DHCPv6 sends a Release to
+    /// its server (RFC 8415 section 18.2.7). Best effort: it works from the address alone
+    /// (also for leases of an earlier process), may block for a few seconds waiting for
+    /// replies, and an unanswered release is not an error. Networks without leases do
+    /// nothing.
+    fn release_lease(&self, _addr: Ipv6Addr) -> Result<()> {
+        Ok(())
+    }
     /// Make the network match the grants. IP networks do nothing here: their rules are
     /// part of the shared firewall ruleset.
     fn enforce(&self, enforcement: &NetworkEnforcement) -> Result<()>;
@@ -359,6 +368,7 @@ mod tests {
             exe_path: None,
             interpreter_arg: None,
             identity_note: None,
+            exe_missing: false,
             reviewed: true,
             system: false,
             first_seen: now,

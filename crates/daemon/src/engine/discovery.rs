@@ -22,7 +22,83 @@ type PendingSighting<'a> = (&'a AppId, Option<Touch<'a>>, Vec<(PortRef, AddrFami
 /// nothing for minutes.
 const SIGHTING_REFRESH: chrono::Duration = chrono::Duration::minutes(5);
 
+/// How long a "does the executable still exist" answer is reused.
+const EXE_CHECK_REFRESH: Duration = Duration::from_secs(180);
+
+/// Whether each app's executable still exists, checked at poll time so that API reads
+/// never touch the disk. Shared by all engines of the process, keyed by path; not stored.
+#[derive(Default)]
+struct ExeCache(HashMap<String, (bool, Instant)>);
+
+static EXE_CACHE: Mutex<Option<ExeCache>> = Mutex::new(None);
+
+impl ExeCache {
+    /// Re-check the paths whose answer is unknown or older than `EXE_CHECK_REFRESH` (all of
+    /// them with `force`). Returns whether any answer changed.
+    fn refresh<'a>(
+        &mut self,
+        paths: impl Iterator<Item = &'a str>,
+        now: Instant,
+        force: bool,
+        exists: impl Fn(&str) -> bool,
+    ) -> bool {
+        let mut flipped = false;
+        for p in paths {
+            let before = self.0.get(p).copied();
+            let stale =
+                force || before.is_none_or(|(_, at)| now.duration_since(at) >= EXE_CHECK_REFRESH);
+            if stale {
+                let missing = !exists(p);
+                self.0.insert(p.to_string(), (missing, now));
+                // A path seen for the first time that exists is not a change.
+                flipped |= before.map_or(missing, |(m, _)| m != missing);
+            }
+        }
+        flipped
+    }
+
+    fn missing(&self, path: &str) -> bool {
+        self.0.get(path).is_some_and(|(m, _)| *m)
+    }
+}
+
+/// A process in another mount namespace has a path this daemon cannot see.
+fn path_is_checkable(app: &App) -> bool {
+    app.exe_path.as_deref().is_some_and(|p| !p.is_empty())
+        && !app
+            .identity_note
+            .as_deref()
+            .is_some_and(|n| n.contains("foreign mount namespace"))
+}
+
+/// The cached answer for an app's executable: true only when a path is known and was found
+/// missing at the last poll.
+pub(super) fn exe_missing(app: &App) -> bool {
+    let guard = EXE_CACHE.lock().unwrap();
+    path_is_checkable(app)
+        && app
+            .exe_path
+            .as_deref()
+            .is_some_and(|p| guard.as_ref().is_some_and(|c| c.missing(p)))
+}
+
 impl Engine {
+    /// Refresh the executable-exists cache for the known apps (a few minutes apart, and at
+    /// once with `force`). Returns whether any answer changed.
+    fn refresh_exe_cache(&self, apps: &HashMap<AppId, App>, force: bool) -> bool {
+        let paths = apps
+            .values()
+            .filter(|a| path_is_checkable(a))
+            .filter_map(|a| a.exe_path.as_deref());
+        EXE_CACHE
+            .lock()
+            .unwrap()
+            .get_or_insert_with(ExeCache::default)
+            .refresh(paths, Instant::now(), force, |p| {
+                std::path::Path::new(p).exists()
+            })
+    }
+
     /// Steps 1 of the reconcile: live sockets -> apps and their ports. Returns whether
     /// anything user-visible changed.
     pub(super) async fn upsert_apps(
@@ -90,7 +166,9 @@ impl Engine {
             .into_iter()
             .map(|a| (a.id.clone(), a))
             .collect();
-        let mut changed = false;
+        // A new app is when "the old one moved" gets noticed: look again at every path then.
+        let new_app = live.keys().any(|id| !known.contains_key(id));
+        let mut changed = self.refresh_exe_cache(&known, new_app);
         // What goes to the database, in one transaction; nothing when nothing changed.
         let mut writes: Vec<PendingSighting<'_>> = Vec::new();
 
@@ -105,6 +183,7 @@ impl Engine {
                     exe_path: l.exe_path.clone(),
                     interpreter_arg: l.interpreter_arg.clone(),
                     identity_note: l.identity_note.clone(),
+                    exe_missing: false,
                     reviewed: false,
                     system: l.system,
                     first_seen: now,
@@ -190,5 +269,33 @@ impl Engine {
             db.record_sightings(&sightings, now).await?;
         }
         Ok(changed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exe_cache_rechecks_only_after_the_refresh_interval() {
+        let t0 = Instant::now();
+        let mut c = ExeCache::default();
+        assert!(c.refresh(["/a"].into_iter(), t0, false, |_| false));
+        assert!(c.missing("/a"));
+        // The file comes back, but the answer is reused until it is stale or forced.
+        let soon = t0 + Duration::from_secs(60);
+        assert!(!c.refresh(["/a"].into_iter(), soon, false, |_| true));
+        assert!(c.missing("/a"));
+        assert!(c.refresh(["/a"].into_iter(), soon, true, |_| true));
+        assert!(!c.missing("/a"));
+        // Missing again after the interval: reported as a change.
+        assert!(c.refresh(
+            ["/a"].into_iter(),
+            t0 + EXE_CHECK_REFRESH * 2,
+            false,
+            |_| false
+        ));
+        assert!(c.missing("/a"));
+        assert!(!c.missing("/never-checked"));
     }
 }

@@ -336,15 +336,18 @@ impl Firewall for NftablesFirewall {
     }
 
     fn verify(&self) -> Result<bool> {
-        let out = run_nft(&["list", "table", "inet", TABLE], None)?;
-        if out.status.success() {
-            return Ok(true);
+        // The table of earlier versions (`ip6`) counts too: it is ours and disable removes it.
+        for family in ["inet", "ip6"] {
+            let out = run_nft(&["list", "table", family, TABLE], None)?;
+            if out.status.success() {
+                return Ok(true);
+            }
+            let err = String::from_utf8_lossy(&out.stderr);
+            if !err.contains("No such file or directory") {
+                bail!("nft list table failed: {}", err.trim());
+            }
         }
-        let err = String::from_utf8_lossy(&out.stderr);
-        if err.contains("No such file or directory") {
-            return Ok(false);
-        }
-        bail!("nft list table failed: {}", err.trim());
+        Ok(false)
     }
 
     fn revoke(&self, revoked: &[Revocation]) -> Result<()> {
@@ -366,6 +369,12 @@ impl Firewall for NftablesFirewall {
         let err = String::from_utf8_lossy(&out.stderr);
         if !out.status.success() && !err.contains("No such file or directory") {
             bail!("nft delete table failed: {}", err.trim());
+        }
+        // The table of earlier versions (`table ip6 socketguard`), if one is still around.
+        let out = run_nft(&["delete", "table", "ip6", TABLE], None)?;
+        let err = String::from_utf8_lossy(&out.stderr);
+        if !out.status.success() && !err.contains("No such file or directory") {
+            bail!("nft delete table (legacy ip6) failed: {}", err.trim());
         }
         Ok(())
     }

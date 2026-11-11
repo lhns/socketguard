@@ -1,5 +1,6 @@
 import { api, type ExposureResponse, type NetworkExposure } from "../api";
 import { errorText } from "../lib";
+import { elevatedFailure } from "./ElevatedAction";
 
 /** The networks whose software keeps running, so that they stay reachable without the block. */
 export function exposedNetworks(e: ExposureResponse | undefined): NetworkExposure[] {
@@ -16,10 +17,9 @@ export async function stopStartedService(configPath: string | undefined): Promis
   if (!configPath) return "The daemon did not say where its config file is, so the service cannot be stopped from here.";
   try {
     const r = await api.stopSetupService("yggdrasil", configPath);
-    if (r.cancelled) return "Cancelled: the service was not stopped and nothing was changed.";
-    if (!r.launched) return `This system has no way to ask for administrator rights from here. Run this in a terminal with administrator rights: ${r.command}`;
-    if (r.exit_code !== 0) return `Stopping the service failed (exit code ${r.exit_code ?? "unknown"}). Its window shows why.`;
-    return null;
+    const failure = elevatedFailure(r);
+    if (failure === null) return null;
+    return `${failure} The service was not stopped.${r.launched ? "" : ` ${r.command}`}`;
   } catch (e) {
     return errorText(e);
   }

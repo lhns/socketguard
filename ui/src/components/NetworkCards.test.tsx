@@ -189,7 +189,7 @@ describe("Network cards", () => {
   });
 
   it("keeps the typed form under Advanced, with the interfaces to pick from", async () => {
-    const d = mockDaemon({ add_network: () => network("lan", "dhcpv6-eth9", "eth9") });
+    const d = mockDaemon({ add_network: () => saved(network("lan", "dhcpv6-eth9", "eth9")) });
     const user = userEvent.setup();
     const { container } = renderWithProviders(<NetworksSection />);
     await screen.findByRole("article", { name: "Yggdrasil" });
@@ -207,7 +207,7 @@ describe("Network cards", () => {
   it("adds Local on the loopback interface the daemon named", async () => {
     const d = mockDaemon({
       network_setup: () => withSetup({ local: setupState("ready", { found: { interface: "lo0" } }) }),
-      add_network: () => network("local", "ula", "lo0"),
+      add_network: () => saved(network("local", "ula", "lo0")),
     });
     const user = userEvent.setup();
     renderWithProviders(<NetworksSection />);

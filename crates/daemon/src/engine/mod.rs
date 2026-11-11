@@ -26,8 +26,6 @@ mod reservations;
 mod tags;
 mod torkeys;
 
-use addresses::disable_all;
-use enforce::disable_networks;
 pub use port_groups::clean_ranges;
 
 use crate::api::DaemonEvent;
@@ -70,7 +68,7 @@ impl Clock for SystemClock {
 }
 
 /// Every backend allocates single addresses.
-const ADDRESS_PREFIX_LEN: u8 = 128;
+pub const ADDRESS_PREFIX_LEN: u8 = 128;
 
 /// Raw drop events held between reconcile passes; the platform rate-limits them, this is
 /// only a bound.
@@ -148,6 +146,9 @@ pub struct Engine {
     unavailable_ifaces: Mutex<HashSet<String>>,
     /// Networks whose last allocation failed (log once per outage).
     alloc_failing: Mutex<HashSet<String>>,
+    // Lock order (see `AppState`): the engine RwLock, `poll_lock`, `apps_lock`,
+    // `alloc_lock`, `state.firewall_lock`, the ledger lock, `state.config`, a database
+    // transaction. The std mutexes below are never held across an `.await`.
     /// Held while addresses are created, so two mutations never create the same one.
     alloc_lock: tokio::sync::Mutex<()>,
     /// Held for a whole reconcile pass, and by `disable` and `enable`: a pass never puts
@@ -398,6 +399,8 @@ impl Engine {
     /// Startup: apply the desired state over whatever the previous run left (never a
     /// flush, ADR 0026), then make sure the addresses are on their interfaces.
     pub async fn startup_reconcile(&self, state: &AppState) {
+        // The API is already up: a `disable` must not interleave with putting addresses back.
+        let _pass = self.poll_lock.lock().await;
         if let Err(e) = networks::ledger::adopt_stored_keys(&state.db).await {
             warn!("Could not adopt existing onion services: {e:#}");
         }
@@ -470,12 +473,18 @@ impl Engine {
             .iter()
             .map(|(id, b)| (id.clone(), b.network.clone()))
             .collect();
+        // What the block keeps off the host, said before it goes (ADR 0051).
+        let exposure = self.exposure(state, None).await.ok();
+        for sentence in exposure.iter().flat_map(|e| e.sentences()) {
+            warn!("{sentence}");
+        }
         let removed = disable_everything(
             &state.db,
             &ifaces,
             nets,
             self.firewall.clone(),
             self.ifaces.clone(),
+            exposure,
         )
         .await;
         self.commit(state, removed, None, &[DaemonEvent::SettingsChanged])
@@ -543,8 +552,8 @@ impl Engine {
 }
 
 /// The teardown behind `disable`, for the engine and for `--disable` (which has no engine):
-/// set the latch and take the addresses and the firewall rules away ([`disable_all`]), then
-/// the services of the networks outside the firewall ([`disable_networks`]). The second
+/// set the latch and take the addresses, the onion services and the firewall rules away
+/// (`crate::disable`, which reports per item). The services
 /// step runs even when the first fails, so a stuck address never leaves services published;
 /// the first error is returned.
 pub async fn disable_everything(
@@ -553,10 +562,26 @@ pub async fn disable_everything(
     networks: Vec<(String, Arc<dyn networks::Network>)>,
     firewall: Arc<dyn Firewall>,
     ifaces: Arc<dyn InterfaceManager>,
+    exposure: Option<socketguard_core::api_types::ExposureResponse>,
 ) -> anyhow::Result<()> {
-    let removed = disable_all(db, interfaces, firewall, ifaces).await;
-    disable_networks(db, networks).await;
-    removed
+    let slots = networks
+        .into_iter()
+        .map(|(id, n)| crate::disable::NetworkSlot {
+            id,
+            is_tor: n.kind() == socketguard_core::NetworkKind::Tor,
+            network: Ok(n),
+        })
+        .collect();
+    crate::disable::disable_with_db(crate::disable::DisableInput {
+        db,
+        interfaces,
+        networks: slots,
+        firewall,
+        ifaces,
+        exposure,
+    })
+    .await
+    .into_result()
 }
 
 /// Run the reconciliation loop with shutdown support.
@@ -643,6 +668,7 @@ mod tests {
             vec![("tor".to_string(), tor.clone())],
             Arc::new(MockFirewall::new(Arc::new(Mutex::new(vec![])))),
             Arc::new(net),
+            None,
         )
         .await;
 

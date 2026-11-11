@@ -142,9 +142,11 @@ impl Engine {
     }
 }
 
-/// The services `networks setup yggdrasil` started, from the setup log next to the config
-/// file. Read as plain JSON so that the log's writer owns its type.
+/// The services `networks setup yggdrasil` started, from the install record next to the
+/// config file.
 fn started_by_setup(config: Option<&std::path::Path>) -> Vec<String> {
+    use socketguard_core::install_log::{read_file, Change};
+    use socketguard_core::setup::SetupKind;
     let Some(config) = config else {
         return vec![];
     };
@@ -152,18 +154,14 @@ fn started_by_setup(config: Option<&std::path::Path>) -> Vec<String> {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("setup-log.json");
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return vec![];
-    };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return vec![];
-    };
-    let mut out: Vec<String> = doc["entries"]
-        .as_array()
+    let mut out: Vec<String> = read_file(&path)
+        .unwrap_or_default()
         .into_iter()
-        .flatten()
-        .filter(|e| e["kind"] == "yggdrasil" && e["type"] == "service_started")
-        .filter_map(|e| e["service"].as_str().map(str::to_string))
+        .filter(|e| e.kind == Some(SetupKind::Yggdrasil))
+        .filter_map(|e| match e.change {
+            Change::ServiceStarted { service, .. } => Some(service),
+            _ => None,
+        })
         .collect();
     out.sort();
     out.dedup();

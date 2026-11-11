@@ -80,8 +80,44 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Disable(a) => disable(&c, a).await,
         Command::Enable => enable(&c).await,
+        Command::Access(cmd) => access(cmd),
         Command::Completions { .. } => unreachable!("handled above"),
     }
+}
+
+// ─── Access (ADR 0050) ───────────────────────────────────────────────────────
+
+/// The daemon binary installed next to the given `socketguard` executable.
+fn daemon_next_to(exe: &std::path::Path) -> Result<std::path::PathBuf> {
+    let name = format!("socketguard-daemon{}", std::env::consts::EXE_SUFFIX);
+    let daemon = exe.parent().map(|d| d.join(&name));
+    match daemon {
+        Some(p) if p.is_file() => Ok(p),
+        _ => bail!(
+            "{name} was not found next to {}; `socketguard access` runs it, so both must be installed together",
+            exe.display()
+        ),
+    }
+}
+
+/// `socketguard access allow|deny|list`: hand over to `socketguard-daemon access`, which
+/// does the work and needs administrator rights. Its output and exit status are ours.
+fn access(cmd: AccessCmd) -> Result<()> {
+    let exe = std::env::current_exe().context("cannot tell where socketguard is installed")?;
+    let daemon = daemon_next_to(&exe)?;
+    let args: Vec<&str> = match &cmd {
+        AccessCmd::Allow { account } => vec!["access", "allow", account],
+        AccessCmd::Deny { account } => vec!["access", "deny", account],
+        AccessCmd::List => vec!["access", "list"],
+    };
+    let status = std::process::Command::new(&daemon)
+        .args(&args)
+        .status()
+        .with_context(|| format!("cannot run {}", daemon.display()))?;
+    if !status.success() {
+        bail!("{} {} failed ({status})", daemon.display(), args.join(" "));
+    }
+    Ok(())
 }
 
 // ─── Output and lookups ──────────────────────────────────────────────────────
@@ -1834,6 +1870,24 @@ async fn enable(c: &Ctx) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn access_needs_the_daemon_binary_next_to_the_cli() {
+        let dir = std::env::temp_dir().join("sg-access-test-empty");
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = super::daemon_next_to(&dir.join("socketguard")).unwrap_err();
+        assert!(err.to_string().contains("was not found next to"), "{err}");
+        let daemon = dir.join(format!(
+            "socketguard-daemon{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        std::fs::write(&daemon, b"").unwrap();
+        assert_eq!(
+            super::daemon_next_to(&dir.join("socketguard")).unwrap(),
+            daemon
+        );
+        std::fs::remove_file(&daemon).unwrap();
+    }
+
     use super::*;
 
     #[test]

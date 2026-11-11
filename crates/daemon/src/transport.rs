@@ -37,7 +37,7 @@ pub fn bind(config: &DaemonConfig) -> anyhow::Result<Server> {
         if group.is_none() {
             warn!(
                 "Local group '{WINDOWS_GROUP}' does not exist: only SYSTEM and Administrators can \
-                 use the API pipe. Create it with: net localgroup \"{WINDOWS_GROUP}\" /add"
+                 use the API pipe. Create it with: socketguard-daemon access group ensure"
             );
         }
         bind_pipe(&config.api_pipe, &platform::pipe_sddl(group.as_deref()))

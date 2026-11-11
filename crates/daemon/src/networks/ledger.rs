@@ -12,7 +12,8 @@ use tracing::warn;
 const OWNED: &str = "tor_owned_services";
 const TOMBSTONES: &str = "tor_tombstones";
 
-/// Read-modify-write of the two lists must not interleave.
+/// Read-modify-write of the two lists must not interleave. Taken under `firewall_lock`
+/// and before any database transaction (lock order: see `AppState`).
 static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -99,6 +100,19 @@ pub async fn settle(db: &Database, passed: &Ledger, wanted: &BTreeSet<String>) -
     owned.retain(|id| !passed.owned.contains(id));
     owned.extend(wanted.iter().cloned());
     tombs.retain(|id| !passed.tombstones.contains(id));
+    write(db, OWNED, &owned).await?;
+    write(db, TOMBSTONES, &tombs).await
+}
+
+/// Services are gone (removed or never there): drop them from both lists.
+pub async fn forget(db: &Database, ids: &[String]) -> Result<()> {
+    let _g = LOCK.lock().await;
+    let mut owned = read(db, OWNED).await?;
+    let mut tombs = read(db, TOMBSTONES).await?;
+    for id in ids {
+        owned.remove(id);
+        tombs.remove(id);
+    }
     write(db, OWNED, &owned).await?;
     write(db, TOMBSTONES, &tombs).await
 }

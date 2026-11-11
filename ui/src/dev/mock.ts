@@ -38,7 +38,7 @@ let apps: App[] = [];
 own.forEach(([name, exe, ports], i) => {
   const id = `a${i + 1}`;
   apps.push({
-    id, name, process_name: name, exe_path: exe, interpreter_arg: null, identity_note: null, reviewed: i % 3 !== 2, system: false,
+    id, name, process_name: name, exe_path: exe, interpreter_arg: null, identity_note: null, exe_missing: false, reviewed: i % 3 !== 2, system: false,
     first_seen: T0, last_seen: T0,
     ports: ports.map(([port, proto]) => ({ port, proto, listening: true, last_seen: T0, family: i % 2 ? "dual" : "v6" })),
     addresses: [
@@ -52,7 +52,7 @@ apps[0].addresses[0].excluded = [{ start: 9000, end: 9000, proto: "tcp" }];
 sys.forEach((name, i) => {
   const id = `s${i + 1}`;
   apps.push({
-    id, name, process_name: name, exe_path: null, interpreter_arg: null, identity_note: null, reviewed: true, system: true,
+    id, name, process_name: name, exe_path: null, interpreter_arg: null, identity_note: null, exe_missing: false, reviewed: true, system: true,
     first_seen: T0, last_seen: T0,
     ports: [{ port: 100 + i, proto: "tcp", listening: true, last_seen: T0, family: "v6" }],
     addresses: [{ id: `${id}-y`, app_id: id, network_id: "n-ygg", scope: ALL_SCOPE, locator: { kind: "ipv6", addr: `302:b${i}::1` }, created_at: T0, reservation_id: null, up: true, excluded: [], notes: [] }],

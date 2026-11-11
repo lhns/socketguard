@@ -300,6 +300,23 @@ fn protect_host(interfaces: &[String]) -> String {
     }
 }
 
+/// Where the daemon keeps its state and whether it is a service, one line (with a leading
+/// newline) each; what it did not report is left out.
+fn host_lines(s: &StatusResponse) -> String {
+    let service = s
+        .service_installed
+        .map(|i| if i { "installed" } else { "not installed" });
+    [
+        ("config", s.config_path.as_deref()),
+        ("database", s.db_path.as_deref()),
+        ("socket", s.socket.as_deref()),
+        ("service", service),
+    ]
+    .into_iter()
+    .filter_map(|(k, v)| v.map(|v| format!("\n{k:<13} {v}")))
+    .collect()
+}
+
 pub fn status(s: &StatusResponse) -> String {
     let c = &s.counts;
     let protect = protect_host(&s.protect_host_interfaces);
@@ -316,7 +333,7 @@ pub fn status(s: &StatusResponse) -> String {
          enforcement   {enforcement}\n\
          protect-host  {protect}\n\
          apps          {} ({} pending), {} addresses\n\
-         peers         {}, groups {}, grants {}\n\n{}",
+         peers         {}, groups {}, grants {}{}\n\n{}",
         s.version,
         c.apps,
         c.pending_apps,
@@ -324,6 +341,7 @@ pub fn status(s: &StatusResponse) -> String {
         c.peers,
         c.groups,
         c.grants,
+        host_lines(s),
         section("Networks", networks(&s.networks)),
     )
 }
@@ -393,37 +411,7 @@ pub fn network_setup(s: &socketguard_core::setup::NetworkSetup) -> String {
 /// What stays reachable when a block goes (ADR 0051): one paragraph per network whose node
 /// keeps running; empty when nothing does.
 pub fn exposure(e: &socketguard_core::api_types::ExposureResponse) -> String {
-    let mut out = Vec::new();
-    for n in e.networks.iter().filter(|n| n.node_running) {
-        let programs = match n.listeners.len() {
-            0 => "no program listens on all addresses now".to_string(),
-            1 => "1 program on this PC is reachable over it".to_string(),
-            k => format!("{k} programs on this PC are reachable over it"),
-        };
-        let mut s = format!(
-            "{} keeps running. Without SocketGuard, {programs}",
-            n.network
-        );
-        if !n.listeners.is_empty() {
-            let list: Vec<String> = n
-                .listeners
-                .iter()
-                .map(|l| format!("{} (port {}/{})", l.app, l.port, l.proto))
-                .collect();
-            s.push_str(&format!(": {}", list.join(", ")));
-        }
-        s.push('.');
-        if n.services_started_by_setup.is_empty() {
-            s.push_str(" Stop its service yourself to close it.");
-        } else {
-            s.push_str(&format!(
-                " SocketGuard's setup started {}; `socketguard networks setup yggdrasil --undo --stop-service-only` stops it.",
-                n.services_started_by_setup.join(", ")
-            ));
-        }
-        out.push(s);
-    }
-    out.join("\n")
+    e.sentences().join("\n")
 }
 
 pub fn networks(nets: &[Network]) -> String {

@@ -19,11 +19,12 @@ ExecStart=/usr/local/bin/socketguard-daemon
 Restart=on-failure
 RestartSec=2
 
-# State (socketguard.db, socketguard.json) lives in /var/lib/socketguard, the working
-# directory. The API socket is in /run, so no RuntimeDirectory is needed.
+# Config and setup log live in /etc/socketguard, the database in /var/lib/socketguard
+# (ADR 0050); nothing depends on a working directory. `service install` creates both
+# directories itself and records that. The API socket is in /run.
 StateDirectory=socketguard
-WorkingDirectory=/var/lib/socketguard
-ReadWritePaths=/run
+ConfigurationDirectory=socketguard
+ReadWritePaths=/run /etc/socketguard
 
 # nftables, interface addresses and the NFLOG netlink socket need CAP_NET_ADMIN (nothing
 # opens a raw or packet socket: DHCPv6 is a plain UDP socket). CAP_SYS_PTRACE reads other

@@ -201,6 +201,10 @@ impl Network for IpNetwork {
         }
     }
 
+    fn release_lease(&self, addr: Ipv6Addr) -> Result<()> {
+        self.backend.release_address(&addr)
+    }
+
     fn enforce(&self, _enforcement: &NetworkEnforcement) -> Result<()> {
         Ok(())
     }

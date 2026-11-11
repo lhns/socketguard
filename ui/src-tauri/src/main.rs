@@ -36,16 +36,22 @@ struct UiError {
 }
 
 const ACCESS_HINT: &str = if cfg!(windows) {
-    "Make sure the daemon is running and your account is in the local group 'SocketGuard Users'."
+    "Make sure the SocketGuard service is running and your account is in the local group 'SocketGuard Users'."
 } else {
-    "Make sure the daemon is running and your user is in the 'socketguard' group."
+    "Make sure the SocketGuard service is running and your user is in the 'socketguard' group."
 };
 
 impl From<ClientError> for UiError {
     fn from(e: ClientError) -> Self {
         match e {
             ClientError::Connect { endpoint, source } => UiError {
-                code: "connection".into(),
+                // The service answers on its socket, but this account may not use it.
+                code: if source.kind() == std::io::ErrorKind::PermissionDenied {
+                    "permission_denied"
+                } else {
+                    "connection"
+                }
+                .into(),
                 message: format!("Cannot reach the daemon at {endpoint}: {source}"),
                 details: Some(serde_json::json!({ "endpoint": endpoint, "hint": ACCESS_HINT })),
             },
@@ -465,54 +471,121 @@ async fn connect_sse(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(windows)]
-#[tauri::command]
-async fn start_daemon() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let daemon = exe.parent().unwrap().join("socketguard-daemon.exe");
-    if !daemon.exists() {
-        return Err("socketguard-daemon.exe not found next to UI executable".into());
-    }
-    spawn_elevated(&daemon)
+// ─── The service, access and removal (ADR 0050) ──────────────────────────
+//
+// Everything that changes the host is a command of `socketguard-daemon`, run through the
+// system's elevation prompt. The window never starts a daemon of its own.
+
+#[derive(Debug, Serialize)]
+struct ServiceStatus {
+    installed: bool,
+    running: bool,
 }
 
-/// Launch the daemon through the UAC prompt (`runas`).
-#[cfg(windows)]
-fn spawn_elevated(path: &std::path::Path) -> Result<(), String> {
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
-
-    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
-    let file: Vec<u16> = path
-        .to_string_lossy()
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            PCWSTR(verb.as_ptr()),
-            PCWSTR(file.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_HIDE,
-        )
+/// Run `socketguard-daemon <args>` with administrator rights and wait for it.
+async fn run_daemon_elevated(args: Vec<String>) -> CmdResult<SetupRun> {
+    let command = format!("socketguard-daemon {}", args.join(" "));
+    let Ok(daemon) = sibling("socketguard-daemon") else {
+        return Ok(SetupRun {
+            launched: false,
+            cancelled: false,
+            exit_code: None,
+            command,
+        });
     };
-
-    let code = result.0 as isize;
-    if code > 32 {
-        Ok(())
-    } else {
-        Err(format!("ShellExecuteW failed with code {code}"))
-    }
+    let run = tokio::task::spawn_blocking(move || elevated_run(&daemon, &args, false))
+        .await
+        .map_err(|e| internal(e.to_string()))?;
+    Ok(setup_run(run, command))
 }
 
-#[cfg(not(windows))]
+/// Whether the service is installed and running; needs no administrator rights.
 #[tauri::command]
-async fn start_daemon() -> Result<(), String> {
-    Err("Starting the daemon from the UI is only supported on Windows; start it with systemd or sudo.".into())
+async fn service_status() -> CmdResult<ServiceStatus> {
+    let daemon = sibling("socketguard-daemon")?;
+    tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new(daemon);
+        cmd.args(["service", "status", "--json"]);
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000); // CREATE_NO_WINDOW
+        let out = cmd.output().map_err(|e| internal(e.to_string()))?;
+        serde_json::from_slice::<serde_json::Value>(&out.stdout)
+            .ok()
+            .and_then(|v| Some((v.get("installed")?.as_bool()?, v.get("running")?.as_bool()?)))
+            .map(|(installed, running)| ServiceStatus { installed, running })
+            .ok_or_else(|| internal("service status gave no answer".into()))
+    })
+    .await
+    .map_err(|e| internal(e.to_string()))?
+}
+
+/// Start the SocketGuard service, installing it first when it is not installed.
+#[tauri::command]
+async fn start_daemon() -> CmdResult<SetupRun> {
+    let installed = service_status().await.map(|s| s.installed).unwrap_or(true);
+    let action = if installed { "start" } else { "install" };
+    run_daemon_elevated(vec!["service".into(), action.into()]).await
+}
+
+/// Install the service (it starts at once).
+#[tauri::command]
+async fn install_service() -> CmdResult<SetupRun> {
+    run_daemon_elevated(vec!["service".into(), "install".into()]).await
+}
+
+/// The account this window runs as, in the form `access allow` takes: `DOMAIN\user` for a
+/// domain account on Windows, the plain name otherwise.
+fn account_name() -> CmdResult<String> {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    #[cfg(windows)]
+    let name = var("USERNAME").map(|user| match (var("USERDOMAIN"), var("COMPUTERNAME")) {
+        (Some(d), Some(c)) if !d.eq_ignore_ascii_case(&c) => format!("{d}\\{user}"),
+        _ => user,
+    });
+    #[cfg(not(windows))]
+    let name = var("USER").or_else(|| {
+        let out = std::process::Command::new("id").arg("-un").output().ok()?;
+        let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+        (!s.is_empty()).then_some(s)
+    });
+    name.filter(|n| !n.contains(['"', '\n', '\r']))
+        .ok_or_else(|| internal("cannot tell which account this is".into()))
+}
+
+#[tauri::command]
+async fn current_account() -> CmdResult<String> {
+    account_name()
+}
+
+/// Add this account to the group that may use the service (applies from the next sign-in).
+#[tauri::command]
+async fn allow_my_account() -> CmdResult<SetupRun> {
+    let account = account_name()?;
+    run_daemon_elevated(vec!["access".into(), "allow".into(), account]).await
+}
+
+/// Remove SocketGuard from this computer. `purge` also deletes the settings and keys;
+/// otherwise they stay. Always silent: the window has asked already.
+#[tauri::command]
+async fn remove_socketguard(purge: bool) -> CmdResult<SetupRun> {
+    let keep = if purge { "--purge" } else { "--keep-data" };
+    run_daemon_elevated(vec!["uninstall".into(), "--yes".into(), keep.into()]).await
+}
+
+/// Forget this window's own local storage (the columns shown in Apps, and whatever else the
+/// webview keeps). Only the webview profile of this app is touched.
+#[tauri::command]
+async fn clear_local_ui_settings(window: tauri::WebviewWindow) -> CmdResult<()> {
+    let _ = window.eval("try { localStorage.removeItem('socketguard.columns'); } catch (e) {}");
+    window
+        .clear_all_browsing_data()
+        .map_err(|e| internal(e.to_string()))
+}
+
+/// Close the window and the app.
+#[tauri::command]
+async fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 // ─── Network setup (ADR 0048) ────────────────────────────────────────────
@@ -567,24 +640,29 @@ fn setup_args_with(
     Ok(args)
 }
 
-/// The CLI next to this executable.
-fn cli_path() -> Result<std::path::PathBuf, UiError> {
-    let exe = std::env::current_exe().map_err(|e| UiError {
-        code: "internal".into(),
-        message: e.to_string(),
-        details: None,
-    })?;
-    let name = if cfg!(windows) {
-        "socketguard.exe"
-    } else {
-        "socketguard"
-    };
-    let cli = exe.parent().map(|d| d.join(name)).filter(|p| p.exists());
-    cli.ok_or_else(|| UiError {
+/// A program installed next to this executable (`base` without the platform suffix).
+fn sibling(base: &str) -> Result<std::path::PathBuf, UiError> {
+    let exe = std::env::current_exe().map_err(|e| internal(e.to_string()))?;
+    let name = format!("{base}{}", std::env::consts::EXE_SUFFIX);
+    let path = exe.parent().map(|d| d.join(&name)).filter(|p| p.exists());
+    path.ok_or_else(|| UiError {
         code: "not_found".into(),
         message: format!("{name} was not found next to the SocketGuard window"),
         details: None,
     })
+}
+
+fn internal(message: String) -> UiError {
+    UiError {
+        code: "internal".into(),
+        message,
+        details: None,
+    }
+}
+
+/// The CLI next to this executable.
+fn cli_path() -> Result<std::path::PathBuf, UiError> {
+    sibling("socketguard")
 }
 
 /// Start `socketguard networks setup <kind>` with administrator rights and wait for it.
@@ -635,14 +713,14 @@ async fn launch_setup(
         }
     };
     let command = shown(false);
-    let run = tokio::task::spawn_blocking(move || elevated_run(&cli, &args))
+    let run = tokio::task::spawn_blocking(move || elevated_run(&cli, &args, true))
         .await
-        .map_err(|e| UiError {
-            code: "internal".into(),
-            message: e.to_string(),
-            details: None,
-        })?;
-    Ok(match run {
+        .map_err(|e| internal(e.to_string()))?;
+    Ok(setup_run(run, command))
+}
+
+fn setup_run(run: ElevatedRun, command: String) -> SetupRun {
+    match run {
         ElevatedRun::Done(code) => SetupRun {
             launched: true,
             cancelled: false,
@@ -661,7 +739,7 @@ async fn launch_setup(
             exit_code: None,
             command,
         },
-    })
+    }
 }
 
 enum ElevatedRun {
@@ -672,14 +750,15 @@ enum ElevatedRun {
     Unavailable,
 }
 
-/// UAC (`runas`) in a visible console that the CLI keeps open at the end (`--pause`).
+/// UAC (`runas`), in a visible console (that the CLI keeps open at the end with `--pause`)
+/// or hidden.
 #[cfg(windows)]
-fn elevated_run(cli: &std::path::Path, args: &[String]) -> ElevatedRun {
+fn elevated_run(cli: &std::path::Path, args: &[String], visible: bool) -> ElevatedRun {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
     use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
     let verb = wide("runas");
@@ -697,7 +776,7 @@ fn elevated_run(cli: &std::path::Path, args: &[String]) -> ElevatedRun {
         lpVerb: PCWSTR(verb.as_ptr()),
         lpFile: PCWSTR(file.as_ptr()),
         lpParameters: PCWSTR(params.as_ptr()),
-        nShow: SW_SHOWNORMAL.0,
+        nShow: if visible { SW_SHOWNORMAL.0 } else { SW_HIDE.0 },
         ..Default::default()
     };
     if unsafe { ShellExecuteExW(&mut info) }.is_err() {
@@ -730,7 +809,7 @@ fn sh_quote(s: &str) -> String {
 
 /// pkexec on Linux, osascript on macOS; nothing else is tried.
 #[cfg(not(windows))]
-fn elevated_run(cli: &std::path::Path, args: &[String]) -> ElevatedRun {
+fn elevated_run(cli: &std::path::Path, args: &[String], _visible: bool) -> ElevatedRun {
     use std::process::Command;
     let status = if cfg!(target_os = "macos") {
         let line = std::iter::once(cli.to_string_lossy().to_string())
@@ -854,6 +933,13 @@ fn main() {
             disable,
             subscribe_events,
             start_daemon,
+            install_service,
+            service_status,
+            current_account,
+            allow_my_account,
+            remove_socketguard,
+            clear_local_ui_settings,
+            quit_app,
         ])
         .run(tauri::generate_context!())
         .expect("error running SocketGuard UI");

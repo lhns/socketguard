@@ -1,8 +1,10 @@
 //! Keys of the `settings` table and the typed accessors over them.
 
 use super::Database;
+use crate::networks::ip::dhcpv6::StateStore;
 use anyhow::Result;
 use socketguard_core::Settings;
+use std::sync::Arc;
 use tracing::warn;
 
 /// Settings keys.
@@ -52,6 +54,15 @@ impl Database {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// The settings table for blocking code (network backends run in `spawn_blocking`).
+    /// Must be called inside the runtime; its calls must not be made on a runtime thread.
+    pub fn blocking_store(&self) -> Arc<dyn StateStore> {
+        Arc::new(BlockingSettings {
+            pool: self.pool.clone(),
+            runtime: tokio::runtime::Handle::current(),
+        })
     }
 
     /// The installation's ULA global ID (40 bits), generated and stored on first use so
@@ -132,6 +143,44 @@ impl Database {
     }
 }
 
+/// [`StateStore`] over the settings table: each call waits for the query on the runtime.
+struct BlockingSettings {
+    pool: sqlx::SqlitePool,
+    runtime: tokio::runtime::Handle,
+}
+
+impl StateStore for BlockingSettings {
+    fn get(&self, key: &str) -> Result<Option<String>> {
+        Ok(self.runtime.block_on(
+            sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
+                .bind(key)
+                .fetch_optional(&self.pool),
+        )?)
+    }
+
+    fn set(&self, key: &str, value: &str) -> Result<()> {
+        self.runtime.block_on(
+            sqlx::query(
+                "INSERT INTO settings (key, value) VALUES (?, ?) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(key)
+            .bind(value)
+            .execute(&self.pool),
+        )?;
+        Ok(())
+    }
+
+    fn delete(&self, key: &str) -> Result<()> {
+        self.runtime.block_on(
+            sqlx::query("DELETE FROM settings WHERE key = ?")
+                .bind(key)
+                .execute(&self.pool),
+        )?;
+        Ok(())
+    }
+}
+
 /// Parse the stored `protect_host_interfaces` value; absent or invalid means off.
 pub fn parse_protect_host(value: Option<&str>) -> Vec<String> {
     let mut v: Vec<String> = value
@@ -176,5 +225,21 @@ mod tests {
         assert!(parse_global_id("zz").is_none());
         assert_eq!(parse_protect_host(Some(r#"["b","a","a",""]"#)), ["a", "b"]);
         assert!(parse_protect_host(Some("not json")).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_blocking_store_reads_writes_and_deletes() {
+        let db = db().await;
+        let store = db.blocking_store();
+        tokio::task::spawn_blocking(move || {
+            assert_eq!(store.get("k").unwrap(), None);
+            store.set("k", "v").unwrap();
+            store.set("k", "w").unwrap();
+            assert_eq!(store.get("k").unwrap().as_deref(), Some("w"));
+            store.delete("k").unwrap();
+            assert_eq!(store.get("k").unwrap(), None);
+        })
+        .await
+        .unwrap();
     }
 }
