@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { accessSummary, membershipsOf } from "../access";
+import { accessSummaries, membershipsOf } from "../access";
 import type { App, PortGroup, Tag } from "../api";
 import type { AccessHighlight } from "../components/AccessList";
 import { AppInspector, AppsInspector } from "../components/AppInspector";
@@ -10,7 +10,7 @@ import { NewPortGroupForm, PortGroupInspector, PortGroupsInspector } from "../co
 import { NewTagForm, TagInspector, TagsInspector } from "../components/TagInspector";
 import { useColumns } from "../columns";
 import { errorText, portLabel, rangeLabel, sameScope, scopeKey, scopeLabel } from "../lib";
-import { buildColumns, buildRows, cellOf, groupsOf, type Cell, type Col, type Ctx, type Row as MatrixRow } from "../matrix";
+import { buildColumns, buildRows, cellOf, type Cell, type Col, type Ctx, type Row as MatrixRow } from "../matrix";
 import type { FocusMessage } from "../nav";
 import { useApps, useGrants, useGroups, useNetworks, usePeers, useReservations, usePortGroups, useTags } from "../queries";
 
@@ -20,6 +20,8 @@ interface AppRow extends ListRow {
   sg?: PortGroup;
 }
 
+const NO_EXPANDED = new Set<string>();
+const NO_GROUPS: PortGroup[] = [];
 const NO_CELL: Cell = { state: "none", grants: [], networkIds: [], allNetworks: false };
 
 const CELL_GLYPH = { granted: "✓", partial: "◐", inherited: "↳", none: "" } as const;
@@ -59,7 +61,8 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   const [closed, setClosed] = useState(false);
   const [highlight, setHighlight] = useState<AccessHighlight | null>(null);
   const [selectLabel, setSelectLabel] = useState<string | null>(null);
-  const [selectGroupLabel, setSelectGroupLabel] = useState<string | null>(null);
+  // The port groups there were when a new one was started: the first one beyond them is selected.
+  const [groupsBefore, setGroupsBefore] = useState<Set<string> | null>(null);
   // Showing the details again after they were closed or folded away.
   const reveal = () => {
     setStripOpen(true);
@@ -123,18 +126,38 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
 
   // A port group that was just created is selected as soon as it is in the list.
   useEffect(() => {
-    if (!selectGroupLabel) return;
-    const g = groupList.find((x) => x.label === selectGroupLabel);
+    if (!groupsBefore) return;
+    const g = groupList.find((x) => !groupsBefore.has(x.id));
     if (g) {
       setSelected(new Set([`sgroup:${g.id}`]));
-      setSelectGroupLabel(null);
+      setGroupsBefore(null);
     }
-  }, [groupList, selectGroupLabel]);
-  const own = shownApps.filter((a) => !a.system);
-  const system = shownApps.filter((a) => a.system);
+  }, [groupList, groupsBefore]);
+  const own = useMemo(() => shownApps.filter((a) => !a.system), [shownApps]);
+  const system = useMemo(() => shownApps.filter((a) => a.system), [shownApps]);
   const selectedSystem = appList.some((a) => a.system && selected.has(`app:${a.id}`));
   // A search, a filter or a selection that reaches a system service should not hide it.
   const systemOpen = showSystem || q !== "" || tagFilter !== null || selectedSystem;
+
+  // Per-row lookups, worked out once instead of by scanning all grants and tags in every cell.
+  const summaries = useMemo(() => accessSummaries(appList, ctx.grants, tagList), [appList, ctx.grants, tagList]);
+  const membershipsByApp = useMemo(() => {
+    const m = new Map<string, ReturnType<typeof membershipsOf>>();
+    for (const tag of tagList) for (const mem of tag.members) m.set(mem.app_id, [...(m.get(mem.app_id) ?? []), { tag, scope: mem.scope }]);
+    return m;
+  }, [tagList]);
+  const groupsByApp = useMemo(() => {
+    const m = new Map<string, PortGroup[]>();
+    for (const g of groupList) for (const id of g.apps) m.set(id, [...(m.get(id) ?? []), g]);
+    return m;
+  }, [groupList]);
+  const attachedTo = (appId: string) => groupsByApp.get(appId) ?? NO_GROUPS;
+  const tagById = useMemo(() => new Map(tagList.map((t) => [t.id, t])), [tagList]);
+  const tagGrantCount = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const g of ctx.grants) if (g.target.kind === "tag") m.set(g.target.id, (m.get(g.target.id) ?? 0) + 1);
+    return m;
+  }, [ctx.grants]);
 
   const allCols = useMemo(() => buildColumns({ ...ctx, scope: null }), [ctx]);
   const shownCols: Col[] = useMemo(
@@ -143,13 +166,21 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   );
   const withCols = shownCols.length > 0;
 
-  const appRows = (list: App[]) => buildRows(list, [], withCols ? expanded : new Set(), groupList).map(toRow);
+  const expandedPorts = withCols ? expanded : NO_EXPANDED;
+  const appRows = (list: App[]) => buildRows(list, [], expandedPorts, groupList).map(toRow);
+  const tagRows = useMemo(() => buildRows([], shownTags, NO_EXPANDED).map(toRow), [shownTags]);
+  const groupRows = useMemo(() => shownGroups.map(groupRow), [shownGroups]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const ownRows = useMemo(() => appRows(own), [own, expandedPorts, groupList]);
+  // A folded section builds no rows.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const systemRows = useMemo(() => (systemOpen ? appRows(system) : []), [systemOpen, system, expandedPorts, groupList]);
   const sections: ListSection<AppRow>[] = [
     {
       key: "tags",
       title: "Tags",
       count: shownTags.length,
-      rows: buildRows([], shownTags, new Set()).map(toRow),
+      rows: tagRows,
       action: <button className="btn btn-sm" onClick={() => { setCreating(true); setCreatingGroup(false); setSelected(new Set()); reveal(); }}>New tag</button>,
       emptyText: tagList.length === 0 ? "No tags yet. A tag groups apps so one grant covers all of them, also programs that start later." : "No tag matches.",
     },
@@ -157,13 +188,13 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
       key: "port-groups",
       title: "Port groups",
       count: shownGroups.length,
-      rows: shownGroups.map(groupRow),
-      action: <button className="btn btn-sm" onClick={() => { setCreatingGroup(true); setCreating(false); setSelected(new Set()); reveal(); }}>New port group</button>,
+      rows: groupRows,
+      action: <button className="btn btn-sm" onClick={() => { setCreatingGroup(true); setCreating(false); setSelected(new Set()); setGroupsBefore(new Set(groupList.map((g) => g.id))); reveal(); }}>New port group</button>,
       emptyText: groupList.length === 0 ? "No port groups yet. A port group names ports and ranges, like FTP's passive range, to attach to apps." : "No port group matches.",
     },
-    { key: "apps", title: "Apps", count: own.length, rows: appRows(own), emptyText: appList.length === 0 ? "No apps detected yet. The daemon discovers listening programs automatically." : "No app matches." },
+    { key: "apps", title: "Apps", count: own.length, rows: ownRows, emptyText: appList.length === 0 ? "No apps detected yet. The daemon discovers listening programs automatically." : "No app matches." },
     ...(system.length > 0
-      ? [{ key: "system", title: "System services", count: system.length, hint: "Windows services and system processes", rows: appRows(system), collapsed: !systemOpen, onToggle: () => setShowSystem(!showSystem) }]
+      ? [{ key: "system", title: "System services", count: system.length, hint: "Windows services and system processes", rows: systemRows, collapsed: !systemOpen, onToggle: () => setShowSystem(!showSystem) }]
       : []),
   ];
 
@@ -179,10 +210,10 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
           return <span className="muted">{n} {n === 1 ? "app" : "apps"}</span>;
         }
         if (r.m.kind === "tag") {
-          const t = tagList.find((x) => x.id === r.m.target.id);
+          const t = tagById.get(r.m.target.id);
           return <span className="muted">{t && t.patterns.length > 0 ? `matches ${t.patterns.join(", ")}` : ""}</span>;
         }
-        const mine = membershipsOf(r.m.target.id, tagList).filter((m) => (r.m.kind === "app" ? true : sameScope(m.scope, r.m.scope)));
+        const mine = (membershipsByApp.get(r.m.target.id) ?? []).filter((m) => (r.m.kind === "app" ? true : sameScope(m.scope, r.m.scope)));
         return (
           <>
             {mine.map((m) => (
@@ -205,11 +236,11 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
           return g ? <span className="muted">{g.ports.map(rangeLabel).join(", ")}</span> : null;
         }
         if (r.m.kind === "tag") {
-          const n = tagList.find((t) => t.id === r.m.target.id)?.members.length ?? 0;
+          const n = tagById.get(r.m.target.id)?.members.length ?? 0;
           return <span className="muted">{n} {n === 1 ? "member" : "members"}</span>;
         }
         const listening = r.m.app?.ports.filter((p) => p.listening) ?? [];
-        const attached = groupsOf(r.m.target.id, groupList);
+        const attached = attachedTo(r.m.target.id);
         return (
           <>
             {listening.length ? listening.map(portLabel).join(", ") : <span className="muted">not listening</span>}
@@ -232,10 +263,10 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
           return <span className="muted">{n === 0 ? "no grants" : `${n} grant${n === 1 ? "" : "s"}`}</span>;
         }
         if (r.m.kind === "tag") {
-          const n = (grants.data ?? []).filter((g) => g.target.kind === "tag" && g.target.id === r.m.target.id).length;
+          const n = tagGrantCount.get(r.m.target.id) ?? 0;
           return <span className="muted">{n === 0 ? "no grants" : `${n} grant${n === 1 ? "" : "s"}`}</span>;
         }
-        const sum = accessSummary(r.m.target.id, grants.data ?? [], tagList);
+        const sum = summaries.get(r.m.target.id)!;
         return (
           <>
             {sum.open && <span className="badge reach reach-bad">open to anyone</span>}
@@ -255,7 +286,16 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
     },
   ];
 
-  const cellFor = (r: AppRow, c: Col): Cell => (r.sg ? NO_CELL : cellOf(r.m, c, ctx));
+  // Each cell is asked for several times (glyph, class, label, title): work it out once.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const cellCache = useMemo(() => new Map<string, Cell>(), [ctx]);
+  const cellFor = (r: AppRow, c: Col): Cell => {
+    if (r.sg) return NO_CELL;
+    const key = `${r.key}|${c.key}`;
+    let cell = cellCache.get(key);
+    if (!cell) cellCache.set(key, (cell = cellOf(r.m, c, ctx)));
+    return cell;
+  };
   const cellTitle = (cell: Cell): string => {
     switch (cell.state) {
       case "inherited":
@@ -309,7 +349,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   const inspector = (() => {
     if (collapsed) return <Inspector label="Details" title="" collapsed onExpand={reveal} />;
     if (creating) return <NewTagForm onCreated={(label) => { setCreating(false); setSelectLabel(label); }} onClose={() => setCreating(false)} />;
-    if (creatingGroup) return <NewPortGroupForm onCreated={(label) => { setCreatingGroup(false); setSelectGroupLabel(label); }} onClose={() => setCreatingGroup(false)} />;
+    if (creatingGroup) return <NewPortGroupForm onCreated={() => setCreatingGroup(false)} onClose={() => { setCreatingGroup(false); setGroupsBefore(null); }} />;
     if (selectedApps.length === 1 && selectedTags.length === 0 && selectedGroups.length === 0) {
       return <AppInspector key={selectedApps[0].id} id={selectedApps[0].id} highlight={highlight} onCollapse={onCollapse} onClose={close} />;
     }
@@ -410,7 +450,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
             selectAllKind="app"
             selectAllLabel="Select all shown apps"
             expand={(r) =>
-              withCols && r.m.kind === "app" && !r.sg && (r.m.app?.ports.length ?? 0) + groupsOf(r.m.target.id, groupList).length > 0
+              withCols && r.m.kind === "app" && !r.sg && (r.m.app?.ports.length ?? 0) + attachedTo(r.m.target.id).length > 0
                 ? {
                     open: expanded.has(r.m.target.id),
                     label: `${expanded.has(r.m.target.id) ? "Collapse" : "Expand"} ports of ${r.m.label}`,

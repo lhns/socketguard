@@ -246,9 +246,11 @@ pub enum PortGroupsCmd {
     List,
     /// Create a port group from ports (`80/tcp`) and ranges (`50000-51000/tcp`)
     Add {
-        label: String,
         #[arg(required = true, value_name = "PORTS")]
         ports: Vec<String>,
+        /// The name; without it the group is named after its ports, e.g. `80/tcp, 443/tcp`
+        #[arg(long = "label", short = 'n')]
+        label: Option<String>,
         /// Attach it to this app right away (repeatable)
         #[arg(long = "app", value_name = "APP")]
         apps: Vec<String>,
@@ -646,9 +648,10 @@ mod tests {
         let c = parse(&[
             "port-groups",
             "add",
-            "passive",
             "21/tcp",
             "50000-51000/tcp",
+            "-n",
+            "passive",
             "--app",
             "ftpd",
         ])
@@ -659,8 +662,10 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(label, "passive");
+        assert_eq!(label.as_deref(), Some("passive"));
         assert_eq!(ports, ["21/tcp", "50000-51000/tcp"]);
+        // The name is optional.
+        assert!(parse(&["port-groups", "add", "80/tcp"]).is_ok());
         assert_eq!(apps, ["ftpd"]);
         assert!(parse(&["port-groups", "attach", "passive", "ftpd", "-y"]).is_ok());
         let c = parse(&[

@@ -16,6 +16,7 @@ use crate::networks::{LocatorRequest, NewLocator};
 use crate::state::{Database, OwnedAddress};
 use crate::AppState;
 use chrono::Utc;
+use futures_util::StreamExt;
 use socketguard_core::{
     classify_legacy, Binding, BindingTarget, LegacyClass, Model, Reservation, Row,
 };
@@ -24,6 +25,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
+
+/// How many interface calls to add addresses run at once.
+const ADD_CONCURRENCY: usize = 4;
 
 impl Engine {
     /// Write ahead of taking `addresses` off their interfaces: mark them retiring. They
@@ -49,19 +53,20 @@ impl Engine {
     /// retry the ones whose removal failed before. A row is deleted only once the removal
     /// is confirmed. Run after the ruleset is applied; needs no ruleset itself.
     pub(super) async fn sweep_owned(&self, state: &AppState) {
+        match self.wanted_on_interfaces(state).await {
+            Ok(wanted) => self.sweep_owned_except(state, &wanted).await,
+            // Never sweep on a guess: without the list everything looks orphaned.
+            Err(e) => warn!("Cannot sweep owned addresses: {e:#}"),
+        }
+    }
+
+    /// [`Engine::sweep_owned`] for a `referenced` set the caller already worked out.
+    async fn sweep_owned_except(&self, state: &AppState, referenced: &HashSet<Ipv6Addr>) {
         let db = &state.db;
-        let (owned, referenced) = match (
-            db.list_owned_addresses().await,
-            self.wanted_on_interfaces(state).await,
-        ) {
-            (Ok(o), Ok(a)) => (o, a),
-            (Err(e), _) => {
-                // Never sweep on a guess: without the list everything looks orphaned.
+        let owned = match db.list_owned_addresses().await {
+            Ok(o) => o,
+            Err(e) => {
                 warn!("Cannot sweep owned addresses: {e}");
-                return;
-            }
-            (_, Err(e)) => {
-                warn!("Cannot sweep owned addresses: {e:#}");
                 return;
             }
         };
@@ -137,21 +142,69 @@ impl Engine {
         network_id: &str,
         addr: Ipv6Addr,
     ) -> bool {
-        if !self.covered_by_applied(addr) {
-            debug!("Not adding {addr} to {iface}: the applied ruleset does not cover it");
-            return false;
-        }
-        if let Err(e) = state.db.claim_address(addr, iface, Some(network_id)).await {
-            warn!("Not adding {addr} to {iface}: cannot record it first: {e}");
-            return false;
-        }
-        match self.ifaces.add_address(iface, addr, ADDRESS_PREFIX_LEN) {
-            Ok(()) => true,
-            Err(e) => {
-                warn!("Failed to add {addr} to {iface}: {e}");
-                false
+        self.add_to_interfaces(
+            state,
+            vec![(iface.to_string(), network_id.to_string(), addr)],
+        )
+        .await
+            == 1
+    }
+
+    /// [`Engine::add_to_interface`] for several addresses. Each is gated and recorded in
+    /// turn; the interface calls, which can take a while each (Windows), then run a few at
+    /// a time off the runtime threads. Returns how many were added.
+    pub(super) async fn add_to_interfaces(
+        &self,
+        state: &AppState,
+        wanted: Vec<(String, String, Ipv6Addr)>,
+    ) -> usize {
+        let mut recorded = Vec::new();
+        for (iface, network_id, addr) in wanted {
+            if !self.covered_by_applied(addr) {
+                debug!("Not adding {addr} to {iface}: the applied ruleset does not cover it");
+                continue;
             }
+            if let Err(e) = state
+                .db
+                .claim_address(addr, &iface, Some(&network_id))
+                .await
+            {
+                warn!("Not adding {addr} to {iface}: cannot record it first: {e}");
+                continue;
+            }
+            recorded.push((iface, addr));
         }
+        let results: Vec<(String, Ipv6Addr, bool)> = futures_util::stream::iter(recorded)
+            .map(|(iface, addr)| {
+                let ifaces = self.ifaces.clone();
+                async move {
+                    let on = iface.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        ifaces.add_address(&on, addr, ADDRESS_PREFIX_LEN)
+                    })
+                    .await;
+                    let added = match result {
+                        Ok(Ok(())) => true,
+                        Ok(Err(e)) => {
+                            warn!("Failed to add {addr} to {iface}: {e}");
+                            false
+                        }
+                        Err(e) => {
+                            warn!("Failed to add {addr} to {iface}: {e}");
+                            false
+                        }
+                    };
+                    (iface, addr, added)
+                }
+            })
+            .buffer_unordered(ADD_CONCURRENCY)
+            .collect()
+            .await;
+        let added = results.iter().filter(|(_, _, ok)| *ok).count();
+        for (iface, addr, _) in results.iter().filter(|(_, _, ok)| *ok) {
+            debug!("Added address {addr} to {iface}");
+        }
+        added
     }
 
     /// The IPv6 addresses that belong on an interface now: those that are up.
@@ -345,16 +398,9 @@ impl Engine {
             }
         };
         // Only addresses that are on an interface (or wanted there) move with the prefix;
-        // a remembered one just gets the new prefix in the database.
-        let owned: HashSet<Ipv6Addr> = state
-            .db
-            .list_owned_addresses()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|o| o.addr)
-            .collect();
-        let wanted = self.wanted_on_interfaces(state).await.unwrap_or_default();
+        // a remembered one just gets the new prefix in the database. Which those are is
+        // looked up when the first address needs to move.
+        let mut placed: Option<(HashSet<Ipv6Addr>, HashSet<Ipv6Addr>)> = None;
         for network_id in self.sorted_backend_ids() {
             let active = &self.backends[network_id];
             let prefix = match active.network.current_prefix() {
@@ -377,6 +423,19 @@ impl Engine {
                 }
                 let new = with_prefix64(prefix.addr, iid_of(old));
                 info!("Prefix of backend '{network_id}' changed: moving {old} to {new}");
+                if placed.is_none() {
+                    let owned = state
+                        .db
+                        .list_owned_addresses()
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|o| o.addr)
+                        .collect();
+                    let wanted = self.wanted_on_interfaces(state).await.unwrap_or_default();
+                    placed = Some((owned, wanted));
+                }
+                let (owned, wanted) = placed.as_ref().expect("looked up above");
                 // Write ahead: the old address is retiring before the row stops naming it.
                 if owned.contains(&old) {
                     if let Err(e) = state
@@ -419,12 +478,17 @@ impl Engine {
     /// Interfaces that don't exist are skipped. An address is added only if the ruleset
     /// last applied successfully denies it: otherwise it would be exposed.
     pub(super) async fn ensure_addresses_present(&self, state: &AppState) {
-        self.sweep_owned(state).await;
+        // What belongs on the interfaces does not change by sweeping, so it is worked out
+        // once (without it, nothing is swept: everything would look orphaned).
+        let Ok(wanted) = self.wanted_on_interfaces(state).await else {
+            warn!("Cannot work out the addresses to keep on the interfaces");
+            return;
+        };
+        self.sweep_owned_except(state, &wanted).await;
         if state.db.disabled().await {
             return;
         }
         let mut expected: HashMap<String, Vec<(Ipv6Addr, String)>> = HashMap::new();
-        let wanted = self.wanted_on_interfaces(state).await.unwrap_or_default();
         for a in state.db.list_addresses().await.unwrap_or_default() {
             if let (Some(addr), Some(iface)) = (a.locator.ipv6(), self.interface_of(&a.network_id))
             {
@@ -447,6 +511,7 @@ impl Engine {
             .map(|o| o.addr)
             .collect();
 
+        let mut missing: Vec<(String, String, Ipv6Addr)> = Vec::new();
         for (iface, wanted) in expected {
             let present = match self.ifaces.list_addresses(&iface) {
                 Ok(p) => {
@@ -480,13 +545,12 @@ impl Engine {
                     }
                     continue;
                 }
-                if self
-                    .add_to_interface(state, &iface, &network_id, addr)
-                    .await
-                {
-                    info!("Added address {addr} to {iface}");
-                }
+                missing.push((iface.clone(), network_id, addr));
             }
+        }
+        let added = self.add_to_interfaces(state, missing).await;
+        if added > 0 {
+            info!("Added {added} address(es) to the interfaces");
         }
     }
 

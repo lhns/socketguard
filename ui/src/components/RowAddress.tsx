@@ -5,6 +5,7 @@ import { sameScope } from "../lib";
 import { bindsRow } from "../matrix";
 import { useNav } from "../nav";
 import { useReservations } from "../queries";
+import AddToReserved from "./AddToReserved";
 import AddressLines, { ReserveForm } from "./AddressLines";
 import CommitPreview from "./CommitPreview";
 import { useNameCtx } from "./Inspector";
@@ -16,8 +17,8 @@ interface Props {
   onlyLocal: boolean;
 }
 
-/** The "Address" part of a row card: the automatic address per network (with Reserve…), or the
- * reserved address the row is reached on. */
+/** The "Address" part of a row card: the automatic address per network (with Reserve…) and
+ * "Add to reserved address…", or the reserved address the row is reached on. */
 export default function RowAddress({ app, scope, onlyLocal }: Props) {
   const names = useNameCtx();
   const nav = useNav();
@@ -60,6 +61,7 @@ export default function RowAddress({ app, scope, onlyLocal }: Props) {
           />
         )}
         <CommitPreview commit={commit} title="This lets more in" />
+        {!onlyLocal && <AddToReserved target={{ kind: "app", app_id: app.id, scope }} />}
       </>
     );
   }

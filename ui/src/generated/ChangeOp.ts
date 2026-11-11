@@ -18,7 +18,11 @@ ref?: string,
 /**
  * Optional, as in `NewPeer`.
  */
-label?: string, credentials: Array<NewCredential>, } | { "op": "create_group", ref?: string, label: string, members: Array<string>, } | { "op": "create_tag", ref?: string, label: string, patterns: Array<string>, } | { "op": "create_port_group", ref?: string, label: string, ports: Array<PortRange>, 
+label?: string, credentials: Array<NewCredential>, } | { "op": "create_group", ref?: string, label: string, members: Array<string>, } | { "op": "create_tag", ref?: string, label: string, patterns: Array<string>, } | { "op": "create_port_group", ref?: string, 
+/**
+ * Optional, as in `NewPortGroup`.
+ */
+label?: string, ports: Array<PortRange>, 
 /**
  * Apps to attach it to right away.
  */

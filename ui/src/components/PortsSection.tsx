@@ -39,6 +39,8 @@ function rowsOf(app: AppDetail, entries: AccessEntry[], tagScopes: Scope[]): Row
 
 interface Props {
   app: AppDetail;
+  /** The detail has not arrived: who can reach each row is not known yet. */
+  partial: boolean;
   highlight: AccessHighlight | null;
   onlyLocal: boolean;
   hasV4: boolean;
@@ -46,7 +48,7 @@ interface Props {
 
 /** The "Ports" section of one app: a row for All ports, one per detected port and one per
  * attached port group. Every row has the same parts: its tags, who can reach it, Add access. */
-export default function PortsSection({ app, highlight, onlyLocal, hasV4 }: Props) {
+export default function PortsSection({ app, partial, highlight, onlyLocal, hasV4 }: Props) {
   const names = useNameCtx();
   const grants = useGrants().data ?? [];
   const protectsHost = (useSettings().data?.protect_host_interfaces.length ?? 0) > 0;
@@ -79,32 +81,7 @@ export default function PortsSection({ app, highlight, onlyLocal, hasV4 }: Props
   };
 
   return (
-    <Section
-      title="Ports"
-      aside={
-        unidentified ? undefined : (
-          <Picker
-            label="Port groups"
-            trigger="Attach port group"
-            triggerClass="btn btn-sm"
-            items={items}
-            onToggle={toggle}
-            create={(typed) => ({
-              label: <>Create &ldquo;{typed}&rdquo;</>,
-              pick: () => {
-                setCreating(typed);
-                setOpen(false);
-              },
-            })}
-            open={open}
-            onOpenChange={setOpen}
-            placeholder="Find or create a port group"
-            empty="No port groups yet. Type a name to create one."
-            align="right"
-          />
-        )
-      }
-    >
+    <Section title="Ports">
       {onlyLocal ? (
         <p className="muted">This machine only. Grants do not apply on the Local network.</p>
       ) : (
@@ -129,6 +106,7 @@ export default function PortsSection({ app, highlight, onlyLocal, hasV4 }: Props
             row={r}
             entries={entries.filter((e) => sameScope(e.row ?? e.scope, r.scope))}
             alsoAll={r.scope.kind !== "all" && hasAllEntries && (r.port !== undefined || r.group !== undefined)}
+            partial={partial}
             onlyLocal={onlyLocal}
             highlight={highlight}
             itemRef={r.scope.kind === "all" ? allRow : undefined}
@@ -143,6 +121,28 @@ export default function PortsSection({ app, highlight, onlyLocal, hasV4 }: Props
             } : undefined}
           />
         ))}
+        {!unidentified && (
+          <li className="port-add-entry">
+            <Picker
+              label="Port groups"
+              trigger="+ Port group"
+              triggerClass="btn btn-sm btn-dashed"
+              items={items}
+              onToggle={toggle}
+              create={(typed) => ({
+                label: <>Create &ldquo;{typed}&rdquo;</>,
+                pick: () => {
+                  setCreating(typed);
+                  setOpen(false);
+                },
+              })}
+              open={open}
+              onOpenChange={setOpen}
+              placeholder="Find or create a port group"
+              empty="No port groups yet. Type a name to create one."
+            />
+          </li>
+        )}
       </ul>
     </Section>
   );
@@ -154,6 +154,8 @@ interface RowProps {
   entries: AccessEntry[];
   /** Grants on All ports also cover this row: say so once instead of repeating them. */
   alsoAll: boolean;
+  /** The detail has not arrived: show "Loading…" for who can reach the row. */
+  partial: boolean;
   onlyLocal: boolean;
   highlight: AccessHighlight | null;
   itemRef?: React.RefObject<HTMLLIElement>;
@@ -162,7 +164,7 @@ interface RowProps {
 }
 
 /** One row of an app: name, tags, who can reach it, Add access, address. */
-function RowItem({ app, row, entries, alsoAll, onlyLocal, highlight, itemRef, jumpToAll, onDetach }: RowProps) {
+function RowItem({ app, row, entries, alsoAll, partial, onlyLocal, highlight, itemRef, jumpToAll, onDetach }: RowProps) {
   const nav = useNav();
   const names = useNameCtx();
   const reservations = useReservations().data ?? [];
@@ -193,7 +195,9 @@ function RowItem({ app, row, entries, alsoAll, onlyLocal, highlight, itemRef, ju
       }
       tags={<TagPicker appIds={[app.id]} scope={row.scope} />}
       access={
-        onlyLocal ? undefined : (
+        onlyLocal ? undefined : partial ? (
+          <div className="port-access"><p className="muted">Loading…</p></div>
+        ) : (
           <RowAccess
             entries={entries}
             rowScope={row.scope}

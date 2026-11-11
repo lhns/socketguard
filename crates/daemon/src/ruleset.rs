@@ -144,7 +144,7 @@ fn host_ipv4_rules(
         if v4_ports.is_empty() {
             continue;
         }
-        for ag in &model.app_grants(app) {
+        for ag in model.app_grants(app).iter() {
             let grant = &ag.grant;
             let scoped = grant
                 .network_id
@@ -234,7 +234,6 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
     let model = Model::new(snap.world());
     let info = model.address_info();
     let apps: HashMap<&str, &App> = snap.apps.iter().map(|a| (a.id.as_str(), a)).collect();
-    let mut grants_of: HashMap<&str, Vec<socketguard_core::AppGrant>> = HashMap::new();
     for address in &snap.addresses {
         let Some(state) = info.get(&address.id).filter(|s| s.up) else {
             continue; // dormant: not on the interface, no rules
@@ -254,9 +253,7 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
             let Some(app) = apps.get(app_id.as_str()) else {
                 continue;
             };
-            let app_grants = grants_of
-                .entry(app.id.as_str())
-                .or_insert_with(|| model.app_grants(app));
+            let app_grants = model.app_grants(app);
             let iif = match &network.interface {
                 Some(i) if valid_interface_name(i) => Some(i.clone()),
                 Some(i) => {

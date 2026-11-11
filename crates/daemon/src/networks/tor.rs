@@ -64,8 +64,8 @@ pub struct Plan {
 /// Tor authorizes per service, not per port, so every authorized party gets every
 /// published port. The published ports are the union of the granted ports; a party whose
 /// grants cover fewer ports than that is left out (and noted), which keeps the service
-/// closed rather than over-granting. Give a port its own address (`split`) to grant it
-/// separately.
+/// closed rather than over-granting. Granting a port on its own row gives it its own
+/// address, which grants it separately.
 pub fn plan(addr: &EnforcedAddress) -> Plan {
     let mut notes = Vec::new();
     let tcp: Vec<PortRef> = addr

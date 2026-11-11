@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import ReservedPage from "./ReservedPage";
 import type { ChangesRequest, GrantView, Network } from "../api";
 import {
-  batch, detail, grantView, mkApp, mkPeer, mkReservation, memoryStorage, mockDaemon, networks, renderWithProviders, saved,
+  batch, detail, grantView, mkApp, mkPeer, mkReservation, mkTag, memoryStorage, mockDaemon, networks, renderWithProviders, saved,
 } from "../test/helpers";
 
 const nginx = mkApp("a1", "nginx", [80, 443]);
@@ -218,6 +218,17 @@ describe("Add ports", () => {
     await user.click(await screen.findByRole("checkbox", { name: row }));
     return panel;
   };
+
+  it("lists the tags first, then the apps", async () => {
+    setup({ list_tags: () => [mkTag("t1", "web", ["a1"])] });
+    const user = userEvent.setup();
+    renderWithProviders(<ReservedPage />);
+    const panel = await openReservation(user, "front");
+    await user.click(panel.getByRole("button", { name: "Add ports" }));
+    const list = await screen.findByRole("listbox", { name: "Ports of front" });
+    const headings = [...list.querySelectorAll(".picker-heading")].map((h) => h.textContent);
+    expect(headings).toEqual(["Tags", "nginx", "caddy", "sshd"]);
+  });
 
   it("lists the rows of every app by app, and disables the rows bound elsewhere with the reservation", async () => {
     setup();
