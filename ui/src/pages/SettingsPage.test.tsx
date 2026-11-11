@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import SettingsPage from "./SettingsPage";
-import { mockDaemon, renderWithProviders, settings, status } from "../test/helpers";
+import { memoryStorage, mockDaemon, renderWithProviders, settings, status } from "../test/helpers";
 
 const risk = {
   process_name: "sshd",
@@ -131,6 +131,8 @@ describe("Settings page", () => {
     };
 
     it("explains what goes, keeps settings by default, runs the uninstall with --keep-data, then clears the window and closes", async () => {
+      vi.stubGlobal("localStorage", memoryStorage());
+      localStorage.setItem("socketguard.columns", '["p1"]');
       const d = mockDaemon({ remove_socketguard: () => ok, clear_local_ui_settings: () => undefined, quit_app: () => undefined });
       const user = userEvent.setup();
       renderWithProviders(<SettingsPage />);
@@ -145,6 +147,8 @@ describe("Settings page", () => {
       await user.click(within(dialog).getByRole("button", { name: "Remove SocketGuard" }));
       await waitFor(() => expect(d.count("quit_app")).toBe(1));
       expect(d.last("remove_socketguard")?.args).toEqual({ purge: false });
+      expect(localStorage.getItem("socketguard.columns")).toBeNull();
+      vi.unstubAllGlobals();
       expect(d.calls.map((c) => c.cmd).filter((c) => ["remove_socketguard", "clear_local_ui_settings", "quit_app"].includes(c))).toEqual([
         "remove_socketguard", "clear_local_ui_settings", "quit_app",
       ]);

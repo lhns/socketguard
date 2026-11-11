@@ -8,7 +8,7 @@ export function elevatedFailure(r: SetupRun): string | null {
   if (!r.launched) {
     return "This system has no way to ask for administrator rights from here. Run this in a terminal with administrator rights:";
   }
-  if (r.exit_code !== 0) return `The command stopped (exit code ${r.exit_code ?? "unknown"}). Fix what it reports, then try again.`;
+  if (r.exit_code !== 0) return `The command stopped (exit code ${r.exit_code ?? "unknown"}). Run it in a terminal with administrator rights to see why.`;
   return null;
 }
 

@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import { api } from "../api";
+import { forgetColumns } from "../columns";
 import { errorText, saveTextFile } from "../lib";
 import ElevatedAction from "./ElevatedAction";
 
@@ -35,6 +36,9 @@ export default function RemoveDialog({ onCancel }: { onCancel: () => void }) {
 
   const finish = async () => {
     setDone(true);
+    // Synchronously here, so it is gone before the window closes; the backend wipes the
+    // rest of the webview profile as well.
+    forgetColumns();
     try {
       await api.clearLocalUiSettings();
     } catch {

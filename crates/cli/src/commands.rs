@@ -1846,9 +1846,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let err = super::daemon_next_to(&dir.join("socketguard")).unwrap_err();
         assert!(err.to_string().contains("was not found next to"), "{err}");
-        let daemon = dir.join(format!("socketguard-daemon{}", std::env::consts::EXE_SUFFIX));
+        let daemon = dir.join(format!(
+            "socketguard-daemon{}",
+            std::env::consts::EXE_SUFFIX
+        ));
         std::fs::write(&daemon, b"").unwrap();
-        assert_eq!(super::daemon_next_to(&dir.join("socketguard")).unwrap(), daemon);
+        assert_eq!(
+            super::daemon_next_to(&dir.join("socketguard")).unwrap(),
+            daemon
+        );
         std::fs::remove_file(&daemon).unwrap();
     }
 

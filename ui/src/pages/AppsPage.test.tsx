@@ -327,7 +327,7 @@ describe("A program that moved", () => {
     const d = setup({ list_apps: () => [nginx, redis, old], changes: (a) => batch(a.req as ChangesRequest, false, [moved]) });
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
-    await user.click(await inList().findByRole("button", { name: /^nginx$/ }));
+    await user.click(await inList().findByRole("button", { name: /^nginx(?!-)/ }));
     const card = await within(inspector()).findByRole("group", { name: "Moved program" });
     expect(card).toHaveTextContent("Looks like nginx-old moved.");
     await user.click(within(card).getByRole("button", { name: "Take over from the old entry" }));
@@ -341,7 +341,7 @@ describe("A program that moved", () => {
     setup({ list_apps: () => [nginx, redis, gone] });
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
-    await user.click(await inList().findByRole("button", { name: /^nginx$/ }));
+    await user.click(await inList().findByRole("button", { name: /^nginx(?!-)/ }));
     await within(inspector()).findByRole("button", { name: "Keep closed" });
     expect(screen.queryByRole("group", { name: "Moved program" })).not.toBeInTheDocument();
   });
@@ -351,7 +351,7 @@ describe("A program that moved", () => {
     setup({ list_apps: () => [reviewed, old], get_app: () => detail(reviewed) });
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
-    await user.click(await inList().findByRole("button", { name: /^nginx$/ }));
+    await user.click(await inList().findByRole("button", { name: /^nginx(?!-)/ }));
     await within(inspector()).findByRole("button", { name: "Mark pending again" });
     expect(screen.queryByRole("group", { name: "Moved program" })).not.toBeInTheDocument();
   });

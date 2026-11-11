@@ -37,6 +37,17 @@ function write(keys: string[]) {
   for (const l of listeners) l();
 }
 
+/** Forget the remembered columns (the window's own storage, on removal). */
+export function forgetColumns() {
+  try {
+    window.localStorage.removeItem(KEY);
+  } catch {
+    // Nothing stored that we can reach.
+  }
+  fallback = [];
+  for (const l of listeners) l();
+}
+
 const subscribe = (cb: () => void) => {
   listeners.add(cb);
   return () => {

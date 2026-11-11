@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, onEnforcementNotice, toDaemonError, type Enforcement } from "./api";
 import ElevatedAction from "./components/ElevatedAction";
+import { errorText } from "./lib";
 import { NavContext, type Focus, type FocusMessage, type Page } from "./nav";
 import ActivityPage from "./pages/ActivityPage";
 import AppsPage from "./pages/AppsPage";
@@ -75,6 +76,7 @@ function ConnectionBanner({ error }: { error: unknown }) {
       <div>
         <strong>{cannotUse ? "Cannot use the SocketGuard service." : "Daemon error."}</strong> {err.message}
         {hint && <div>{hint}</div>}
+        {cannotUse && service.error && <div>The service state is not known: {errorText(service.error)}</div>}
         {action}
       </div>
     </div>
