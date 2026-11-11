@@ -36,7 +36,7 @@ jobs:
         working-directory: ui
       - name: Build (./build.sh)
         shell: bash
-        run: ./build.sh
+        run: bash ./build.sh
       - uses: ./.github/actions/setup-wix
       - name: Build the MSIs (this version, and the next patch for the upgrade test)
         shell: bash
@@ -90,7 +90,7 @@ jobs:
         run: npm ci
         working-directory: ui
       - name: Build (./build.sh)
-        run: ./build.sh
+        run: bash ./build.sh
       - name: Install nfpm (pinned, checksum verified)
         run: |
           base="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}"
@@ -136,7 +136,7 @@ jobs:
         run: npm ci
         working-directory: ui
       - name: Build (./build.sh)
-        run: ./build.sh
+        run: bash ./build.sh
       - name: Build the pkgs (this version, and the next patch for the upgrade test)
         run: |
           v=$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p}' Cargo.toml | head -n1)
