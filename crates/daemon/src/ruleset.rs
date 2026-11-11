@@ -993,6 +993,9 @@ mod tests {
             .ports
             .push(app("x", &[9000], vec![]).ports[0].clone());
         assert_eq!(rule_ports(&build(&s), "ap"), ["9000/tcp"]);
+        // A stale record (seen once, no longer listening) does not keep it.
+        s.apps[0].ports.last_mut().expect("port").listening = false;
+        assert!(rule_ports(&build(&s), "ap").is_empty());
     }
 
     #[test]

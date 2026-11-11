@@ -480,7 +480,15 @@ pub fn scope_ports(
     foreign: &PortRangeSet,
 ) -> ScopePorts {
     let detected = detected_ports(app);
-    let excluded = foreign.subtract(&detected);
+    // Only a port the app is listening on now is its own: a stale record must not keep a
+    // port open that another app has taken over.
+    let own = PortRangeSet::from_ports(
+        app.ports
+            .iter()
+            .filter(|p| p.listening)
+            .map(|p| p.port_ref()),
+    );
+    let excluded = foreign.subtract(&own);
     match scope {
         Scope::All => {
             let attached = groups
@@ -489,7 +497,7 @@ pub fn scope_ports(
                 .fold(PortRangeSet::new(), |acc, g| acc.union(&g.port_set()));
             ScopePorts {
                 ranged: attached.subtract(&detected).subtract(&excluded),
-                fixed: detected,
+                fixed: detected.subtract(&excluded),
             }
         }
         Scope::Port { port, proto } => ScopePorts {
