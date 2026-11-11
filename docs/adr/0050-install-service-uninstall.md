@@ -1,0 +1,35 @@
+# ADR 0050: Installed as a Service, with Fixed Paths and an Uninstall That Leaves Nothing
+
+## Status
+
+Accepted. Fulfils the uninstaller that ADR 0026 names as a release blocker. Changes where ADR 0038's config file lives by default.
+
+## Date
+
+2026-11-11
+
+## Context
+
+`docs/footprint.md` lists what SocketGuard puts on a host. Several items have no removal path (database, config, groups, service unit, the pf anchor line, a WFP engine option, DHCPv6 leases), and the removal that exists is unsafe: config and database default to the working directory, so `--disable` run elsewhere finds an empty state, deletes the rules and leaves the addresses unprotected. There is no installer, and outside Linux no service, so the daemon is started by hand and a frontend needs administrator rights.
+
+## Decision
+
+- **Fixed locations.** Config and database live in one system directory per platform (Windows `%ProgramData%\SocketGuard`, Linux `/etc/socketguard` and `/var/lib/socketguard`, macOS `/Library/Application Support/SocketGuard`). `SOCKETGUARD_CONFIG` and `db_path` still override. Nothing defaults to the working directory any more. A daemon that finds state in the old place moves it once and says so.
+- **Every install and removal action is a command of the daemon binary** (`service install|uninstall|start|stop`, `uninstall`). Packages only call these commands, so the logic is tested in one place.
+- **Service.** A Windows service, a systemd unit and a launchd daemon, started with the system. Stopping the service removes nothing (ADR 0026).
+- **Install record.** Install writes what it found and what it created (group existed or not, pf anchor line and pf state, the WFP engine option's prior value) to the same log network setup uses. Removal reverses exactly that record and nothing else.
+- **Disable is safe.** It opens the existing database and never creates one. Without it, it refuses; `--force` removes what can be found by name (provider, table, anchor) and reports what it could not check. It includes services known only to the Tor ledger, and it reports truthfully and exits non-zero when something is left.
+- **Uninstall** = stop the service, refuse if a daemon still answers, disable, undo the install record and the network setup log, remove the service and, where it created them, the groups. It keeps the database and config unless told otherwise: asked when a person runs it, kept when run silently, deleted by `--purge` (and by `apt purge`). Before deleting it offers an export, because the database holds the onion keys. It deletes named files only, never a directory tree it did not create.
+- **An upgrade is not an uninstall.** Package scripts must tell the two apart; disable and purge never run on an upgrade.
+- **Access.** A group (`SocketGuard Users` on Windows, `socketguard` elsewhere) may use the API without administrator rights. The Windows installer offers to add the installing account; Linux and macOS packages add nobody, and the frontends offer "allow my account" with elevation.
+- **DHCPv6.** The client identifier is stored and stable, and an address that is given up is released to the server.
+- **Packages.** A WiX MSI for Windows, deb and rpm for Linux, a pkg for macOS, built by a release workflow. Unsigned for now; signing is added by providing certificates.
+- **Proof.** After uninstall with purge, a check looks for every item in `docs/footprint.md` from outside and must find none. It runs in CI for each package.
+
+## Consequences
+
+- A frontend connects to a running service without elevation; the test wrapper around the daemon is no longer needed.
+- Uninstalling from a package manager keeps settings and keys; removing them is a separate, explicit step.
+- Unsigned installers show a warning on Windows and are blocked by default on macOS until signing is set up.
+- Linux and macOS installers are verified only in CI.
+- Existing hand-started installations change location once.
