@@ -10,9 +10,11 @@ import { ALL_SCOPE, rangeLabel, sameScope } from "../lib";
 const T0 = "2026-01-01T00:00:00Z";
 const networks: Network[] = [
   { id: "n-local", kind: "local", name: "Local", interface: "lo", grants_apply: false, status: { state: "up" } },
-  { id: "n-ygg", kind: "yggdrasil", name: "Yggdrasil", interface: "ygg0", grants_apply: true, status: { state: "up" } },
+  { id: "n-ygg", kind: "yggdrasil", name: "Yggdrasil", interface: "ygg0", grants_apply: true, status: { state: "up" },
+    managed: { state: "up", runs_as: "the daemon's account (Windows cannot drop it)", version: "0.5.12", address: "200:8af8:ba35:56ae:bef0:6284:981f:5972", peers: ["tls://ygg.example.org:443"], peers_connected: 1 } },
   { id: "n-lan", kind: "lan", name: "LAN", interface: "eth0", grants_apply: true, status: { state: "up" } },
-  { id: "n-tor", kind: "tor", name: "Tor", interface: null, grants_apply: true, status: { state: "up" } },
+  { id: "n-tor", kind: "tor", name: "Tor", interface: null, grants_apply: true, status: { state: "up" },
+    managed: { state: "bootstrapping", progress: 62, runs_as: "socketguard-net", version: "0.4.8.12", peers: [] } },
 ];
 
 let seq = 100;
@@ -451,17 +453,16 @@ const networkSetup: NetworkSetup = {
     { interface: "eth0", has_ipv6_prefix: true, is_default_route: false, already_added: true },
   ],
   yggdrasil: {
-    state: "ready",
-    found: { yggdrasilctl: "C:\\Program Files\\Yggdrasil\\yggdrasilctl.exe", address: "200:8af8:ba35:56ae:bef0:6284:981f:5972", interface: "Yggdrasil", peers: "2" },
-    exposed: true,
-    warning: "Yggdrasil is running but not managed: programs on this PC that listen on all addresses are reachable over it until you add it here.",
+    managed: { available: true, version: "0.5.12" },
+    existing: {
+      state: "ready",
+      found: { yggdrasilctl: "C:\\Program Files\\Yggdrasil\\yggdrasilctl.exe", address: "200:8af8:ba35:56ae:bef0:6284:981f:5972", interface: "Yggdrasil", peers: "2" },
+      exposed: true,
+      warning: "Yggdrasil is running but not managed: programs on this PC that listen on all addresses are reachable over it until you add it here.",
+    },
   },
-  tor: {
-    state: "not_installed",
-    found: {}, exposed: false,
-    missing: "Tor is not installed. Windows has no package for it; download the Tor Expert Bundle, then come back here.",
-    download_link: "https://www.torproject.org/download/tor/",
-  },
+  // A build without the Tor files: only an existing node could be used.
+  tor: { managed: { available: false, reason: "this build does not include the Tor files" }, existing: { state: "absent", found: {}, exposed: false } },
   local: { state: "ready", found: {}, exposed: false },
   config_path: "C:\\ProgramData\\SocketGuard\\socketguard.json",
 };
@@ -475,7 +476,7 @@ export function installMock() {
       const a = (args ?? {}) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
       switch (cmd) {
         case "status":
-          return { version: "dev", networks, protect_host_interfaces: [], disabled: false, unadopted: false, counts: { apps: apps.length, pending_apps: apps.filter((x) => !x.reviewed).length, addresses: 0, peers: peers.length, groups: groups.length, grants: grants.length } };
+          return { version: "dev", networks, protect_host_interfaces: [], disabled: false, unadopted: false, bundled: { versions: [{ name: "tor", version: "0.4.8.12" }, { name: "yggdrasil", version: "0.5.12" }] }, counts: { apps: apps.length, pending_apps: apps.filter((x) => !x.reviewed).length, addresses: 0, peers: peers.length, groups: groups.length, grants: grants.length } };
         case "list_apps": return apps;
         case "get_app": return detail(apps.find((x) => x.id === a.id)!);
         case "list_peers": return peers;
@@ -510,17 +511,18 @@ export function installMock() {
         case "exposure":
           return {
             networks: networks
-              .filter((n) => n.kind === "yggdrasil" && (a.without === "all" || a.without === n.id))
+              .filter((n) => n.kind === "yggdrasil" && !n.managed && (a.without === "all" || a.without === n.id))
               .map((n) => ({
                 network: n.id, kind: n.kind, interface: n.interface, node_running: true,
                 listeners: [{ app: "nginx", port: 8080, proto: "tcp" }, { app: "sshd", port: 22, proto: "tcp" }],
-                services_started_by_setup: ["Yggdrasil"],
               })),
           };
-        case "stop_setup_service": return { launched: true, cancelled: false, exit_code: 0, command: "" };
-        case "run_network_setup": return { launched: false, cancelled: false, exit_code: null, command: `socketguard networks setup ${a.kind} --yes` };
-        case "open_download_page": return undefined;
-        case "add_network": return { id: a.req.type, kind: a.req.type === "slaac" ? "lan" : a.req.type, name: a.req.type, interface: a.req.interface ?? null, grants_apply: true, status: { state: "up" } };
+        case "set_network_peers": {
+          const n = networks.find((x) => x.id === a.id);
+          if (n?.managed) n.managed = { ...n.managed, peers: a.peers as string[], state: "starting", peers_connected: undefined };
+          return done(n);
+        }
+        case "add_network": return { id: a.req.type, kind: a.req.type === "slaac" ? "lan" : a.req.type, name: a.req.type, interface: a.req.interface ?? null, grants_apply: true, status: { state: "up" }, ...(a.req.managed ? { managed: { state: "starting", peers: a.req.peers ?? [] } } : {}) };
         case "get_settings": return { protect_host_interfaces: ["eth0"] };
         case "activity": return [];
         case "share_app": return { tor: [] };

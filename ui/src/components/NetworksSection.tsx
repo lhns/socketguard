@@ -3,7 +3,8 @@ import { toDaemonError, type Network, type NewNetwork } from "../api";
 import { errorText } from "../lib";
 import { useAddNetwork, useDeleteNetwork, useExposure, useNetworks, useNetworkSetup } from "../queries";
 import ConfirmDialog from "./ConfirmDialog";
-import ExposureNotice, { exposedNetworks, stoppable, stopStartedService } from "./ExposureNotice";
+import ExposureNotice, { exposedNetworks } from "./ExposureNotice";
+import { ManagedDetails, NetworkOrigin } from "./ManagedNetwork";
 import NetworkCards from "./NetworkCards";
 import { useToast } from "./Toast";
 
@@ -24,22 +25,13 @@ export default function NetworksSection() {
   const [removing, setRemoving] = useState<Network | null>(null);
   const [force, setForce] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
-  const configPath = useNetworkSetup().data?.config_path;
-  const exposure = useExposure(removing?.id ?? "", removing?.kind === "yggdrasil");
+  // A managed node stops with its network: nothing stays reachable, so nothing to ask.
+  const exposure = useExposure(removing?.id ?? "", removing?.kind === "yggdrasil" && !removing.managed);
   const exposed = exposedNetworks(exposure.data);
-  const [stop, setStop] = useState(true);
 
-  const remove = async (n: Network, forced: boolean) => {
+  const remove = (n: Network, forced: boolean) => {
     setRemoveError(null);
-    // The service goes first: if it cannot be stopped, the block stays and nothing is removed.
-    if (exposed.length > 0 && stoppable(exposed) && stop) {
-      const why = await stopStartedService(configPath);
-      if (why) {
-        setRemoveError(why);
-        return;
-      }
-    }
-    del.mutate({ id: n.id, force: forced, confirmExposed: exposed.length > 0 }, {
+    del.mutate({ id: n.id, force: forced, confirmExposed: !n.managed && exposed.length > 0 }, {
       onSuccess: () => {
         toast.success(`Removed ${n.name}`);
         setRemoving(null);
@@ -59,31 +51,34 @@ export default function NetworksSection() {
       <h2 className="card-title">Networks</h2>
       <ul className="plain-list">
         {networks.data?.map((n) => (
-          <li key={n.id} className="net-row">
-            <strong>{n.name}</strong>
-            <span className="muted">
-              {n.kind}
-              {n.interface ? ` · ${n.interface}` : ""}
-              {n.vlan_id != null ? ` · VLAN ${n.vlan_id}` : ""}
-            </span>
-            {n.status.state === "up" ? (
-              <span className="badge reach reach-ok">up</span>
-            ) : (
-              <span className="badge reach reach-bad" title={n.status.reason}>down: {n.status.reason}</span>
-            )}
-            {!n.grants_apply && <span className="muted">this machine only</span>}
-            <button
-              className="btn btn-danger btn-sm"
-              aria-label={`Remove network ${n.name}`}
-              onClick={() => {
-                setRemoveError(null);
-                setForce(false);
-                setStop(true);
-                setRemoving(n);
-              }}
-            >
-              Remove
-            </button>
+          <li key={n.id}>
+            <div className="net-row">
+              <strong>{n.name}</strong>
+              <span className="muted">
+                {n.kind}
+                {n.interface ? ` · ${n.interface}` : ""}
+                {n.vlan_id != null ? ` · VLAN ${n.vlan_id}` : ""}
+              </span>
+              {(n.kind === "tor" || n.kind === "yggdrasil") && <NetworkOrigin network={n} />}
+              {n.status.state === "up" ? (
+                <span className="badge reach reach-ok">up</span>
+              ) : (
+                <span className="badge reach reach-bad" title={n.status.reason}>down: {n.status.reason}</span>
+              )}
+              {!n.grants_apply && <span className="muted">this machine only</span>}
+              <button
+                className="btn btn-danger btn-sm"
+                aria-label={`Remove network ${n.name}`}
+                onClick={() => {
+                  setRemoveError(null);
+                  setForce(false);
+                  setRemoving(n);
+                }}
+              >
+                Remove
+              </button>
+            </div>
+            <ManagedDetails network={n} />
           </li>
         ))}
       </ul>
@@ -97,12 +92,16 @@ export default function NetworksSection() {
           title={`Remove network ${removing.name}?`}
           confirmLabel={force ? "Remove anyway" : "Remove network"}
           onCancel={() => setRemoving(null)}
-          onConfirm={() => void remove(removing, force)}
+          onConfirm={() => remove(removing, force)}
         >
           <p>
             Its addresses leave the interfaces and the grants that applied only there stop having an effect. Apps and peers stay.
           </p>
-          <ExposureNotice exposure={exposure.data} stop={stop} onStop={setStop} />
+          {removing.managed ? (
+            <p>SocketGuard&apos;s own {removing.kind === "tor" ? "Tor" : "Yggdrasil"} stops with it.</p>
+          ) : (
+            <ExposureNotice exposure={exposure.data} />
+          )}
           {removeError && <div className="error-banner" role="alert">{removeError}</div>}
         </ConfirmDialog>
       )}
@@ -117,7 +116,7 @@ function AddNetworkForm() {
   const hostInterfaces = [
     ...new Set([
       ...(setup.data?.lan.map((l) => l.interface) ?? []),
-      ...(setup.data?.yggdrasil.found.interface ? [setup.data.yggdrasil.found.interface] : []),
+      ...(setup.data?.yggdrasil.existing.found.interface ? [setup.data.yggdrasil.existing.found.interface] : []),
     ]),
   ];
   const toast = useToast();

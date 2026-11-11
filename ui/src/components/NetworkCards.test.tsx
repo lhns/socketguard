@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import NetworksSection from "./NetworksSection";
-import { mockDaemon, networkSetup, renderWithProviders, saved, setupState } from "../test/helpers";
-import type { NetworkSetup, SetupState } from "../api";
+import { kindSetup, mockDaemon, networkSetup, renderWithProviders, saved, setupState } from "../test/helpers";
+import type { NetworkSetup } from "../api";
 
 const withSetup = (over: Partial<NetworkSetup>): NetworkSetup => ({ ...networkSetup, ...over });
 const card = async (name: string) => within(await screen.findByRole("article", { name }));
@@ -40,142 +40,93 @@ describe("Network cards", () => {
     expect(d.last("add_network")?.args.req).toEqual({ type: "dhcpv6", interface: "Ethernet 3" });
   });
 
-  it("adds a ready Yggdrasil with no fields and shows what was found", async () => {
+  it("adds the managed form with one click and says nothing is installed", async () => {
+    const d = mockDaemon({ add_network: () => saved(network("yggdrasil", "yggdrasil", "ygg0")) });
+    const user = userEvent.setup();
+    renderWithProviders(<NetworksSection />);
+    const ygg = await card("Yggdrasil");
+    expect(ygg.getByText("SocketGuard runs its own Yggdrasil node. Nothing is installed or changed on your system.")).toBeInTheDocument();
+    expect(ygg.getByText("Version 0.5.12")).toBeInTheDocument();
+    expect(ygg.queryByRole("button", { name: /existing/ })).not.toBeInTheDocument();
+    await user.click(ygg.getByRole("button", { name: "Add Yggdrasil" }));
+    await waitFor(() => expect(d.count("add_network")).toBe(1));
+    expect(d.last("add_network")?.args.req).toEqual({ type: "yggdrasil", managed: true, peers: [] });
+
+    const tor = await card("Tor");
+    expect(tor.getByText("SocketGuard runs its own Tor. Nothing is installed or changed on your system.")).toBeInTheDocument();
+    await user.click(tor.getByRole("button", { name: "Add Tor" }));
+    await waitFor(() => expect(d.count("add_network")).toBe(2));
+    expect(d.last("add_network")?.args.req).toEqual({ type: "tor", managed: true });
+  });
+
+  it("offers an existing ready node as a second choice and adds it as it is", async () => {
     const d = mockDaemon({
       network_setup: () =>
-        withSetup({ yggdrasil: setupState("ready", { found: { address: "200:1::1", interface: "Yggdrasil", peers: "0" } }) }),
+        withSetup({
+          yggdrasil: kindSetup(setupState("ready", { found: { address: "200:1::1", interface: "Yggdrasil" } })),
+          tor: kindSetup(setupState("ready", { found: { control: "127.0.0.1:9051" } })),
+        }),
       add_network: () => saved(network("yggdrasil", "yggdrasil", "Yggdrasil")),
     });
     const user = userEvent.setup();
     renderWithProviders(<NetworksSection />);
     const ygg = await card("Yggdrasil");
-    expect(await ygg.findByText(/200:1::1 on Yggdrasil/)).toBeInTheDocument();
-    expect(ygg.getByText(/No peers yet/)).toBeInTheDocument();
-    expect(ygg.getByText(/everything on the Yggdrasil adapter is blocked/)).toBeInTheDocument();
-    await user.click(ygg.getByRole("button", { name: "Add Yggdrasil" }));
+    expect(ygg.getByText(/uses your node's identity; SocketGuard cannot start or stop it/i)).toBeInTheDocument();
+    expect(ygg.getByText(/200:1::1 on Yggdrasil/)).toBeInTheDocument();
+    expect(ygg.getByRole("button", { name: "Add Yggdrasil" })).toBeInTheDocument();
+    await user.click(ygg.getByRole("button", { name: "Use my existing Yggdrasil" }));
     await waitFor(() => expect(d.count("add_network")).toBe(1));
     expect(d.last("add_network")?.args.req).toEqual({ type: "yggdrasil" });
+    await user.click((await card("Tor")).getByRole("button", { name: "Use my existing Tor" }));
+    await waitFor(() => expect(d.count("add_network")).toBe(2));
+    expect(d.last("add_network")?.args.req).toEqual({ type: "tor", control: "127.0.0.1:9051", auth: "cookie" });
   });
 
-  it("says how many peers a ready Yggdrasil has", async () => {
-    mockDaemon({ network_setup: () => withSetup({ yggdrasil: setupState("ready", { found: { address: "200:1::1", interface: "Y", peers: "3" } }) }) });
-    renderWithProviders(<NetworksSection />);
-    expect(await (await card("Yggdrasil")).findByText("Connected to 3 peers.")).toBeInTheDocument();
-  });
-
-  it("offers Set up… for a stopped Yggdrasil and runs the elevated command", async () => {
-    const stopped = setupState("not_running", { missing: "The Yggdrasil service is stopped." });
-    const d = mockDaemon({
-      network_setup: () => withSetup({ yggdrasil: stopped }),
-      run_network_setup: () => ({ launched: true, cancelled: false, exit_code: 0, command: "" }),
+  it("an unavailable build says so, has no Add, and still offers a ready existing node", async () => {
+    mockDaemon({
+      network_setup: () =>
+        withSetup({
+          yggdrasil: kindSetup(setupState("absent"), { available: false, reason: "the Yggdrasil files are missing" }),
+          tor: kindSetup(setupState("ready"), { available: false, reason: "no Tor for this system" }),
+        }),
     });
-    const user = userEvent.setup();
     renderWithProviders(<NetworksSection />);
     const ygg = await card("Yggdrasil");
-    expect(ygg.queryByRole("button", { name: "Add Yggdrasil" })).not.toBeInTheDocument();
-    await user.click(await ygg.findByRole("button", { name: "Set up…" }));
-    expect(ygg.getByText("socketguard networks setup yggdrasil --yes")).toBeInTheDocument();
-    expect(ygg.getByText("socketguard networks setup yggdrasil --undo")).toBeInTheDocument();
-    expect(ygg.getByText(/setup-log.json/)).toBeInTheDocument();
-    await user.click(ygg.getByRole("button", { name: "Run as administrator" }));
-    await waitFor(() => expect(d.count("run_network_setup")).toBe(1));
-    expect(d.last("run_network_setup")?.args).toEqual({ kind: "yggdrasil", config: networkSetup.config_path });
-    // The state is asked again once it returned.
-    await waitFor(() => expect(d.count("network_setup")).toBeGreaterThan(1));
+    expect(ygg.getByText(/Not included in this build: the Yggdrasil files are missing/)).toBeInTheDocument();
+    expect(ygg.queryByRole("button")).not.toBeInTheDocument();
+    const tor = await card("Tor");
+    expect(tor.getByText(/Not included in this build/)).toBeInTheDocument();
+    expect(tor.queryByRole("button", { name: "Add Tor" })).not.toBeInTheDocument();
+    expect(tor.getByRole("button", { name: "Use my existing Tor" })).toBeInTheDocument();
   });
 
-  it("offers no install for a missing Yggdrasil, only the download page", async () => {
-    const d = mockDaemon({});
-    const user = userEvent.setup();
-    renderWithProviders(<NetworksSection />);
-    const ygg = await card("Yggdrasil");
-    expect(await ygg.findByText("Yggdrasil is not installed.")).toBeInTheDocument();
-    expect(ygg.queryByRole("button", { name: "Set up…" })).not.toBeInTheDocument();
-    expect(ygg.queryByText(/winget/)).not.toBeInTheDocument();
-    await user.click(ygg.getByRole("button", { name: "Download page" }));
-    await waitFor(() => expect(d.count("open_download_page")).toBe(1));
-  });
-
-  it("warns above Add that a running Yggdrasil is not managed", async () => {
+  it("warns above the buttons that a running Yggdrasil is not managed", async () => {
     const warning =
       "Yggdrasil is running but not managed: programs on this PC that listen on all addresses are reachable over it until you add it here.";
     mockDaemon({
       network_setup: () =>
-        withSetup({ yggdrasil: setupState("ready", { found: { address: "200:1::1", interface: "Y" }, exposed: true, warning }) }),
+        withSetup({ yggdrasil: kindSetup(setupState("ready", { found: { address: "200:1::1", interface: "Y" }, exposed: true, warning })) }),
     });
     renderWithProviders(<NetworksSection />);
     const ygg = await card("Yggdrasil");
     const text = await ygg.findByText(warning);
     const add = ygg.getByRole("button", { name: "Add Yggdrasil" });
-    // The warning comes before the button in the card.
     expect(text.compareDocumentPosition(add) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // A node that is managed or not running carries no warning.
     expect(screen.queryAllByText(warning)).toHaveLength(1);
   });
 
-  it("lists the close-first order in the steps of a stopped Yggdrasil", async () => {
-    mockDaemon({ network_setup: () => withSetup({ yggdrasil: setupState("not_running", { missing: "The Yggdrasil service is stopped." }) }) });
-    const user = userEvent.setup();
+  it("shows no card for a kind that is already added", async () => {
+    mockDaemon({ network_setup: () => withSetup({ yggdrasil: kindSetup(setupState("added")), tor: kindSetup(setupState("absent")) }) });
     renderWithProviders(<NetworksSection />);
-    const ygg = await card("Yggdrasil");
-    await user.click(await ygg.findByRole("button", { name: "Set up…" }));
-    const steps = ygg.getAllByRole("listitem").map((li) => li.textContent ?? "");
-    const add = steps.findIndex((t) => /Add the Yggdrasil network first/.test(t));
-    const start = steps.findIndex((t) => /Start the Yggdrasil service/.test(t));
-    expect(add).toBeGreaterThanOrEqual(0);
-    expect(add).toBeLessThan(start);
-  });
-
-  it("shows the command to run by hand when there is no elevation helper; a cancelled prompt is no error", async () => {
-    let answer = { launched: false, cancelled: false, exit_code: null as number | null, command: "socketguard networks setup yggdrasil --yes --config C:/c.json" };
-    mockDaemon({
-      network_setup: () => withSetup({ yggdrasil: setupState("not_running", { missing: "The Yggdrasil service is stopped." }) }),
-      run_network_setup: () => answer,
-    });
-    const user = userEvent.setup();
-    renderWithProviders(<NetworksSection />);
-    const ygg = await card("Yggdrasil");
-    await user.click(await ygg.findByRole("button", { name: "Set up…" }));
-    await user.click(ygg.getByRole("button", { name: "Run as administrator" }));
-    expect(await ygg.findByText(/--config C:\/c.json/)).toBeInTheDocument();
-    answer = { ...answer, launched: true, cancelled: true };
-    await user.click(ygg.getByRole("button", { name: "Run as administrator" }));
-    expect(await ygg.findByText(/Cancelled: nothing was changed/)).toBeInTheDocument();
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  });
-
-  it("Tor not installed without an offer gives the sentence, a download page and Check again", async () => {
-    const d = mockDaemon({});
-    const user = userEvent.setup();
-    renderWithProviders(<NetworksSection />);
-    const tor = await card("Tor");
-    expect(await tor.findByText(/Windows has no package for it; download the Tor Expert Bundle, then come back here/)).toBeInTheDocument();
-    expect(tor.queryByRole("button", { name: "Set up…" })).not.toBeInTheDocument();
-    expect(tor.getByRole("button", { name: "Check again" })).toBeInTheDocument();
-    await user.click(tor.getByRole("button", { name: "Download page" }));
-    await waitFor(() => expect(d.count("open_download_page")).toBe(1));
-    expect(d.last("open_download_page")?.args).toEqual({ url: "https://www.torproject.org/download/tor/" });
-  });
-
-  it("Tor that needs setup offers Set up… and a ready Tor adds with the default settings", async () => {
-    const needs: SetupState = setupState("not_configured", { missing: "SocketGuard does not know Tor's cookie file yet." });
-    mockDaemon({ network_setup: () => withSetup({ tor: needs, yggdrasil: setupState("added") }) });
-    const { unmount } = renderWithProviders(<NetworksSection />);
-    const tor = await card("Tor");
-    expect(await tor.findByText("SocketGuard does not know Tor's cookie file yet.")).toBeInTheDocument();
-    expect(tor.getByRole("button", { name: "Set up…" })).toBeInTheDocument();
+    await card("Tor");
     expect(screen.queryByRole("article", { name: "Yggdrasil" })).not.toBeInTheDocument();
-    unmount();
+  });
 
-    const d = mockDaemon({
-      network_setup: () => withSetup({ tor: setupState("ready", { found: { control: "127.0.0.1:9051" } }) }),
-      add_network: () => saved(network("tor", "tor")),
-    });
-    const user = userEvent.setup();
+  it("has no setup flow any more", async () => {
+    mockDaemon({});
     renderWithProviders(<NetworksSection />);
-    await user.click((await card("Tor")).getByRole("button", { name: "Add Tor" }));
-    await waitFor(() => expect(d.count("add_network")).toBe(1));
-    expect(d.last("add_network")?.args.req).toEqual({ type: "tor", control: "127.0.0.1:9051", auth: "cookie" });
+    await card("Tor");
+    expect(screen.queryByRole("button", { name: /Set up|Download page|administrator/ })).not.toBeInTheDocument();
   });
 
   it("Check again asks the daemon again", async () => {
@@ -219,7 +170,7 @@ describe("Network cards", () => {
   it("does not offer anything for a kind that is already a network", async () => {
     mockDaemon({
       network_setup: () =>
-        withSetup({ lan: [], yggdrasil: setupState("added"), tor: setupState("added"), local: setupState("added") }),
+        withSetup({ lan: [], yggdrasil: kindSetup(setupState("added")), tor: kindSetup(setupState("added")), local: setupState("added") }),
     });
     renderWithProviders(<NetworksSection />);
     expect(await screen.findByText(/Every network this machine offers is added/)).toBeInTheDocument();
