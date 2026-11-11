@@ -18,7 +18,7 @@ ref?: string,
 /**
  * Optional, as in `NewPeer`.
  */
-label?: string, credentials: Array<NewCredential>, } | { "op": "create_group", ref?: string, label: string, members: Array<string>, } | { "op": "create_tag", ref?: string, label: string, patterns: Array<string>, } | { "op": "create_socket_group", ref?: string, label: string, ports: Array<PortRange>, 
+label?: string, credentials: Array<NewCredential>, } | { "op": "create_group", ref?: string, label: string, members: Array<string>, } | { "op": "create_tag", ref?: string, label: string, patterns: Array<string>, } | { "op": "create_port_group", ref?: string, label: string, ports: Array<PortRange>, 
 /**
  * Apps to attach it to right away.
  */
@@ -26,16 +26,16 @@ apps: Array<string>,
 /**
  * Needed when attaching would open an app to Anyone.
  */
-confirm_open: boolean, } | { "op": "update_socket_group", group_id: string, label?: string, ports?: Array<PortRange>, 
+confirm_open: boolean, } | { "op": "update_port_group", group_id: string, label?: string, ports?: Array<PortRange>, 
 /**
  * Needed when new ports would open an app to Anyone.
  */
-confirm_open: boolean, } | { "op": "delete_socket_group", group_id: string, } | { "op": "attach_socket_group", group_id: string, app_id: string, 
+confirm_open: boolean, } | { "op": "delete_port_group", group_id: string, } | { "op": "attach_port_group", group_id: string, app_id: string, 
 /**
  * Needed when the app or a tag it is in has a grant to Anyone that would cover
  * the group's ports.
  */
-confirm_open: boolean, } | { "op": "detach_socket_group", group_id: string, app_id: string, } | { "op": "add_grant", target: Target, scope: Scope, network_id?: string, subject: Subject, 
+confirm_open: boolean, } | { "op": "detach_port_group", group_id: string, app_id: string, } | { "op": "add_grant", target: Target, scope: Scope, network_id?: string, subject: Subject, 
 /**
  * Needed when the subject is Anyone; without it the whole batch is refused.
  */

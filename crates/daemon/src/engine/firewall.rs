@@ -30,7 +30,7 @@ impl Engine {
             groups: db.list_groups().await?,
             grants: db.list_grants().await?,
             tags: db.list_tags().await?,
-            socket_groups: db.list_socket_groups().await?,
+            port_groups: db.list_port_groups().await?,
             v4_subnets: self.protected_v4_subnets(&protect_host),
             protect_host,
             // Owned addresses stay denied until they are really off their interface.

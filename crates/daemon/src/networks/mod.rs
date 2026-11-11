@@ -305,13 +305,13 @@ mod tests {
         }
     }
 
-    /// An address of a socket group publishes only the group's ports that listen now, even
+    /// An address of a port group publishes only the group's ports that listen now, even
     /// though the group's ranges are granted whole (ADR 0047).
     #[test]
     fn a_group_address_on_tor_publishes_only_listening_ports() {
         use chrono::Utc;
         use socketguard_core::{
-            parse_ranges, App, AppPort, Grant, Locator, Protocol, SocketGroup, Target,
+            parse_ranges, App, AppPort, Grant, Locator, PortGroup, Protocol, Target,
         };
         let now = Utc::now();
         let port = |p: u16, listening| AppPort {
@@ -321,7 +321,7 @@ mod tests {
             last_seen: now,
             family: Default::default(),
         };
-        let group = SocketGroup {
+        let group = PortGroup {
             id: "sg".into(),
             label: "passive".into(),
             ports: parse_ranges(&["50000-50010/tcp"]).unwrap(),
@@ -358,7 +358,7 @@ mod tests {
             apps: vec![app],
             networks: vec![info(NetworkKind::Tor)],
             addresses: vec![address],
-            socket_groups: vec![group],
+            port_groups: vec![group],
             grants: vec![Grant {
                 id: "g".into(),
                 target: Target::App("a".into()),

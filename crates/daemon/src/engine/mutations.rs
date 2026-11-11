@@ -8,7 +8,7 @@ use crate::AppState;
 use chrono::Utc;
 use socketguard_core::{
     new_id, normalize_credential, ActivityKind, Address, App, Credential, CredentialKind, Grant,
-    GrantView, NewCredential, NewGrant, Peer, PeerGroup, Reservation, SocketGroup, Subject, Tag,
+    GrantView, NewCredential, NewGrant, Peer, PeerGroup, PortGroup, Reservation, Subject, Tag,
     Target,
 };
 use std::collections::{BTreeSet, HashSet};
@@ -456,7 +456,7 @@ impl Engine {
     }
 
     /// Whether `scope` can be used on `app`: a port the app has (or that one of its attached
-    /// socket groups covers), or a socket group attached to it.
+    /// port groups covers), or a port group attached to it.
     pub(super) fn check_scope_on_app(
         cat: &Catalog,
         app: &App,
@@ -471,7 +471,7 @@ impl Engine {
                     proto: *proto,
                 };
                 let in_group = cat
-                    .socket_groups
+                    .port_groups
                     .iter()
                     .filter(|g| g.is_attached_to(&app.id))
                     .any(|g| g.ports.iter().any(|r| r.contains(p)));
@@ -486,7 +486,7 @@ impl Engine {
             }
             Scope::Group { id } => {
                 let group = cat
-                    .socket_group(id)
+                    .port_group(id)
                     .ok_or_else(|| EngineError::NotFound(format!("port group {id}")))?;
                 if group.is_attached_to(&app.id) {
                     Ok(())
@@ -532,7 +532,7 @@ impl Engine {
                     .ok_or_else(|| EngineError::NotFound(format!("tag {id}")))?;
                 // The grant's own scope needs no attachment, but the group must exist.
                 if let Some(gid) = req.scope.group_id() {
-                    cat.socket_group(gid)
+                    cat.port_group(gid)
                         .ok_or_else(|| EngineError::NotFound(format!("port group {gid}")))?;
                 }
                 format!("tag {}", tag.label)
@@ -654,7 +654,7 @@ pub(super) struct Catalog {
     pub peers: Vec<Peer>,
     pub groups: Vec<PeerGroup>,
     pub tags: Vec<Tag>,
-    pub socket_groups: Vec<SocketGroup>,
+    pub port_groups: Vec<PortGroup>,
     pub grants: Vec<Grant>,
     pub reservations: Vec<Reservation>,
     /// Every address as stored (no computed fields).
@@ -678,7 +678,7 @@ impl Catalog {
             peers: db.list_peers().await?,
             groups: db.list_groups().await?,
             tags: db.list_tags().await?,
-            socket_groups: db.list_socket_groups().await?,
+            port_groups: db.list_port_groups().await?,
             grants: db.list_grants().await?,
             reservations: db.list_reservations().await?,
             addresses: db.list_addresses().await?,
@@ -701,7 +701,7 @@ impl Catalog {
         self.tags.iter().find(|t| t.id == id)
     }
 
-    pub fn socket_group(&self, id: &str) -> Option<&SocketGroup> {
-        self.socket_groups.iter().find(|g| g.id == id)
+    pub fn port_group(&self, id: &str) -> Option<&PortGroup> {
+        self.port_groups.iter().find(|g| g.id == id)
     }
 }

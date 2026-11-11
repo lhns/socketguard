@@ -6,8 +6,8 @@
 //! against the real constraints and rolls back.
 
 use super::mutations::Catalog;
+use super::port_groups::GroupPlan;
 use super::reservations::ResPlan;
-use super::socket_groups::GroupPlan;
 use super::*;
 use crate::api::DaemonEvent;
 use crate::state::{NewActivity, Write};
@@ -18,7 +18,7 @@ use socketguard_core::api_types::{
 };
 use socketguard_core::{
     new_id, ActivityKind, Address, BindingTarget, Credential, Grant, GrantReach, NewGrant, Peer,
-    PeerGroup, Reach, Scope, SocketGroup, Subject, TagMember, Target,
+    PeerGroup, PortGroup, Reach, Scope, Subject, TagMember, Target,
 };
 use std::collections::BTreeMap;
 
@@ -34,7 +34,7 @@ struct Plan {
     protected: Vec<String>,
     /// Some operation gives someone access they did not have.
     changes_reach: bool,
-    /// Addresses that go with a socket group the batch detaches or deletes.
+    /// Addresses that go with a port group the batch detaches or deletes.
     removed: Vec<Address>,
 }
 
@@ -90,7 +90,7 @@ impl Plan {
         Engine::reach_of(grant, &self.cat, &self.networks, &self.protected)
     }
 
-    /// A scope whose socket group may be a `ref` of an earlier operation.
+    /// A scope whose port group may be a `ref` of an earlier operation.
     fn resolve_scope(&self, scope: &Scope) -> Result<Scope, EngineError> {
         Ok(match scope {
             Scope::Group { id } => Scope::Group {
@@ -100,7 +100,7 @@ impl Plan {
         })
     }
 
-    /// A binding target whose tag or socket group may be a `ref` of an earlier operation.
+    /// A binding target whose tag or port group may be a `ref` of an earlier operation.
     fn resolve_binding(&self, t: &BindingTarget) -> Result<BindingTarget, EngineError> {
         Ok(match t {
             BindingTarget::App { app_id, scope } => BindingTarget::App {
@@ -168,14 +168,14 @@ impl Plan {
         self.event(DaemonEvent::AppsChanged);
     }
 
-    /// Add the outcome of a socket group operation: its writes, the addresses that leave, and
+    /// Add the outcome of a port group operation: its writes, the addresses that leave, and
     /// who can now reach more (the grants that cover more ports than before).
     fn push_group_plan(
         &mut self,
         gp: GroupPlan,
         kind: ChangeKind,
         name: String,
-        group: &SocketGroup,
+        group: &PortGroup,
         activity: NewActivity,
     ) {
         let reach: Vec<GrantReach> = gp
@@ -202,7 +202,7 @@ impl Plan {
         self.changes.push(BatchChange {
             change: Change {
                 kind,
-                item: ChangeItem::SocketGroup,
+                item: ChangeItem::PortGroup,
                 name,
                 detail: (!who.is_empty()).then(|| format!("reachable by {}", who.join(", "))),
                 opens_to_anyone: gp.opens_to_anyone(),
@@ -213,7 +213,7 @@ impl Plan {
         self.activities.push(activity);
         self.writes.extend(gp.writes);
         self.removed.extend(gp.removed);
-        self.event(DaemonEvent::SocketGroupsChanged);
+        self.event(DaemonEvent::PortGroupsChanged);
         self.event(DaemonEvent::GrantsChanged);
         self.event(DaemonEvent::AppsChanged);
     }
@@ -280,7 +280,7 @@ impl Engine {
         if plan.writes.is_empty() {
             return Ok(response(&plan));
         }
-        // Addresses of a socket group that goes or is detached leave their interfaces and
+        // Addresses of a port group that goes or is detached leave their interfaces and
         // networks first (retiring, so they stay denied until really gone).
         if !plan.removed.is_empty() {
             self.retire_addresses(state, &plan.removed).await?;
@@ -442,7 +442,7 @@ impl Engine {
                 plan.writes.push(Write::InsertTag(tag));
                 plan.event(DaemonEvent::TagsChanged);
             }
-            ChangeOp::CreateSocketGroup {
+            ChangeOp::CreatePortGroup {
                 ref_,
                 label,
                 ports,
@@ -459,7 +459,7 @@ impl Engine {
                 )?;
                 plan.define_ref(ref_, &group.id)?;
                 let activity = NewActivity::new(
-                    ActivityKind::SocketGroupAdded,
+                    ActivityKind::PortGroupAdded,
                     format!("Added port group {}", group.label),
                 );
                 plan.push_group_plan(
@@ -470,7 +470,7 @@ impl Engine {
                     activity,
                 );
             }
-            ChangeOp::UpdateSocketGroup {
+            ChangeOp::UpdatePortGroup {
                 group_id,
                 label,
                 ports,
@@ -485,7 +485,7 @@ impl Engine {
                     *confirm_open,
                 )?;
                 let activity = NewActivity::new(
-                    ActivityKind::SocketGroupChanged,
+                    ActivityKind::PortGroupChanged,
                     format!("Changed port group {}", group.label),
                 );
                 plan.push_group_plan(
@@ -496,11 +496,11 @@ impl Engine {
                     activity,
                 );
             }
-            ChangeOp::DeleteSocketGroup { group_id } => {
+            ChangeOp::DeletePortGroup { group_id } => {
                 let id = plan.resolve(group_id)?;
                 let (group, gp) = self.plan_delete_group(&mut plan.cat, &id)?;
                 let activity = NewActivity::new(
-                    ActivityKind::SocketGroupRemoved,
+                    ActivityKind::PortGroupRemoved,
                     format!("Removed port group {}", group.label),
                 );
                 plan.push_group_plan(
@@ -511,7 +511,7 @@ impl Engine {
                     activity,
                 );
             }
-            ChangeOp::AttachSocketGroup {
+            ChangeOp::AttachPortGroup {
                 group_id,
                 app_id,
                 confirm_open,
@@ -525,7 +525,7 @@ impl Engine {
                         .app(app_id)
                         .map_or(app_id.clone(), |a| a.name.clone());
                     let activity = NewActivity::new(
-                        ActivityKind::SocketGroupChanged,
+                        ActivityKind::PortGroupChanged,
                         format!("Attached port group {} to {app}", group.label),
                     )
                     .app(app_id);
@@ -538,7 +538,7 @@ impl Engine {
                     );
                 }
             }
-            ChangeOp::DetachSocketGroup { group_id, app_id } => {
+            ChangeOp::DetachPortGroup { group_id, app_id } => {
                 let id = plan.resolve(group_id)?;
                 let (group, gp) = self.plan_detach_group(&mut plan.cat, &id, app_id)?;
                 let app = plan
@@ -546,7 +546,7 @@ impl Engine {
                     .app(app_id)
                     .map_or(app_id.clone(), |a| a.name.clone());
                 let activity = NewActivity::new(
-                    ActivityKind::SocketGroupChanged,
+                    ActivityKind::PortGroupChanged,
                     format!("Detached port group {} from {app}", group.label),
                 )
                 .app(app_id);
@@ -606,7 +606,7 @@ impl Engine {
                             if grant.scope.is_all() {
                                 String::new()
                             } else {
-                                format!(" {}", grant.scope.describe(&plan.cat.socket_groups))
+                                format!(" {}", grant.scope.describe(&plan.cat.port_groups))
                             }
                         ),
                         detail: grant.network_id.as_ref().map(|n| format!("on {n}")),

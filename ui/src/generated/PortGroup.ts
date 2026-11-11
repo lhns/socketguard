@@ -6,7 +6,7 @@ import type { PortRange } from "./PortRange";
  * passive range). It is attached to the apps it applies to and is then usable in each as
  * a scope; its ports need not be detected.
  */
-export type SocketGroup = { id: string, label: string, 
+export type PortGroup = { id: string, label: string, 
 /**
  * Non-empty, normalized: sorted, merged.
  */

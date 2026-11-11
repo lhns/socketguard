@@ -2,12 +2,13 @@
 // activity row to its app). Pages stay mounted, so a link only tells the target what to show.
 import { createContext, useContext } from "react";
 
-export type Page = "apps" | "peers" | "activity" | "settings";
+export type Page = "apps" | "reserved" | "peers" | "activity" | "settings";
 
 /** What a page should show when it is opened by a link rather than by the tab. */
 export interface Focus {
   appId?: string;
   tagId?: string;
+  reservationId?: string;
   search?: string;
   pendingOnly?: boolean;
   peerId?: string;

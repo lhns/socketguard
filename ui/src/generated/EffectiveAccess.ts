@@ -15,6 +15,6 @@ export type EffectiveAccess = { grant_id: string,
 scope: Scope, 
 /**
  * What the grant covers on this app now: detected ports, explicit ports and the
- * ranges of socket groups, merged.
+ * ranges of port groups, merged.
  */
 ports: Array<PortRange>, network_id: string | null, subject: Subject, origin: AccessOrigin, };

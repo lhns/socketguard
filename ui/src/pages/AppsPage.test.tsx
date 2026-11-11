@@ -1,10 +1,11 @@
+import type { Focus, Page } from "../nav";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import AppsPage from "./AppsPage";
-import type { AppDetail, ChangesRequest, EffectiveAccess, GrantView, Tag } from "../api";
+import type { AppDetail, ChangesRequest, EffectiveAccess, GrantView, Scope, Tag } from "../api";
 import {
-  batch, detail, grantView, mkApp, mkGroup, mkPeer, mkTag, memoryStorage, mockDaemon, renderWithProviders, saved,
+  batch, detail, grantView, mkApp, mkGroup, mkPeer, mkReservation, mkTag, memoryStorage, mockDaemon, renderWithProviders, saved,
 } from "../test/helpers";
 
 const nginx = mkApp("a1", "nginx", [80, 443], { reviewed: false });
@@ -169,8 +170,9 @@ describe("Inspector: one app", () => {
     expect(within(ports).getByText("80/tcp")).toBeInTheDocument();
     expect(within(row).queryByRole("button", { name: "alice" })).not.toBeInTheDocument();
     expect(within(row).getByRole("button", { name: /also reachable by everyone on All ports/ })).toBeInTheDocument();
-    const addresses = within(panel).getByRole("heading", { name: "Addresses" }).closest("section")!;
-    expect(within(addresses).getAllByText("Yggdrasil")).toHaveLength(1);
+    // The address is a part of the row, not a section of its own.
+    expect(within(panel).queryByRole("heading", { name: "Addresses" })).not.toBeInTheDocument();
+    expect(within(all).getByText("Yggdrasil")).toBeInTheDocument();
   });
 
   it("puts each access on the row that names it", async () => {
@@ -191,28 +193,92 @@ describe("Inspector: one app", () => {
     expect(row80).not.toHaveTextContent("alice");
   });
 
-  it("shows each network once, with each address, its scope and whether it is up", async () => {
+  it("shows the address on the row it serves: network, locator with Copy, up or closed; a row without one says so", async () => {
+    const mk = (id: string, network_id: string, scope: Scope, addr: string, up = true) =>
+      ({ id, app_id: "a1", network_id, scope, locator: { kind: "ipv6" as const, addr }, created_at: "t", reservation_id: null, up, excluded: [], notes: [] });
     const two = {
       ...nginx,
       addresses: [
-        { id: "x1", app_id: "a1", network_id: "n-ygg", scope: { kind: "all" as const }, locator: { kind: "ipv6" as const, addr: "302::1" }, created_at: "t", reservation_id: null, up: true, excluded: [], notes: [] },
-        { id: "x2", app_id: "a1", network_id: "n-ygg", scope: { kind: "port" as const, port: 443, proto: "tcp" as const }, locator: { kind: "ipv6" as const, addr: "302::2" }, created_at: "t", reservation_id: null, up: true, excluded: [], notes: [] },
-        { id: "x3", app_id: "a1", network_id: "n-lan", scope: { kind: "all" as const }, locator: { kind: "ipv6" as const, addr: "fd00::1" }, created_at: "t", reservation_id: null, up: true, excluded: [], notes: [] },
+        mk("x1", "n-ygg", { kind: "all" }, "302::1"),
+        mk("x2", "n-ygg", { kind: "port", port: 443, proto: "tcp" }, "302::2", false),
+        mk("x3", "n-lan", { kind: "all" }, "fd00::1"),
       ],
     };
-    setup({
-      get_app: () => detail(two),
-    });
+    setup({ get_app: () => detail(two) });
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await user.click(await inList().findByRole("button", { name: /^nginx/ }));
-    const section = (await within(inspector()).findByRole("heading", { name: "Addresses" })).closest("section")!;
-    expect(within(section).getAllByText("Yggdrasil")).toHaveLength(1);
-    expect(within(section).getAllByText("LAN")).toHaveLength(1);
-    expect(within(section).getByText("302::2")).toBeInTheDocument();
-    expect(within(section).getByText("443/tcp")).toBeInTheDocument();
-    expect(within(section).getAllByText("up")).toHaveLength(3);
-    expect(within(section).queryByRole("button")).not.toBeInTheDocument();
+    const ports = (await within(inspector()).findByRole("heading", { name: "Ports" })).closest("section")!;
+    const rowOf = (label: string) => within(ports).getByText(label, { selector: ".port-name" }).closest("li")!;
+    const all = rowOf("All ports");
+    expect(within(all).getByText("302::1")).toBeInTheDocument();
+    expect(within(all).getByText("fd00::1")).toBeInTheDocument();
+    expect(within(all).getAllByText("up")).toHaveLength(2);
+    expect(within(all).getByRole("button", { name: "Copy 302::1" })).toBeInTheDocument();
+    const r443 = rowOf("443/tcp");
+    expect(within(r443).getByText("302::2")).toBeInTheDocument();
+    expect(within(r443).getByText("closed")).toBeInTheDocument();
+    // The address is the last part of the card.
+    expect(r443.lastElementChild).toHaveClass("port-address");
+    expect(within(rowOf("80/tcp")).getByText("Gets an address when access is added.")).toBeInTheDocument();
+  });
+
+  it("Copy puts the locator on the clipboard", async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    const user = userEvent.setup();
+    setup();
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("button", { name: /^nginx/ }));
+    await user.click(await within(inspector()).findByRole("button", { name: "Copy 302::2" }));
+    expect(writeText).toHaveBeenCalledWith("302::2");
+  });
+
+  it("lists the ports an address leaves out and its notes", async () => {
+    const withExtras = {
+      ...nginx,
+      addresses: [
+        { id: "x1", app_id: "a1", network_id: "n-ygg", scope: { kind: "all" as const }, locator: { kind: "ipv6" as const, addr: "302::1" }, created_at: "t", reservation_id: null, up: true,
+          excluded: [{ start: 9000, end: 9000, proto: "tcp" as const }], notes: ["no client may connect yet"] },
+      ],
+    };
+    setup({ get_app: () => detail(withExtras) });
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("button", { name: /^nginx/ }));
+    const panel = inspector();
+    expect(await within(panel).findByText("Not served here: 9000/tcp (another app is listening on it)")).toBeInTheDocument();
+    expect(within(panel).getByText("no client may connect yet")).toBeInTheDocument();
+  });
+
+  it("Reserve… asks for a name inline and sends reserve_address through the commit rule", async () => {
+    const d = setup();
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("button", { name: /^nginx/ }));
+    const ports = (await within(inspector()).findByRole("heading", { name: "Ports" })).closest("section")!;
+    const all = within(ports).getByText("All ports", { selector: ".port-name" }).closest("li")!;
+    await user.click(within(all).getByRole("button", { name: /^Reserve/ }));
+    const form = within(all).getByRole("form", { name: "Reserve address" });
+    await user.type(within(form).getByRole("textbox"), "public-web");
+    await user.click(within(form).getByRole("button", { name: "Reserve" }));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "reserve_address", address_id: "a1-y", label: "public-web" }]]));
+  });
+
+  it("a row bound to a reservation says where it is reached and links to the Reserved tab", async () => {
+    const go = vi.fn();
+    const res = mkReservation("r1", "front", [{ kind: "app", app_id: "a1", scope: { kind: "port", port: 443, proto: "tcp" } }]);
+    setup({ list_reservations: () => [res] });
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />, go);
+    await user.click(await inList().findByRole("button", { name: /^nginx/ }));
+    const ports = (await within(inspector()).findByRole("heading", { name: "Ports" })).closest("section")!;
+    const row = within(ports).getByText("443/tcp", { selector: ".port-name" }).closest("li")!;
+    expect(row).toHaveTextContent("Reached on reserved address front");
+    expect(within(row).getByText("302:ffff::1")).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: /^Reserve/ })).not.toBeInTheDocument();
+    await user.click(within(row).getByRole("button", { name: "Go to reservation front" }));
+    expect(go).toHaveBeenCalledWith("reserved", { reservationId: "r1" });
   });
 
   it("Revoke closes at once, with an Undo toast that puts the grant back", async () => {
@@ -248,6 +314,51 @@ describe("Inspector: one app", () => {
     expect(d.count("delete_app")).toBe(0);
     await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Forget app" }));
     await waitFor(() => expect(d.last("delete_app")?.args).toEqual({ id: "a1" }));
+  });
+});
+
+describe("Move everything to another app", () => {
+  const moved = { kind: "update" as const, item: "grant" as const, name: "alice on nginx moves to redis-server", opens_to_anyone: false, reach: [] };
+  async function pickTarget(user: ReturnType<typeof userEvent.setup>, go?: (page: Page, focus?: Focus) => void) {
+    renderWithProviders(<AppsPage />, go);
+    await user.click(await inList().findByRole("button", { name: /^nginx/ }));
+    await user.click(await within(inspector()).findByRole("button", { name: "Move everything to…" }));
+    await user.click(await screen.findByRole("checkbox", { name: "redis-server" }));
+  }
+
+  it("always shows the review, even when nobody gains access, and Apply sends move_app", async () => {
+    const d = setup({ changes: (a) => batch(a.req as ChangesRequest, false, [moved]) });
+    const user = userEvent.setup();
+    const go = vi.fn();
+    await pickTarget(user, go);
+    const review = await within(inspector()).findByRole("region", { name: "Review before applying" });
+    expect(review).toHaveTextContent("alice on nginx moves to redis-server");
+    expect(applied(d)).toEqual([]);
+    await user.click(within(review).getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "move_app", from: "a1", to: "a2", confirm_open: false }]]));
+    // The target is selected afterwards.
+    await waitFor(() => expect(go).toHaveBeenCalledWith("apps", { appId: "a2" }));
+  });
+
+  it("asks for a confirmation when an Anyone grant moves", async () => {
+    const d = setup({ changes: (a) => batch(a.req as ChangesRequest, true, [{ ...moved, opens_to_anyone: true }]) });
+    const user = userEvent.setup();
+    await pickTarget(user);
+    const review = await within(inspector()).findByRole("region", { name: "Review before applying" });
+    await user.click(within(review).getByRole("button", { name: "Apply" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(applied(d)).toEqual([]);
+    await user.click(within(dialog).getByRole("button", { name: "Open it" }));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "move_app", from: "a1", to: "a2", confirm_open: true }]]));
+  });
+
+  it("Cancel in the review sends nothing", async () => {
+    const d = setup();
+    const user = userEvent.setup();
+    await pickTarget(user);
+    const review = await within(inspector()).findByRole("region", { name: "Review before applying" });
+    await user.click(within(review).getByRole("button", { name: "Cancel" }));
+    expect(applied(d)).toEqual([]);
   });
 });
 

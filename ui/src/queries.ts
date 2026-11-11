@@ -42,7 +42,7 @@ export const usePeers = () => useQuery({ queryKey: ["peers"], queryFn: api.listP
 export const useGroups = () => useQuery({ queryKey: ["groups"], queryFn: api.listGroups });
 export const useGrants = () => useQuery({ queryKey: ["grants"], queryFn: api.listGrants });
 export const useTags = () => useQuery({ queryKey: ["tags"], queryFn: api.listTags });
-export const useSocketGroups = () => useQuery({ queryKey: ["socketGroups"], queryFn: api.listSocketGroups });
+export const usePortGroups = () => useQuery({ queryKey: ["portGroups"], queryFn: api.listPortGroups });
 export const useAddresses = () => useQuery({ queryKey: ["addresses"], queryFn: api.listAddresses });
 export const useReservations = () => useQuery({ queryKey: ["reservations"], queryFn: api.listReservations });
 export const useNetworks = () => useQuery({ queryKey: ["networks"], queryFn: api.listNetworks });
@@ -114,7 +114,7 @@ const TAG_KEYS = [["tags"], ["grants"], ["apps"], ["app"], ["activity"]];
 const RESERVATION_KEYS = [["reservations"], ["addresses"], ["grants"], ["apps"], ["app"], ["activity"]];
 const NETWORK_KEYS = [["networks"], ["status"], ["apps"], ["app"], ["grants"], ["settings"]];
 /** A batch can touch anything. */
-const CHANGES_KEYS = [["grants"], ["apps"], ["app"], ["peers"], ["groups"], ["tags"], ["socketGroups"], ["reservations"], ["addresses"], ["status"], ["activity"]];
+const CHANGES_KEYS = [["grants"], ["apps"], ["app"], ["peers"], ["groups"], ["tags"], ["portGroups"], ["reservations"], ["addresses"], ["status"], ["activity"]];
 
 export const useDeleteApp = () =>
   useInvalidating((id: string) => api.deleteApp(id), [...GRANT_KEYS, ["status"], ["tags"]]);
@@ -200,14 +200,14 @@ export const EVENT_INVALIDATIONS: Record<string, string[][]> = {
   peers_changed: [["peers"], ["groups"], ["grants"], ["app"], ["share"]],
   grants_changed: [["grants"], ["apps"], ["app"], ["share"]],
   tags_changed: [["tags"], ["grants"], ["app"]],
-  socket_groups_changed: [["socketGroups"], ["grants"], ["apps"], ["app"]],
+  port_groups_changed: [["portGroups"], ["grants"], ["apps"], ["app"]],
   reservations_changed: [["reservations"], ["addresses"], ["grants"], ["apps"], ["app"]],
   addresses_changed: [["addresses"], ["reservations"], ["apps"], ["app"]],
   networks_changed: [["networks"], ["status"], ["app"]],
   settings_changed: [["settings"], ["status"]],
   activity: [["activity"]],
   daemon_disconnected: [["status"]],
-  daemon_connected: [["status"], ["apps"], ["app"], ["peers"], ["groups"], ["grants"], ["tags"], ["socketGroups"], ["reservations"], ["addresses"], ["networks"], ["settings"], ["activity"]],
+  daemon_connected: [["status"], ["apps"], ["app"], ["peers"], ["groups"], ["grants"], ["tags"], ["portGroups"], ["reservations"], ["addresses"], ["networks"], ["settings"], ["activity"]],
 };
 
 let subscribed = false;

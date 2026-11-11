@@ -72,7 +72,7 @@ impl Engine {
             &cat.grants,
             &grant_targets(&cat.tags, &cat.reservations),
             app,
-            &cat.socket_groups,
+            &cat.port_groups,
             &PortRangeSet::new(),
         );
         let (views, _) = self.address_views(state).await?;

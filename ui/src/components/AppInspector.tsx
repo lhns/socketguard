@@ -1,17 +1,17 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { appEntriesFromGrants, mergeEntries } from "../access";
-import type { AppDetail, Network } from "../api";
+import type { AppDetail } from "../api";
 import { useCommit, useRevoke } from "../commit";
-import { errorText, formatBytes, scopeLabel } from "../lib";
-import {
-  useActivity, useApp, useDeleteApp, useGrants, useReservations, useShare,
-} from "../queries";
+import { errorText, formatBytes } from "../lib";
+import { useNav } from "../nav";
+import { useActivity, useApp, useDeleteApp, useGrants, useShare } from "../queries";
 import AccessList, { type AccessHighlight } from "./AccessList";
 import PortsSection from "./PortsSection";
 import AddAccess from "./AddAccess";
 import CommitPreview from "./CommitPreview";
 import ConfirmDialog from "./ConfirmDialog";
 import Inspector, { Section, useNameCtx } from "./Inspector";
+import Picker, { type PickerItem } from "./Picker";
 import TagPicker from "./TagPicker";
 import { useToast } from "./Toast";
 
@@ -39,7 +39,13 @@ function OneApp({ app, highlight, onCollapse, onClose }: { app: AppDetail } & Co
   const toast = useToast();
   const names = useNameCtx();
   const forget = useDeleteApp();
+  const nav = useNav();
   const review = useCommit();
+  const moveTarget = useRef<string | null>(null);
+  const move = useCommit(() => {
+    if (moveTarget.current) nav.go("apps", { appId: moveTarget.current });
+  });
+  const [moving, setMoving] = useState(false);
   const [forgetting, setForgetting] = useState(false);
 
   const netById = (nid: string) => names.networks.find((n) => n.id === nid);
@@ -76,8 +82,6 @@ function OneApp({ app, highlight, onCollapse, onClose }: { app: AppDetail } & Co
 
       <PortsSection app={app} highlight={highlight} onlyLocal={onlyLocal} hasV4={hasV4} />
 
-      <Addresses app={app} networks={names.networks} />
-
       <div className="actions">
         {!app.reviewed && (
           <button className="btn btn-sm" onClick={() => void review.runBatch([{ op: "review", app_id: app.id, reviewed: true }], `${app.name} stays closed`)}>
@@ -89,9 +93,16 @@ function OneApp({ app, highlight, onCollapse, onClose }: { app: AppDetail } & Co
             Mark pending again
           </button>
         )}
+        <MovePicker app={app} open={moving} onOpenChange={setMoving} onPick={(to) => {
+          moveTarget.current = to.id;
+          setMoving(false);
+          // The diff is always shown: a move changes grants, tags, addresses and bindings at once.
+          void move.runBatch([{ op: "move_app", from: app.id, to: to.id, confirm_open: false }], `Moved everything to ${to.name}`, undefined, true);
+        }} />
         <button className="btn btn-danger btn-sm" onClick={() => setForgetting(true)}>Forget app</button>
       </div>
       <CommitPreview commit={review} />
+      <CommitPreview commit={move} title={`Move everything to ${names.apps.find((a) => a.id === moveTarget.current)?.name ?? "the other app"}`} />
 
       <TorShare appId={app.id} hasOnion={app.addresses.some((a) => a.locator.kind === "onion")} />
       <Counters app={app} />
@@ -119,40 +130,26 @@ function OneApp({ app, highlight, onCollapse, onClose }: { app: AppDetail } & Co
   );
 }
 
-/** Each network once, with the addresses serving the app on it; an address is up while it is on
- * its interface (or published, on Tor), and belongs to a reservation or to the app's own rows. */
-function Addresses({ app, networks }: { app: AppDetail; networks: Network[] }) {
-  const reservations = useReservations().data ?? [];
-  if (app.addresses.length === 0) {
-    return <Section title="Addresses"><p className="muted">No addresses yet. An app gets one once a grant names it.</p></Section>;
-  }
-  const byNetwork = new Map<string, AppDetail["addresses"]>();
-  for (const a of app.addresses) byNetwork.set(a.network_id, [...(byNetwork.get(a.network_id) ?? []), a]);
+/** "Move everything to…": a search over the other apps. */
+function MovePicker({ app, open, onOpenChange, onPick }: { app: AppDetail; open: boolean; onOpenChange: (o: boolean) => void; onPick: (to: { id: string; name: string }) => void }) {
+  const names = useNameCtx();
+  const others = names.apps.filter((a) => a.id !== app.id);
+  const items: PickerItem[] = [
+    ...others.filter((a) => !a.system).map<PickerItem>((a) => ({ id: a.id, label: a.name, section: "Apps", state: "off" })),
+    ...others.filter((a) => a.system).map<PickerItem>((a) => ({ id: a.id, label: a.name, section: "System services", state: "off" })),
+  ];
   return (
-    <Section title="Addresses">
-      <ul className="plain-list">
-        {[...byNetwork.entries()].map(([networkId, list]) => {
-          const net = networks.find((n) => n.id === networkId);
-          return (
-            <li key={networkId} className="address-net">
-              <strong>{net?.name ?? networkId}</strong>
-              {net?.grants_apply === false && <span className="muted"> · this machine only</span>}
-              {list.map((a) => {
-                const reservation = a.reservation_id ? reservations.find((r) => r.id === a.reservation_id) : undefined;
-                return (
-                  <div key={a.id} className="address-row">
-                    <span className="mono">{a.locator.kind === "ipv6" ? a.locator.addr : a.locator.hostname}</span>
-                    <span className="muted">{scopeLabel(a.scope, app.socket_groups)}</span>
-                    <span className={`badge ${a.up ? "reach reach-ok" : "reach reach-warn"}`}>{a.up ? "up" : "closed"}</span>
-                    {a.reservation_id && <span className="badge">reservation {reservation?.label ?? a.reservation_id.slice(0, 8)}</span>}
-                  </div>
-                );
-              })}
-            </li>
-          );
-        })}
-      </ul>
-    </Section>
+    <Picker
+      label="Move everything to"
+      trigger="Move everything to…"
+      triggerClass="btn btn-sm"
+      items={items}
+      onToggle={(it) => onPick({ id: it.id, name: it.label })}
+      open={open}
+      onOpenChange={onOpenChange}
+      placeholder="Find the app that replaces it"
+      empty="No other app."
+    />
   );
 }
 

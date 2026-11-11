@@ -39,9 +39,9 @@ pub enum Command {
     #[command(subcommand)]
     Tags(TagsCmd),
     /// Manage port groups: named sets of ports and port ranges, attached to apps and then
-    /// usable as a scope (`<app>:socket-group=<label>`, `--socket-group <label>`)
+    /// usable as a scope (`<app>:port-group=<label>`, `--port-group <label>`)
     #[command(subcommand)]
-    SocketGroups(SocketGroupsCmd),
+    PortGroups(PortGroupsCmd),
     /// Manage reservations: a named address that keeps its place while the apps behind it
     /// change; grants can target it (`reservation:<label>`)
     #[command(subcommand)]
@@ -241,7 +241,7 @@ pub enum TagsCmd {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum SocketGroupsCmd {
+pub enum PortGroupsCmd {
     /// List port groups
     List,
     /// Create a port group from ports (`80/tcp`) and ranges (`50000-51000/tcp`)
@@ -288,7 +288,7 @@ pub enum ReservationsCmd {
     /// List reservations: bindings, addresses (up or closed), conflicts and grants
     List,
     /// Create a reservation, optionally with bindings. A binding is an app row,
-    /// <app>[:port[/proto]] or <app>:socket-group=<label>, or tag:<label>
+    /// <app>[:port[/proto]] or <app>:port-group=<label>, or tag:<label>
     Add {
         label: String,
         bindings: Vec<String>,
@@ -333,7 +333,7 @@ pub enum AddressesCmd {
 #[derive(Subcommand, Debug)]
 pub enum TagMembersCmd {
     /// Add apps (or one port or port group of an app): <app>[:port[/proto]] or
-    /// <app>:socket-group=<label>
+    /// <app>:port-group=<label>
     Add {
         tag: String,
         #[arg(required = true)]
@@ -370,8 +370,8 @@ pub struct GrantArgs {
     #[arg(long = "port", value_name = "PORT")]
     pub ports: Vec<String>,
     /// Limit the apps and tags to this port group, by label (repeatable)
-    #[arg(long = "socket-group", value_name = "LABEL")]
-    pub socket_groups: Vec<String>,
+    #[arg(long = "port-group", value_name = "LABEL")]
+    pub port_groups: Vec<String>,
     /// A peer label, group:<label> or anyone (repeatable)
     #[arg(long = "to", value_name = "SUBJECT")]
     pub to: Vec<String>,
@@ -405,8 +405,8 @@ pub struct RevokeArgs {
     #[arg(long = "port", value_name = "PORT")]
     pub ports: Vec<String>,
     /// Limit the apps and tags to this port group, by label (repeatable)
-    #[arg(long = "socket-group", value_name = "LABEL")]
-    pub socket_groups: Vec<String>,
+    #[arg(long = "port-group", value_name = "LABEL")]
+    pub port_groups: Vec<String>,
     /// A peer label, group:<label> or anyone (repeatable)
     #[arg(long = "to", value_name = "SUBJECT")]
     pub to: Vec<String>,
@@ -642,9 +642,9 @@ mod tests {
     }
 
     #[test]
-    fn socket_group_commands_and_flags_parse() {
+    fn port_group_commands_and_flags_parse() {
         let c = parse(&[
-            "socket-groups",
+            "port-groups",
             "add",
             "passive",
             "21/tcp",
@@ -653,7 +653,7 @@ mod tests {
             "ftpd",
         ])
         .unwrap();
-        let Command::SocketGroups(SocketGroupsCmd::Add {
+        let Command::PortGroups(PortGroupsCmd::Add {
             label, ports, apps, ..
         }) = c.command
         else {
@@ -662,12 +662,12 @@ mod tests {
         assert_eq!(label, "passive");
         assert_eq!(ports, ["21/tcp", "50000-51000/tcp"]);
         assert_eq!(apps, ["ftpd"]);
-        assert!(parse(&["socket-groups", "attach", "passive", "ftpd", "-y"]).is_ok());
+        assert!(parse(&["port-groups", "attach", "passive", "ftpd", "-y"]).is_ok());
         let c = parse(&[
             "grant",
             "--app",
             "ftpd",
-            "--socket-group",
+            "--port-group",
             "passive",
             "--to",
             "alice",
@@ -676,7 +676,7 @@ mod tests {
         let Command::Grant(g) = c.command else {
             panic!()
         };
-        assert_eq!(g.socket_groups, ["passive"]);
+        assert_eq!(g.port_groups, ["passive"]);
     }
 
     #[test]

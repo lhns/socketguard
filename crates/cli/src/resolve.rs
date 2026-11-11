@@ -55,7 +55,7 @@ impl Named for socketguard_core::ReservationView {
     }
 }
 
-impl Named for socketguard_core::SocketGroup {
+impl Named for socketguard_core::PortGroup {
     fn id(&self) -> &str {
         &self.id
     }

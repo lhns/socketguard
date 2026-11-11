@@ -19,17 +19,17 @@ use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use serde::{de::DeserializeOwned, Serialize};
 use socketguard_core::api_types::{
-    ApiError, ApplyRequest, ApplyResponse, AttachSocketGroup, ChangesRequest, ChangesResponse,
+    ApiError, ApplyRequest, ApplyResponse, AttachPortGroup, ChangesRequest, ChangesResponse,
     DisableRequest, Enforcement, EnforcementNotice, ExportDocument, MemberQuery, MoveAppRequest,
-    NewBinding, NewGroup, NewNetwork, NewPeer, NewReservation, NewSocketGroup, NewTag,
-    NewTagMember, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse, ReserveRequest,
+    NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation, NewTag, NewTagMember,
+    ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse, ReserveRequest,
     ReviewRequest, SetMembers, ShareResponse, StatusResponse, TorKeyResponse, UpdateLabel,
-    UpdateSocketGroup, UpdateTag,
+    UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::{
     ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
-    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, ReservationView, Scope, Settings,
-    SocketGroup, Tag, TagMember,
+    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, PortGroup, ReservationView, Scope,
+    Settings, Tag, TagMember,
 };
 
 /// Environment variable that overrides the endpoint (socket path or pipe name).
@@ -456,7 +456,7 @@ impl Client {
         self.call_saved(&routes::DELETE_TAG, &[id], None).await
     }
 
-    /// Add an app (or a port or socket group of it) to a tag. A tag with a grant to Anyone
+    /// Add an app (or a port or port group of it) to a tag. A tag with a grant to Anyone
     /// opens the app, so it needs `confirm_open`, else the error code is
     /// `confirmation_required`.
     pub async fn add_tag_member(
@@ -474,7 +474,7 @@ impl Client {
             .await
     }
 
-    /// Remove an app (`Scope::All`), or one port or socket group of it, from a tag.
+    /// Remove an app (`Scope::All`), or one port or port group of it, from a tag.
     pub async fn remove_tag_member(
         &self,
         tag_id: &str,
@@ -500,61 +500,59 @@ impl Client {
         self.saved_from(status, &bytes)
     }
 
-    // ─── Socket groups ───────────────────────────────────────────────────────
+    // ─── Port groups ───────────────────────────────────────────────────────
 
-    pub async fn list_socket_groups(&self) -> Result<Vec<SocketGroup>> {
-        self.call(&routes::LIST_SOCKET_GROUPS, &[], None, None)
-            .await
+    pub async fn list_port_groups(&self) -> Result<Vec<PortGroup>> {
+        self.call(&routes::LIST_PORT_GROUPS, &[], None, None).await
     }
 
-    pub async fn get_socket_group(&self, id: &str) -> Result<SocketGroup> {
-        self.call(&routes::GET_SOCKET_GROUP, &[id], None, None)
-            .await
+    pub async fn get_port_group(&self, id: &str) -> Result<PortGroup> {
+        self.call(&routes::GET_PORT_GROUP, &[id], None, None).await
     }
 
-    /// Create a socket group (and attach it to `req.apps`). Where attaching would open an
+    /// Create a port group (and attach it to `req.apps`). Where attaching would open an
     /// app to Anyone it needs `confirm_open`, else the code is `confirmation_required`.
-    pub async fn create_socket_group(&self, req: &NewSocketGroup) -> Result<Saved<SocketGroup>> {
-        self.call_saved(&routes::CREATE_SOCKET_GROUP, &[], json(req))
+    pub async fn create_port_group(&self, req: &NewPortGroup) -> Result<Saved<PortGroup>> {
+        self.call_saved(&routes::CREATE_PORT_GROUP, &[], json(req))
             .await
     }
 
-    /// Rename a socket group and/or replace its ports.
-    pub async fn update_socket_group(
+    /// Rename a port group and/or replace its ports.
+    pub async fn update_port_group(
         &self,
         id: &str,
-        req: &UpdateSocketGroup,
-    ) -> Result<Saved<SocketGroup>> {
-        self.call_saved(&routes::UPDATE_SOCKET_GROUP, &[id], json(req))
+        req: &UpdatePortGroup,
+    ) -> Result<Saved<PortGroup>> {
+        self.call_saved(&routes::UPDATE_PORT_GROUP, &[id], json(req))
             .await
     }
 
-    /// Delete a socket group; refused (409) while a grant or a tag member uses it.
-    pub async fn delete_socket_group(&self, id: &str) -> Result<Saved<()>> {
-        self.call_saved(&routes::DELETE_SOCKET_GROUP, &[id], None)
+    /// Delete a port group; refused (409) while a grant or a tag member uses it.
+    pub async fn delete_port_group(&self, id: &str) -> Result<Saved<()>> {
+        self.call_saved(&routes::DELETE_PORT_GROUP, &[id], None)
             .await
     }
 
-    /// Attach a socket group to an app. It widens what the grants that cover All sockets of the app cover, so
+    /// Attach a port group to an app. It widens what the grants that cover All sockets of the app cover, so
     /// where that reaches Anyone it needs `confirm_open`.
-    pub async fn attach_socket_group(
+    pub async fn attach_port_group(
         &self,
         id: &str,
         app_id: &str,
         confirm_open: bool,
-    ) -> Result<Saved<SocketGroup>> {
+    ) -> Result<Saved<PortGroup>> {
         self.call_saved(
-            &routes::ATTACH_SOCKET_GROUP,
+            &routes::ATTACH_PORT_GROUP,
             &[id, app_id],
-            json(&AttachSocketGroup { confirm_open }),
+            json(&AttachPortGroup { confirm_open }),
         )
         .await
     }
 
-    /// Detach a socket group from an app; refused (409) while a grant or a tag member uses
+    /// Detach a port group from an app; refused (409) while a grant or a tag member uses
     /// it there.
-    pub async fn detach_socket_group(&self, id: &str, app_id: &str) -> Result<Saved<SocketGroup>> {
-        self.call_saved(&routes::DETACH_SOCKET_GROUP, &[id, app_id], None)
+    pub async fn detach_port_group(&self, id: &str, app_id: &str) -> Result<Saved<PortGroup>> {
+        self.call_saved(&routes::DETACH_PORT_GROUP, &[id, app_id], None)
             .await
     }
 

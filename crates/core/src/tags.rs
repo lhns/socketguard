@@ -7,12 +7,12 @@ use crate::model::{
     TagId, Target,
 };
 use crate::scope::{
-    raw_scope_ports, scope_ports, PortRange, PortRangeSet, Scope, ScopePorts, SocketGroup,
+    raw_scope_ports, scope_ports, PortGroup, PortRange, PortRangeSet, Scope, ScopePorts,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// One member of a tag: an app with a scope (all of it, one port, or one socket group).
+/// One member of a tag: an app with a scope (all of it, one port, or one port group).
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TagMember {
@@ -132,7 +132,7 @@ pub struct EffectiveAccess {
     /// The grant's own scope.
     pub scope: Scope,
     /// What the grant covers on this app now: detected ports, explicit ports and the
-    /// ranges of socket groups, merged.
+    /// ranges of port groups, merged.
     pub ports: Vec<PortRange>,
     pub network_id: Option<NetworkId>,
     pub subject: Subject,
@@ -151,7 +151,7 @@ pub fn covered_ports(
     grant: &Grant,
     tags: &[Tag],
     app: &App,
-    groups: &[SocketGroup],
+    groups: &[PortGroup],
     foreign: &PortRangeSet,
 ) -> Option<ScopePorts> {
     match &grant.target {
@@ -189,7 +189,7 @@ pub fn grants_for_app(
     grants: &[Grant],
     tags: &[Tag],
     app: &App,
-    groups: &[SocketGroup],
+    groups: &[PortGroup],
     foreign: &PortRangeSet,
 ) -> Vec<AppGrant> {
     grants
@@ -212,7 +212,7 @@ pub fn effective_access(
     grants: &[Grant],
     tags: &[Tag],
     app: &App,
-    groups: &[SocketGroup],
+    groups: &[PortGroup],
 ) -> Vec<EffectiveAccess> {
     let none = PortRangeSet::new();
     grants

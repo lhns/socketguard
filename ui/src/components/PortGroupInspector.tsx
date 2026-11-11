@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { appEntriesFromGrants } from "../access";
-import type { ChangeOp, PortRange, Scope, SocketGroup } from "../api";
+import type { ChangeOp, PortRange, Scope, PortGroup } from "../api";
 import { useCommit, useRevoke } from "../commit";
 import { errorField, rangeLabel, sameScope, splitOperationError, withRange } from "../lib";
 import { useNav } from "../nav";
@@ -18,14 +18,15 @@ interface Common {
   onClose: () => void;
 }
 
-const attachOp = (group_id: string, app_id: string): ChangeOp => ({ op: "attach_socket_group", group_id, app_id, confirm_open: false });
-const detachOp = (group_id: string, app_id: string): ChangeOp => ({ op: "detach_socket_group", group_id, app_id });
-const portsOp = (group_id: string, ports: PortRange[]): ChangeOp => ({ op: "update_socket_group", group_id, ports, confirm_open: false });
+const attachOp = (group_id: string, app_id: string): ChangeOp => ({ op: "attach_port_group", group_id, app_id, confirm_open: false });
+const detachOp = (group_id: string, app_id: string): ChangeOp => ({ op: "detach_port_group", group_id, app_id });
+const portsOp = (group_id: string, ports: PortRange[]): ChangeOp => ({ op: "update_port_group", group_id, ports, confirm_open: false });
 
 /** One port group: its name and ports, the apps it is attached to, and who can reach it there. */
-export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { group: SocketGroup; highlight: AccessHighlight | null } & Common) {
+export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { group: PortGroup; highlight: AccessHighlight | null } & Common) {
   const id = useId();
   const names = useNameCtx();
+  const nav = useNav();
   const grants = useGrants().data ?? [];
   const edit = useCommit();
   const attach = useCommit();
@@ -71,7 +72,7 @@ export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { 
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            if (dirty) void edit.runBatch([{ op: "update_socket_group", group_id: group.id, label: label.trim(), confirm_open: false }], "Port group renamed");
+            if (dirty) void edit.runBatch([{ op: "update_port_group", group_id: group.id, label: label.trim(), confirm_open: false }], "Port group renamed");
           }}
         >
           <div className="form-row">
@@ -126,20 +127,29 @@ export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { 
           <p className="muted">Not attached to any app yet.</p>
         ) : (
           <>
-            {attachedApps.map((a) => (
-              <div key={a.id} className="per-app">
-                <h4 className="sub-title">{a.name}</h4>
-                <AccessList
-                  entries={appEntriesFromGrants(a.id, grants, names).filter((e) => sameScope(e.row ?? e.scope, scope))}
-                  direction="who"
-                  networks={names.networks}
-                  onRevoke={revoke}
-                  highlight={highlight}
-                  empty="Nobody can reach it here."
-                  rowScope={scope}
-                />
-              </div>
-            ))}
+            {attachedApps.map((a) => {
+              const all = appEntriesFromGrants(a.id, grants, names);
+              const alsoAll = all.some((e) => (e.row ?? e.scope).kind === "all");
+              return (
+                <div key={a.id} className="per-app">
+                  <h4 className="sub-title">{a.name}</h4>
+                  <AccessList
+                    entries={all.filter((e) => sameScope(e.row ?? e.scope, scope))}
+                    direction="who"
+                    networks={names.networks}
+                    onRevoke={revoke}
+                    highlight={highlight}
+                    empty="No access on this port group alone."
+                    rowScope={scope}
+                  />
+                  {alsoAll && (
+                    <button className="link-btn also-line" onClick={() => nav.go("apps", { appId: a.id })}>
+                      also reachable by everyone on All ports of {a.name}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
             <CommitPreview commit={revokeCommit} />
             <AddAccess fixed={{ side: "targets", targets: attachedApps.map((a) => ({ kind: "app" as const, id: a.id })) }} preselect={scope} rowLabel={group.label} />
           </>
@@ -158,7 +168,7 @@ export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { 
           onCancel={() => setDeleting(false)}
           onConfirm={() => {
             setDeleting(false);
-            void del.runBatch([{ op: "delete_socket_group", group_id: group.id }], `Deleted ${group.label}`);
+            void del.runBatch([{ op: "delete_port_group", group_id: group.id }], `Deleted ${group.label}`);
           }}
         >
           <p>It is detached from its apps. The daemon refuses while a grant or a tag member uses it.</p>
@@ -183,7 +193,7 @@ function AttachedApps({ apps }: { apps: { id: string; name: string }[] }) {
 }
 
 /** Several port groups: where they are attached (mixed when only some have it), and Delete. */
-export function PortGroupsInspector({ groups, onCollapse, onClose }: { groups: SocketGroup[] } & Common) {
+export function PortGroupsInspector({ groups, onCollapse, onClose }: { groups: PortGroup[] } & Common) {
   const apps = useApps().data ?? [];
   const edit = useCommit();
   const del = useCommit(onClose);
@@ -250,7 +260,7 @@ export function PortGroupsInspector({ groups, onCollapse, onClose }: { groups: S
           onCancel={() => setDeleting(false)}
           onConfirm={() => {
             setDeleting(false);
-            void del.runBatch(groups.map((g) => ({ op: "delete_socket_group", group_id: g.id })), `Deleted ${groups.length} port groups`);
+            void del.runBatch(groups.map((g) => ({ op: "delete_port_group", group_id: g.id })), `Deleted ${groups.length} port groups`);
           }}
         >
           <p>They are detached from their apps. The daemon refuses while a grant or a tag member uses one.</p>
@@ -275,7 +285,7 @@ export function NewPortGroupForm({ onCreated, onClose }: { onCreated: (label: st
           e.preventDefault();
           if (ranges.length === 0) return;
           void commit.runBatch(
-            [{ op: "create_socket_group", label: label.trim(), ports: ranges, apps: [], confirm_open: false }],
+            [{ op: "create_port_group", label: label.trim(), ports: ranges, apps: [], confirm_open: false }],
             `Created port group ${label.trim()}`,
           );
         }}

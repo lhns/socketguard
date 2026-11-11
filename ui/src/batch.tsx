@@ -1,6 +1,6 @@
 // Shared by every place that sends a batch (ADR 0045): the confirmation flag and the list of
 // changes a dry run returns.
-import type { BatchChange, ChangeOp, GrantView, Network } from "./api";
+import type { BatchChange, ChangeOp, GrantReach, GrantView, Network } from "./api";
 import { ReachBadge } from "./reach";
 
 /** The same operations with the Anyone confirmation set. A dry run is sent this way (it saves
@@ -8,7 +8,8 @@ import { ReachBadge } from "./reach";
  * agreed. */
 export const confirmAll = (ops: ChangeOp[]): ChangeOp[] =>
   ops.map((o) =>
-    o.op === "add_grant" || o.op === "add_tag_member" || o.op === "create_socket_group" || o.op === "update_socket_group" || o.op === "attach_socket_group"
+    o.op === "add_grant" || o.op === "add_tag_member" || o.op === "create_port_group" || o.op === "update_port_group" || o.op === "attach_port_group" ||
+    o.op === "create_reservation" || o.op === "add_binding" || o.op === "move_app"
       ? { ...o, confirm_open: true }
       : o,
   );
@@ -23,6 +24,11 @@ export const grantInverse = (g: GrantView): ChangeOp => ({
   confirm_open: false,
 });
 
+/** The reasons the daemon gives for a reach ("a reservation is opened as a whole on Tor"), once each. */
+export function reachNotes(reach: GrantReach[], netName: (id: string) => string): string[] {
+  return [...new Set(reach.filter((r) => r.note).map((r) => `On ${netName(r.network_id)}: ${r.reach === "not_reachable" ? "not reachable — " : ""}${r.note}`))];
+}
+
 const KIND_SIGN = { create: "+", update: "~", delete: "−" } as const;
 
 /** The diff of a batch: what is created or removed and how well each new grant identifies
@@ -35,12 +41,15 @@ export function ChangeList({ changes, networks }: { changes: BatchChange[]; netw
       {changes.map((c, i) => (
         <li key={i} className={`change change-${c.kind}`}>
           <span className="change-sign" aria-hidden="true">{KIND_SIGN[c.kind]}</span>
-          <span className="change-item">{c.kind} {c.item.replace("socket_group", "port group").replace("_", " ")}</span>
+          <span className="change-item">{c.kind} {c.item.replace("port_group", "port group").replace("_", " ")}</span>
           <span className="change-name">{c.name}</span>
           {c.detail && <span className="muted">{c.detail}</span>}
           {c.opens_to_anyone && <span className="badge reach reach-bad">opens to anyone</span>}
           {(c.reach ?? []).map((r, j) => (
-            <ReachBadge key={`${r.network_id}-${j}`} reach={r.reach} network={netName(r.network_id)} />
+            <ReachBadge key={`${r.network_id}-${j}`} reach={r.reach} network={netName(r.network_id)} note={r.note} />
+          ))}
+          {reachNotes(c.reach ?? [], netName).map((n) => (
+            <span key={n} className="reach-note muted">{n}</span>
           ))}
         </li>
       ))}

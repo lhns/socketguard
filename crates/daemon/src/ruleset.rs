@@ -9,8 +9,8 @@ use crate::firewall::{DesiredRuleset, Dst, Families, Rule, Scope, ScopeKind, Sco
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use socketguard_core::{
     app_identity, credential_source, valid_interface_name, Address, App, AppPort, Credential,
-    Grant, ListeningSocket, Model, Network, NetworkKind, Peer, PeerGroup, PortRange, PortRef,
-    Protocol, Reservation, ScopePorts, SocketGroup, Subject, Tag, World,
+    Grant, ListeningSocket, Model, Network, NetworkKind, Peer, PeerGroup, PortGroup, PortRange,
+    PortRef, Protocol, Reservation, ScopePorts, Subject, Tag, World,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
@@ -30,8 +30,8 @@ pub struct Snapshot {
     pub grants: Vec<Grant>,
     /// Tags, to expand the grants that target them (ADR 0043).
     pub tags: Vec<Tag>,
-    /// Socket groups, for the ports of the scopes that name them (ADR 0047).
-    pub socket_groups: Vec<SocketGroup>,
+    /// Port groups, for the ports of the scopes that name them (ADR 0047).
+    pub port_groups: Vec<PortGroup>,
     /// Interfaces under whole-host protection.
     pub protect_host: Vec<String>,
     /// The IPv4 subnets of the protected interfaces that carry IPv4 (others are absent).
@@ -54,7 +54,7 @@ impl Snapshot {
             grants: &self.grants,
             tags: &self.tags,
             reservations: &self.reservations,
-            socket_groups: &self.socket_groups,
+            port_groups: &self.port_groups,
             addresses: &self.addresses,
         }
     }
@@ -562,7 +562,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use socketguard_core::{
-        Address, AppPort, CredentialKind, Locator, NetworkStatus, Reach, Scope, SocketGroup, Target,
+        Address, AppPort, CredentialKind, Locator, NetworkStatus, PortGroup, Reach, Scope, Target,
     };
 
     const KEY: &str = "ba83a2e554a8a087cebdb3f053468cd3ff915b5dd94bf11b7a5fc2e36f13158b";
@@ -921,8 +921,8 @@ mod tests {
         assert!(rs.rules.iter().any(|r| r.id == "a:ay2:443:tcp:g:ygg0"));
     }
 
-    fn group(id: &str, ranges: &[&str], apps: &[&str]) -> SocketGroup {
-        SocketGroup {
+    fn group(id: &str, ranges: &[&str], apps: &[&str]) -> PortGroup {
+        PortGroup {
             id: id.into(),
             label: id.into(),
             ports: socketguard_core::parse_ranges(ranges).unwrap(),
@@ -944,10 +944,10 @@ mod tests {
     }
 
     #[test]
-    fn a_socket_group_range_is_a_range_rule_before_anything_listens() {
+    fn a_port_group_range_is_a_range_rule_before_anything_listens() {
         let mut s = base();
         s.apps[0].ports.clear();
-        s.socket_groups = vec![group("passive", &["50000-51000/tcp", "21/tcp"], &["web"])];
+        s.port_groups = vec![group("passive", &["50000-51000/tcp", "21/tcp"], &["web"])];
         s.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
         assert_eq!(rule_ports(&rs, "ay"), ["21/tcp", "50000-51000/tcp"]);
@@ -959,7 +959,7 @@ mod tests {
         // A single-port range keeps the id of a plain port.
         assert!(rs.rules.iter().any(|r| r.id == "a:ay:21:tcp:g:ygg0"));
         // Not attached to the app: no ports from it.
-        s.socket_groups[0].apps.clear();
+        s.port_groups[0].apps.clear();
         assert!(build(&s).rules.is_empty());
     }
 
@@ -968,7 +968,7 @@ mod tests {
         let mut s = base();
         s.apps[0].ports = app("x", &[50005]).ports;
         s.apps.push(app("other", &[50003]));
-        s.socket_groups = vec![group("passive", &["50000-50010/tcp"], &["web"])];
+        s.port_groups = vec![group("passive", &["50000-50010/tcp"], &["web"])];
         s.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
         // 50003 is the other app's; 50005 is web's own and stays (as a port of its own).
@@ -1043,7 +1043,7 @@ mod tests {
     fn a_group_address_serves_only_its_group_and_a_group_grant_only_its_ranges() {
         let mut s = base();
         s.apps[0].ports = app("x", &[8080]).ports;
-        s.socket_groups = vec![group("passive", &["50000-50010/tcp"], &["web"])];
+        s.port_groups = vec![group("passive", &["50000-50010/tcp"], &["web"])];
         s.addresses = vec![address(
             "ag",
             "web",
@@ -1073,7 +1073,7 @@ mod tests {
     fn a_tag_grant_by_group_meets_the_members_scope() {
         let mut s = base();
         s.apps[0].ports = app("x", &[8080]).ports;
-        s.socket_groups = vec![
+        s.port_groups = vec![
             group("passive", &["50000-50010/tcp"], &["web"]),
             group("wide", &["50005-60000/tcp"], &[]),
         ];

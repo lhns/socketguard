@@ -2,7 +2,7 @@
 import type { ExportAppRef } from "./ExportAppRef";
 import type { PortRange } from "./PortRange";
 
-export type ExportSocketGroup = { label: string, ports: Array<PortRange>, 
+export type ExportPortGroup = { label: string, ports: Array<PortRange>, 
 /**
  * The apps it is attached to; an app that does not exist here makes the document invalid.
  */

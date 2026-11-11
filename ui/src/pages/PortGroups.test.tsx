@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import AppsPage from "./AppsPage";
-import type { AppDetail, ChangeOp, ChangesRequest, EffectiveAccess, GrantView, SocketGroup, Tag } from "../api";
+import type { AppDetail, ChangeOp, ChangesRequest, EffectiveAccess, GrantView, PortGroup, Tag } from "../api";
 import {
   batch, detail, grantView, mkApp, mkPeer, mkTag, memoryStorage, mockDaemon, renderWithProviders,
 } from "../test/helpers";
@@ -18,8 +18,8 @@ const bob = mkPeer("p2", "bob");
 const carol = mkPeer("p3", "carol");
 
 const T0 = "2026-01-01T00:00:00Z";
-const passive: SocketGroup = { id: "sg1", label: "passive", ports: [{ start: 50000, end: 51000, proto: "tcp" }], apps: ["a1"], created_at: T0 };
-const dns: SocketGroup = { id: "sg2", label: "dns", ports: [{ start: 53, end: 53, proto: "udp" }, { start: 5353, end: 5353, proto: "udp" }], apps: [], created_at: T0 };
+const passive: PortGroup = { id: "sg1", label: "passive", ports: [{ start: 50000, end: 51000, proto: "tcp" }], apps: ["a1"], created_at: T0 };
+const dns: PortGroup = { id: "sg2", label: "dns", ports: [{ start: 53, end: 53, proto: "udp" }, { start: 5353, end: 5353, proto: "udp" }], apps: [], created_at: T0 };
 
 const ftp: Tag = { ...mkTag("t-ftp", "ftp"), members: [{ app_id: "a1", scope: { kind: "group", id: "sg1" } }] };
 const mon: Tag = { ...mkTag("t-mon", "monitoring"), members: [{ app_id: "a1", scope: { kind: "port", port: 443, proto: "tcp" } }] };
@@ -37,13 +37,13 @@ const access = (g: GrantView, origin: EffectiveAccess["origin"] = { kind: "direc
 const requests = (d: ReturnType<typeof mockDaemon>) => d.calls.filter((c) => c.cmd === "changes").map((c) => c.args.req as ChangesRequest);
 const applied = (d: ReturnType<typeof mockDaemon>) => requests(d).filter((r) => !r.dry_run).map((r) => r.ops);
 
-function setup(over: Parameters<typeof mockDaemon>[0] = {}, groups: SocketGroup[] = [passive, dns]) {
+function setup(over: Parameters<typeof mockDaemon>[0] = {}, groups: PortGroup[] = [passive, dns]) {
   const details: Record<string, AppDetail> = {
     a1: detail(nginx, {
       grants: [gAll, gGroup],
       access: [access(gAll), access(gGroup), access(gFtp, { kind: "tag", tag_id: "t-ftp" })],
       tags: ["t-ftp", "t-mon"],
-      socket_groups: groups.filter((g) => g.apps.includes("a1")),
+      port_groups: groups.filter((g) => g.apps.includes("a1")),
     }),
     a2: detail(redis),
     a3: detail(odd),
@@ -54,7 +54,7 @@ function setup(over: Parameters<typeof mockDaemon>[0] = {}, groups: SocketGroup[
     list_peers: () => [alice, bob, carol],
     list_tags: () => [ftp, mon, web],
     list_grants: () => grants,
-    list_socket_groups: () => groups,
+    list_port_groups: () => groups,
     changes: (a) => batch(a.req as ChangesRequest),
     ...over,
   });
@@ -181,7 +181,7 @@ describe("Access through a tag names the member's row", () => {
     setup({
       list_tags: () => [pair, whole],
       list_grants: () => [gPair, gLimit],
-      get_app: (a) => (a.id === "a1" ? detail(nginx, { access: accessList, socket_groups: [passive] }) : detail(redis)),
+      get_app: (a) => (a.id === "a1" ? detail(nginx, { access: accessList, port_groups: [passive] }) : detail(redis)),
     });
 
   it("an app in a tag by two rows has the grant on those two rows, not on All ports", async () => {
@@ -216,7 +216,7 @@ describe("Attach port group", () => {
   };
 
   it("attaching shows the review when the dry run reports a change of reach, then applies", async () => {
-    const gaining = { kind: "update" as const, item: "socket_group" as const, name: "attach dns on redis-server", detail: "reachable by alice", opens_to_anyone: false, reach: [{ network_id: "n-ygg", reach: "verified" as const }] };
+    const gaining = { kind: "update" as const, item: "port_group" as const, name: "attach dns on redis-server", detail: "reachable by alice", opens_to_anyone: false, reach: [{ network_id: "n-ygg", reach: "verified" as const }] };
     const d = setup({ changes: (a) => batch(a.req as ChangesRequest, true, [gaining]) });
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
@@ -227,7 +227,7 @@ describe("Attach port group", () => {
     expect(review).toHaveTextContent("update port group");
     expect(applied(d)).toEqual([]);
     await user.click(within(review).getByRole("button", { name: "Apply" }));
-    await waitFor(() => expect(applied(d)).toEqual([[{ op: "attach_socket_group", group_id: "sg2", app_id: "a2", confirm_open: false }]]));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "attach_port_group", group_id: "sg2", app_id: "a2", confirm_open: false }]]));
   });
 
   it("applies at once when nobody gains access, and an attached group can be detached with Undo", async () => {
@@ -236,7 +236,7 @@ describe("Attach port group", () => {
     renderWithProviders(<AppsPage />);
     await openApp(user, "redis-server");
     await user.click(await groupRow(user, /^dns/));
-    await waitFor(() => expect(applied(d)).toEqual([[{ op: "attach_socket_group", group_id: "sg2", app_id: "a2", confirm_open: false }]]));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "attach_port_group", group_id: "sg2", app_id: "a2", confirm_open: false }]]));
     expect(screen.queryByRole("region", { name: "Review before applying" })).not.toBeInTheDocument();
   });
 
@@ -246,10 +246,10 @@ describe("Attach port group", () => {
     renderWithProviders(<AppsPage />);
     const ports = await openApp(user, /^nginx/);
     await user.click(within(rowOf(ports, "passive")).getByRole("button", { name: "Detach passive" }));
-    await waitFor(() => expect(applied(d)).toEqual([[{ op: "detach_socket_group", group_id: "sg1", app_id: "a1" }]]));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "detach_port_group", group_id: "sg1", app_id: "a1" }]]));
     await user.click(await screen.findByRole("button", { name: "Undo" }));
     await waitFor(() => expect(applied(d)).toHaveLength(2));
-    expect(applied(d)[1]).toEqual([{ op: "attach_socket_group", group_id: "sg1", app_id: "a1", confirm_open: true }]);
+    expect(applied(d)[1]).toEqual([{ op: "attach_port_group", group_id: "sg1", app_id: "a1", confirm_open: true }]);
   });
 
   it("asks the ports of a new group and creates and attaches it in one batch with a ref", async () => {
@@ -271,8 +271,8 @@ describe("Attach port group", () => {
     await user.click(within(form).getByRole("button", { name: "Create and attach" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0]).toEqual<ChangeOp[]>([
-      { op: "create_socket_group", ref: "$group", label: "ftp-data", ports: [{ start: 2121, end: 2121, proto: "tcp" }, { start: 50000, end: 50100, proto: "tcp" }], apps: [], confirm_open: false },
-      { op: "attach_socket_group", group_id: "$group", app_id: "a1", confirm_open: false },
+      { op: "create_port_group", ref: "$group", label: "ftp-data", ports: [{ start: 2121, end: 2121, proto: "tcp" }, { start: 50000, end: 50100, proto: "tcp" }], apps: [], confirm_open: false },
+      { op: "attach_port_group", group_id: "$group", app_id: "a1", confirm_open: false },
     ]);
   });
 
@@ -332,7 +332,7 @@ describe("Port groups in the list", () => {
     await user.type(screen.getByLabelText("Add a port or range"), "25/tcp{Enter}");
     await user.click(screen.getByRole("button", { name: "Create port group" }));
     await waitFor(() => expect(applied(d)).toEqual([[
-      { op: "create_socket_group", label: "mail", ports: [{ start: 25, end: 25, proto: "tcp" }], apps: [], confirm_open: false },
+      { op: "create_port_group", label: "mail", ports: [{ start: 25, end: 25, proto: "tcp" }], apps: [], confirm_open: false },
     ]]));
   });
 });
@@ -358,9 +358,18 @@ describe("Port group inspector", () => {
     expect(within(who).getByRole("button", { name: "Add access to passive" })).toBeInTheDocument();
   });
 
+  it("says when the grants on All ports of an app also cover the group, instead of only that nobody can reach it", async () => {
+    setup();
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    const panel = await openGroup(user, "passive");
+    const who = panel.getByRole("heading", { name: "Who can reach it" }).closest("section")!;
+    expect(within(who).getByRole("button", { name: "also reachable by everyone on All ports of nginx" })).toHaveClass("link-btn");
+  });
+
   it("adding a range shows the review when it lets more in; removing applies at once with Undo", async () => {
-    const gaining = { kind: "update" as const, item: "socket_group" as const, name: "add 60000-60010/tcp to passive on nginx", opens_to_anyone: false, reach: [{ network_id: "n-ygg", reach: "verified" as const }] };
-    const d = setup({ changes: (a) => ((a.req as ChangesRequest).ops[0].op === "update_socket_group" && ((a.req as ChangesRequest).ops[0] as { ports: unknown[] }).ports.length > 1 ? batch(a.req as ChangesRequest, true, [gaining]) : batch(a.req as ChangesRequest)) });
+    const gaining = { kind: "update" as const, item: "port_group" as const, name: "add 60000-60010/tcp to passive on nginx", opens_to_anyone: false, reach: [{ network_id: "n-ygg", reach: "verified" as const }] };
+    const d = setup({ changes: (a) => ((a.req as ChangesRequest).ops[0].op === "update_port_group" && ((a.req as ChangesRequest).ops[0] as { ports: unknown[] }).ports.length > 1 ? batch(a.req as ChangesRequest, true, [gaining]) : batch(a.req as ChangesRequest)) });
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     const panel = await openGroup(user, "passive");
@@ -374,7 +383,7 @@ describe("Port group inspector", () => {
     expect(applied(d)).toEqual([]);
     await user.click(within(review).getByRole("button", { name: "Apply" }));
     await waitFor(() => expect(applied(d)).toEqual([[
-      { op: "update_socket_group", group_id: "sg1", ports: [{ start: 50000, end: 51000, proto: "tcp" }, { start: 60000, end: 60010, proto: "tcp" }], confirm_open: false },
+      { op: "update_port_group", group_id: "sg1", ports: [{ start: 50000, end: 51000, proto: "tcp" }, { start: 60000, end: 60010, proto: "tcp" }], confirm_open: false },
     ]]));
   });
 
@@ -385,12 +394,12 @@ describe("Port group inspector", () => {
     const panel = await openGroup(user, "dns");
     await user.click(panel.getByRole("button", { name: "Remove 5353/udp" }));
     await waitFor(() => expect(applied(d)).toEqual([[
-      { op: "update_socket_group", group_id: "sg2", ports: [{ start: 53, end: 53, proto: "udp" }], confirm_open: false },
+      { op: "update_port_group", group_id: "sg2", ports: [{ start: 53, end: 53, proto: "udp" }], confirm_open: false },
     ]]));
     await user.click(await screen.findByRole("button", { name: "Undo" }));
     await waitFor(() => expect(applied(d)).toHaveLength(2));
     expect(applied(d)[1]).toEqual([
-      { op: "update_socket_group", group_id: "sg2", ports: dns.ports, confirm_open: true },
+      { op: "update_port_group", group_id: "sg2", ports: dns.ports, confirm_open: true },
     ]);
   });
 
@@ -402,13 +411,13 @@ describe("Port group inspector", () => {
     await user.click(panel.getByRole("button", { name: "Attach or detach apps" }));
     expect(screen.queryByRole("checkbox", { name: "mystery" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("checkbox", { name: "redis-server" }));
-    await waitFor(() => expect(applied(d)).toEqual([[{ op: "attach_socket_group", group_id: "sg2", app_id: "a2", confirm_open: false }]]));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "attach_port_group", group_id: "sg2", app_id: "a2", confirm_open: false }]]));
   });
 
   it("Delete asks first, and the daemon's refusal naming the users is shown", async () => {
     const d = setup({
       changes: (a) => {
-        if ((a.req as ChangesRequest).ops[0].op === "delete_socket_group") throw { code: "conflict", message: "port group passive is used by a grant on nginx, tag ftp" };
+        if ((a.req as ChangesRequest).ops[0].op === "delete_port_group") throw { code: "conflict", message: "port group passive is used by a grant on nginx, tag ftp" };
         return batch(a.req as ChangesRequest);
       },
     });
@@ -439,7 +448,7 @@ describe("Port group inspector", () => {
     await user.click(panel.getByRole("button", { name: "Delete 2 port groups" }));
     await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete port groups" }));
     await waitFor(() => expect(applied(d)).toEqual([[
-      { op: "delete_socket_group", group_id: "sg1" }, { op: "delete_socket_group", group_id: "sg2" },
+      { op: "delete_port_group", group_id: "sg1" }, { op: "delete_port_group", group_id: "sg2" },
     ]]));
   });
 });
@@ -496,6 +505,14 @@ describe("Wording", () => {
     await user.click(inList().getByRole("checkbox", { name: "Select ftp" }));
     await screen.findByRole("heading", { name: "ftp" });
     expect(said()).not.toMatch(banned);
+
+    // Addresses on rows, the Reserve form and the move picker.
+    await openApp(user, /^nginx/);
+    await user.click(within(inspector()).getAllByRole("button", { name: /^Reserve/ })[0]);
+    expect(said()).not.toMatch(banned);
+    await user.click(within(inspector()).getByRole("button", { name: "Move everything to…" }));
+    expect(said()).not.toMatch(banned);
+    await user.keyboard("{Escape}");
 
     await user.click(inList().getByRole("button", { name: "New port group" }));
     await screen.findByRole("heading", { name: "New port group" });

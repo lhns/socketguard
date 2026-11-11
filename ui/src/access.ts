@@ -1,6 +1,6 @@
 // Pure helpers over grants, tags and groups shared by the pages, the lists and the overview.
 import type {
-  App, EffectiveAccess, GrantReach, GrantView, Network, Peer, PeerGroup, PortRef, Scope, SocketGroup, Subject, Tag, Target,
+  App, EffectiveAccess, GrantReach, GrantView, Network, Peer, PeerGroup, PortRef, Scope, PortGroup, Subject, Tag, Target,
 } from "./api";
 import { sameScope, scopeKey, scopeLabel, scopeOfPort, subjectLabel, targetLabel } from "./lib";
 import type { Focus } from "./nav";
@@ -53,7 +53,7 @@ export interface NameCtx {
   /** Names the reservations in targets and origins; the ids show without it. */
   reservations?: { id: string; label: string }[];
   /** Names the port groups in scopes; the ids show without it. */
-  socketGroups?: SocketGroup[];
+  portGroups?: PortGroup[];
 }
 
 export type EntryOrigin =
@@ -70,7 +70,7 @@ export interface AccessEntry {
   ident: string;
   name: string;
   /** Where the name leads. */
-  link?: { page: "apps" | "peers"; focus: Focus };
+  link?: { page: "apps" | "reserved" | "peers"; focus: Focus };
   subject?: Subject;
   scope: Scope;
   /** The row of the app this access is listed on: what a direct grant names, or the tag member's
@@ -104,7 +104,7 @@ const subjectLink = (s: Subject): AccessEntry["link"] =>
 const targetLink = (t: Target): AccessEntry["link"] =>
   t.kind === "app" ? { page: "apps", focus: { appId: t.id } }
   : t.kind === "tag" ? { page: "apps", focus: { tagId: t.id } }
-  : undefined;
+  : { page: "reserved", focus: { reservationId: t.id } };
 
 /** All-ports access first, then what only some ports have, each by name. */
 export const sortEntries = (entries: AccessEntry[]) =>
@@ -124,7 +124,7 @@ export function grantEntries(grants: GrantView[], side: "subject" | "target", ct
       link: side === "subject" ? subjectLink(g.subject) : targetLink(g.target),
       subject: g.subject,
       scope: g.scope,
-      scopeText: scopeLabel(g.scope, ctx.socketGroups),
+      scopeText: scopeLabel(g.scope, ctx.portGroups),
       networkId: g.network_id,
       reach: g.reach,
       origin: { kind: "direct" },
@@ -167,7 +167,7 @@ export function appEntries(appId: string, access: EffectiveAccess[], grants: Gra
         subject: a.subject,
         scope,
         row,
-        scopeText: scopeLabel(scope, ctx.socketGroups),
+        scopeText: scopeLabel(scope, ctx.portGroups),
         networkId: a.network_id,
         reach: grant?.reach ?? [],
         origin,
@@ -232,7 +232,7 @@ export function appEntriesFromGrants(appId: string, grants: GrantView[], ctx: Na
       ident: e.ident.replace(/\|direct$/, `|${tag.id}`),
       scope: narrowScope(e.scope, scope),
       row: scope,
-      scopeText: scopeLabel(narrowScope(e.scope, scope), ctx.socketGroups),
+      scopeText: scopeLabel(narrowScope(e.scope, scope), ctx.portGroups),
       origin: { kind: "tag", id: tag.id, label: tag.label },
       grants: [],
     })),

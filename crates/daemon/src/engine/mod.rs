@@ -19,15 +19,15 @@ mod discovery;
 mod enforce;
 mod firewall;
 mod mutations;
+mod port_groups;
 mod queries;
 mod reservations;
-mod socket_groups;
 mod tags;
 mod torkeys;
 
 use addresses::disable_all;
 use enforce::disable_networks;
-pub use socket_groups::clean_ranges;
+pub use port_groups::clean_ranges;
 
 use crate::api::DaemonEvent;
 use crate::firewall::{DesiredRuleset, DropEvent, Firewall};

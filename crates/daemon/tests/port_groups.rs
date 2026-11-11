@@ -1,4 +1,4 @@
-//! Socket groups (ADR 0047) through the API: their lifecycle, attachment, use as a scope
+//! Port groups (ADR 0047) through the API: their lifecycle, attachment, use as a scope
 //! in grants, tag members and addresses, the refusals while they are used, the batch
 //! operations and export/apply.
 
@@ -30,10 +30,7 @@ fn app_target(app_id: &str) -> Value {
 
 async fn create_group(d: &Daemon, label: &str, ports: Value) -> String {
     let (s, body) = d
-        .post(
-            "/api/socket-groups",
-            json!({"label": label, "ports": ports}),
-        )
+        .post("/api/port-groups", json!({"label": label, "ports": ports}))
         .await;
     assert_eq!(s, StatusCode::CREATED, "{body}");
     id(&body)
@@ -46,7 +43,7 @@ fn passive() -> Value {
 async fn attach(d: &Daemon, gid: &str, app_id: &str, confirm: bool) -> (StatusCode, Value) {
     d.send(
         Method::PUT,
-        &format!("/api/socket-groups/{gid}/apps/{app_id}"),
+        &format!("/api/port-groups/{gid}/apps/{app_id}"),
         json!({"confirm_open": confirm}),
     )
     .await
@@ -62,43 +59,38 @@ async fn groups_are_created_listed_changed_and_validated() {
     let gid = create_group(&d, "passive", passive()).await;
 
     // Ports are normalized: sorted.
-    let (_, g) = d.get(&format!("/api/socket-groups/{gid}")).await;
+    let (_, g) = d.get(&format!("/api/port-groups/{gid}")).await;
     assert_eq!(g["label"], "passive");
     assert_eq!(g["ports"][0]["start"], 21);
     assert_eq!(g["ports"][1]["end"], 50010);
     assert_eq!(g["apps"], json!([]));
     assert_eq!(
-        d.get("/api/socket-groups")
-            .await
-            .1
-            .as_array()
-            .unwrap()
-            .len(),
+        d.get("/api/port-groups").await.1.as_array().unwrap().len(),
         1
     );
 
     // Labels are unique; ports are needed and valid.
     let (s, b) = d
         .post(
-            "/api/socket-groups",
+            "/api/port-groups",
             json!({"label": "passive", "ports": passive()}),
         )
         .await;
     assert_eq!((s, code(&b)), (StatusCode::CONFLICT, "conflict"));
     let (s, b) = d
-        .post("/api/socket-groups", json!({"label": "x", "ports": []}))
+        .post("/api/port-groups", json!({"label": "x", "ports": []}))
         .await;
     assert_eq!((s, code(&b)), (StatusCode::BAD_REQUEST, "invalid"));
     let (s, b) = d
         .post(
-            "/api/socket-groups",
+            "/api/port-groups",
             json!({"label": "x", "ports": [{"start": 9, "end": 5, "proto": "tcp"}]}),
         )
         .await;
     assert_eq!((s, code(&b)), (StatusCode::BAD_REQUEST, "invalid"));
     let (s, b) = d
         .post(
-            "/api/socket-groups",
+            "/api/port-groups",
             json!({"label": "  ", "ports": passive()}),
         )
         .await;
@@ -108,7 +100,7 @@ async fn groups_are_created_listed_changed_and_validated() {
     let (s, g) = d
         .send(
             Method::PUT,
-            &format!("/api/socket-groups/{gid}"),
+            &format!("/api/port-groups/{gid}"),
             json!({"label": "ftp", "ports": [{"start": 2121, "end": 2121, "proto": "tcp"}]}),
         )
         .await;
@@ -118,20 +110,16 @@ async fn groups_are_created_listed_changed_and_validated() {
         (Some("ftp"), 1)
     );
     let (s, _) = d
-        .send(
-            Method::PUT,
-            "/api/socket-groups/nope",
-            json!({"label": "z"}),
-        )
+        .send(Method::PUT, "/api/port-groups/nope", json!({"label": "z"}))
         .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 
     assert_eq!(
-        d.delete(&format!("/api/socket-groups/{gid}")).await.0,
+        d.delete(&format!("/api/port-groups/{gid}")).await.0,
         StatusCode::NO_CONTENT
     );
     assert_eq!(
-        d.get(&format!("/api/socket-groups/{gid}")).await.0,
+        d.get(&format!("/api/port-groups/{gid}")).await.0,
         StatusCode::NOT_FOUND
     );
 }
@@ -155,7 +143,7 @@ async fn attached_groups_show_in_the_app_and_give_range_rules() {
     // Attaching again changes nothing.
     assert_eq!(attach(&d, &gid, &app_id, false).await.0, StatusCode::OK);
     let (_, detail) = d.get(&format!("/api/apps/{app_id}")).await;
-    assert_eq!(detail["socket_groups"][0]["label"], "passive");
+    assert_eq!(detail["port_groups"][0]["label"], "passive");
 
     let (s, b) = d.post("/api/grants", grant).await;
     assert_eq!(s, StatusCode::CREATED, "{b}");
@@ -218,13 +206,13 @@ async fn a_group_in_use_cannot_be_detached_or_deleted_and_the_message_says_why()
     .await;
 
     let (s, b) = d
-        .delete(&format!("/api/socket-groups/{gid}/apps/{app_id}"))
+        .delete(&format!("/api/port-groups/{gid}/apps/{app_id}"))
         .await;
     assert_eq!((s, code(&b)), (StatusCode::CONFLICT, "conflict"));
     let msg = b["message"].as_str().unwrap();
     assert!(msg.contains("grant to alice on nginx"), "{msg}");
     assert!(msg.contains("nginx in tag ftp"), "{msg}");
-    let (s, b) = d.delete(&format!("/api/socket-groups/{gid}")).await;
+    let (s, b) = d.delete(&format!("/api/port-groups/{gid}")).await;
     assert_eq!((s, code(&b)), (StatusCode::CONFLICT, "conflict"));
     assert!(b["message"].as_str().unwrap().contains("tag ftp"));
 
@@ -243,16 +231,16 @@ async fn a_group_in_use_cannot_be_detached_or_deleted_and_the_message_says_why()
         )
         .await;
     assert_eq!(tag_grant["scope"], group_scope(&gid));
-    let (s, b) = d.delete(&format!("/api/socket-groups/{gid}")).await;
+    let (s, b) = d.delete(&format!("/api/port-groups/{gid}")).await;
     assert_eq!(s, StatusCode::CONFLICT, "{b}");
     let (s, b) = d
-        .delete(&format!("/api/socket-groups/{gid}/apps/{app_id}"))
+        .delete(&format!("/api/port-groups/{gid}/apps/{app_id}"))
         .await;
     assert_eq!(s, StatusCode::OK, "{b}");
     assert_eq!(b["apps"], json!([]));
     d.delete(&format!("/api/grants/{}", id(&tag_grant))).await;
     assert_eq!(
-        d.delete(&format!("/api/socket-groups/{gid}")).await.0,
+        d.delete(&format!("/api/port-groups/{gid}")).await.0,
         StatusCode::NO_CONTENT
     );
 }
@@ -283,7 +271,7 @@ async fn an_address_for_a_group_goes_when_the_group_is_detached() {
     let ip: std::net::Ipv6Addr = a["locator"]["addr"].as_str().unwrap().parse().unwrap();
     // Detaching is refused while the grant uses the group there, and allowed after.
     let (s, b) = d
-        .delete(&format!("/api/socket-groups/{gid}/apps/{app_id}"))
+        .delete(&format!("/api/port-groups/{gid}/apps/{app_id}"))
         .await;
     assert_eq!((s, code(&b)), (StatusCode::CONFLICT, "conflict"));
     d.delete(&format!("/api/grants/{}", g["id"].as_str().unwrap()))
@@ -298,7 +286,7 @@ async fn an_address_for_a_group_goes_when_the_group_is_detached() {
         .any(|x| x.locator.ipv6() == Some(ip)));
 
     let (s, b) = d
-        .delete(&format!("/api/socket-groups/{gid}/apps/{app_id}"))
+        .delete(&format!("/api/port-groups/{gid}/apps/{app_id}"))
         .await;
     assert_eq!(s, StatusCode::OK, "{b}");
     let left = d.state.db.list_addresses().await.unwrap();
@@ -342,7 +330,7 @@ async fn attaching_or_widening_under_a_grant_to_anyone_needs_confirm_open() {
     let (s, b) = d
         .send(
             Method::PUT,
-            &format!("/api/socket-groups/{gid}"),
+            &format!("/api/port-groups/{gid}"),
             json!({"ports": [{"start": 60000, "end": 60010, "proto": "tcp"}]}),
         )
         .await;
@@ -353,7 +341,7 @@ async fn attaching_or_widening_under_a_grant_to_anyone_needs_confirm_open() {
     let (s, _) = d
         .send(
             Method::PUT,
-            &format!("/api/socket-groups/{gid}"),
+            &format!("/api/port-groups/{gid}"),
             json!({"confirm_open": true, "ports": [{"start": 60000, "end": 60010, "proto": "tcp"}]}),
         )
         .await;
@@ -368,7 +356,7 @@ async fn attaching_or_widening_under_a_grant_to_anyone_needs_confirm_open() {
     // Creating a group with an app to attach to is the same.
     let (s, b) = d
         .post(
-            "/api/socket-groups",
+            "/api/port-groups",
             json!({"label": "more", "ports": [{"start": 1, "end": 2, "proto": "udp"}], "apps": [app_id]}),
         )
         .await;
@@ -391,8 +379,8 @@ async fn batch_operations_chain_refs_report_reach_and_are_atomic() {
     )
     .await;
     let ops = json!([
-        {"op": "create_socket_group", "ref": "$g", "label": "passive", "ports": passive()},
-        {"op": "attach_socket_group", "group_id": "$g", "app_id": app_id},
+        {"op": "create_port_group", "ref": "$g", "label": "passive", "ports": passive()},
+        {"op": "attach_port_group", "group_id": "$g", "app_id": app_id},
         {"op": "add_grant", "target": app_target(&app_id),
          "scope": {"kind": "group", "id": "$g"}, "network_id": "ygg",
          "subject": {"kind": "peer", "id": "$other"}},
@@ -405,11 +393,11 @@ async fn batch_operations_chain_refs_report_reach_and_are_atomic() {
         .await;
     assert_eq!(s, StatusCode::OK, "{b}");
     assert_eq!(b["changes_reach"], true, "{b}");
-    assert_eq!(b["changes"][0]["item"], "socket_group");
+    assert_eq!(b["changes"][0]["item"], "port_group");
     assert_eq!(b["changes"][1]["kind"], "update");
     assert!(!b["changes"][1]["reach"].as_array().unwrap().is_empty());
     assert_eq!(
-        d.state.db.list_socket_groups().await.unwrap().len(),
+        d.state.db.list_port_groups().await.unwrap().len(),
         0,
         "a dry run saves nothing"
     );
@@ -427,7 +415,7 @@ async fn batch_operations_chain_refs_report_reach_and_are_atomic() {
         .await;
     assert_eq!(s, StatusCode::OK, "{b}");
     let gid = b["refs"]["$g"].as_str().unwrap().to_string();
-    let g = d.state.db.get_socket_group(&gid).await.unwrap().unwrap();
+    let g = d.state.db.get_port_group(&gid).await.unwrap().unwrap();
     assert_eq!(g.apps, std::slice::from_ref(&app_id));
 
     // Detaching is refused while the grant uses it; the whole batch changes nothing.
@@ -435,8 +423,8 @@ async fn batch_operations_chain_refs_report_reach_and_are_atomic() {
         .post(
             "/api/changes",
             json!({"ops": [
-                {"op": "update_socket_group", "group_id": gid, "label": "renamed"},
-                {"op": "detach_socket_group", "group_id": gid, "app_id": app_id}
+                {"op": "update_port_group", "group_id": gid, "label": "renamed"},
+                {"op": "detach_port_group", "group_id": gid, "app_id": app_id}
             ]}),
         )
         .await;
@@ -445,7 +433,7 @@ async fn batch_operations_chain_refs_report_reach_and_are_atomic() {
     assert_eq!(
         d.state
             .db
-            .get_socket_group(&gid)
+            .get_port_group(&gid)
             .await
             .unwrap()
             .unwrap()
@@ -469,13 +457,13 @@ async fn batch_operations_chain_refs_report_reach_and_are_atomic() {
             "/api/changes",
             json!({"ops": [
                 {"op": "remove_grant", "grant_id": grant_id},
-                {"op": "detach_socket_group", "group_id": gid, "app_id": app_id},
-                {"op": "delete_socket_group", "group_id": gid}
+                {"op": "detach_port_group", "group_id": gid, "app_id": app_id},
+                {"op": "delete_port_group", "group_id": gid}
             ]}),
         )
         .await;
     assert_eq!(s, StatusCode::OK, "{b}");
-    assert!(d.state.db.list_socket_groups().await.unwrap().is_empty());
+    assert!(d.state.db.list_port_groups().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -489,7 +477,7 @@ async fn a_batch_attach_under_a_grant_to_anyone_needs_confirm_open() {
     )
     .await;
     let op = |confirm: bool| {
-        json!({"dry_run": true, "ops": [{"op": "attach_socket_group", "group_id": gid,
+        json!({"dry_run": true, "ops": [{"op": "attach_port_group", "group_id": gid,
                                          "app_id": app_id, "confirm_open": confirm}]})
     };
     let (s, b) = d.post("/api/changes", op(false)).await;
@@ -505,7 +493,7 @@ async fn a_batch_attach_under_a_grant_to_anyone_needs_confirm_open() {
 }
 
 #[tokio::test]
-async fn export_and_apply_carry_socket_groups_by_label() {
+async fn export_and_apply_carry_port_groups_by_label() {
     let d = Daemon::new().await;
     let app_id = d.app_id().await;
     let alice = d.ygg_peer("alice").await;
@@ -520,8 +508,8 @@ async fn export_and_apply_carry_socket_groups_by_label() {
 
     let (s, doc) = d.get("/api/export").await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(doc["socket_groups"][0]["label"], "passive");
-    assert_eq!(doc["socket_groups"][0]["apps"][0]["id"], app_id);
+    assert_eq!(doc["port_groups"][0]["label"], "passive");
+    assert_eq!(doc["port_groups"][0]["apps"][0]["id"], app_id);
     assert_eq!(
         doc["grants"][0]["scope"],
         json!({"kind": "group", "label": "passive"})
@@ -535,21 +523,21 @@ async fn export_and_apply_carry_socket_groups_by_label() {
 
     // A document with another group and port set changes the state to match.
     let mut want = doc.clone();
-    want["socket_groups"][0]["ports"] = json!([{"start": 4000, "end": 4005, "proto": "tcp"}]);
-    want["socket_groups"].as_array_mut().unwrap().push(json!({
+    want["port_groups"][0]["ports"] = json!([{"start": 4000, "end": 4005, "proto": "tcp"}]);
+    want["port_groups"].as_array_mut().unwrap().push(json!({
         "label": "dns", "ports": [{"start": 53, "end": 53, "proto": "udp"}], "apps": []
     }));
     let (s, r) = d
         .post("/api/apply", json!({"document": want, "dry_run": false}))
         .await;
     assert_eq!(s, StatusCode::OK, "{r}");
-    let groups = d.state.db.list_socket_groups().await.unwrap();
+    let groups = d.state.db.list_port_groups().await.unwrap();
     assert_eq!(groups.len(), 2);
     assert!(rule_ids(&d).iter().any(|r| r.contains(":4000-4005:tcp:")));
 
     // A grant naming a group the document does not attach is invalid.
     let mut bad = want.clone();
-    bad["socket_groups"][1]["apps"] = json!([]);
+    bad["port_groups"][1]["apps"] = json!([]);
     bad["grants"][0]["scope"] = json!({"kind": "group", "label": "dns"});
     let (s, r) = d
         .post("/api/apply", json!({"document": bad, "dry_run": true}))
@@ -558,13 +546,13 @@ async fn export_and_apply_carry_socket_groups_by_label() {
 
     // Dropping the group and its grant from the document removes both.
     let mut gone = want.clone();
-    gone["socket_groups"] = json!([]);
+    gone["port_groups"] = json!([]);
     gone["grants"] = json!([]);
     let (s, r) = d
         .post("/api/apply", json!({"document": gone, "dry_run": false}))
         .await;
     assert_eq!(s, StatusCode::OK, "{r}");
-    assert!(d.state.db.list_socket_groups().await.unwrap().is_empty());
+    assert!(d.state.db.list_port_groups().await.unwrap().is_empty());
     assert!(d.state.db.list_grants().await.unwrap().is_empty());
 }
 
@@ -597,7 +585,7 @@ async fn a_tag_open_to_anyone_makes_attaching_and_widening_a_confirmed_change() 
         .post(
             "/api/changes",
             json!({"dry_run": true, "ops": [
-                {"op": "attach_socket_group", "group_id": gid, "app_id": app_id, "confirm_open": true}]}),
+                {"op": "attach_port_group", "group_id": gid, "app_id": app_id, "confirm_open": true}]}),
         )
         .await;
     assert_eq!(s, StatusCode::OK, "{b}");
@@ -617,8 +605,8 @@ async fn one_batch_creates_a_group_attaches_it_and_uses_it_by_ref() {
         .post(
             "/api/changes",
             json!({"ops": [
-                {"op": "create_socket_group", "ref": "$g", "label": "passive", "ports": passive()},
-                {"op": "attach_socket_group", "group_id": "$g", "app_id": app_id},
+                {"op": "create_port_group", "ref": "$g", "label": "passive", "ports": passive()},
+                {"op": "attach_port_group", "group_id": "$g", "app_id": app_id},
                 {"op": "add_tag_member", "tag_id": id(&tag), "app_id": app_id,
                  "scope": {"kind": "group", "id": "$g"}},
                 {"op": "add_grant", "target": app_target(&app_id),
@@ -638,7 +626,7 @@ async fn one_batch_creates_a_group_attaches_it_and_uses_it_by_ref() {
 }
 
 #[tokio::test]
-async fn unidentified_apps_take_no_socket_groups() {
+async fn unidentified_apps_take_no_port_groups() {
     let d = Daemon::new().await;
     let mut sock = listener("mystery", 9999);
     sock.unidentified = true;
@@ -651,7 +639,7 @@ async fn unidentified_apps_take_no_socket_groups() {
     assert_eq!((s, code(&b)), (StatusCode::BAD_REQUEST, "invalid"), "{b}");
     let (s, b) = d
         .post(
-            "/api/socket-groups",
+            "/api/port-groups",
             json!({"label": "other", "ports": passive(), "apps": [unknown.id]}),
         )
         .await;
@@ -659,7 +647,7 @@ async fn unidentified_apps_take_no_socket_groups() {
     assert!(d
         .state
         .db
-        .get_socket_group(&gid)
+        .get_port_group(&gid)
         .await
         .unwrap()
         .unwrap()

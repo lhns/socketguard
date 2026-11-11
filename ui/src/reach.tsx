@@ -39,15 +39,16 @@ export const REACH_INFO: Record<Reach, BadgeInfo> = {
   },
 };
 
-export function ReachBadge({ reach, network }: { reach: Reach; network?: string }) {
+export function ReachBadge({ reach, network, note }: { reach: Reach; network?: string; note?: string }) {
   const info = REACH_INFO[reach];
   const text = network ? `${network}: ${info.label}` : info.label;
+  const tip = note ?? info.tip;
   return (
     <span
       className={`badge reach reach-${info.cls}`}
-      title={info.tip}
+      title={tip}
       tabIndex={0}
-      aria-label={`${text}. ${info.tip}`}
+      aria-label={`${text}. ${tip}`}
     >
       {text}
     </span>

@@ -3,7 +3,7 @@ import type { ChangeOp, Scope } from "../api";
 import { useCommit } from "../commit";
 import { ALL_SCOPE, sameScope, scopeLabel } from "../lib";
 import { useNav } from "../nav";
-import { useSocketGroups, useTags } from "../queries";
+import { usePortGroups, useTags } from "../queries";
 import CommitPreview from "./CommitPreview";
 import Picker, { type PickerItem } from "./Picker";
 
@@ -19,12 +19,12 @@ interface Props {
 export default function TagPicker({ appIds, scope: rowScope }: Props) {
   const nav = useNav();
   const tags = (useTags().data ?? []);
-  const socketGroups = useSocketGroups().data ?? [];
+  const portGroups = usePortGroups().data ?? [];
   const [open, setOpen] = useState(false);
   const commit = useCommit();
   const scope = rowScope ?? ALL_SCOPE;
   const named = rowScope !== undefined;
-  const what = named ? scopeLabel(scope, socketGroups) : "";
+  const what = named ? scopeLabel(scope, portGroups) : "";
 
   const has = (tagId: string, appId: string) =>
     tags.find((t) => t.id === tagId)?.members.some((m) => m.app_id === appId && sameScope(m.scope, scope)) ?? false;

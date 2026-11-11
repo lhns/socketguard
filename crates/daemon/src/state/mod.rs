@@ -8,11 +8,11 @@
 //! DACL (SYSTEM and Administrators only) before SQLite opens it, and the DACL is applied to
 //! the -wal/-shm files and any `.pre-v1` backup too.
 
+mod port_groups;
 mod protect;
 mod reservations;
 mod schema;
 mod settings;
-mod socket_groups;
 mod tags;
 #[cfg(windows)]
 mod winacl;
@@ -900,9 +900,9 @@ impl NewActivity {
 }
 
 const ADDRESS_SELECT: &str = "SELECT id, app_id, reservation_id, network_id, port, proto, \
-     socket_group, locator_kind, locator, created_at FROM addresses";
+     port_group, locator_kind, locator, created_at FROM addresses";
 
-const GRANT_SELECT: &str = "SELECT id, target_kind, target_id, port, proto, socket_group, \
+const GRANT_SELECT: &str = "SELECT id, target_kind, target_id, port, proto, port_group, \
      network_id, subject_kind, subject_id, created_at FROM grants";
 
 type Tx<'a> = sqlx::Transaction<'a, sqlx::Sqlite>;
@@ -933,7 +933,7 @@ async fn insert_grant_in(tx: &mut Tx<'_>, g: &Grant) -> Result<()> {
     };
     let (port, proto, group) = scope_columns(&g.scope);
     sqlx::query(
-        "INSERT INTO grants (id, target_kind, target_id, port, proto, socket_group, network_id, \
+        "INSERT INTO grants (id, target_kind, target_id, port, proto, port_group, network_id, \
          subject_kind, subject_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&g.id)
@@ -963,7 +963,7 @@ async fn insert_address_in(
     let (port, proto, group) = scope_columns(&a.scope);
     sqlx::query(
         "INSERT INTO addresses (id, app_id, reservation_id, network_id, port, proto, \
-         socket_group, locator_kind, locator, created_at) \
+         port_group, locator_kind, locator, created_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&a.id)
@@ -1006,8 +1006,8 @@ async fn insert_credential(
     Ok(())
 }
 
-/// A scope as the `port`, `proto` and `socket_group` columns of grants, tag members and
-/// addresses: all NULL = every socket, a port with its protocol, or a socket group id.
+/// A scope as the `port`, `proto` and `port_group` columns of grants, tag members and
+/// addresses: all NULL = every socket, a port with its protocol, or a port group id.
 pub(super) fn scope_columns(s: &Scope) -> (Option<i64>, Option<String>, Option<&str>) {
     match s {
         Scope::All => (None, None, None),
@@ -1046,7 +1046,7 @@ fn address_from_row(r: sqlx::sqlite::SqliteRow) -> Result<Address> {
         app_id: r.get("app_id"),
         reservation_id: r.get("reservation_id"),
         network_id: r.get("network_id"),
-        scope: scope_from_columns(r.get("port"), r.get("proto"), r.get("socket_group"))?,
+        scope: scope_from_columns(r.get("port"), r.get("proto"), r.get("port_group"))?,
         locator,
         created_at: parse_ts(r.get("created_at"))?,
         up: false,
@@ -1056,7 +1056,7 @@ fn address_from_row(r: sqlx::sqlite::SqliteRow) -> Result<Address> {
 }
 
 fn grant_from_row(r: sqlx::sqlite::SqliteRow) -> Result<Grant> {
-    let scope = scope_from_columns(r.get("port"), r.get("proto"), r.get("socket_group"))?;
+    let scope = scope_from_columns(r.get("port"), r.get("proto"), r.get("port_group"))?;
     let subject_id: Option<String> = r.get("subject_id");
     let subject = match (r.get::<String, _>("subject_kind").as_str(), subject_id) {
         ("peer", Some(id)) => Subject::Peer(id),

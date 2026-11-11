@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { accessSummary, membershipsOf } from "../access";
-import type { App, SocketGroup, Tag } from "../api";
+import type { App, PortGroup, Tag } from "../api";
 import type { AccessHighlight } from "../components/AccessList";
 import { AppInspector, AppsInspector } from "../components/AppInspector";
 import EntityList, { type ListColumn, type ListRow, type ListSection } from "../components/EntityList";
@@ -12,12 +12,12 @@ import { useColumns } from "../columns";
 import { errorText, portLabel, rangeLabel, sameScope, scopeKey, scopeLabel } from "../lib";
 import { buildColumns, buildRows, cellOf, groupsOf, type Cell, type Col, type Ctx, type Row as MatrixRow } from "../matrix";
 import type { FocusMessage } from "../nav";
-import { useApps, useGrants, useGroups, useNetworks, usePeers, useSocketGroups, useTags } from "../queries";
+import { useApps, useGrants, useGroups, useNetworks, usePeers, useReservations, usePortGroups, useTags } from "../queries";
 
 /** A row of the list: an app, a tag, a row inside an app (`m`), or a port group (`sg`). */
 interface AppRow extends ListRow {
   m: MatrixRow;
-  sg?: SocketGroup;
+  sg?: PortGroup;
 }
 
 const NO_CELL: Cell = { state: "none", grants: [], networkIds: [], allNetworks: false };
@@ -28,7 +28,7 @@ const ALL = "__all__";
 
 const toRow = (m: MatrixRow): AppRow => ({ key: m.key, kind: m.kind, selectable: m.kind !== "port", indent: m.kind === "port", m });
 /** A port group has no matrix row of its own; the tag-shaped stand-in is never read for it. */
-const groupRow = (sg: SocketGroup): AppRow => ({
+const groupRow = (sg: PortGroup): AppRow => ({
   key: `sgroup:${sg.id}`, kind: "sgroup", selectable: true,
   m: { key: `sgroup:${sg.id}`, kind: "tag", target: { kind: "tag", id: sg.id }, scope: { kind: "all" }, port: null, label: sg.label },
   sg,
@@ -37,12 +37,13 @@ const groupRow = (sg: SocketGroup): AppRow => ({
 export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage }) {
   const apps = useApps();
   const tags = useTags();
-  const socketGroupQuery = useSocketGroups();
-  const socketGroupList = useMemo(() => socketGroupQuery.data ?? [], [socketGroupQuery.data]);
+  const portGroupQuery = usePortGroups();
+  const portGroupList = useMemo(() => portGroupQuery.data ?? [], [portGroupQuery.data]);
   const grants = useGrants();
   const peers = usePeers();
   const groups = useGroups();
   const networks = useNetworks();
+  const reservations = useReservations();
   const columns = useColumns();
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -66,13 +67,13 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   };
 
   const tagList = useMemo(() => tags.data ?? [], [tags.data]);
-  const groupList = useMemo(() => socketGroupList, [socketGroupList]);
+  const groupList = useMemo(() => portGroupList, [portGroupList]);
   const appList = useMemo(() => apps.data ?? [], [apps.data]);
   const ctx: Ctx = useMemo(
     () => ({
-      grants: grants.data ?? [], tags: tagList, peers: peers.data ?? [], groups: groups.data ?? [], networks: networks.data ?? [], scope,
+      grants: grants.data ?? [], tags: tagList, peers: peers.data ?? [], groups: groups.data ?? [], networks: networks.data ?? [], scope, reservations: reservations.data ?? [],
     }),
-    [grants.data, tagList, peers.data, groups.data, networks.data, scope],
+    [grants.data, tagList, peers.data, groups.data, networks.data, scope, reservations.data],
   );
 
   // A link from elsewhere: show what it points at. The page stays mounted, so the rest of its
@@ -186,7 +187,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
           <>
             {mine.map((m) => (
               <button key={`${m.tag.id}-${scopeKey(m.scope)}`} className="tag-pill" title="Show only this tag" onClick={() => setTagFilter(m.tag.id)}>
-                {m.tag.label}{m.scope.kind !== "all" && r.m.kind === "app" ? ` ${scopeLabel(m.scope, socketGroupList)}` : ""}
+                {m.tag.label}{m.scope.kind !== "all" && r.m.kind === "app" ? ` ${scopeLabel(m.scope, portGroupList)}` : ""}
               </button>
             ))}
           </>

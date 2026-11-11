@@ -47,11 +47,11 @@ impl Engine {
         let all_grants = state.db.list_grants().await?;
         let tags = state.db.list_tags().await?;
         let targets = socketguard_core::grant_targets(&tags, &state.db.list_reservations().await?);
-        let socket_groups = state.db.list_socket_groups().await?;
+        let port_groups = state.db.list_port_groups().await?;
         Ok(AppDetail {
             counters: self.metrics.app_counters(&app.id),
-            access: effective_access(&all_grants, &targets, &app, &socket_groups),
-            socket_groups: socket_groups
+            access: effective_access(&all_grants, &targets, &app, &port_groups),
+            port_groups: port_groups
                 .iter()
                 .filter(|g| g.is_attached_to(&app.id))
                 .cloned()
@@ -176,7 +176,7 @@ impl Engine {
         let none = PortRangeSet::new();
         let targets = cat.targets();
         let app_listens_v4 = cat.apps.iter().any(|a| {
-            covered_ports(grant, &targets, a, &cat.socket_groups, &none).is_some_and(|covered| {
+            covered_ports(grant, &targets, a, &cat.port_groups, &none).is_some_and(|covered| {
                 a.ports
                     .iter()
                     .filter(|p| covered.contains(p.port_ref()))

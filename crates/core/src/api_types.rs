@@ -8,7 +8,7 @@ use crate::model::{
     NewCredential, PeerId, ReservationId, Settings, Subject, TagId, Target,
 };
 use crate::reach::GrantReach;
-use crate::scope::{PortRange, Scope, SocketGroupId};
+use crate::scope::{PortGroupId, PortRange, Scope};
 use crate::tags::TagMember;
 use crate::types::Protocol;
 use serde::{Deserialize, Serialize};
@@ -216,8 +216,9 @@ pub struct ExportDocument {
     pub settings: Settings,
     pub peers: Vec<ExportPeer>,
     pub groups: Vec<ExportGroup>,
-    #[serde(default)]
-    pub socket_groups: Vec<ExportSocketGroup>,
+    /// Documents written before the rename call this `socket_groups`.
+    #[serde(default, alias = "socket_groups")]
+    pub port_groups: Vec<ExportPortGroup>,
     pub grants: Vec<ExportGrant>,
     #[serde(default)]
     pub reservations: Vec<ExportReservation>,
@@ -257,14 +258,14 @@ pub struct ExportAppRef {
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExportSocketGroup {
+pub struct ExportPortGroup {
     pub label: String,
     pub ports: Vec<PortRange>,
     /// The apps it is attached to; an app that does not exist here makes the document invalid.
     pub apps: Vec<ExportAppRef>,
 }
 
-/// A scope by label, as the document names a socket group.
+/// A scope by label, as the document names a port group.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -366,7 +367,7 @@ pub enum ChangeItem {
     Grant,
     Tag,
     TagMember,
-    SocketGroup,
+    PortGroup,
     App,
     Reservation,
     Binding,
@@ -445,7 +446,7 @@ pub struct NewTagMember {
 
 /// Query of `DELETE /api/tags/{id}/members/{app_id}`: without `port` and `group` the
 /// All-sockets membership goes, with `port` (and `proto`) the membership of that port, with
-/// `group` (a socket group id) the membership by that group.
+/// `group` (a port group id) the membership by that group.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberQuery {
@@ -457,7 +458,7 @@ pub struct MemberQuery {
     pub proto: Option<Protocol>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
-    pub group: Option<SocketGroupId>,
+    pub group: Option<PortGroupId>,
 }
 
 impl MemberQuery {
@@ -475,12 +476,12 @@ impl MemberQuery {
     }
 }
 
-// ─── Socket groups ───────────────────────────────────────────────────────────
+// ─── Port groups ───────────────────────────────────────────────────────────
 
-/// Body of `POST /api/socket-groups`.
+/// Body of `POST /api/port-groups`.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NewSocketGroup {
+pub struct NewPortGroup {
     pub label: String,
     pub ports: Vec<PortRange>,
     /// Apps to attach it to right away.
@@ -491,11 +492,11 @@ pub struct NewSocketGroup {
     pub confirm_open: bool,
 }
 
-/// Body of `PUT /api/socket-groups/{id}`. Absent fields stay as they are. New ports take
+/// Body of `PUT /api/port-groups/{id}`. Absent fields stay as they are. New ports take
 /// effect everywhere the group is used.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UpdateSocketGroup {
+pub struct UpdatePortGroup {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub label: Option<String>,
@@ -507,11 +508,11 @@ pub struct UpdateSocketGroup {
     pub confirm_open: bool,
 }
 
-/// Body of `PUT /api/socket-groups/{id}/apps/{app_id}`. Attaching a group to an app widens
+/// Body of `PUT /api/port-groups/{id}/apps/{app_id}`. Attaching a group to an app widens
 /// what the grants covering the app's All sockets cover; where that reaches Anyone it needs `confirm_open`.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttachSocketGroup {
+pub struct AttachPortGroup {
     #[serde(default)]
     pub confirm_open: bool,
 }
@@ -586,7 +587,7 @@ pub enum ChangeOp {
         #[serde(default)]
         patterns: Vec<String>,
     },
-    CreateSocketGroup {
+    CreatePortGroup {
         #[serde(rename = "ref", default)]
         #[cfg_attr(feature = "ts", ts(optional, rename = "ref"))]
         ref_: Option<String>,
@@ -599,8 +600,8 @@ pub enum ChangeOp {
         #[serde(default)]
         confirm_open: bool,
     },
-    UpdateSocketGroup {
-        group_id: SocketGroupId,
+    UpdatePortGroup {
+        group_id: PortGroupId,
         #[serde(default)]
         #[cfg_attr(feature = "ts", ts(optional))]
         label: Option<String>,
@@ -611,19 +612,19 @@ pub enum ChangeOp {
         #[serde(default)]
         confirm_open: bool,
     },
-    DeleteSocketGroup {
-        group_id: SocketGroupId,
+    DeletePortGroup {
+        group_id: PortGroupId,
     },
-    AttachSocketGroup {
-        group_id: SocketGroupId,
+    AttachPortGroup {
+        group_id: PortGroupId,
         app_id: AppId,
         /// Needed when the app or a tag it is in has a grant to Anyone that would cover
         /// the group's ports.
         #[serde(default)]
         confirm_open: bool,
     },
-    DetachSocketGroup {
-        group_id: SocketGroupId,
+    DetachPortGroup {
+        group_id: PortGroupId,
         app_id: AppId,
     },
     AddGrant {
@@ -787,7 +788,7 @@ pub mod event_name {
     pub const PEERS_CHANGED: &str = "peers_changed";
     pub const GRANTS_CHANGED: &str = "grants_changed";
     pub const TAGS_CHANGED: &str = "tags_changed";
-    pub const SOCKET_GROUPS_CHANGED: &str = "socket_groups_changed";
+    pub const PORT_GROUPS_CHANGED: &str = "port_groups_changed";
     pub const RESERVATIONS_CHANGED: &str = "reservations_changed";
     pub const ADDRESSES_CHANGED: &str = "addresses_changed";
     pub const NETWORKS_CHANGED: &str = "networks_changed";
@@ -806,7 +807,7 @@ pub enum ApiEvent {
     PeersChanged,
     GrantsChanged,
     TagsChanged,
-    SocketGroupsChanged,
+    PortGroupsChanged,
     ReservationsChanged,
     AddressesChanged,
     NetworksChanged,
@@ -828,7 +829,7 @@ impl ApiEvent {
             ApiEvent::PeersChanged => event_name::PEERS_CHANGED,
             ApiEvent::GrantsChanged => event_name::GRANTS_CHANGED,
             ApiEvent::TagsChanged => event_name::TAGS_CHANGED,
-            ApiEvent::SocketGroupsChanged => event_name::SOCKET_GROUPS_CHANGED,
+            ApiEvent::PortGroupsChanged => event_name::PORT_GROUPS_CHANGED,
             ApiEvent::ReservationsChanged => event_name::RESERVATIONS_CHANGED,
             ApiEvent::AddressesChanged => event_name::ADDRESSES_CHANGED,
             ApiEvent::NetworksChanged => event_name::NETWORKS_CHANGED,
@@ -847,7 +848,7 @@ impl ApiEvent {
             PEERS_CHANGED => ApiEvent::PeersChanged,
             GRANTS_CHANGED => ApiEvent::GrantsChanged,
             TAGS_CHANGED => ApiEvent::TagsChanged,
-            SOCKET_GROUPS_CHANGED => ApiEvent::SocketGroupsChanged,
+            PORT_GROUPS_CHANGED => ApiEvent::PortGroupsChanged,
             RESERVATIONS_CHANGED => ApiEvent::ReservationsChanged,
             ADDRESSES_CHANGED => ApiEvent::AddressesChanged,
             NETWORKS_CHANGED => ApiEvent::NetworksChanged,
@@ -858,5 +859,22 @@ impl ApiEvent {
                 data: data.to_string(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod export_document_tests {
+    use super::*;
+
+    #[test]
+    fn document_with_the_old_socket_groups_key_still_loads() {
+        let json = r#"{"version":1,"settings":{"protect_host_interfaces":[]},"peers":[],
+            "groups":[],"grants":[],
+            "socket_groups":[{"label":"web","ports":[],"apps":[]}]}"#;
+        let doc: ExportDocument = serde_json::from_str(json).unwrap();
+        assert_eq!(doc.port_groups.len(), 1);
+        assert_eq!(doc.port_groups[0].label, "web");
+        let out = serde_json::to_value(&doc).unwrap();
+        assert!(out.get("port_groups").is_some() && out.get("socket_groups").is_none());
     }
 }

@@ -17,13 +17,13 @@ use serde::Serialize;
 use socketguard_client::{ApiEvent, Client, Error as ApiError, GrantQuery, Saved};
 use socketguard_core::api_types::{
     error_code, ApplyRequest, ChangeOp, ChangesRequest, Enforcement, LockoutRiskInfo,
-    MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewReservation, NewSocketGroup,
-    NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest, UpdateSocketGroup, UpdateTag,
+    MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation,
+    NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::config::TorAuth;
 use socketguard_core::{
     ActivityKind, ActivityQuery, ActivityRecord, App, BackendConfig, BindingTarget, CredentialKind,
-    GrantView, NewCredential, NewGrant, Peer, PeerGroup, ReservationView, Scope, SocketGroup,
+    GrantView, NewCredential, NewGrant, Peer, PeerGroup, PortGroup, ReservationView, Scope,
     Subject, Tag, TagMember, Target,
 };
 
@@ -51,7 +51,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Peers(cmd) => peers(&c, cmd).await,
         Command::Groups(cmd) => groups(&c, cmd).await,
         Command::Tags(cmd) => tags(&c, cmd).await,
-        Command::SocketGroups(cmd) => socket_groups(&c, cmd).await,
+        Command::PortGroups(cmd) => port_groups(&c, cmd).await,
         Command::Reservations(cmd) => reservations(&c, cmd).await,
         Command::Addresses(cmd) => addresses(&c, cmd).await,
         Command::Grant(a) => grant(&c, a).await,
@@ -166,7 +166,7 @@ impl Ctx {
         )
         .with_tags(&self.client.list_tags().await?)
         .with_reservations(&self.client.list_reservations().await?)
-        .with_socket_groups(&self.client.list_socket_groups().await?))
+        .with_port_groups(&self.client.list_port_groups().await?))
     }
 
     async fn reservation(&self, query: &str) -> Result<ReservationView> {
@@ -178,13 +178,8 @@ impl Ctx {
         .clone())
     }
 
-    async fn socket_group(&self, query: &str) -> Result<SocketGroup> {
-        Ok(resolve(
-            "port group",
-            &self.client.list_socket_groups().await?,
-            query,
-        )?
-        .clone())
+    async fn port_group(&self, query: &str) -> Result<PortGroup> {
+        Ok(resolve("port group", &self.client.list_port_groups().await?, query)?.clone())
     }
 
     /// A scope as typed, with a port group resolved by label.
@@ -192,7 +187,7 @@ impl Ctx {
         Ok(match spec {
             parse::ScopeSpec::All => Scope::All,
             parse::ScopeSpec::Port(p) => Scope::port(*p),
-            parse::ScopeSpec::Group(label) => Scope::group(self.socket_group(label).await?.id),
+            parse::ScopeSpec::Group(label) => Scope::group(self.port_group(label).await?.id),
         })
     }
 
@@ -704,7 +699,7 @@ fn member_ids(all: &[Peer], queries: &[String]) -> Result<Vec<String>> {
 
 // ─── Tags ────────────────────────────────────────────────────────────────────
 
-/// `<app>[:port[/proto]]` or `<app>:socket-group=<label>` texts as tag members.
+/// `<app>[:port[/proto]]` or `<app>:port-group=<label>` texts as tag members.
 async fn tag_members(c: &Ctx, texts: &[String]) -> Result<Vec<TagMember>> {
     let mut out = Vec::new();
     for t in texts {
@@ -862,14 +857,14 @@ fn confirm_group_open(group: &str) -> Result<()> {
     )
 }
 
-async fn socket_groups(c: &Ctx, cmd: SocketGroupsCmd) -> Result<()> {
+async fn port_groups(c: &Ctx, cmd: PortGroupsCmd) -> Result<()> {
     match cmd {
-        SocketGroupsCmd::List => {
-            let g = c.client.list_socket_groups().await?;
+        PortGroupsCmd::List => {
+            let g = c.client.list_port_groups().await?;
             let names = c.names().await?;
-            c.print(&g, || render::socket_groups(&g, &names))
+            c.print(&g, || render::port_groups(&g, &names))
         }
-        SocketGroupsCmd::Add {
+        PortGroupsCmd::Add {
             label,
             ports,
             apps,
@@ -880,35 +875,33 @@ async fn socket_groups(c: &Ctx, cmd: SocketGroupsCmd) -> Result<()> {
             for a in &apps {
                 app_ids.push(c.app(a).await?.id);
             }
-            let mut req = NewSocketGroup {
+            let mut req = NewPortGroup {
                 label: label.clone(),
                 ports,
                 apps: app_ids,
                 confirm_open: yes,
             };
-            let saved = match c.client.create_socket_group(&req).await {
+            let saved = match c.client.create_port_group(&req).await {
                 Err(e) if e.is_confirmation_required() => {
                     confirm_group_open(&label)?;
                     req.confirm_open = true;
-                    c.client.create_socket_group(&req).await?
+                    c.client.create_port_group(&req).await?
                 }
                 other => other?,
             };
             c.warn_pending(&saved.enforcement);
             let g = saved.value;
             let names = c.names().await?;
-            c.print(&g, || {
-                render::socket_groups(std::slice::from_ref(&g), &names)
-            })
+            c.print(&g, || render::port_groups(std::slice::from_ref(&g), &names))
         }
-        SocketGroupsCmd::Set {
+        PortGroupsCmd::Set {
             group,
             label,
             ports,
             yes,
         } => {
-            let g = c.socket_group(&group).await?;
-            let mut req = UpdateSocketGroup {
+            let g = c.port_group(&group).await?;
+            let mut req = UpdatePortGroup {
                 label,
                 ports: if ports.is_empty() {
                     None
@@ -920,33 +913,31 @@ async fn socket_groups(c: &Ctx, cmd: SocketGroupsCmd) -> Result<()> {
             if req.label.is_none() && req.ports.is_none() {
                 bail!("give --label and/or --port");
             }
-            let saved = match c.client.update_socket_group(&g.id, &req).await {
+            let saved = match c.client.update_port_group(&g.id, &req).await {
                 Err(e) if e.is_confirmation_required() => {
                     confirm_group_open(&g.label)?;
                     req.confirm_open = true;
-                    c.client.update_socket_group(&g.id, &req).await?
+                    c.client.update_port_group(&g.id, &req).await?
                 }
                 other => other?,
             };
             c.warn_pending(&saved.enforcement);
             let g = saved.value;
             let names = c.names().await?;
-            c.print(&g, || {
-                render::socket_groups(std::slice::from_ref(&g), &names)
-            })
+            c.print(&g, || render::port_groups(std::slice::from_ref(&g), &names))
         }
-        SocketGroupsCmd::Rm { group } => {
-            let g = c.socket_group(&group).await?;
-            let saved = c.client.delete_socket_group(&g.id).await?;
+        PortGroupsCmd::Rm { group } => {
+            let g = c.port_group(&group).await?;
+            let saved = c.client.delete_port_group(&g.id).await?;
             c.done_saved(saved, format!("removed port group {}", g.label))
         }
-        SocketGroupsCmd::Attach { group, app, yes } => {
-            let g = c.socket_group(&group).await?;
+        PortGroupsCmd::Attach { group, app, yes } => {
+            let g = c.port_group(&group).await?;
             let app = c.app(&app).await?;
-            let saved = match c.client.attach_socket_group(&g.id, &app.id, yes).await {
+            let saved = match c.client.attach_port_group(&g.id, &app.id, yes).await {
                 Err(e) if e.is_confirmation_required() => {
                     confirm_group_open(&g.label)?;
-                    c.client.attach_socket_group(&g.id, &app.id, true).await?
+                    c.client.attach_port_group(&g.id, &app.id, true).await?
                 }
                 other => other?,
             };
@@ -956,10 +947,10 @@ async fn socket_groups(c: &Ctx, cmd: SocketGroupsCmd) -> Result<()> {
                 format!("port group {} attached to {}", g.label, app.name)
             })
         }
-        SocketGroupsCmd::Detach { group, app } => {
-            let g = c.socket_group(&group).await?;
+        PortGroupsCmd::Detach { group, app } => {
+            let g = c.port_group(&group).await?;
             let app = c.app(&app).await?;
-            let saved = c.client.detach_socket_group(&g.id, &app.id).await?;
+            let saved = c.client.detach_port_group(&g.id, &app.id).await?;
             c.warn_pending(&saved.enforcement);
             let g = saved.value;
             c.print(&g, || {
@@ -972,7 +963,7 @@ async fn socket_groups(c: &Ctx, cmd: SocketGroupsCmd) -> Result<()> {
 // ─── Reservations and addresses ──────────────────────────────────────────────
 
 impl Ctx {
-    /// A binding as typed: `<app>[:port[/proto]]`, `<app>:socket-group=<label>` or `tag:<label>`.
+    /// A binding as typed: `<app>[:port[/proto]]`, `<app>:port-group=<label>` or `tag:<label>`.
     async fn binding_target(&self, text: &str) -> Result<BindingTarget> {
         Ok(match parse::parse_target_spec(text) {
             (TargetSpec::App(q), scope) => BindingTarget::App {
@@ -1219,14 +1210,14 @@ impl Ctx {
     }
 
     /// The targets named by the texts of a command, crossed with `--port` and
-    /// `--socket-group` for those that carry no scope of their own. A reservation takes
+    /// `--port-group` for those that carry no scope of their own. A reservation takes
     /// neither: it is always granted whole.
     async fn targets(&self, texts: &TargetTexts<'_>) -> Result<Vec<(Target, Scope, String)>> {
         let mut extra: Vec<parse::ScopeSpec> = Vec::new();
         for p in texts.ports {
             extra.push(parse::ScopeSpec::Port(parse::parse_port(p)?));
         }
-        for g in texts.socket_groups {
+        for g in texts.port_groups {
             extra.push(parse::ScopeSpec::Group(g.clone()));
         }
         if extra.is_empty() {
@@ -1307,7 +1298,7 @@ struct TargetTexts<'a> {
     tags: &'a [String],
     reservations: &'a [String],
     ports: &'a [String],
-    socket_groups: &'a [String],
+    port_groups: &'a [String],
 }
 
 /// Whether `grant`/`revoke` got the flag form (several targets, subjects or ports).
@@ -1316,7 +1307,7 @@ fn uses_flags(texts: &TargetTexts<'_>, to: &[String]) -> bool {
         && texts.tags.is_empty()
         && texts.reservations.is_empty()
         && texts.ports.is_empty()
-        && texts.socket_groups.is_empty()
+        && texts.port_groups.is_empty()
         && to.is_empty())
 }
 
@@ -1326,7 +1317,7 @@ async fn grant(c: &Ctx, a: GrantArgs) -> Result<()> {
         tags: &a.tags,
         reservations: &a.reservations,
         ports: &a.ports,
-        socket_groups: &a.socket_groups,
+        port_groups: &a.port_groups,
     };
     let flags = uses_flags(&flag_texts, &a.to);
     let (targets, to) = match (&a.target, &a.subject) {
@@ -1526,7 +1517,7 @@ fn revoke_texts(a: &RevokeArgs) -> TargetTexts<'_> {
         tags: &a.tags,
         reservations: &a.reservations,
         ports: &a.ports,
-        socket_groups: &a.socket_groups,
+        port_groups: &a.port_groups,
     }
 }
 

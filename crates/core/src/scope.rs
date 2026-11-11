@@ -1,4 +1,4 @@
-//! Scopes and socket groups (ADR 0047): which sockets of an app a grant, a tag member or
+//! Scopes and port groups (ADR 0047): which sockets of an app a grant, a tag member or
 //! an address means, the port sets that follow from it, and the sets themselves.
 //!
 //! [`PortRangeSet`] is the arithmetic (union, intersection, subtraction) on ports and port
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-pub type SocketGroupId = String;
+pub type PortGroupId = String;
 
 // ─── Port ranges ─────────────────────────────────────────────────────────────
 
@@ -300,23 +300,23 @@ pub fn ranges_text(ranges: &[PortRange]) -> String {
         .join(", ")
 }
 
-// ─── Scope and socket groups ─────────────────────────────────────────────────
+// ─── Scope and port groups ─────────────────────────────────────────────────
 
 /// Which sockets of an app a grant, a tag member or an address means.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Scope {
-    /// Every socket of the app: its detected ports and its attached socket groups.
+    /// Every socket of the app: its detected ports and its attached port groups.
     #[default]
     All,
     Port {
         port: u16,
         proto: Protocol,
     },
-    /// A socket group attached to the app.
+    /// A port group attached to the app.
     Group {
-        id: SocketGroupId,
+        id: PortGroupId,
     },
 }
 
@@ -328,7 +328,7 @@ impl Scope {
         }
     }
 
-    pub fn group(id: impl Into<SocketGroupId>) -> Scope {
+    pub fn group(id: impl Into<PortGroupId>) -> Scope {
         Scope::Group { id: id.into() }
     }
 
@@ -354,7 +354,7 @@ impl Scope {
     }
 
     /// For people: `All sockets`, `80/tcp`, `group <label>` (the id if the group is unknown).
-    pub fn describe(&self, groups: &[SocketGroup]) -> String {
+    pub fn describe(&self, groups: &[PortGroup]) -> String {
         match self {
             Scope::All => "All ports".to_string(),
             Scope::Port { port, proto } => format!("{port}/{proto}"),
@@ -374,8 +374,8 @@ impl Scope {
 /// a scope; its ports need not be detected.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SocketGroup {
-    pub id: SocketGroupId,
+pub struct PortGroup {
+    pub id: PortGroupId,
     pub label: String,
     /// Non-empty, normalized: sorted, merged.
     pub ports: Vec<PortRange>,
@@ -384,7 +384,7 @@ pub struct SocketGroup {
     pub created_at: DateTime<Utc>,
 }
 
-impl SocketGroup {
+impl PortGroup {
     pub fn is_attached_to(&self, app_id: &str) -> bool {
         self.apps.iter().any(|a| a == app_id)
     }
@@ -394,7 +394,7 @@ impl SocketGroup {
     }
 }
 
-pub fn find_group<'a>(groups: &'a [SocketGroup], id: &str) -> Option<&'a SocketGroup> {
+pub fn find_group<'a>(groups: &'a [PortGroup], id: &str) -> Option<&'a PortGroup> {
     groups.iter().find(|g| g.id == id)
 }
 
@@ -405,7 +405,7 @@ pub fn find_group<'a>(groups: &'a [SocketGroup], id: &str) -> Option<&'a SocketG
 pub struct ScopePorts {
     /// Detected and explicitly named ports.
     pub fixed: PortRangeSet,
-    /// Ports that only a socket group's range contributes; disjoint from `fixed`.
+    /// Ports that only a port group's range contributes; disjoint from `fixed`.
     pub ranged: PortRangeSet,
 }
 
@@ -474,7 +474,7 @@ pub fn detected_ports(app: &App) -> PortRangeSet {
 
 /// The ports `scope` means on `app` (ADR 0047):
 ///
-/// - `All`: the detected ports and the ranges of every attached socket group,
+/// - `All`: the detected ports and the ranges of every attached port group,
 /// - `Port`: that port, detected or not,
 /// - `Group`: the group's ranges if it is attached to the app, else nothing.
 ///
@@ -484,7 +484,7 @@ pub fn detected_ports(app: &App) -> PortRangeSet {
 pub fn scope_ports(
     app: &App,
     scope: &Scope,
-    groups: &[SocketGroup],
+    groups: &[PortGroup],
     foreign: &PortRangeSet,
 ) -> ScopePorts {
     let detected = detected_ports(app);
@@ -528,7 +528,7 @@ pub fn scope_ports(
 
 /// The ports `scope` names by itself, as a tag grant's own scope does: no attachment
 /// needed, `All` is everything.
-pub fn raw_scope_ports(scope: &Scope, groups: &[SocketGroup]) -> ScopePorts {
+pub fn raw_scope_ports(scope: &Scope, groups: &[PortGroup]) -> ScopePorts {
     match scope {
         Scope::All => ScopePorts {
             fixed: PortRangeSet::new(),
@@ -542,7 +542,7 @@ pub fn raw_scope_ports(scope: &Scope, groups: &[SocketGroup]) -> ScopePorts {
             ranged: PortRangeSet::new(),
         },
         Scope::Group { id } => ScopePorts {
-            ranged: find_group(groups, id).map_or_else(PortRangeSet::new, SocketGroup::port_set),
+            ranged: find_group(groups, id).map_or_else(PortRangeSet::new, PortGroup::port_set),
             fixed: PortRangeSet::new(),
         },
     }
@@ -709,8 +709,8 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn group(id: &str, ranges: &[&str], apps: &[&str]) -> SocketGroup {
-        SocketGroup {
+    pub(crate) fn group(id: &str, ranges: &[&str], apps: &[&str]) -> PortGroup {
+        PortGroup {
             id: id.into(),
             label: id.into(),
             ports: parse_ranges(ranges).unwrap(),

@@ -270,7 +270,7 @@ fn app_detail() {
         }],
         access: vec![],
         tags: vec![],
-        socket_groups: vec![],
+        port_groups: vec![],
     };
     insta::assert_snapshot!(render::app_detail(&d, &names()));
 }
@@ -283,7 +283,7 @@ fn closed_app_detail() {
         counters: vec![],
         access: vec![],
         tags: vec![],
-        socket_groups: vec![],
+        port_groups: vec![],
     };
     insta::assert_snapshot!(render::app_detail(&d, &names()));
 }
@@ -532,7 +532,7 @@ fn documents_round_trip_through_toml_and_json() {
             label: "team".into(),
             members: vec!["alice".into()],
         }],
-        socket_groups: vec![],
+        port_groups: vec![],
         grants: vec![
             ExportGrant {
                 app: ExportAppRef {
@@ -664,7 +664,7 @@ fn grant_notes_and_reservation_access_are_shown() {
             },
         }],
         tags: vec![],
-        socket_groups: vec![],
+        port_groups: vec![],
     };
     d.app.addresses[0].reservation_id = Some("r1111111aaaa".into());
     let text = render::app_detail(&d, &n);

@@ -2,10 +2,10 @@
 import type { PortRange } from "./PortRange";
 
 /**
- * Body of `PUT /api/socket-groups/{id}`. Absent fields stay as they are. New ports take
+ * Body of `PUT /api/port-groups/{id}`. Absent fields stay as they are. New ports take
  * effect everywhere the group is used.
  */
-export type UpdateSocketGroup = { label?: string, ports?: Array<PortRange>, 
+export type UpdatePortGroup = { label?: string, ports?: Array<PortRange>, 
 /**
  * Needed when new ports would open an app to Anyone.
  */

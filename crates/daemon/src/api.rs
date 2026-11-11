@@ -19,11 +19,11 @@ use futures_util::stream::Stream;
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use socketguard_core::api_types::{
-    error_code, event_name, ApiError, ApplyRequest, AttachSocketGroup, ChangesRequest, Counts,
+    error_code, event_name, ApiError, ApplyRequest, AttachPortGroup, ChangesRequest, Counts,
     DisableRequest, EnforcementNotice, LockoutRiskInfo, MemberQuery, MoveAppRequest, NewBinding,
-    NewGroup, NewNetwork, NewPeer, NewReservation, NewSocketGroup, NewTag, NewTagMember,
+    NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation, NewTag, NewTagMember,
     ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse, ReserveRequest,
-    ReviewRequest, SetMembers, StatusResponse, UpdateLabel, UpdateSocketGroup, UpdateTag,
+    ReviewRequest, SetMembers, StatusResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
 use socketguard_core::{ActivityQuery, NewCredential, NewGrant};
@@ -42,7 +42,7 @@ pub enum DaemonEvent {
     PeersChanged,
     GrantsChanged,
     TagsChanged,
-    SocketGroupsChanged,
+    PortGroupsChanged,
     ReservationsChanged,
     AddressesChanged,
     NetworksChanged,
@@ -58,7 +58,7 @@ impl DaemonEvent {
             DaemonEvent::PeersChanged => event_name::PEERS_CHANGED,
             DaemonEvent::GrantsChanged => event_name::GRANTS_CHANGED,
             DaemonEvent::TagsChanged => event_name::TAGS_CHANGED,
-            DaemonEvent::SocketGroupsChanged => event_name::SOCKET_GROUPS_CHANGED,
+            DaemonEvent::PortGroupsChanged => event_name::PORT_GROUPS_CHANGED,
             DaemonEvent::ReservationsChanged => event_name::RESERVATIONS_CHANGED,
             DaemonEvent::AddressesChanged => event_name::ADDRESSES_CHANGED,
             DaemonEvent::NetworksChanged => event_name::NETWORKS_CHANGED,
@@ -115,13 +115,13 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::DELETE, "/api/tags/{id}"),
     (Method::POST, "/api/tags/{id}/members"),
     (Method::DELETE, "/api/tags/{id}/members/{app_id}"),
-    (Method::GET, "/api/socket-groups"),
-    (Method::POST, "/api/socket-groups"),
-    (Method::GET, "/api/socket-groups/{id}"),
-    (Method::PUT, "/api/socket-groups/{id}"),
-    (Method::DELETE, "/api/socket-groups/{id}"),
-    (Method::PUT, "/api/socket-groups/{id}/apps/{app_id}"),
-    (Method::DELETE, "/api/socket-groups/{id}/apps/{app_id}"),
+    (Method::GET, "/api/port-groups"),
+    (Method::POST, "/api/port-groups"),
+    (Method::GET, "/api/port-groups/{id}"),
+    (Method::PUT, "/api/port-groups/{id}"),
+    (Method::DELETE, "/api/port-groups/{id}"),
+    (Method::PUT, "/api/port-groups/{id}/apps/{app_id}"),
+    (Method::DELETE, "/api/port-groups/{id}/apps/{app_id}"),
     (Method::GET, "/api/reservations"),
     (Method::POST, "/api/reservations"),
     (Method::GET, "/api/reservations/{id}"),
@@ -186,13 +186,13 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("DELETE", "/api/tags/{id}") => delete(tag_delete),
         ("POST", "/api/tags/{id}/members") => post(tag_member_add),
         ("DELETE", "/api/tags/{id}/members/{app_id}") => delete(tag_member_remove),
-        ("GET", "/api/socket-groups") => get(socket_groups_list),
-        ("POST", "/api/socket-groups") => post(socket_group_create),
-        ("GET", "/api/socket-groups/{id}") => get(socket_group_get),
-        ("PUT", "/api/socket-groups/{id}") => put(socket_group_update),
-        ("DELETE", "/api/socket-groups/{id}") => delete(socket_group_delete),
-        ("PUT", "/api/socket-groups/{id}/apps/{app_id}") => put(socket_group_attach),
-        ("DELETE", "/api/socket-groups/{id}/apps/{app_id}") => delete(socket_group_detach),
+        ("GET", "/api/port-groups") => get(port_groups_list),
+        ("POST", "/api/port-groups") => post(port_group_create),
+        ("GET", "/api/port-groups/{id}") => get(port_group_get),
+        ("PUT", "/api/port-groups/{id}") => put(port_group_update),
+        ("DELETE", "/api/port-groups/{id}") => delete(port_group_delete),
+        ("PUT", "/api/port-groups/{id}/apps/{app_id}") => put(port_group_attach),
+        ("DELETE", "/api/port-groups/{id}/apps/{app_id}") => delete(port_group_detach),
         ("GET", "/api/reservations") => get(reservations_list),
         ("POST", "/api/reservations") => post(reservation_create),
         ("GET", "/api/reservations/{id}") => get(reservation_get),
@@ -838,40 +838,40 @@ async fn tag_member_remove(
     Ok(saved(&engine, StatusCode::OK, Some(tag)))
 }
 
-// ─── Socket groups ───────────────────────────────────────────────────────────
+// ─── Port groups ───────────────────────────────────────────────────────────
 
-async fn socket_groups_list(State(state): State<Shared>) -> ApiResult<Response> {
+async fn port_groups_list(State(state): State<Shared>) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    Ok(Json(engine.list_socket_groups(&state).await?).into_response())
+    Ok(Json(engine.list_port_groups(&state).await?).into_response())
 }
 
-async fn socket_group_create(
+async fn port_group_create(
     State(state): State<Shared>,
-    ApiJson(req): ApiJson<NewSocketGroup>,
+    ApiJson(req): ApiJson<NewPortGroup>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
     let group = engine
-        .create_socket_group(&state, &req.label, &req.ports, &req.apps, req.confirm_open)
+        .create_port_group(&state, &req.label, &req.ports, &req.apps, req.confirm_open)
         .await?;
     Ok(saved(&engine, StatusCode::CREATED, Some(group)))
 }
 
-async fn socket_group_get(
+async fn port_group_get(
     State(state): State<Shared>,
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    Ok(Json(engine.get_socket_group(&state, &id).await?).into_response())
+    Ok(Json(engine.get_port_group(&state, &id).await?).into_response())
 }
 
-async fn socket_group_update(
+async fn port_group_update(
     State(state): State<Shared>,
     Path(id): Path<String>,
-    ApiJson(req): ApiJson<UpdateSocketGroup>,
+    ApiJson(req): ApiJson<UpdatePortGroup>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
     let group = engine
-        .update_socket_group(
+        .update_port_group(
             &state,
             &id,
             req.label.as_deref(),
@@ -882,33 +882,33 @@ async fn socket_group_update(
     Ok(saved(&engine, StatusCode::OK, Some(group)))
 }
 
-async fn socket_group_delete(
+async fn port_group_delete(
     State(state): State<Shared>,
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    engine.delete_socket_group(&state, &id).await?;
+    engine.delete_port_group(&state, &id).await?;
     Ok(saved(&engine, StatusCode::NO_CONTENT, None::<()>))
 }
 
-async fn socket_group_attach(
+async fn port_group_attach(
     State(state): State<Shared>,
     Path((id, app_id)): Path<(String, String)>,
-    ApiJson(req): ApiJson<AttachSocketGroup>,
+    ApiJson(req): ApiJson<AttachPortGroup>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
     let group = engine
-        .attach_socket_group(&state, &id, &app_id, req.confirm_open)
+        .attach_port_group(&state, &id, &app_id, req.confirm_open)
         .await?;
     Ok(saved(&engine, StatusCode::OK, Some(group)))
 }
 
-async fn socket_group_detach(
+async fn port_group_detach(
     State(state): State<Shared>,
     Path((id, app_id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    let group = engine.detach_socket_group(&state, &id, &app_id).await?;
+    let group = engine.detach_port_group(&state, &id, &app_id).await?;
     Ok(saved(&engine, StatusCode::OK, Some(group)))
 }
 

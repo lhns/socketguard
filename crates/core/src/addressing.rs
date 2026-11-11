@@ -19,7 +19,7 @@ use crate::model::{
     PortConflict, PortRef, Reservation, ReservationId, Target,
 };
 use crate::scope::{
-    foreign_listening, scope_ports, PortRange, PortRangeSet, Scope, ScopePorts, SocketGroup,
+    foreign_listening, scope_ports, PortGroup, PortRange, PortRangeSet, Scope, ScopePorts,
 };
 use crate::tags::{grant_targets, grants_for_app, reservation_members, AppGrant, Tag, TagMember};
 use crate::types::Protocol;
@@ -65,7 +65,7 @@ pub struct World<'a> {
     pub grants: &'a [Grant],
     pub tags: &'a [Tag],
     pub reservations: &'a [Reservation],
-    pub socket_groups: &'a [SocketGroup],
+    pub port_groups: &'a [PortGroup],
     pub addresses: &'a [Address],
 }
 
@@ -134,7 +134,7 @@ impl<'a> Model<'a> {
             self.w.grants,
             &self.targets,
             app,
-            self.w.socket_groups,
+            self.w.port_groups,
             &self.foreign_of(&app.id),
         )
     }
@@ -146,7 +146,7 @@ impl<'a> Model<'a> {
         if let Scope::Group { id } = &row.scope {
             if !self
                 .w
-                .socket_groups
+                .port_groups
                 .iter()
                 .any(|g| &g.id == id && g.is_attached_to(&app.id))
             {
@@ -228,7 +228,7 @@ impl<'a> Model<'a> {
     /// the plain claims, so a resolved one still shows.
     pub fn reservation_serving(&self, res: &Reservation) -> Serving {
         let none = PortRangeSet::new();
-        let groups = self.w.socket_groups;
+        let groups = self.w.port_groups;
         // Rows, with the bindings that produce them.
         let mut rows: Vec<(Row, Vec<BindingId>)> = Vec::new();
         for b in &res.bindings {
@@ -355,7 +355,7 @@ impl<'a> Model<'a> {
     /// Every address with its state.
     pub fn address_info(&self) -> HashMap<AddressId, AddressInfo> {
         let none = PortRangeSet::new();
-        let groups = self.w.socket_groups;
+        let groups = self.w.port_groups;
         let mut servings: HashMap<&str, Serving> = HashMap::new();
         let mut out = HashMap::new();
         for a in self.w.addresses {
@@ -565,10 +565,10 @@ pub fn classify_legacy(w: World<'_>) -> Vec<(AddressId, LegacyClass)> {
         }
         let served = BTreeMap::from([(
             app_id.clone(),
-            scope_ports(app, &a.scope, w.socket_groups, &m.foreign_of(app_id)),
+            scope_ports(app, &a.scope, w.port_groups, &m.foreign_of(app_id)),
         )]);
         if m.covered_on(network, &served, None) {
-            let base = format!("{} {}", app.name, a.scope.describe(w.socket_groups));
+            let base = format!("{} {}", app.name, a.scope.describe(w.port_groups));
             let mut label = base.clone();
             let mut n = 2;
             while labels.contains(&label) {
@@ -688,7 +688,7 @@ mod tests {
             grants: &grants,
             tags: &tags,
             reservations: &[],
-            socket_groups: &[],
+            port_groups: &[],
             addresses: &[],
         };
         let rows = Model::new(w).named_rows(&nets[0]);
@@ -714,7 +714,7 @@ mod tests {
             grants: &grants,
             tags: &[],
             reservations: &res,
-            socket_groups: &[],
+            port_groups: &[],
             addresses: &[],
         };
         let m = Model::new(w);
@@ -753,7 +753,7 @@ mod tests {
             grants: &[],
             tags: &[],
             reservations: std::slice::from_ref(&res),
-            socket_groups: &groups,
+            port_groups: &groups,
             addresses: &[],
         };
         let s = Model::new(w).reservation_serving(&res);
@@ -781,7 +781,7 @@ mod tests {
             grants: &[],
             tags: &[],
             reservations: std::slice::from_ref(&res),
-            socket_groups: &groups,
+            port_groups: &groups,
             addresses: &[],
         };
         let s = Model::new(w).reservation_serving(&res);
@@ -821,7 +821,7 @@ mod tests {
             grants: &grants,
             tags: &[],
             reservations: &[],
-            socket_groups: &groups,
+            port_groups: &groups,
             addresses: &addrs,
         };
         let info = &Model::new(w).address_info()[&a.id];
@@ -854,7 +854,7 @@ mod tests {
             grants: &grants,
             tags: &[],
             reservations: &[],
-            socket_groups: &[],
+            port_groups: &[],
             addresses: &addrs,
         };
         let c: HashMap<_, _> = classify_legacy(w).into_iter().collect();

@@ -70,7 +70,7 @@ export default function AccessList({ entries, direction, networks, onRevoke, hig
               )}
             </div>
             <div className="access-meta">
-              {e.reach.map((r, j) => <ReachBadge key={`${r.network_id}-${j}`} reach={r.reach} network={netName(r.network_id)} />)}
+              {e.reach.map((r, j) => <ReachBadge key={`${r.network_id}-${j}`} reach={r.reach} network={netName(r.network_id)} note={r.note} />)}
               {e.origin.kind === "tag" && (
                 <button className="link-btn" aria-label={`Go to tag ${e.origin.label}`} onClick={() => nav.go("apps", { tagId: (e.origin as { id: string }).id })}>
                   via tag {e.origin.label}
@@ -81,7 +81,11 @@ export default function AccessList({ entries, direction, networks, onRevoke, hig
                   via group {e.origin.label}
                 </button>
               )}
-              {e.origin.kind === "reservation" && <span className="muted">via reservation {e.origin.label}</span>}
+              {e.origin.kind === "reservation" && (
+                <button className="link-btn" aria-label={`Go to reservation ${e.origin.label}`} onClick={() => nav.go("reserved", { reservationId: (e.origin as { id: string }).id })}>
+                  via reservation {e.origin.label}
+                </button>
+              )}
               {e.origin.kind === "direct" && e.grants.length > 0 && onRevoke && (
                 <button className="btn btn-danger btn-sm access-revoke" aria-label={`Revoke ${nameOf(e)}`} onClick={() => onRevoke(e)}>
                   Revoke
