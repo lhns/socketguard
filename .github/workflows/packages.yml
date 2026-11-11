@@ -1,0 +1,154 @@
+# Installers (ADR 0050): the Windows MSI, the Linux deb and rpm, the macOS pkg. Each job builds
+# with ./build.sh, builds the package (and a second one with the next patch version, by
+# repackaging, for the upgrade test), then installs it on the runner and checks the host from
+# outside (deploy/ci/footprint-check.*). Reused by release.yml. Unsigned.
+name: packages
+
+on:
+  push:
+    branches: [installers, redesign, main]
+  workflow_dispatch:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+permissions:
+  contents: read
+
+jobs:
+  msi:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install the frontend dependencies
+        run: npm ci
+        working-directory: ui
+      - name: Build (./build.sh)
+        shell: bash
+        run: ./build.sh
+      - uses: ./.github/actions/setup-wix
+      - name: Build the MSIs (this version, and the next patch for the upgrade test)
+        shell: bash
+        run: |
+          v=$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p}' Cargo.toml | head -n1)
+          next="${v%.*}.$(( ${v##*.} + 1 ))"
+          echo "version $v, next $next"
+          pwsh -File installer/windows/build.ps1 -Version "$v" -BinDir target/release -Out "dist/SocketGuard-$v-x64.msi"
+          pwsh -File installer/windows/build.ps1 -Version "$next" -BinDir target/release -Out "dist/next/SocketGuard-$next-x64.msi"
+          echo "V=$v" >> "$GITHUB_ENV"
+          echo "NEXT=$next" >> "$GITHUB_ENV"
+      - name: Self-test of the footprint check
+        shell: pwsh
+        run: ./deploy/ci/footprint-check.ps1 -SelfTest
+      - name: Install, exercise, upgrade, remove, purge
+        shell: pwsh
+        timeout-minutes: 30
+        run: ./test/msi.ps1 -Msi "dist/SocketGuard-$env:V-x64.msi" -MsiNext "dist/next/SocketGuard-$env:NEXT-x64.msi" -Out dist/msi-test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: msi-test-output
+          path: dist/msi-test
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msi
+          path: dist/SocketGuard-*-x64.msi
+          if-no-files-found: error
+
+  linux:
+    # 22.04: the oldest glibc and webkit2gtk-4.1 the packages should run on.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      NFPM_VERSION: 2.47.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build dependencies of the desktop app
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev patchelf
+      - name: Install the frontend dependencies
+        run: npm ci
+        working-directory: ui
+      - name: Build (./build.sh)
+        run: ./build.sh
+      - name: Install nfpm (pinned, checksum verified)
+        run: |
+          base="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}"
+          curl -fsSLO "$base/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLO "$base/checksums.txt"
+          grep "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" checksums.txt | sha256sum -c -
+          tar -xzf "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" nfpm
+          sudo install -m 0755 nfpm /usr/local/bin/nfpm
+          nfpm --version
+      - name: Build the packages (this version, and the next patch for the upgrade test)
+        run: |
+          v=$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p}' Cargo.toml | head -n1)
+          next="${v%.*}.$(( ${v##*.} + 1 ))"
+          bash installer/linux/build.sh "$v" dist
+          bash installer/linux/build.sh "$next" dist/next
+      - name: Self-test of the footprint check
+        run: bash deploy/ci/footprint-check.sh --self-test
+      - name: deb - install, upgrade, remove, purge (a VM with systemd)
+        run: bash test/deb.sh dist/socketguard_*_amd64.deb dist/next/socketguard_*_amd64.deb
+      - name: rpm - install and erase in a Fedora container (no systemd there)
+        run: bash test/rpm.sh dist/socketguard-*.x86_64.rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            dist/*.deb
+            dist/*.rpm
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install the frontend dependencies
+        run: npm ci
+        working-directory: ui
+      - name: Build (./build.sh)
+        run: ./build.sh
+      - name: Build the pkgs (this version, and the next patch for the upgrade test)
+        run: |
+          v=$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p}' Cargo.toml | head -n1)
+          next="${v%.*}.$(( ${v##*.} + 1 ))"
+          bash installer/macos/build.sh "$v" dist
+          bash installer/macos/build.sh "$next" dist/next
+      - name: Self-test of the footprint check
+        run: bash deploy/ci/footprint-check.sh --self-test
+      - name: Install, upgrade, purge
+        run: bash test/pkg.sh dist/SocketGuard-*.pkg dist/next/SocketGuard-*.pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-pkg
+          path: dist/SocketGuard-*.pkg
+          if-no-files-found: error

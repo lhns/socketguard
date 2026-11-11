@@ -4,6 +4,8 @@
 #
 #   footprint-check.sh expect-absent  [--ledger-export FILE]   after uninstall --purge
 #   footprint-check.sh expect-present [--ledger-export FILE]   right after install
+#   footprint-check.sh expect-present --require nft-table-inet   also require named items
+#   footprint-check.sh expect-absent --allow-data                 the data may remain (after remove, before purge)
 #   footprint-check.sh --self-test                             parse embedded samples only
 #
 # Output: one line per item, `PRESENT <item>` or `ABSENT <item>` (or `UNKNOWN <item>` when the
@@ -145,6 +147,8 @@ evaluate() {
             note=" (not required)"
         elif [ "$mode" = present ] && [ "$state" != PRESENT ]; then
             bad=$((bad + 1)); missing+=("$name")
+        elif [ "$mode" = absent ] && [ "$state" = PRESENT ] && [[ "$ALLOWED" == *" $name "* ]]; then
+            note=" (data, kept)"
         elif [ "$mode" = absent ] && [ "$state" != ABSENT ]; then
             bad=$((bad + 1)); found+=("$name")
         fi
@@ -231,14 +235,18 @@ self_test() {
 
 # ---- main ----------------------------------------------------------------------------------
 
-usage() { echo "usage: $0 expect-absent|expect-present [--ledger-export FILE] | --self-test" >&2; exit 2; }
+usage() { echo "usage: $0 expect-absent|expect-present [--allow-data] [--require NAME[,NAME]] [--ledger-export FILE] | --self-test" >&2; exit 2; }
 
-mode="" ledger="" selftest=0
+DATA_ITEMS=" config-dir data-dir config-json database database-wal database-shm setup-log archived-database temp-file torrc-backup "
+ALLOWED=" "
+mode="" ledger="" selftest=0 extra_required=""
 while [ $# -gt 0 ]; do
     case "$1" in
         expect-absent) mode=absent ;;
         expect-present) mode=present ;;
         --ledger-export) [ $# -ge 2 ] || usage; ledger=$2; shift ;;
+        --allow-data) ALLOWED=$DATA_ITEMS ;;
+        --require) [ $# -ge 2 ] || usage; extra_required=$2; shift ;;
         --self-test) selftest=1 ;;
         *) usage ;;
     esac
@@ -255,6 +263,7 @@ case "$(uname -s)" in
     Darwin) collect_macos ;;
     *) echo "unsupported system $(uname -s); use footprint-check.ps1 on Windows" >&2; exit 2 ;;
 esac
+for n in ${extra_required//,/ }; do REQUIRED="$REQUIRED$n "; done
 if [ -n "$ledger" ]; then add_ledger_item "$(cat "$ledger")" "$LIVE_ADDRS"; fi
 
 evaluate "$mode"

@@ -792,6 +792,36 @@ mod tests {
         std::fs::remove_dir_all(w.d).unwrap();
     }
 
+    /// The Debian postrm cannot run the daemon (the binary is gone at purge) and deletes the
+    /// same files by a list of its own: this keeps that list in step with `named_files`.
+    #[test]
+    fn the_debian_postrm_names_what_purge_deletes() {
+        let script = include_str!("../../../installer/linux/scripts/deb-postrm");
+        let l = socketguard_core::paths::locations_for("linux", None);
+        let unix = |p: &Path| p.to_string_lossy().replace('\\', "/");
+        let (config, db) = (l.config(), l.db());
+        let p = UninstallPaths {
+            config: config.clone(),
+            db: db.clone(),
+            socket: None,
+            state_dir: l.state_dir.clone(),
+        };
+        // Files that exist by name; the prefixed ones (temp files, archived databases) are
+        // matched below by their prefix.
+        for f in named_files(&p) {
+            assert!(
+                script.contains(&unix(&f)),
+                "postrm does not delete {}",
+                f.display()
+            );
+        }
+        assert!(script.contains(&unix(&l.config_dir.join("socketguard.tmp-"))));
+        assert!(script.contains(&format!("{}.pre-v1", unix(&db))));
+        for d in l.dirs() {
+            assert!(script.contains(&unix(&d)), "postrm leaves {}", d.display());
+        }
+    }
+
     #[test]
     fn strictly_inside_rejects_the_root_and_dotdot() {
         let root = std::env::temp_dir().join("socketguard");

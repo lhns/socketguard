@@ -118,9 +118,19 @@ impl<H: Host> ServiceManager for Systemd<'_, H> {
         write_atomic(&self.unit_path(), &unit_text(exe))?;
         self.host.run_ok("systemctl", &["daemon-reload"])?;
         if start {
-            // `enable --now` also starts a stopped unit and leaves a running one alone.
-            self.host
-                .run_ok("systemctl", &["enable", "--now", SYSTEMD_UNIT])?;
+            // After an upgrade the unit is the same text but the binary is new, and `enable
+            // --now` would leave the old process running: a running unit is restarted.
+            let running = self
+                .host
+                .run("systemctl", &["is-active", "--quiet", SYSTEMD_UNIT])?
+                .ok();
+            if running {
+                self.host.run_ok("systemctl", &["enable", SYSTEMD_UNIT])?;
+                self.host.run_ok("systemctl", &["restart", SYSTEMD_UNIT])?;
+            } else {
+                self.host
+                    .run_ok("systemctl", &["enable", "--now", SYSTEMD_UNIT])?;
+            }
         } else {
             self.host.run_ok("systemctl", &["enable", SYSTEMD_UNIT])?;
         }
@@ -196,11 +206,18 @@ impl<H: Host> ServiceManager for Launchd<'_, H> {
         write_atomic(&plist, &plist_text(exe))?;
         // The property list is `RunAtLoad`, so bootstrapping starts it; a changed list needs
         // the old one booted out first.
-        if self.loaded() && changed {
+        let mut loaded = self.loaded();
+        if loaded && changed {
             self.host
                 .run_ok("launchctl", &["bootout", &Self::target()])?;
+            loaded = false;
         }
-        if !self.loaded() {
+        if loaded && start {
+            // The same property list, possibly a new binary (an upgrade): restart the job.
+            self.host
+                .run_ok("launchctl", &["kickstart", "-k", &Self::target()])?;
+        }
+        if !loaded {
             if start {
                 self.host.run_ok(
                     "launchctl",
@@ -630,6 +647,14 @@ mod tests {
     fn systemd_install_is_idempotent_and_uninstall_when_absent_is_quiet() {
         let d = dir();
         let mut host = FakeHost::new("linux");
+        // Not running at the first install, running at the second (an upgrade).
+        host.answer_in_order(
+            "systemctl is-active",
+            vec![crate::host::Output {
+                code: 3,
+                ..Default::default()
+            }],
+        );
         {
             let mut m = Systemd {
                 host: &mut host,
@@ -654,9 +679,12 @@ mod tests {
             host.commands,
             [
                 "systemctl daemon-reload",
+                "systemctl is-active --quiet socketguard.service",
                 "systemctl enable --now socketguard.service",
                 "systemctl daemon-reload",
-                "systemctl enable --now socketguard.service",
+                "systemctl is-active --quiet socketguard.service",
+                "systemctl enable socketguard.service",
+                "systemctl restart socketguard.service",
                 "systemctl is-active --quiet socketguard.service",
                 "systemctl stop socketguard.service",
                 "systemctl disable socketguard.service",
@@ -698,12 +726,7 @@ mod tests {
                     code: 113,
                     ..Default::default()
                 }, // install #1: loaded()
-                crate::host::Output {
-                    code: 113,
-                    ..Default::default()
-                }, // install #1: !loaded()
                 crate::host::Output::default(), // install #2: loaded() (unchanged)
-                crate::host::Output::default(), // install #2: !loaded()
                 crate::host::Output::default(), // uninstall: loaded()
             ],
         );
@@ -729,6 +752,11 @@ mod tests {
             .filter(|c| c.starts_with("launchctl bootstrap system "))
             .count();
         assert_eq!(bootstraps, 1, "{:?}", host.commands);
+        // The second install finds the job loaded with the same list: it restarts it.
+        assert!(host
+            .commands
+            .iter()
+            .any(|c| c == "launchctl kickstart -k system/de.lhns.socketguard"));
         assert!(host
             .commands
             .iter()

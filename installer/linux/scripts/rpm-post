@@ -1,0 +1,8 @@
+#!/bin/sh
+# rpm %post: $1 is 1 on a fresh install and 2 on an upgrade. Both run `service install` (safe to
+# repeat; it restarts a running daemon onto the new binary). Nobody is added to the group.
+if [ ! -d /run/systemd/system ]; then
+    echo "socketguard: systemd is not running; run 'socketguard-daemon service install' when it is." >&2
+    exit 0
+fi
+/usr/bin/socketguard-daemon service install

@@ -1,0 +1,19 @@
+#!/bin/sh
+# Debian prerm. Only `remove` takes SocketGuard off the host; `upgrade`, `deconfigure` and
+# `failed-upgrade` must leave the rules and the service alone (an upgrade is not an uninstall).
+# The data is kept here; `apt purge` deletes it in postrm.
+set -e
+case "$1" in
+remove)
+    if [ -x /usr/bin/socketguard-daemon ] && [ -d /run/systemd/system ]; then
+        # Exit 1 means something is LEFT: the removal stops rather than leave rules without a
+        # program that can remove them. SOCKETGUARD_FORCE_REMOVE=1 is the way out.
+        if [ "${SOCKETGUARD_FORCE_REMOVE:-}" = 1 ]; then
+            /usr/bin/socketguard-daemon uninstall --keep-data --yes --force || true
+        else
+            /usr/bin/socketguard-daemon uninstall --keep-data --yes
+        fi
+    fi
+    ;;
+esac
+exit 0

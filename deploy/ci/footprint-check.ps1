@@ -3,6 +3,8 @@
 #
 #   footprint-check.ps1 -Expect absent  [-LedgerExport FILE]   after uninstall --purge
 #   footprint-check.ps1 -Expect present [-LedgerExport FILE]   right after install
+#   footprint-check.ps1 -Expect present -Require wfp-provider,wfp-sublayer,named-pipe   after the first start
+#   footprint-check.ps1 -Expect absent -AllowData              after an uninstall that keeps the data
 #   footprint-check.ps1 -SelfTest                              parse embedded samples only
 #
 # Output: one line per item, `PRESENT <item>` or `ABSENT <item>` (or `UNKNOWN <item>` when a
@@ -26,6 +28,10 @@
 param(
     [ValidateSet('absent', 'present')][string]$Expect,
     [string]$LedgerExport,
+    # present: item names that must also be PRESENT (e.g. wfp-provider after the first start)
+    [string[]]$Require = @(),
+    # absent: the data (config directory and files) may remain: after an uninstall without --purge
+    [switch]$AllowData,
     [switch]$SelfTest
 )
 
@@ -96,6 +102,8 @@ function Get-LedgerStillPresent([string]$Json, $InterfaceAddresses) {
 
 # ---- items and verdict ---------------------------------------------------------------------
 
+$DataItems = @('config-dir', 'config-json', 'database', 'database-wal', 'database-shm', 'setup-log', 'archived-database', 'temp-file')
+$script:AllowData = $false
 $FileItems = @(
     @('config-json', '\\socketguard\.json$'),
     @('database', '\\socketguard\.db$'),
@@ -115,6 +123,7 @@ function Write-Verdict($Items, [string]$Mode, [string[]]$Required) {
     $bad = 0; $names = @()
     foreach ($i in $Items) {
         $note = ''
+        if ($Mode -eq 'absent' -and $script:AllowData -and $DataItems -contains $i.Name -and $i.State -eq 'PRESENT') { Write-Host ('PRESENT ' + $i.Name + ' (data, kept)'); continue }
         if ($Mode -eq 'present' -and $Required -notcontains $i.Name) { $note = ' (not required)' }
         elseif ($Mode -eq 'present' -and $i.State -ne 'PRESENT') { $bad++; $names += $i.Name }
         elseif ($Mode -eq 'absent' -and $i.State -ne 'ABSENT') { $bad++; $names += $i.Name }
@@ -261,6 +270,7 @@ if ($LedgerExport -and -not (Test-Path -LiteralPath $LedgerExport)) {
     exit 2
 }
 
+$script:AllowData = [bool]$AllowData
 $items = Invoke-Live
-$bad = Write-Verdict $items $Expect @('service', 'group', 'config-dir') | Select-Object -Last 1
+$bad = Write-Verdict $items $Expect (@('service', 'group', 'config-dir') + $Require) | Select-Object -Last 1
 if ($bad -eq 0) { exit 0 } else { exit 1 }

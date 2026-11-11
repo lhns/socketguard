@@ -189,6 +189,17 @@ fn check_account(account: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether `account` is among `members`. Windows lists a local account as `PC\alice`, so a
+/// bare `alice` matches it (adding it again would fail with "already a member").
+fn is_member(members: &[String], account: &str) -> bool {
+    members.iter().any(|m| {
+        m.eq_ignore_ascii_case(account)
+            || (!account.contains('\\')
+                && m.rsplit_once('\\')
+                    .is_some_and(|(_, user)| user.eq_ignore_ascii_case(account)))
+    })
+}
+
 pub const SIGN_IN_NOTE: &str =
     "Membership applies from the account's next sign-in; the account must sign out and in again.";
 
@@ -203,11 +214,7 @@ pub fn allow(
     check_account(account)?;
     ensure_group(host, groups, record)?;
     let name = group_name(host.os());
-    if groups
-        .members(name)?
-        .iter()
-        .any(|m| m.eq_ignore_ascii_case(account))
-    {
+    if is_member(&groups.members(name)?, account) {
         host.say(&format!("{account} is a member of \"{name}\" already."));
         return Ok(());
     }
@@ -223,12 +230,7 @@ pub fn deny(host: &mut dyn Host, groups: &mut dyn GroupManager, account: &str) -
     require_admin(host, "changing who may use SocketGuard")?;
     check_account(account)?;
     let name = group_name(host.os());
-    if !groups.exists(name)?
-        || !groups
-            .members(name)?
-            .iter()
-            .any(|m| m.eq_ignore_ascii_case(account))
-    {
+    if !groups.exists(name)? || !is_member(&groups.members(name)?, account) {
         host.say(&format!("{account} is not a member of \"{name}\"."));
         return Ok(());
     }
@@ -366,6 +368,16 @@ mod tests {
         assert!(format!("{err}").contains("administrator"), "{err}");
         assert!(deny(&mut host, &mut g, "bob").is_err());
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_bare_account_matches_the_domain_form_windows_lists() {
+        let m = vec!["PC\\alice".to_string(), "CORP\\bob".to_string()];
+        assert!(is_member(&m, "alice"));
+        assert!(is_member(&m, "ALICE"));
+        assert!(is_member(&m, "CORP\\bob"));
+        assert!(!is_member(&m, "OTHER\\alice"));
+        assert!(!is_member(&m, "carol"));
     }
 
     #[test]

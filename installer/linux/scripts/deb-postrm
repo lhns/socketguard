@@ -1,0 +1,23 @@
+#!/bin/sh
+# Debian postrm. `purge` deletes the data. The binary is gone by now, so this removes exactly
+# the files `socketguard-daemon uninstall --purge` names (crates/daemon/src/uninstall.rs
+# named_files; a unit test keeps this list in step). It never removes a directory tree.
+set -e
+case "$1" in
+purge)
+    for f in \
+        /etc/socketguard/socketguard.json \
+        /etc/socketguard/setup-log.json \
+        /var/lib/socketguard/socketguard.db \
+        /var/lib/socketguard/socketguard.db-wal \
+        /var/lib/socketguard/socketguard.db-shm; do
+        rm -f "$f"
+    done
+    rm -f /etc/socketguard/socketguard.tmp-* /var/lib/socketguard/socketguard.db.pre-v1*
+    rmdir /etc/socketguard /var/lib/socketguard 2>/dev/null || true
+    for d in /etc/socketguard /var/lib/socketguard; do
+        [ -d "$d" ] && echo "socketguard: $d is not empty; left in place." >&2
+    done
+    ;;
+esac
+exit 0
