@@ -22,6 +22,8 @@ interface Props {
   empty?: string;
   /** What the "of N" counts, with several things selected. */
   unit?: string;
+  /** Show the port or port group of an entry (a list for one row leaves it out). */
+  showScope?: boolean;
 }
 
 const nameOf = (e: AccessEntry) => `${e.name}${e.scope.kind !== "all" ? ` ${e.scopeText}` : ""}`;
@@ -29,7 +31,7 @@ const nameOf = (e: AccessEntry) => `${e.name}${e.scope.kind !== "all" ? ` ${e.sc
 /** Access in either direction: the name, port, network, how well the subject is identified and
  * where it comes from. A direct entry can be revoked; one that comes through a tag or a group
  * links to it. */
-export default function AccessList({ entries, direction, networks, onRevoke, highlight = null, empty, unit = "selected" }: Props) {
+export default function AccessList({ entries, direction, networks, onRevoke, highlight = null, empty, unit = "selected", showScope = true }: Props) {
   const nav = useNav();
   const marked = useRef<HTMLLIElement>(null);
   const netName = (id: string) => networks.find((n) => n.id === id)?.name ?? id;
@@ -58,7 +60,7 @@ export default function AccessList({ entries, direction, networks, onRevoke, hig
               ) : (
                 <span className="access-name">{e.name}</span>
               )}
-              {e.scope.kind !== "all" && <span className="badge access-port mono" title="Only these ports">{e.scopeText}</span>}
+              {showScope && e.scope.kind !== "all" && <span className="badge access-port mono" title="Only these ports">{e.scopeText}</span>}
               {e.networkId && e.subject?.kind !== "anyone" && <span className="muted">on {netName(e.networkId)}</span>}
               {e.of !== undefined && e.of > 1 && (
                 <span className={`badge ${e.have === e.of ? "reach reach-ok" : "reach reach-warn"}`}>

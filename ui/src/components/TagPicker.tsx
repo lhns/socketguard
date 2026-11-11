@@ -1,27 +1,30 @@
 import { useState } from "react";
-import type { ChangeOp, PortRef } from "../api";
+import type { ChangeOp, Scope } from "../api";
 import { useCommit } from "../commit";
-import { portLabel, sameScope, scopeOfPort } from "../lib";
+import { ALL_SCOPE, sameScope, scopeLabel } from "../lib";
 import { useNav } from "../nav";
-import { useTags } from "../queries";
+import { useSocketGroups, useTags } from "../queries";
 import CommitPreview from "./CommitPreview";
 import Picker, { type PickerItem } from "./Picker";
 
 interface Props {
   /** The apps to tag: one, or several (a tag some of them have shows as mixed). */
   appIds: string[];
-  /** Tag one port of the app instead of the whole app. */
-  port?: PortRef | null;
+  /** Tag one row of the app (a port or a port group) instead of All ports. */
+  scope?: Scope;
 }
 
 /** The tags of the selected apps. The first one shown is a tag the app has; the rest are a
  * search away, and a typed name that does not exist can be created and applied in one step. */
-export default function TagPicker({ appIds, port = null }: Props) {
+export default function TagPicker({ appIds, scope: rowScope }: Props) {
   const nav = useNav();
   const tags = (useTags().data ?? []);
+  const socketGroups = useSocketGroups().data ?? [];
   const [open, setOpen] = useState(false);
   const commit = useCommit();
-  const scope = scopeOfPort(port);
+  const scope = rowScope ?? ALL_SCOPE;
+  const named = rowScope !== undefined;
+  const what = named ? scopeLabel(scope, socketGroups) : "";
 
   const has = (tagId: string, appId: string) =>
     tags.find((t) => t.id === tagId)?.members.some((m) => m.app_id === appId && sameScope(m.scope, scope)) ?? false;
@@ -38,16 +41,16 @@ export default function TagPicker({ appIds, port = null }: Props) {
   });
 
   const toggle = (item: PickerItem) => {
-    const what = port ? ` ${portLabel(port)}` : "";
+    const suffix = named && scope.kind !== "all" ? ` ${what}` : "";
     if (item.state === "on") {
       const ops: ChangeOp[] = appIds.map((app_id) => ({ op: "remove_tag_member", tag_id: item.id, app_id, scope }));
       const undo: ChangeOp[] = appIds.map((app_id) => ({ op: "add_tag_member", tag_id: item.id, app_id, scope, confirm_open: false }));
-      void commit.runBatch(ops, `Removed from ${item.label}${what}`, undo);
+      void commit.runBatch(ops, `Removed from ${item.label}${suffix}`, undo);
     } else {
       const ops: ChangeOp[] = appIds
         .filter((a) => !has(item.id, a))
         .map((app_id) => ({ op: "add_tag_member", tag_id: item.id, app_id, scope, confirm_open: false }));
-      void commit.runBatch(ops, `Added to ${item.label}${what}`);
+      void commit.runBatch(ops, `Added to ${item.label}${suffix}`);
     }
     // A review is shown below the control, so the list gets out of its way.
     setOpen(false);
@@ -79,12 +82,12 @@ export default function TagPicker({ appIds, port = null }: Props) {
               {t.label}{count(t.id) < appIds.length ? ` ${count(t.id)}/${appIds.length}` : ""}
             </button>
         ))}
-        {port === null && mine.length === 0 && <span className="muted">no tags</span>}
+        {!named && mine.length === 0 && <span className="muted">no tags</span>}
         <Picker
-          label={port ? `Tags of ${portLabel(port)}` : "Tags"}
+          label={named ? `Tags of ${what}` : "Tags"}
           trigger="+"
           triggerClass="tag-pill tag-pill-add"
-          compactLabel={port ? `Add or remove tags of ${portLabel(port)}` : "Add or remove tags"}
+          compactLabel={named ? `Add or remove tags of ${what}` : "Add or remove tags"}
           items={items}
           onToggle={toggle}
           create={(typed) => create(typed)}

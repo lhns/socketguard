@@ -1,6 +1,6 @@
 import {
   toDaemonError, type App, type CredentialKind, type NewCredential, type ParsedCredential,
-  type Peer, type PeerGroup, type PortRef, type Scope, type SocketGroup, type Subject, type Tag, type Target,
+  type Peer, type PeerGroup, type PortRange, type PortRef, type Scope, type SocketGroup, type Subject, type Tag, type Target,
 } from "./api";
 import { CREDENTIAL_EXAMPLES } from "./generated/credentialExamples";
 
@@ -35,17 +35,17 @@ export function subjectLabel(s: Subject, peers: Peer[] = [], groups: PeerGroup[]
 
 export const portLabel = (p: { port: number; proto: string }) => `${p.port}/${p.proto}`;
 
-/** Same port (or both "all ports"). */
+/** Same port (or both All ports). */
 export const samePort = (a: PortRef | null, b: PortRef | null) =>
   a === null || b === null ? a === b : a.port === b.port && a.proto === b.proto;
 
 export const ALL_SCOPE: Scope = { kind: "all" };
 
-/** The scope of one port, or of the whole app for null. */
+/** The scope of one port, or All ports for null. */
 export const scopeOfPort = (p: PortRef | null): Scope =>
   p === null ? ALL_SCOPE : { kind: "port", port: p.port, proto: p.proto };
 
-/** The port of a port scope; null for the whole app and for a socket group. */
+/** The port of a port scope; null for All ports and for a port group. */
 export const portOfScope = (s: Scope): PortRef | null =>
   s.kind === "port" ? { port: s.port, proto: s.proto } : null;
 
@@ -55,11 +55,31 @@ export const sameScope = (a: Scope, b: Scope) =>
   : a.kind === "port" ? b.kind === "port" && a.port === b.port && a.proto === b.proto
   : b.kind === "group" && a.id === b.id;
 
-/** "all ports", "80/tcp" or "group <label>" (the id when the group is not in `groups`). */
+/** "All ports", "80/tcp" or the port group's name (the id when the group is not in `groups`). */
 export const scopeLabel = (s: Scope, groups: SocketGroup[] = []): string =>
-  s.kind === "all" ? "all ports"
+  s.kind === "all" ? "All ports"
   : s.kind === "port" ? portLabel(s)
-  : `group ${groups.find((g) => g.id === s.id)?.label ?? s.id}`;
+  : groups.find((g) => g.id === s.id)?.label ?? s.id;
+
+/** "53/udp" or "50000-51000/tcp". */
+export const rangeLabel = (r: PortRange) => (r.start === r.end ? `${r.start}/${r.proto}` : `${r.start}-${r.end}/${r.proto}`);
+
+/** Parse "80/tcp", "50000-51000/tcp"; an error text for anything else. */
+export function parseRange(text: string): PortRange | string {
+  const m = /^(\d{1,5})(?:\s*-\s*(\d{1,5}))?\s*\/\s*(tcp|udp)$/i.exec(text.trim());
+  if (!m) return `"${text.trim()}" is not a port: write 80/tcp, 53/udp or 50000-51000/tcp.`;
+  const start = Number(m[1]);
+  const end = m[2] === undefined ? start : Number(m[2]);
+  if (start < 1 || end > 65535) return "Ports go from 1 to 65535.";
+  if (end < start) return "A range starts at its lower port.";
+  return { start, end, proto: m[3].toLowerCase() as PortRange["proto"] };
+}
+
+/** Add a range to a list, kept sorted; a repeated range stays once. */
+export function withRange(ranges: PortRange[], add: PortRange): PortRange[] {
+  if (ranges.some((r) => r.start === add.start && r.end === add.end && r.proto === add.proto)) return ranges;
+  return [...ranges, add].sort((a, b) => a.proto.localeCompare(b.proto) || a.start - b.start || a.end - b.end);
+}
 
 /** Key for grouping by scope. */
 export const scopeKey = (s: Scope) => (s.kind === "all" ? "*" : s.kind === "port" ? portLabel(s) : `group:${s.id}`);

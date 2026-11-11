@@ -7,7 +7,11 @@ import { ReachBadge } from "./reach";
  * nothing, and the answer says which changes need the question); an apply only after the user
  * agreed. */
 export const confirmAll = (ops: ChangeOp[]): ChangeOp[] =>
-  ops.map((o) => (o.op === "add_grant" || o.op === "add_tag_member" ? { ...o, confirm_open: true } : o));
+  ops.map((o) =>
+    o.op === "add_grant" || o.op === "add_tag_member" || o.op === "create_socket_group" || o.op === "update_socket_group" || o.op === "attach_socket_group"
+      ? { ...o, confirm_open: true }
+      : o,
+  );
 
 /** The operation that puts a removed grant back. */
 export const grantInverse = (g: GrantView): ChangeOp => ({
@@ -31,7 +35,7 @@ export function ChangeList({ changes, networks }: { changes: BatchChange[]; netw
       {changes.map((c, i) => (
         <li key={i} className={`change change-${c.kind}`}>
           <span className="change-sign" aria-hidden="true">{KIND_SIGN[c.kind]}</span>
-          <span className="change-item">{c.kind} {c.item.replace("_", " ")}</span>
+          <span className="change-item">{c.kind} {c.item.replace("socket_group", "port group").replace("_", " ")}</span>
           <span className="change-name">{c.name}</span>
           {c.detail && <span className="muted">{c.detail}</span>}
           {c.opens_to_anyone && <span className="badge reach reach-bad">opens to anyone</span>}

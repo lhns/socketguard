@@ -116,6 +116,7 @@ export function mockDaemon(handlers: Handlers = {}) {
     list_groups: () => groups,
     list_grants: () => [],
     list_tags: () => noTags,
+    list_socket_groups: () => [],
     share_app: () => ({ tor: [] }),
     list_networks: () => networks,
     get_settings: () => settings,

@@ -1,16 +1,20 @@
 // The logic of the access overview, free of React: what each cell shows. Rows are tags, apps
-// and app ports; columns are groups, peers, Anyone and "Everyone on <network>". Nothing is
+// and the rows of an app (a port or an attached port group); columns are groups, peers, Anyone and "Everyone on <network>". Nothing is
 // edited here; edits are made in the inspector.
 import type {
-  App, GrantView, Network, Peer, PeerGroup, PortRef, Subject, Tag, Target,
+  App, GrantView, Network, Peer, PeerGroup, PortRef, Scope, SocketGroup, Subject, Tag, Target,
 } from "./api";
-import { covers, sameSubject } from "./access";
-import { portLabel, sameScope, scopeOfPort } from "./lib";
+import { coversScope, sameSubject } from "./access";
+import { ALL_SCOPE, portLabel, sameScope, scopeKey, scopeOfPort } from "./lib";
 
 export interface Row {
   key: string;
+  /** "port" is a row inside an app: one port or one attached port group. */
   kind: "tag" | "app" | "port";
   target: Target;
+  /** Which rows of the app this row is; All ports for tag and app rows. */
+  scope: Scope;
+  /** The port of a port row; null for All ports and for a port group. */
   port: PortRef | null;
   label: string;
   /** The app this row belongs to (app and port rows). */
@@ -53,6 +57,8 @@ export interface Ctx {
 export const rowKey = (target: Target, port: PortRef | null) =>
   `${target.kind}:${target.id}${port ? `:${portLabel(port)}` : ""}`;
 
+const subRowKey = (target: Target, scope: Scope) => `${target.kind}:${target.id}${scope.kind === "all" ? "" : `:${scopeKey(scope)}`}`;
+
 /** Segment columns: one per LAN network (VLANs are LAN networks) that takes grants. */
 export const segmentNetworks = (networks: Network[]) =>
   networks.filter((n) => n.grants_apply && n.kind === "lan");
@@ -74,21 +80,29 @@ export function buildColumns(ctx: Pick<Ctx, "peers" | "groups" | "networks" | "s
   return cols;
 }
 
-export function buildRows(apps: App[], tags: Tag[], expanded: Set<string>): Row[] {
+/** The port groups attached to an app. */
+export const groupsOf = (appId: string, socketGroups: SocketGroup[]) => socketGroups.filter((g) => g.apps.includes(appId));
+
+export function buildRows(apps: App[], tags: Tag[], expanded: Set<string>, socketGroups: SocketGroup[] = []): Row[] {
   const rows: Row[] = tags.map((t) => ({
     key: rowKey({ kind: "tag", id: t.id }, null),
     kind: "tag",
     target: { kind: "tag", id: t.id },
+    scope: ALL_SCOPE,
     port: null,
     label: `tag ${t.label}`,
   }));
   for (const a of apps) {
     const target: Target = { kind: "app", id: a.id };
-    rows.push({ key: rowKey(target, null), kind: "app", target, port: null, label: a.name, app: a });
+    rows.push({ key: rowKey(target, null), kind: "app", target, scope: ALL_SCOPE, port: null, label: a.name, app: a });
     if (expanded.has(a.id)) {
       for (const p of a.ports) {
         const port = { port: p.port, proto: p.proto };
-        rows.push({ key: rowKey(target, port), kind: "port", target, port, label: portLabel(p), app: a });
+        rows.push({ key: rowKey(target, port), kind: "port", target, scope: scopeOfPort(port), port, label: portLabel(p), app: a });
+      }
+      for (const g of groupsOf(a.id, socketGroups)) {
+        const scope: Scope = { kind: "group", id: g.id };
+        rows.push({ key: subRowKey(target, scope), kind: "port", target, scope, port: null, label: g.label, app: a });
       }
     }
   }
@@ -110,7 +124,7 @@ function networkCounts(g: GrantView, col: Col, ctx: Ctx): boolean {
 
 export function cellOf(row: Row, col: Col, ctx: Ctx): Cell {
   const direct = ctx.grants.filter(
-    (g) => sameTarget(g.target, row.target) && sameScope(g.scope, scopeOfPort(row.port)) && sameSubject(g.subject, col.subject) && networkCounts(g, col, ctx),
+    (g) => sameTarget(g.target, row.target) && sameScope(g.scope, row.scope) && sameSubject(g.subject, col.subject) && networkCounts(g, col, ctx),
   );
   if (direct.length > 0) {
     const everywhere = direct.some((g) => g.network_id === null);
@@ -144,20 +158,20 @@ function inheritedFrom(row: Row, col: Col, ctx: Ctx): Cell["origin"] | undefined
     const groupOrigin = byGroup && g.subject.kind === "group" ? { kind: "group" as const, id: g.subject.id, label: groupLabel(g.subject.id) } : undefined;
 
     // The same row, reached through a group.
-    if (sameTarget(g.target, row.target) && sameScope(g.scope, scopeOfPort(row.port)) && groupOrigin) return groupOrigin;
+    if (sameTarget(g.target, row.target) && sameScope(g.scope, row.scope) && groupOrigin) return groupOrigin;
     if (row.kind === "tag") continue;
     const appId = row.target.id;
-    // A grant on the whole app covers its ports.
+    // A grant on All ports covers its ports and port groups.
     if (row.kind === "port" && g.target.kind === "app" && g.target.id === appId && g.scope.kind === "all") {
-      return groupOrigin ?? { kind: "app", id: appId, label: "the whole app" };
+      return groupOrigin ?? { kind: "app", id: appId, label: "All ports" };
     }
     // A grant on a tag the app (or this port of it) belongs to.
     if (g.target.kind === "tag") {
       const tag = ctx.tags.find((t) => t.id === (g.target as { id: string }).id);
       const member = tag?.members.find(
-        (m) => m.app_id === appId && (row.port === null ? m.scope.kind === "all" : m.scope.kind === "all" || sameScope(m.scope, scopeOfPort(row.port))),
+        (m) => m.app_id === appId && (row.scope.kind === "all" ? m.scope.kind === "all" : coversScope(m.scope, row.scope)),
       );
-      if (tag && member && (row.port === null ? g.scope.kind === "all" : covers(g.scope, row.port))) {
+      if (tag && member && (row.scope.kind === "all" ? g.scope.kind === "all" : coversScope(g.scope, row.scope))) {
         return groupOrigin ? { ...groupOrigin, label: `${groupOrigin.label} on tag ${tagLabel(tag.id)}` } : { kind: "tag", id: tag.id, label: tag.label };
       }
     }
