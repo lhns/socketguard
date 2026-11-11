@@ -85,8 +85,11 @@ function Invoke-Msi([string[]]$Arguments, [string]$Tag, [int]$Expect = 0) {
     Fail "msiexec ($Tag) did not finish within 10 minutes"
   }
   if ($p.ExitCode -ne $Expect) {
-    Write-Host "  exit $($p.ExitCode), expected $Expect; log (tail):"
-    if (Test-Path $log) { Get-Content $log -Tail 120 | Write-Host }
+    Write-Host "  exit $($p.ExitCode), expected $Expect; the lines that matter:"
+    if (Test-Path $log) {
+      Get-Content $log | Where-Object { $_ -match 'Return value 3|DEBUG: Error|Error \d{4}|returned actual error|WixQuietExec|socketguard|SOFTWARE\\|Failed|failed' -and $_ -notmatch 'SELECT `Message`' } |
+        Select-Object -First 80 | Write-Host
+    }
     Fail "msiexec ($Tag) exited $($p.ExitCode), expected $Expect"
   }
   Ok "msiexec ($Tag) exited $Expect"

@@ -170,7 +170,7 @@
     -->
     <?define Daemon = '"[INSTALLFOLDER]socketguard-daemon.exe"' ?>
     <?define Arriving = 'NOT REMOVE' ?>
-    <?define Leaving = 'REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE' ?>
+    <?define Leaving = 'REMOVE AND NOT UPGRADINGPRODUCTCODE' ?>
     <?define Fresh = 'NOT REMOVE AND NOT Installed AND NOT WIX_UPGRADE_DETECTED' ?>
 
     <CustomAction Id="R.Uninstall" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
