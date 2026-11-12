@@ -89,25 +89,53 @@ fn installed(host: &mut dyn Host) -> Result<Option<String>> {
     Ok(find_wintun(&parse_enum_drivers(&out.stdout)))
 }
 
+/// Where the fact "Wintun was in the driver store before SocketGuard" is kept: the install
+/// record of an installed SocketGuard, the session record of a portable one (ADR 0054, which
+/// has no install record).
+pub trait PresenceLog {
+    /// What was recorded, if anything was.
+    fn recorded(&self) -> Result<Option<bool>>;
+    /// Record it; the first answer stands.
+    fn record(&self, present_before: bool) -> Result<()>;
+}
+
+impl PresenceLog for Record {
+    fn recorded(&self) -> Result<Option<bool>> {
+        Ok(self.entries()?.iter().find_map(|e| match e.change {
+            Change::WintunDriver { present_before } => Some(present_before),
+            _ => None,
+        }))
+    }
+
+    fn record(&self, present_before: bool) -> Result<()> {
+        self.push_once(
+            |c| matches!(c, Change::WintunDriver { .. }),
+            Entry::now(Change::WintunDriver { present_before }),
+        )
+    }
+}
+
 /// Record whether Wintun is in the driver store, unless that was recorded already. An
 /// answer that cannot be had is not recorded (and tried again at the next start): guessing
 /// "absent" could remove a driver that other software needs.
-pub fn record_present_before(host: &mut dyn Host, record: &Record) -> Result<()> {
-    let known = |c: &Change| matches!(c, Change::WintunDriver { .. });
-    if record.entries()?.iter().any(|e| known(&e.change)) {
+pub fn record_present_before(host: &mut dyn Host, log: &dyn PresenceLog) -> Result<()> {
+    if log.recorded()?.is_some() {
         return Ok(());
     }
-    let present_before = installed(host)?.is_some();
-    record.push_once(known, Entry::now(Change::WintunDriver { present_before }))
+    log.record(installed(host)?.is_some())
 }
 
-/// Before the first managed Yggdrasil start on Windows. A daemon without a record path
-/// (tests) does nothing.
+/// Before the first managed Yggdrasil start on Windows: into the session record when portable,
+/// else the install record. A daemon without either (tests) does nothing.
 pub fn record_before_first_start() {
-    let Some(record) = crate::install::record() else {
+    let result = if let Some(log) = crate::portable::session_log() {
+        record_present_before(&mut SystemHost, &log)
+    } else if let Some(record) = crate::install::record() {
+        record_present_before(&mut SystemHost, &record)
+    } else {
         return;
     };
-    if let Err(e) = record_present_before(&mut SystemHost, &record) {
+    if let Err(e) = result {
         tracing::warn!("Could not record whether the Wintun driver was installed: {e:#}");
     }
 }
