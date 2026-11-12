@@ -310,10 +310,23 @@ fn list_prefixed(dir: &Path, prefix: &str) -> Vec<PathBuf> {
 }
 
 fn remove_named(report: &mut Report, f: &Path) {
-    match std::fs::remove_file(f) {
-        Ok(()) => report.removed(format!("file {}", f.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => report.left(format!("file {}", f.display()), e.to_string()),
+    let mut tries = 0;
+    loop {
+        match std::fs::remove_file(f) {
+            Ok(()) => report.removed(format!("file {}", f.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // Windows: a file another process still has open (the process that just
+            // closed it, a scanner, the indexer) cannot be deleted for a moment.
+            Err(e)
+                if cfg!(windows) && tries < 15 && matches!(e.raw_os_error(), Some(5 | 32 | 33)) =>
+            {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                continue;
+            }
+            Err(e) => report.left(format!("file {}", f.display()), e.to_string()),
+        }
+        return;
     }
 }
 
@@ -820,6 +833,30 @@ mod tests {
         for d in l.dirs() {
             assert!(script.contains(&unix(&d)), "postrm leaves {}", d.display());
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_file_held_open_for_a_moment_is_removed_after_a_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let d = std::env::temp_dir().join(format!("sg-rm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("socketguard.db");
+        std::fs::write(&f, b"x").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&f)
+            .unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            drop(held);
+        });
+        let mut report = Report::default();
+        remove_named(&mut report, &f);
+        assert!(!f.exists());
+        assert!(report.complete(), "{}", report.render());
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]
