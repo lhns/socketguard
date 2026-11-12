@@ -73,6 +73,12 @@ state_child_ps() { # name output
     grep -Eq "(^|[[:space:]])[^[:space:]]*/third_party/$1/$1([[:space:]]|\$)" <<<"$2" && echo PRESENT || echo ABSENT
 }
 
+# The obfs4 helper that Tor starts (ADR 0052). Tor runs it by a name relative to its own
+# directory, so `ps` may show `./pluggable_transports/lyrebird` instead of the full path.
+state_helper_ps() { # output
+    grep -Eq "(^|[[:space:]])([^[:space:]]*/third_party/tor/|\\./)pluggable_transports/lyrebird([[:space:]]|\$)" <<<"$1" && echo PRESENT || echo ABSENT
+}
+
 # getent passwd socketguard-net -> `socketguard-net:x:997:997::/nonexistent:/usr/sbin/nologin`
 state_account_getent() { grep -Eq '^socketguard-net:' <<<"$1" && echo PRESENT || echo ABSENT; }
 
@@ -127,6 +133,7 @@ add_managed_items() { # third_party candidate directories...
     local ps_out; ps_out=$(run ps -eo args)
     rec "$(state_child_ps tor "$ps_out")" child-tor
     rec "$(state_child_ps yggdrasil "$ps_out")" child-yggdrasil
+    rec "$(state_helper_ps "$ps_out")" child-obfs4-helper
     local dirs=() d
     [ -n "${SOCKETGUARD_THIRD_PARTY:-}" ] && dirs+=("$SOCKETGUARD_THIRD_PARTY")
     dirs+=("$@")
@@ -254,6 +261,10 @@ self_test() {
     local ps_ours=$'/sbin/init\n/usr/lib/socketguard/third_party/tor/tor -f /var/lib/socketguard/tor/torrc\n/usr/lib/socketguard/third_party/yggdrasil/yggdrasil -useconffile /var/lib/socketguard/yggdrasil/yggdrasil.conf -user socketguard-net'
     expect child-tor PRESENT "$(state_child_ps tor "$ps_ours")"
     expect child-yggdrasil PRESENT "$(state_child_ps yggdrasil "$ps_ours")"
+    expect child-obfs4-helper PRESENT "$(state_helper_ps $'/sbin/init\n./pluggable_transports/lyrebird')"
+    expect child-obfs4-helper-full-path PRESENT "$(state_helper_ps $'/usr/lib/socketguard/third_party/tor/pluggable_transports/lyrebird')"
+    expect child-obfs4-helper-absent ABSENT "$(state_helper_ps "$ps_ours")"
+    expect child-obfs4-helper-other-lyrebird ABSENT "$(state_helper_ps $'/usr/bin/lyrebird')"
     expect child-none ABSENT "$(state_child_ps yggdrasil $'/sbin/init\n/usr/sbin/tor --runasdaemon 1')"
     expect child-system-yggdrasil-is-not-ours ABSENT "$(state_child_ps yggdrasil $'/usr/bin/yggdrasil -useconffile /etc/yggdrasil.conf')"
     expect child-tor-path-must-be-exact ABSENT "$(state_child_ps tor $'/opt/third_party/yggdrasil/yggdrasil')"

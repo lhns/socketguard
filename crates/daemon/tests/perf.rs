@@ -118,6 +118,7 @@ impl Rig {
                 cookie_owner: None,
                 allow_remote_control: false,
                 managed: false,
+                bridges: vec![],
             },
         };
         backends.insert(

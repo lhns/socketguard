@@ -31,7 +31,10 @@ signing_key_url = "https://keys.openpgp.org/vks/v1/by-fingerprint/EF6E286DDA85EA
 # Per target: `files` are paths under the archive's tor/ directory, laid out next
 # to the tor binary (dynamic libraries it needs); `licenses` are name:archive-path
 # pairs copied to licenses/<name>.txt.
-# No pluggable transports. geoip/geoip6 (archive data/) are not shipped: tor 0.4.9
+# Pluggable transports: only the obfs4 helper, lyrebird (pluggable_transports/lyrebird[.exe] in the
+# archive; its pt_config.json lists the transports it speaks: meek_lite, obfs2, obfs3, obfs4,
+# scramblesuit, webtunnel, and snowflake). SocketGuard enables obfs4 only and ships no bridge
+# list (ADR 0052). conjure-client is not shipped. geoip/geoip6 (archive data/) are not shipped: tor 0.4.9
 # starts, bootstraps to 100% and runs hidden services without them, logging only
 # at info level "Failed to open GEOIP file"; they are used for country statistics
 # and country-based node selection only (tor manual, GeoIPFile). Tested 2026-11-11
@@ -43,32 +46,32 @@ signing_key_url = "https://keys.openpgp.org/vks/v1/by-fingerprint/EF6E286DDA85EA
 [tor.windows-x86_64]
 url = "https://dist.torproject.org/torbrowser/16.0.1/tor-expert-bundle-windows-x86_64-16.0.1.tar.gz"
 sha256 = "9eed3c3ff1fe43df034ce360196c9ec95472560d77ff55614d0cd5120edea27b"
-files = "tor.exe"
-licenses = "tor:docs/tor.txt libevent:docs/libevent.txt openssl:docs/openssl.txt zlib:docs/zlib.txt"
+files = "tor.exe pluggable_transports/lyrebird.exe"
+licenses = "tor:docs/tor.txt lyrebird:docs/lyrebird.txt libevent:docs/libevent.txt openssl:docs/openssl.txt zlib:docs/zlib.txt"
 
 [tor.linux-x86_64]
 url = "https://dist.torproject.org/torbrowser/16.0.1/tor-expert-bundle-linux-x86_64-16.0.1.tar.gz"
 sha256 = "7039cb16060ab22e669852e55774d894b55f25ea8bd0ab7194d3478429a58725"
-files = "tor libcrypto.so.3 libevent-2.1.so.7 libssl.so.3"
-licenses = "tor:docs/tor.txt libevent:docs/libevent.txt openssl:docs/openssl.txt"
+files = "tor libcrypto.so.3 libevent-2.1.so.7 libssl.so.3 pluggable_transports/lyrebird"
+licenses = "tor:docs/tor.txt lyrebird:docs/lyrebird.txt libevent:docs/libevent.txt openssl:docs/openssl.txt"
 
 [tor.linux-aarch64]
 url = "https://dist.torproject.org/torbrowser/16.0.1/tor-expert-bundle-linux-aarch64-16.0.1.tar.gz"
 sha256 = "67040520d44c87ccaaf5aa7df0dc1ff122eb938dbb600ae7722e8b6b75282a4b"
-files = "tor libcrypto.so.3 libevent-2.1.so.7 libssl.so.3"
-licenses = "tor:docs/tor.txt libevent:docs/libevent.txt openssl:docs/openssl.txt zlib:docs/zlib.txt"
+files = "tor libcrypto.so.3 libevent-2.1.so.7 libssl.so.3 pluggable_transports/lyrebird"
+licenses = "tor:docs/tor.txt lyrebird:docs/lyrebird.txt libevent:docs/libevent.txt openssl:docs/openssl.txt zlib:docs/zlib.txt"
 
 [tor.macos-x86_64]
 url = "https://dist.torproject.org/torbrowser/16.0.1/tor-expert-bundle-macos-x86_64-16.0.1.tar.gz"
 sha256 = "15464d99adc3bb4de1308260d79878336b04a1ac1aeff83e10f192de7d235946"
-files = "tor libevent-2.1.7.dylib"
-licenses = "tor:docs/tor.txt libevent:docs/libevent.txt openssl:docs/openssl.txt"
+files = "tor libevent-2.1.7.dylib pluggable_transports/lyrebird"
+licenses = "tor:docs/tor.txt lyrebird:docs/lyrebird.txt libevent:docs/libevent.txt openssl:docs/openssl.txt"
 
 [tor.macos-aarch64]
 url = "https://dist.torproject.org/torbrowser/16.0.1/tor-expert-bundle-macos-aarch64-16.0.1.tar.gz"
 sha256 = "0b7d022017c31e3f972d06465bcd7ac50feb66ac825547419a934914fe4bb156"
-files = "tor libevent-2.1.7.dylib"
-licenses = "tor:docs/tor.txt libevent:docs/libevent.txt openssl:docs/openssl.txt"
+files = "tor libevent-2.1.7.dylib pluggable_transports/lyrebird"
+licenses = "tor:docs/tor.txt lyrebird:docs/lyrebird.txt libevent:docs/libevent.txt openssl:docs/openssl.txt"
 
 # ---------------------------------------------------------------- Yggdrasil
 # Built from source (no bare binaries are published), unmodified, static.

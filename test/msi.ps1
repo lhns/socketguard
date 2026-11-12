@@ -263,10 +263,10 @@ function Invoke-FirewallExercise {
 function Assert-Bundled {
   Section 'managed networks: the bundled files'
   $tp = Join-Path $InstallDir 'third_party'
-  foreach ($f in 'tor\tor.exe', 'yggdrasil\yggdrasil.exe', 'yggdrasil\wintun.dll', 'VERSIONS', 'licenses\tor.txt', 'licenses\yggdrasil.txt', 'licenses\wintun.txt') {
+  foreach ($f in 'tor\tor.exe', 'tor\pluggable_transports\lyrebird.exe', 'yggdrasil\yggdrasil.exe', 'yggdrasil\wintun.dll', 'VERSIONS', 'licenses\tor.txt', 'licenses\lyrebird.txt', 'licenses\yggdrasil.txt', 'licenses\wintun.txt') {
     if (-not (Test-Path (Join-Path $tp $f))) { Mn-Fail "missing $tp\$f" }
   }
-  Mn-Ok "third_party has tor.exe, yggdrasil.exe, wintun.dll, VERSIONS and the licence texts"
+  Mn-Ok "third_party has tor.exe, the obfs4 helper (lyrebird.exe), yggdrasil.exe, wintun.dll, VERSIONS and the licence texts"
   foreach ($f in 'LICENSE.txt', 'THIRD_PARTY_NOTICES.md') {
     if (-not (Test-Path (Join-Path $InstallDir "licenses\$f"))) { Mn-Fail "missing $InstallDir\licenses\$f" }
   }

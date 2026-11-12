@@ -292,6 +292,8 @@ fn managed_networks_in_the_table() {
         address: address.map(str::to_string),
         peers: vec![],
         peers_connected,
+        bridges: vec![],
+        bridges_unavailable: None,
     };
     let net = |id: &str, kind, managed| Network {
         id: id.into(),
@@ -329,6 +331,14 @@ fn managed_networks_in_the_table() {
     assert_eq!(
         render::network_peers("yggdrasil", &[]),
         "yggdrasil has no peers"
+    );
+    assert_eq!(
+        render::network_bridges("tor", &["obfs4 192.0.2.1:1 X".into()]),
+        "bridges of tor:\nobfs4 192.0.2.1:1 X"
+    );
+    assert_eq!(
+        render::network_bridges("tor", &[]),
+        "tor has no bridges (Tor connects directly)"
     );
 }
 
@@ -522,7 +532,8 @@ fn tor_network_config_from_flags() {
             expect_tor_uid: None,
             cookie_owner: None,
             allow_remote_control: false,
-            managed: false
+            managed: false,
+            bridges: vec![],
         }
     );
     assert_eq!(
@@ -535,7 +546,8 @@ fn tor_network_config_from_flags() {
             expect_tor_uid: None,
             cookie_owner: None,
             allow_remote_control: false,
-            managed: false
+            managed: false,
+            bridges: vec![],
         }
     );
 }

@@ -23,6 +23,7 @@ jobs:
         script:
           - managed-ygg-e2e   # SocketGuard's own Yggdrasil (built by fetch.sh), tun, firewall
           - managed-tor-e2e   # SocketGuard's own Tor (fetched by fetch.sh), onion service over the Tor network
+          - managed-tor-bridges-e2e # bridges for that Tor: the torrc, the obfs4 helper, back to a direct bootstrap
           - ygg-e2e           # a system Yggdrasil, two nodes, tun
           - tor-e2e           # a system Tor, onion service over the Tor network
     steps:

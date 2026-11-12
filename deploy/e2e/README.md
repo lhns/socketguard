@@ -4,6 +4,7 @@
 - `tor-e2e.sh`: the Tor network (below).
 - `managed-tor-e2e.sh`: the Tor network with the Tor SocketGuard ships (below).
 - `managed-ygg-e2e.sh`: the Yggdrasil network with the Yggdrasil SocketGuard ships (end of this file).
+- `managed-tor-bridges-e2e.sh`: bridges for that Tor (section at the end of this file).
 
 # Yggdrasil end-to-end test
 
@@ -90,3 +91,24 @@ are in the build cache volume):
    gone it starts; removing the network ends it and deletes its configuration.
 
 It runs nightly and on request in `.github/workflows/e2e.yml` (not on push).
+
+# Managed Tor bridges end-to-end test
+
+`managed-tor-bridges-e2e.sh` checks bridges for the managed Tor (ADR 0052), with real Tor in Docker (image from
+`Dockerfile.tor`; same build and `fetch.sh` steps as the managed Tor test, no onion service and no second client):
+
+1. the daemon runs from `/opt/sg dir` and keeps its state in `/var/lib/sg state` (paths with a space, as on macOS and
+   Windows), with `third_party/` laid out by `fetch.sh`, including the obfs4 helper (`lyrebird`) and its licence;
+2. hostile bridge lines (a second option after a newline or `\r`, trailing options, another transport) are refused by
+   `socketguard networks bridges` and change nothing;
+3. two documentation-range bridges (`192.0.2.10:443`, `[2001:db8::5]:9001`, a made-up fingerprint and cert) are set:
+   the status lists them in canonical form, the generated `torrc` ends with exactly `UseBridges 1`,
+   `ClientTransportPlugin obfs4 exec ./pluggable_transports/lyrebird` and the two `Bridge` lines, Tor restarts,
+   starts the helper as `socketguard-net` from the installed directory, and the network says it is connecting
+   through bridges and does not come up (the bridges do not exist);
+4. `networks bridges tor --clear` removes the lines, restarts Tor without the helper, and Tor bootstraps directly
+   again (exit code 2 with a `SKIP` line if Tor cannot bootstrap from this Docker network; the checks before it
+   still ran);
+5. a normal stop leaves neither Tor nor the helper behind.
+
+It removes its containers, network and image on exit. It runs nightly and on request in `.github/workflows/e2e.yml`.

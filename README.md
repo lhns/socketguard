@@ -97,7 +97,21 @@ stops (ADR 0052).
 socketguard networks add tor
 socketguard networks add yggdrasil --peer tls://host:port      # --peer is repeatable
 socketguard networks peers yggdrasil --add tls://host:port --rm tls://old:1
+socketguard networks bridges tor --add "obfs4 IP:port FINGERPRINT cert=... iat-mode=0"   # only if Tor is blocked
 ```
+
+A new Yggdrasil node only finds nodes on your LAN; add peers to reach further. The app has a "Find
+public peers" link to the project's list
+([github.com/yggdrasil-network/public-peers](https://github.com/yggdrasil-network/public-peers));
+SocketGuard ships no list, fetches none and adds no peer on its own.
+
+If Tor is blocked on your network, the managed Tor can connect through obfs4 bridges. Request bridge
+lines from the Tor Project at [bridges.torproject.org](https://bridges.torproject.org/) (the app has a
+"Get bridges from the Tor Project" link) and add them with `socketguard networks bridges tor --add LINE`,
+or paste them in the Tor network's settings in the app. Only `obfs4` lines of the form
+`obfs4 IP:port FINGERPRINT cert=CERT iat-mode=0` are accepted, and changing bridges restarts Tor.
+Bridges are off by default and SocketGuard ships no bridge list. The transport helper (lyrebird, from
+the same Tor Expert Bundle) runs only when bridges are set, as the same account as Tor.
 
 If you already run a node, add it as it is with `--existing` (the app calls it "Use my existing
 one"): `socketguard networks add yggdrasil --existing`, or `socketguard networks add tor --existing`
@@ -222,6 +236,7 @@ socketguard addresses list                 # automatic and reserved addresses
 socketguard reservations add web nginx:80 tag:dev   # bind rows; then grant reservation:web
 socketguard networks add tor | add yggdrasil --peer tls://host:port | add yggdrasil --existing
 socketguard networks list | detect | peers yggdrasil --add URI --rm URI | rm ID
+socketguard networks bridges tor [--add LINE] [--rm LINE] [--clear]   # obfs4 bridges for the managed Tor
 socketguard share nginx                    # connection strings for the peer
 socketguard activity --blocked -f          # what was refused
 socketguard protect-host on eth0           # close the host's other listeners on eth0
@@ -269,6 +284,7 @@ Entries of `backends` (`"type"` selects the kind):
 | | `interface` | string | found at runtime | Existing node: its interface |
 | | `admin_endpoint` | string | `yggdrasilctl`'s default | Existing node: admin socket, e.g. `unix:///var/run/yggdrasil.sock` |
 | `tor` | `managed` | bool | `false` | Run SocketGuard's own Tor; none of the keys below may be set |
+| | `bridges` | string array | `[]` | Managed only: obfs4 bridge lines (`obfs4 IP:port FINGERPRINT cert=... iat-mode=0`), stored in this form; Tor then connects through them |
 | | `control` | string | `127.0.0.1:9051` | Existing Tor: `host:port` or `unix:/path`. Administrator |
 | | `auth` | string or object | `"cookie"` | `"cookie"` (SAFECOOKIE), `"cookie_insecure"`, `{"password": "..."}`, `"none"` (Unix socket only). Administrator |
 | | `cookie_path` | string | none | Cookie file Tor must report. Administrator |
@@ -308,8 +324,6 @@ Not built, and not promised. Each item is recorded in an ADR.
 - More than one Yggdrasil node per host: SocketGuard's own node and one you already run cannot run
   at the same time ([ADR 0052](docs/adr/0052-bundled-tor-and-yggdrasil.md),
   [0051](docs/adr/0051-nothing-socketguard-adds-opens-the-host.md)).
-- Pluggable transports and bridges for the managed Tor (ADR 0052). The ADR's later amendment
-  describes obfs4 bridge lines, but nothing in this tree ships or reads them.
 - Port remapping on a reserved address, and per-client access on one onion address
   ([ADR 0047](docs/adr/0047-addresses-on-demand-reservations-port-groups.md)). Inside a reservation,
   Tor access is all or nothing.

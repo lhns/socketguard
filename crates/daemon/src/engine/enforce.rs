@@ -263,6 +263,63 @@ impl Engine {
             .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))
     }
 
+    /// The API's `PUT /api/networks/{id}/bridges`: replace the bridge lines of a managed Tor
+    /// network (ADR 0052). The lines are validated and stored in canonical form, duplicates
+    /// dropped; setting any needs the obfs4 helper of this build. The caller saves the config
+    /// while it holds the write lock.
+    pub async fn set_bridges(
+        &mut self,
+        state: &AppState,
+        id: &str,
+        bridges: Vec<String>,
+    ) -> Result<Network, EngineError> {
+        let Some(active) = self.backends.get_mut(id) else {
+            return Err(EngineError::NotFound(format!("network {id}")));
+        };
+        let bridges =
+            socketguard_core::bridge::normalize_bridges(&bridges).map_err(EngineError::Invalid)?;
+        let mut updated = active.config.backend.clone();
+        match &mut updated {
+            BackendConfig::Tor {
+                managed: true,
+                bridges: current,
+                ..
+            } => *current = bridges,
+            _ => {
+                return Err(EngineError::Invalid(format!(
+                    "network {id} is not a managed Tor network; an existing Tor has its own configuration"
+                )))
+            }
+        }
+        if !updated.bridges().is_empty() {
+            state
+                .bundled
+                .obfs4_helper()
+                .map_err(EngineError::Conflict)?;
+        }
+        updated.validate_managed().map_err(EngineError::Invalid)?;
+        let count = updated.bridges().len();
+        active.config.backend = updated;
+        // The bridge lines are part of the child's spec: a change restarts Tor.
+        self.sync_children(state).await;
+        let activity = NewActivity::new(
+            ActivityKind::NetworkChanged,
+            format!("Changed the bridges of {id} ({count} now)"),
+        )
+        .network(id);
+        self.commit(
+            state,
+            Ok(()),
+            Some(activity),
+            &[DaemonEvent::NetworksChanged],
+        )
+        .await?;
+        self.networks()
+            .into_iter()
+            .find(|n| n.id == id)
+            .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))
+    }
+
     /// The API's remove. A network that is not an IP network (Tor) first removes every
     /// service this daemon owns on it; once the network is gone nothing retries a removal
     /// that failed, so that failure refuses the request (409) unless `force`.

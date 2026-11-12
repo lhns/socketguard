@@ -325,6 +325,34 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
             let now = n.managed.map(|m| m.peers).unwrap_or(peers);
             c.print(&now, || render::network_peers(&id, &now))
         }
+        NetworksCmd::Bridges { id, add, rm, clear } => {
+            let networks = c.client.list_networks().await?;
+            let Some(network) = networks.iter().find(|n| n.id == id) else {
+                bail!("no network {id}");
+            };
+            let Some(managed) = network
+                .managed
+                .as_ref()
+                .filter(|_| network.kind == socketguard_core::NetworkKind::Tor)
+            else {
+                bail!(
+                    "{id} is not a managed Tor network; an existing Tor has its own configuration"
+                );
+            };
+            if add.is_empty() && rm.is_empty() && !clear {
+                return c.print(&managed.bridges, || {
+                    render::network_bridges(&id, &managed.bridges)
+                });
+            }
+            let bridges = if clear {
+                vec![]
+            } else {
+                edited_bridges(&managed.bridges, &add, &rm)?
+            };
+            let n = c.client.set_bridges(&id, &bridges).await?;
+            let now = n.managed.map(|m| m.bridges).unwrap_or(bridges);
+            c.print(&now, || render::network_bridges(&id, &now))
+        }
         NetworksCmd::Rm { id, force, yes } => {
             // Removing the network removes its block: say what that leaves reachable.
             let exposure = c.client.exposure(Some(&id)).await?;
@@ -492,6 +520,36 @@ pub fn edited_peers(current: &[String], add: &[String], rm: &[String]) -> Result
         }
     }
     Ok(peers)
+}
+
+/// `current` bridges with `rm` removed and `add` appended. Both are compared in canonical
+/// form (so `Bridge ` prefixes and the case of the fingerprint do not matter); a line that is
+/// not a bridge line fails here with the daemon's message.
+pub fn edited_bridges(current: &[String], add: &[String], rm: &[String]) -> Result<Vec<String>> {
+    use socketguard_core::bridge::parse_bridge_line;
+    let canon = |l: &String| {
+        parse_bridge_line(l)
+            .map(|b| b.canonical())
+            .map_err(anyhow::Error::msg)
+    };
+    let removed: Vec<String> = rm.iter().map(canon).collect::<Result<_>>()?;
+    for r in &removed {
+        if !current.contains(r) {
+            bail!("that bridge is not configured: {r}");
+        }
+    }
+    let mut bridges: Vec<String> = current
+        .iter()
+        .filter(|b| !removed.contains(b))
+        .cloned()
+        .collect();
+    for a in add {
+        let a = canon(a)?;
+        if !bridges.contains(&a) {
+            bridges.push(a);
+        }
+    }
+    Ok(bridges)
 }
 
 async fn settings(c: &Ctx, cmd: SettingsCmd) -> Result<()> {
@@ -2024,6 +2082,22 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn bridges_are_edited_in_canonical_form() {
+        let fp = "0123456789ABCDEF0123456789ABCDEF01234567";
+        let cert = "A".repeat(70);
+        let line = |h: u8| format!("obfs4 192.0.2.{h}:443 {fp} cert={cert} iat-mode=0");
+        let cur = vec![line(1), line(2)];
+        let prefixed = format!("Bridge {}", line(1));
+        assert_eq!(
+            edited_bridges(&cur, &[line(3), line(2)], &[prefixed]).unwrap(),
+            [line(2), line(3)]
+        );
+        assert!(edited_bridges(&cur, &[], &[line(9)]).is_err());
+        assert!(edited_bridges(&cur, &[format!("{}\nSocksPort 1", line(3))], &[]).is_err());
+        assert!(edited_bridges(&cur, &["snowflake 192.0.2.3:80".into()], &[]).is_err());
     }
 
     #[test]

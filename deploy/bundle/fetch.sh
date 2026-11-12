@@ -200,6 +200,7 @@ fetch_tor() {
     rm -rf "$OUT/tor"; mkdir -p "$OUT/tor"
     for f in $files; do
         [[ -f "$x/tor/$f" ]] || die "$f not found in $(basename "$archive")"
+        mkdir -p "$OUT/tor/$(dirname "$f")"
         cp "$x/tor/$f" "$OUT/tor/$f"
     done
     # The archive keeps its owner-only modes; Tor runs as an unprivileged account (ADR 0052)
@@ -211,6 +212,8 @@ fetch_tor() {
     done
     say "tor $ver laid out in $OUT/tor ($files)"
     NEW_VERSIONS+=("tor $ver")
+    # The obfs4 helper comes from the same verified archive and has no version of its own.
+    NEW_VERSIONS+=("lyrebird expert-bundle-$ver")
 }
 
 # --- Wintun (Windows)
@@ -270,7 +273,7 @@ build_yggdrasil() {
 }
 
 # --- main
-if [[ $SKIP_TOR -eq 0 ]]; then fetch_tor; else keep_old tor; fi
+if [[ $SKIP_TOR -eq 0 ]]; then fetch_tor; else keep_old tor; keep_old lyrebird; fi
 
 if [[ $SKIP_YGG -eq 0 ]]; then
     if [[ $BUILD_YGG -eq 1 ]]; then

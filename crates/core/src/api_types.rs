@@ -217,6 +217,15 @@ pub struct SetPeers {
     pub peers: Vec<String>,
 }
 
+/// Body of `PUT /api/networks/{id}/bridges`: the obfs4 bridge lines of a managed Tor network
+/// (Tor restarts to use them). Empty turns bridges off. Lines are checked by
+/// `bridge::parse_bridge_line` and stored in canonical form.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetBridges {
+    pub bridges: Vec<String>,
+}
+
 /// Body of `PUT /api/settings/protect-host`. An empty list turns protection off.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

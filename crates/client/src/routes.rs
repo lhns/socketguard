@@ -105,6 +105,7 @@ routes! {
     ADD_NETWORK = add_network: POST "/api/networks",
     DELETE_NETWORK = delete_network: DELETE "/api/networks/{id}",
     SET_PEERS = set_peers: PUT "/api/networks/{id}/peers",
+    SET_BRIDGES = set_bridges: PUT "/api/networks/{id}/bridges",
     EXPOSURE = exposure: GET "/api/exposure",
     GET_SETTINGS = get_settings: GET "/api/settings",
     SET_PROTECT_HOST = set_protect_host: PUT "/api/settings/protect-host",
