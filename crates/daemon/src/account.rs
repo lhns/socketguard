@@ -25,6 +25,11 @@ pub trait Accounts: Send + Sync {
     fn lookup(&self, name: &str) -> Option<Ids>;
     /// The daemon's own uid, and whether it may start processes as another account.
     fn daemon(&self) -> (u32, bool);
+    /// Windows: whether a process can really be started as LocalService (the daemon may
+    /// log it on). Decided before the data directory is protected for it and the owner of
+    /// its files is expected, so those agree with how the child is started; asked often,
+    /// so it is answered the same way for the daemon's run.
+    fn local_service_logon(&self) -> Result<(), String>;
 }
 
 /// The accounts of this machine.
@@ -79,6 +84,19 @@ impl Accounts for SystemAccounts {
     fn daemon(&self) -> (u32, bool) {
         (0, false)
     }
+
+    #[cfg(windows)]
+    fn local_service_logon(&self) -> Result<(), String> {
+        static ANSWER: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+        ANSWER
+            .get_or_init(crate::children::check_local_service_logon)
+            .clone()
+    }
+
+    #[cfg(not(windows))]
+    fn local_service_logon(&self) -> Result<(), String> {
+        Err("LocalService exists on Windows only".into())
+    }
 }
 
 /// A scripted [`Accounts`] for tests.
@@ -87,6 +105,8 @@ pub struct FakeAccounts {
     pub account: Option<Ids>,
     pub daemon_uid: u32,
     pub root: bool,
+    /// Windows: why logging LocalService on fails; None when it works.
+    pub local_service_error: Option<String>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -97,6 +117,7 @@ impl FakeAccounts {
             account: Some(Ids { uid: 990, gid: 990 }),
             daemon_uid: 0,
             root: true,
+            local_service_error: None,
         }
     }
     pub fn absent() -> Self {
@@ -123,6 +144,7 @@ impl FakeAccounts {
             account: Some(ids),
             daemon_uid: ids.uid,
             root: true,
+            local_service_error: None,
         }
     }
 }
@@ -134,6 +156,9 @@ impl Accounts for FakeAccounts {
     }
     fn daemon(&self) -> (u32, bool) {
         (self.daemon_uid, self.root)
+    }
+    fn local_service_logon(&self) -> Result<(), String> {
+        self.local_service_error.clone().map_or(Ok(()), Err)
     }
 }
 

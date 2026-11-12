@@ -147,11 +147,12 @@ fn pipe() -> io::Result<(HANDLE, HANDLE)> {
 }
 
 /// Start the child with the LocalService token (needs a daemon that may log it on, in
-/// practice SYSTEM). If that fails the child runs as the daemon's own account and
-/// `runs_as` says why.
+/// practice SYSTEM). Whether that works is checked beforehand, when the account is chosen
+/// (`tor_managed::resolve_run_as`); a spec with `RunAs::LocalService` is not started any
+/// other way.
 pub(super) async fn spawn_local_service(
     spec: &ChildSpec,
-    out: mpsc::Sender<String>,
+    out: mpsc::Sender<Line>,
 ) -> io::Result<Box<dyn ChildProc>> {
     let spec_owned = spec.clone();
     let started = tokio::task::spawn_blocking(move || start_as_local_service(&spec_owned))
@@ -159,7 +160,7 @@ pub(super) async fn spawn_local_service(
         .map_err(io::Error::other)?;
     match started {
         Ok((pid, process, stdout)) => {
-            pump(tokio::fs::File::from_std(stdout), out);
+            pump(tokio::fs::File::from_std(stdout), out, false);
             let target = Arc::new(Mutex::new(Some(process)));
             let (exit_tx, exit_rx) = watch::channel(None);
             let reaped = target.clone();
@@ -195,46 +196,21 @@ pub(super) async fn spawn_local_service(
                 target,
             )))
         }
-        Err(why) => {
-            warn!("Could not start {} as LocalService: {why}", spec.name);
-            let mut fallback = spec.clone();
-            fallback.run_as = RunAs::Daemon {
-                note: Some(format!("could not start it as LocalService: {why}")),
-            };
-            let note = fallback.run_as.describe();
-            let proc = super::system::SystemSpawner.spawn(&fallback, out).await?;
-            Ok(Box::new(Described(proc, note)))
-        }
+        // No fallback here: whether LocalService is used was decided before the directory
+        // was prepared for it (`Accounts::local_service_logon`), and the start just fails
+        // and is tried again.
+        Err(why) => Err(io::Error::other(format!(
+            "could not start {} as LocalService: {why}",
+            spec.name
+        ))),
     }
 }
 
-/// A process whose account is stated differently from the spec's.
-struct Described(Box<dyn ChildProc>, String);
-
-impl ChildProc for Described {
-    fn pid(&self) -> Option<u32> {
-        self.0.pid()
-    }
-    fn runs_as(&self) -> Option<String> {
-        Some(self.1.clone())
-    }
-    fn wait(&self) -> BoxFuture<'_, ExitInfo> {
-        self.0.wait()
-    }
-    fn terminate(&self) {
-        self.0.terminate()
-    }
-    fn kill(&self) {
-        self.0.kill()
-    }
-}
-
-/// The blocking part: log on, make the pipes, `CreateProcessAsUserW`, join the job.
-/// Returns the pid, the process handle and the read end of the output pipe.
-fn start_as_local_service(spec: &ChildSpec) -> Result<(u32, usize, std::fs::File), String> {
-    // SAFETY: every handle is closed on every path below; buffers outlive the calls.
+/// A token of the LocalService account (the caller closes it).
+fn logon_local_service() -> Result<HANDLE, String> {
+    let mut token = HANDLE::default();
+    // SAFETY: the out pointer is valid for the call.
     unsafe {
-        let mut token = HANDLE::default();
         LogonUserW(
             w!("LocalService"),
             w!("NT AUTHORITY"),
@@ -243,7 +219,28 @@ fn start_as_local_service(spec: &ChildSpec) -> Result<(u32, usize, std::fs::File
             LOGON32_PROVIDER_DEFAULT,
             &mut token,
         )
-        .map_err(|e| format!("LogonUser: {e}"))?;
+    }
+    .map_err(|e| format!("LogonUser: {e}"))?;
+    Ok(token)
+}
+
+/// Whether this process may log LocalService on, which decides whether a child is started
+/// as it (and so what the data directory is prepared for and whose files are trusted).
+pub(crate) fn check_local_service_logon() -> Result<(), String> {
+    let token = logon_local_service()?;
+    // SAFETY: the token was just made and is closed once.
+    unsafe {
+        let _ = CloseHandle(token);
+    }
+    Ok(())
+}
+
+/// The blocking part: log on, make the pipes, `CreateProcessAsUserW`, join the job.
+/// Returns the pid, the process handle and the read end of the output pipe.
+fn start_as_local_service(spec: &ChildSpec) -> Result<(u32, usize, std::fs::File), String> {
+    let token = logon_local_service()?;
+    // SAFETY: every handle is closed on every path below; buffers outlive the calls.
+    unsafe {
         let close_all = |hs: &[HANDLE]| {
             for h in hs {
                 let _ = CloseHandle(*h);

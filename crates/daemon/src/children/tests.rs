@@ -11,9 +11,14 @@ fn spec(args: &[&str]) -> ChildSpec {
         cwd: None,
         run_as: RunAs::Daemon { note: None },
         data_dir: "/tmp/tor".into(),
+        pid_file: None,
+        guarded: false,
+        quiet_patterns: vec![],
         health: None,
         before_start: None,
         on_exit: None,
+        start_deadline: None,
+        on_deadline: None,
         config_tag: String::new(),
     }
 }
@@ -304,4 +309,46 @@ async fn a_network_can_hold_the_status_before_the_child_is_declared() {
     assert_eq!(handle.get().state, ChildState::Up, "the same cell");
     sup.remove("t").await;
     assert_eq!(handle.get().state, ChildState::Stopped);
+}
+
+#[test]
+fn routine_lines_are_quiet_unless_they_are_warnings_errors_or_stderr() {
+    let mut s = spec(&[]);
+    s.quiet_patterns = vec!["New control connection opened".into()];
+    let quiet = |l: Line| is_quiet(&s, &l);
+    assert!(quiet(Line::stdout(
+        "Nov 12 [notice] New control connection opened."
+    )));
+    assert!(!quiet(Line::stdout("Nov 12 [notice] Bootstrapped 5%")));
+    assert!(!quiet(Line::stdout(
+        "[warn] New control connection opened from a stranger"
+    )));
+    assert!(!quiet(Line::stdout("[err] New control connection opened")));
+    assert!(!quiet(Line::stderr("New control connection opened")));
+    // Without patterns nothing is quiet.
+    s.quiet_patterns.clear();
+    assert!(!is_quiet(
+        &s,
+        &Line::stdout("New control connection opened")
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_quiet_line_is_not_taken_for_the_reason_it_exited() {
+    let (sup, fake) = supervisor();
+    let mut s = spec(&[]);
+    s.quiet_patterns = vec!["New control connection opened".into()];
+    sup.set("t", Some(s));
+    pass(TICK).await;
+    fake.proc(0).print("[err] cannot bind");
+    for _ in 0..100 {
+        fake.proc(0)
+            .print("[notice] New control connection opened.");
+    }
+    fake.proc(0).exit("exit code 1");
+    pass(TICK).await;
+    assert_eq!(
+        sup.status("t").detail.as_deref(),
+        Some("Tor exited: [err] cannot bind")
+    );
 }

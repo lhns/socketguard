@@ -11,7 +11,7 @@ pub struct FakeProc {
     pub spec: ChildSpec,
     pub pid: u32,
     exit: Arc<watch::Sender<Option<ExitInfo>>>,
-    out: Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    out: Arc<Mutex<Option<mpsc::Sender<Line>>>>,
     signals: Arc<Mutex<Vec<&'static str>>>,
     stubborn: bool,
 }
@@ -20,7 +20,14 @@ impl FakeProc {
     /// The process prints `line`.
     pub fn print(&self, line: &str) {
         if let Some(out) = self.out.lock().unwrap().as_ref() {
-            let _ = out.try_send(line.to_string());
+            let _ = out.try_send(Line::stdout(line));
+        }
+    }
+
+    /// The process prints `line` on stderr.
+    pub fn print_err(&self, line: &str) {
+        if let Some(out) = self.out.lock().unwrap().as_ref() {
+            let _ = out.try_send(Line::stderr(line));
         }
     }
 
@@ -132,7 +139,7 @@ impl Spawner for FakeSpawner {
     fn spawn<'a>(
         &'a self,
         spec: &'a ChildSpec,
-        out: mpsc::Sender<String>,
+        out: mpsc::Sender<Line>,
     ) -> BoxFuture<'a, io::Result<Box<dyn ChildProc>>> {
         Box::pin(async move {
             let mut inner = self.0.lock().unwrap();

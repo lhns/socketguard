@@ -166,9 +166,54 @@ struct State {
     /// or are non-empty exactly while a change is pending ([`Network::pending`]).
     desired: BTreeMap<String, ServiceSpec>,
     unremoved: BTreeSet<String>,
+    /// Managed: the control checks that failed in a row, and when the first of them did.
+    failures: u32,
+    failing_since: Option<Instant>,
+    /// A failure was stored without being announced (it is still tolerated).
+    quiet_down: bool,
 }
 
 const NOT_CONNECTED: &str = "not connected to Tor yet";
+
+/// A managed Tor whose child is up is reported as up through fewer than this many failed
+/// control checks in a row, and for less than [`DOWN_AFTER`] since the first of them, so
+/// one hiccup is not a flicker.
+const FAILURES_BEFORE_DOWN: u32 = 3;
+const DOWN_AFTER: Duration = Duration::from_secs(10);
+
+/// Whether a streak of `failures` failed checks, the first `failing_for` ago, is still
+/// tolerated.
+fn tolerated(failures: u32, failing_for: Option<Duration>) -> bool {
+    failures < FAILURES_BEFORE_DOWN && failing_for.is_none_or(|d| d < DOWN_AFTER)
+}
+
+impl State {
+    fn record_up(&mut self) {
+        self.failures = 0;
+        self.failing_since = None;
+        if std::mem::take(&mut self.quiet_down) {
+            // Nobody was told it was down.
+            self.status = NetworkStatus::Up;
+        } else {
+            set_status(&mut self.status, NetworkStatus::Up);
+        }
+    }
+
+    /// A failed check. With `tolerant` (a child that is up) the first ones are stored
+    /// without being announced; the status shows them only once they are no longer tolerated.
+    fn record_down(&mut self, reason: String, tolerant: bool) {
+        self.failures += 1;
+        let since = *self.failing_since.get_or_insert_with(Instant::now);
+        let down = NetworkStatus::Down { reason };
+        if tolerant && tolerated(self.failures, Some(since.elapsed())) {
+            self.quiet_down = true;
+            self.status = down;
+        } else {
+            self.quiet_down = false;
+            set_status(&mut self.status, down);
+        }
+    }
+}
 
 /// Set the status, logging a change between up and down but not a repeated failure.
 fn set_status(current: &mut NetworkStatus, new: NetworkStatus) {
@@ -241,6 +286,9 @@ impl TorNetwork {
                 },
                 desired: BTreeMap::new(),
                 unremoved: BTreeSet::new(),
+                failures: 0,
+                failing_since: None,
+                quiet_down: false,
             }),
             io: Mutex::new(()),
         }
@@ -263,12 +311,11 @@ impl TorNetwork {
         match attempt {
             Ok(c) => Ok(c),
             Err(e) => {
-                set_status(
-                    &mut self.state.lock().unwrap().status,
-                    NetworkStatus::Down {
-                        reason: format!("{e:#}"),
-                    },
-                );
+                let tolerant = self.managed.is_some();
+                self.state
+                    .lock()
+                    .unwrap()
+                    .record_down(format!("{e:#}"), tolerant);
                 Err(e)
             }
         }
@@ -290,7 +337,12 @@ impl Network for TorNetwork {
     }
 
     fn status(&self) -> (NetworkStatus, Option<Ipv6Addr>) {
+        let mut st = self.state.lock().unwrap();
         if let Some(m) = self.child_down() {
+            // Starting, bootstrapping NN%: it only moves forward until the child is up.
+            st.failures = 0;
+            st.failing_since = None;
+            st.quiet_down = false;
             return (
                 NetworkStatus::Down {
                     reason: m.reason(true),
@@ -298,7 +350,14 @@ impl Network for TorNetwork {
                 None,
             );
         }
-        (self.state.lock().unwrap().status.clone(), None)
+        if self.managed.is_some() && matches!(st.status, NetworkStatus::Down { .. }) {
+            // The child is up (it answered the bootstrap check): a failed control check or
+            // two, or none made yet, is not yet a reason to say down.
+            if tolerated(st.failures, st.failing_since.map(|t| t.elapsed())) {
+                return (NetworkStatus::Up, None);
+            }
+        }
+        (st.status.clone(), None)
     }
 
     fn managed(&self) -> Option<socketguard_core::ManagedInfo> {
@@ -460,7 +519,7 @@ impl Network for TorNetwork {
         st.unremoved
             .retain(|id| live.contains(id) && !removed.contains(id));
         st.checked = Some(Instant::now());
-        set_status(&mut st.status, NetworkStatus::Up);
+        st.record_up();
         if errors.is_empty() {
             Ok(())
         } else {
@@ -857,6 +916,52 @@ mod tests {
         n3.enforce(&enforcement(vec![address(&[8080], vec![])]))
             .unwrap();
         assert!(mock.detached().is_empty());
+    }
+
+    #[test]
+    fn a_managed_tor_that_is_up_tolerates_a_short_streak_of_failed_checks() {
+        let s = Duration::from_secs;
+        // Nothing failed yet, however long it has been up: the streak starts at a failure.
+        assert!(tolerated(0, None));
+        assert!(tolerated(1, Some(s(0))));
+        assert!(tolerated(2, Some(s(9))));
+        assert!(!tolerated(3, Some(s(1))), "three in a row");
+        assert!(!tolerated(1, Some(s(10))), "ten seconds of it");
+
+        // The state: a failure is stored quietly, a recovery says nothing, and the third
+        // failure in a row is the first announced.
+        let mut st = State {
+            applied: HashMap::new(),
+            checked: None,
+            status: NetworkStatus::Up,
+            desired: BTreeMap::new(),
+            unremoved: BTreeSet::new(),
+            failures: 0,
+            failing_since: None,
+            quiet_down: false,
+        };
+        st.record_down("x".into(), true);
+        assert!(st.quiet_down && st.failures == 1);
+        st.record_up();
+        assert!(!st.quiet_down && st.failures == 0 && st.failing_since.is_none());
+        assert_eq!(st.status, NetworkStatus::Up);
+        for _ in 0..3 {
+            st.record_down("x".into(), true);
+        }
+        assert!(!st.quiet_down, "announced");
+        // Unmanaged: never tolerated.
+        let mut st2 = State {
+            failures: 0,
+            failing_since: None,
+            quiet_down: false,
+            status: NetworkStatus::Up,
+            applied: HashMap::new(),
+            checked: None,
+            desired: BTreeMap::new(),
+            unremoved: BTreeSet::new(),
+        };
+        st2.record_down("x".into(), false);
+        assert!(!st2.quiet_down);
     }
 
     #[test]
