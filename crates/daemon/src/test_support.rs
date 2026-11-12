@@ -513,6 +513,19 @@ pub async fn test_app_state_with(
     })
 }
 
+/// A `third_party` directory in a temp folder: each of `files` (relative paths) holds "x",
+/// and `VERSIONS` says `versions`.
+pub fn third_party_dir(files: &[&str], versions: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("sg-third-party-{}", uuid::Uuid::new_v4()));
+    for f in files {
+        let p = dir.join(f);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"x").unwrap();
+    }
+    std::fs::write(dir.join("VERSIONS"), versions).unwrap();
+    dir
+}
+
 /// The pieces of a Tor or Yggdrasil network test: the fake processes, a state directory in a temp
 /// directory and the accounts, with the supervisor's pauses shortened to milliseconds.
 pub struct ChildHarness {

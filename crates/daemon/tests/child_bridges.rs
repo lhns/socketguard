@@ -48,17 +48,10 @@ impl Fixture {
 
     /// The same without a network.
     async fn new_empty(helper: bool) -> Self {
-        let d = std::env::temp_dir().join(format!("sg-bridges-{}", uuid::Uuid::new_v4()));
-        let mut files = vec![format!("tor/{}", exe("tor"))];
-        if helper {
-            files.push(format!("tor/pluggable_transports/{}", exe("lyrebird")));
-        }
-        for f in files {
-            let p = d.join(f);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, b"x").unwrap();
-        }
-        std::fs::write(d.join("VERSIONS"), "tor 16.0.1\n").unwrap();
+        let tor = format!("tor/{}", exe("tor"));
+        let lyrebird = format!("tor/pluggable_transports/{}", exe("lyrebird"));
+        let files: &[&str] = if helper { &[&tor, &lyrebird] } else { &[&tor] };
+        let d = third_party_dir(files, "tor 16.0.1\n");
         let state = test_app_state_with(
             empty_engine(),
             DaemonConfig::default(),

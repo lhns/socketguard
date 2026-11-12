@@ -15,14 +15,7 @@ use socketguard_daemon::test_support::*;
 use std::sync::Arc;
 
 fn third_party(files: &[&str]) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("sg-child-{}", uuid::Uuid::new_v4()));
-    for f in files {
-        let p = d.join(f);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, b"x").unwrap();
-    }
-    std::fs::write(d.join("VERSIONS"), "tor 16.0.1\nyggdrasil v0.5.15 abc\n").unwrap();
-    d
+    third_party_dir(files, "tor 16.0.1\nyggdrasil v0.5.15 abc\n")
 }
 
 struct Fixture {
