@@ -5,7 +5,9 @@ pub mod dhcpv6;
 mod network;
 pub mod slaac;
 pub mod ula;
+pub mod ygg_admin;
 pub mod yggdrasil;
+pub mod yggdrasil_managed;
 
 pub use network::IpNetwork;
 
@@ -68,6 +70,10 @@ pub trait Ipv6Backend: Send + Sync {
     }
     /// Why the network cannot be used right now, beyond `current_prefix` failing.
     fn problem(&self) -> Option<String> {
+        None
+    }
+    /// How the child process behind a managed network stands (ADR 0052).
+    fn managed(&self) -> Option<socketguard_core::ManagedInfo> {
         None
     }
     /// Release an address (cleanup). Most backends hold no state per address.

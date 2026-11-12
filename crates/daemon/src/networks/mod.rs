@@ -15,12 +15,14 @@ pub mod tor;
 pub mod tor_client_key;
 pub mod tor_control;
 pub mod tor_managed;
+pub mod ygg_key;
+pub mod ygg_managed;
 
 pub use managed::ManagedCtx;
 
 use crate::iface::InterfaceManager;
 use crate::ruleset::{subject_credentials, Snapshot};
-use anyhow::{bail, Result};
+use anyhow::Result;
 use ip::{IpNetwork, Ipv6Backend, Prefix};
 use socketguard_core::config::BackendConfig;
 use socketguard_core::{
@@ -210,17 +212,30 @@ pub fn create(
             managed: managed_ygg,
             peers: _,
         } => {
-            // TODO(managed): the managed Yggdrasil network (ADR 0052) is built by the next
-            // change, from `managed` (the context) like the Tor one above.
             if *managed_ygg {
-                bail!("managed networks are not available yet");
+                return Ok(ip_network(
+                    config,
+                    ip::yggdrasil_managed::ManagedYggBackend::new(ygg_managed::ManagedYgg::new(
+                        id,
+                        managed,
+                        net.clone(),
+                    )),
+                    net,
+                ));
             }
+            // A Unix socket endpoint is spoken to directly; a TCP one, and a node without
+            // an endpoint, go through `yggdrasilctl`.
+            let node: Box<dyn ip::yggdrasil::YggdrasilNode> = match admin_endpoint
+                .as_deref()
+                .and_then(ip::ygg_admin::unix_endpoint)
+            {
+                Some(path) => Box::new(ip::ygg_admin::AdminNode::new(path)),
+                None => Box::new(ip::yggdrasil::YggdrasilctlNode::new(admin_endpoint.clone())),
+            };
             Ok(ip_network(
                 config,
-                ip::yggdrasil::YggdrasilBackend::new(Box::new(
-                    ip::yggdrasil::YggdrasilctlNode::new(admin_endpoint.clone()),
-                ))
-                .with_host(net.clone(), interface.clone()),
+                ip::yggdrasil::YggdrasilBackend::new(node)
+                    .with_host(net.clone(), interface.clone()),
                 net,
             ))
         }

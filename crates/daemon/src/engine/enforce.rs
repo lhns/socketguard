@@ -179,6 +179,13 @@ impl Engine {
             &self.managed,
         )
         .map_err(|e| EngineError::Invalid(format!("cannot create network: {e}")))?;
+        if matches!(inst.backend, BackendConfig::Yggdrasil { managed: true, .. }) {
+            // The node's addresses follow from its key: with them remembered, the first
+            // ruleset already closes them, before any software runs (ADR 0051).
+            self.ensure_managed_key(state, &inst.id, true)
+                .await
+                .map_err(EngineError::Internal)?;
+        }
         let applied = self.add_network_instance(state, &inst, n).await;
         let network = self
             .networks()
@@ -369,7 +376,15 @@ impl Engine {
         // The child ends before its network disappears, so nothing of it outlives the
         // network (a managed Tor takes its onion services with it).
         self.stop_child(backend_id).await;
+        let managed_ygg = self
+            .backends
+            .get(backend_id)
+            .is_some_and(|b| super::children::is_managed_yggdrasil(&b.config.backend));
         self.backends.remove(backend_id);
+        if managed_ygg {
+            // The node's key goes with the network, like the keys of its addresses.
+            self.forget_managed_key(state, backend_id).await;
+        }
         // A network added again later must not inherit this one's remembered node.
         if let Err(e) = state
             .db

@@ -13,6 +13,8 @@ fn spec(args: &[&str]) -> ChildSpec {
         data_dir: "/tmp/tor".into(),
         health: None,
         before_start: None,
+        on_exit: None,
+        config_tag: String::new(),
     }
 }
 

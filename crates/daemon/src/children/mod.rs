@@ -10,9 +10,10 @@
 //! Everything that touches the system is behind [`Spawner`] and [`ChildProc`], so the tests
 //! drive the supervisor with a fake and with tokio's paused clock. The real spawner is in
 //! `system`; children die with the daemon (Linux: parent-death signal; Windows: a job
-//! object; macOS: a pid file that is checked at the next start).
+//! object; macOS, and a child that changes its user id: a pid file that is checked at the
+//! next start).
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(unix), allow(dead_code))]
 mod pidfile;
 mod rate;
 mod system;
@@ -46,6 +47,9 @@ pub enum RunAs {
     Daemon { note: Option<String> },
     /// Unix: a dedicated unprivileged account.
     Account { name: String, uid: u32, gid: u32 },
+    /// Unix: started as the daemon's account (root), and the program drops to the named
+    /// account itself once it has what needs the privilege (Yggdrasil's `-user`).
+    DropsTo { name: String },
     /// Windows: the LocalService account.
     LocalService,
 }
@@ -56,7 +60,7 @@ impl RunAs {
         match self {
             RunAs::Daemon { note: None } => "the daemon's account".into(),
             RunAs::Daemon { note: Some(n) } => format!("the daemon's account ({n})"),
-            RunAs::Account { name, .. } => name.clone(),
+            RunAs::Account { name, .. } | RunAs::DropsTo { name } => name.clone(),
             RunAs::LocalService => "LocalService".into(),
         }
     }
@@ -114,6 +118,9 @@ pub trait HealthCheck: Send + Sync {
 /// the data directory. An error keeps the child from starting and is shown as its detail.
 pub type BeforeStart = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
+/// Runs when a process ended on its own: how long it ran and the last line it printed.
+pub type OnExit = Arc<dyn Fn(Duration, Option<&str>) + Send + Sync>;
+
 /// One child process to keep running.
 #[derive(Clone)]
 pub struct ChildSpec {
@@ -130,12 +137,17 @@ pub struct ChildSpec {
     /// Without one the child counts as up as soon as it runs.
     pub health: Option<Arc<dyn HealthCheck>>,
     pub before_start: Option<BeforeStart>,
+    pub on_exit: Option<OnExit>,
+    /// What else makes this a different launch although the command line is the same (a
+    /// generated configuration file): a changed tag restarts the child.
+    pub config_tag: String,
 }
 
 impl ChildSpec {
     /// Whether both start the same process the same way (the callbacks do not count).
     pub fn same_launch(&self, other: &ChildSpec) -> bool {
         self.name == other.name
+            && self.config_tag == other.config_tag
             && self.program == other.program
             && self.args == other.args
             && self.env == other.env
@@ -586,6 +598,10 @@ impl Task {
                         None => format!("{label} exited ({})", info.description),
                     };
                     warn!("{detail}");
+                    let ran_for = started.elapsed();
+                    if let Some(on_exit) = &spec.on_exit {
+                        on_exit(ran_for, last_line.as_deref());
+                    }
                     self.status.update(|s| {
                         s.state = ChildState::Exited;
                         s.detail = Some(detail);
@@ -594,7 +610,7 @@ impl Task {
                         s.restarts += 1;
                         s.last_line = last_line.clone();
                     });
-                    return End::Exited { ran_for: started.elapsed() };
+                    return End::Exited { ran_for };
                 }
                 Some(l) = lines.recv() => relay(&spec.name, &mut limiter, &mut last_line, l),
                 _ = self.rx.changed() => {

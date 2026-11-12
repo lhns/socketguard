@@ -5,8 +5,9 @@
 //! - Linux: `prctl(PR_SET_PDEATHSIG, SIGKILL)` in the child before `exec`. The signal fires
 //!   when the *thread* that forked ends, so children are spawned from the runtime's worker
 //!   threads (they live as long as the runtime), never from `spawn_blocking`.
-//! - macOS: `child.pid` in the data directory (see `pidfile`); a leftover child is killed
-//!   at the next start. (Untested on a real Mac.)
+//! - Unix: `child.pid` in the data directory (see `pidfile`); a leftover child is killed
+//!   at the next start. macOS has no parent-death signal at all, and on Linux the signal is
+//!   lost when a child changes its user id (Yggdrasil's `-user`). (Untested on a real Mac.)
 //! - Windows: a job object with `KILL_ON_JOB_CLOSE` (see `windows`).
 
 use super::*;
@@ -153,7 +154,7 @@ async fn spawn(spec: &ChildSpec, out: mpsc::Sender<String>) -> io::Result<Box<dy
 /// Start the child with tokio's `Command`, as the daemon's own account or (Unix, daemon
 /// is root) as the unprivileged account.
 fn spawn_tokio(spec: &ChildSpec, out: mpsc::Sender<String>) -> io::Result<Box<dyn ChildProc>> {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     if let Some(pid) = pidfile::kill_stale(&spec.data_dir, &pidfile::process_start_time, &|p| {
         // SAFETY: plain signal; the pid and start time matched the file we wrote.
         unsafe {
@@ -223,9 +224,9 @@ fn spawn_tokio(spec: &ChildSpec, out: mpsc::Sender<String>) -> io::Result<Box<dy
     #[cfg(unix)]
     let handle = Some(pid as usize);
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     if let Some(start) = pidfile::process_start_time(pid) {
-        let _ = std::fs::write(pidfile::path(&spec.data_dir), pidfile::render(pid, &start));
+        pidfile::write(&spec.data_dir, pid, &start);
     }
 
     if let Some(s) = child.stdout.take() {
@@ -237,7 +238,7 @@ fn spawn_tokio(spec: &ChildSpec, out: mpsc::Sender<String>) -> io::Result<Box<dy
     let target = Arc::new(Mutex::new(handle));
     let (exit_tx, exit_rx) = watch::channel(None);
     let reaped = target.clone();
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     let pid_file = pidfile::path(&spec.data_dir);
     tokio::spawn(async move {
         let info = match child.wait().await {
@@ -247,7 +248,7 @@ fn spawn_tokio(spec: &ChildSpec, out: mpsc::Sender<String>) -> io::Result<Box<dy
             },
         };
         *reaped.lock().unwrap() = None;
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         let _ = std::fs::remove_file(pid_file);
         let _ = exit_tx.send(Some(info));
     });

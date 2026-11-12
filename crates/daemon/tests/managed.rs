@@ -42,7 +42,8 @@ impl Fixture {
         call(&self.app, method, path, body).await
     }
 
-    /// A managed Yggdrasil network `ygg` over a mock (creating one is not possible yet).
+    /// A managed Yggdrasil network `ygg` over a mock allocator, without a child (the settings
+    /// and the API are tested here; the child is in `managed_ygg.rs`).
     async fn with_managed_ygg(&self, peers: &[&str]) {
         let inst = BackendInstanceConfig {
             id: "ygg".into(),

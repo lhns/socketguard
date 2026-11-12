@@ -616,17 +616,22 @@ pub struct ManagedHarness {
     pub spawner: crate::children::fake::FakeSpawner,
     pub state_dir: std::path::PathBuf,
     pub ctx: crate::networks::ManagedCtx,
+    /// The firewall and the interfaces of the engines it builds.
+    pub fw: Arc<MockFirewall>,
+    pub fw_calls: Arc<Mutex<Vec<FirewallCall>>>,
+    pub ifaces: MockInterfaceManager,
 }
 
 impl ManagedHarness {
-    /// `third_party` has a Tor; the account `socketguard-net` exists (with the ids of the
-    /// test process, so preparing Tor's directory works without root).
+    /// `third_party` has a Tor and a Yggdrasil; the account `socketguard-net` exists (with
+    /// the ids of the test process, so preparing the directories works without root).
     pub fn new() -> Self {
         Self::with(crate::account::FakeAccounts::own())
     }
 
     pub fn with(accounts: crate::account::FakeAccounts) -> Self {
-        let root = std::env::temp_dir().join(format!("sg-managed-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("sg-m-{}", &uuid::Uuid::new_v4().to_string()[..8]));
         let third = root.join("third_party");
         let tor = third.join("tor");
         std::fs::create_dir_all(&tor).unwrap();
@@ -635,7 +640,19 @@ impl ManagedHarness {
             b"x",
         )
         .unwrap();
-        std::fs::write(third.join("VERSIONS"), "tor 16.0.1\n").unwrap();
+        let ygg = third.join("yggdrasil");
+        std::fs::create_dir_all(&ygg).unwrap();
+        std::fs::write(
+            ygg.join(if cfg!(windows) {
+                "yggdrasil.exe"
+            } else {
+                "yggdrasil"
+            }),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(ygg.join("wintun.dll"), b"x").unwrap();
+        std::fs::write(third.join("VERSIONS"), "tor 16.0.1\nyggdrasil 0.5.15\n").unwrap();
         let state_dir = root.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
         let spawner = crate::children::fake::FakeSpawner::default();
@@ -645,16 +662,25 @@ impl ManagedHarness {
             Arc::new(crate::children::Supervisor::new(Arc::new(spawner.clone()))),
             Arc::new(accounts),
         );
+        let fw_calls = Arc::new(Mutex::new(vec![]));
         Self {
             spawner,
             state_dir,
             ctx,
+            fw: Arc::new(MockFirewall::new(fw_calls.clone())),
+            fw_calls,
+            ifaces: MockInterfaceManager::new(Arc::new(Mutex::new(vec![]))),
         }
     }
 
     /// An engine over mocks with no networks that runs managed networks on this harness.
     pub fn engine(&self) -> crate::engine::Engine {
-        let mut engine = empty_engine();
+        let mut engine = crate::engine::Engine::new_injectable(
+            Box::new(MockSocketMonitor::new(vec![])),
+            self.fw.clone(),
+            Arc::new(self.ifaces.clone()),
+            HashMap::new(),
+        );
         engine.set_managed_ctx(self.ctx.clone());
         engine
     }

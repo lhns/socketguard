@@ -119,10 +119,13 @@ impl Engine {
             .map(|id| {
                 let active = &self.backends[id];
                 let (status, _) = active.network.status();
-                let node_running = match &status {
-                    NetworkStatus::Up => true,
-                    NetworkStatus::Down { reason } => !node_is_down(reason),
-                };
+                // SocketGuard's own node ends with its network, with "turn off" and with the
+                // daemon: nothing keeps running when the block goes.
+                let node_running = !active.config.backend.is_managed()
+                    && match &status {
+                        NetworkStatus::Up => true,
+                        NetworkStatus::Down { reason } => !node_is_down(reason),
+                    };
                 NetworkExposure {
                     network: id.clone(),
                     kind: NetworkKind::Yggdrasil,

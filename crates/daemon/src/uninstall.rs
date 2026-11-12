@@ -108,10 +108,13 @@ pub async fn uninstall(
     // 3. Undo the record, newest first. Directories wait until the data is gone.
     let mut kept_entries: Vec<Entry> = vec![];
     let mut dirs: Vec<Entry> = vec![];
+    // The Wintun driver is shared with other software: it goes only with `--purge`.
+    let mut drivers: Vec<Entry> = vec![];
     let mut service_seen = false;
     for e in entries.iter().rev() {
         match &e.change {
             Change::DirectoryCreated { .. } | Change::OwnedDirectory { .. } => dirs.push(e.clone()),
+            Change::WintunDriver { .. } => drivers.push(e.clone()),
             other => {
                 service_seen |= matches!(other, Change::ServiceRegistered { .. });
                 let r = undo_entry(host, mgr, groups, platform, e);
@@ -182,6 +185,22 @@ pub async fn uninstall(
             "settings and keys (database, config)",
             "kept; remove them with `uninstall --purge`",
         );
+    }
+
+    for e in &drivers {
+        if delete {
+            let r = undo_entry(host, mgr, groups, platform, e);
+            if !r.complete() {
+                kept_entries.push(e.clone());
+            }
+            report.extend(r);
+        } else {
+            report.kept(
+                "Wintun driver",
+                "kept; it is shared with other software (`uninstall --purge` removes it if SocketGuard installed it)",
+            );
+            kept_entries.push(e.clone());
+        }
     }
 
     // Owned directories (a child process's data), then the directories we created.
@@ -765,6 +784,62 @@ mod tests {
             .iter()
             .any(|i| matches!(&i.outcome, Outcome::Left(w) if w.contains("refused"))));
         std::fs::remove_dir_all(w.d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_wintun_driver_goes_on_purge_only_and_only_if_it_was_absent_before() {
+        let enum_with = "Published Name:     oem12.inf\nOriginal Name:      wintun.inf\n";
+        for (present_before, purge, deleted) in [
+            (false, false, false),
+            (false, true, true),
+            (true, true, false),
+        ] {
+            let w = world();
+            record(&w, vec![Change::WintunDriver { present_before }]);
+            let (mut host, mut mgr, mut groups) = (
+                FakeHost::new("windows"),
+                FakeServiceManager::default(),
+                FakeGroups::default(),
+            );
+            host.answer_in_order(
+                "pnputil /enum-drivers",
+                vec![
+                    crate::host::Output {
+                        stdout: enum_with.into(),
+                        ..Default::default()
+                    },
+                    crate::host::Output::default(),
+                ],
+            );
+            let order = RefCell::new(vec![]);
+            let r = run(
+                &w,
+                &mut host,
+                &mut mgr,
+                &mut groups,
+                UninstallOptions {
+                    purge,
+                    keep_data: !purge,
+                    ..Default::default()
+                },
+                Report::default(),
+                &order,
+            )
+            .await
+            .unwrap();
+            let text = r.render();
+            assert!(r.complete(), "{text}");
+            assert_eq!(
+                host.ran("pnputil /delete-driver oem12.inf"),
+                deleted,
+                "present_before={present_before} purge={purge}:\n{text}"
+            );
+            assert!(!host.commands.iter().any(|c| c.contains("/force")));
+            if !deleted {
+                assert!(text.contains("shared with other software"), "{text}");
+            }
+            std::fs::remove_dir_all(w.d).unwrap();
+        }
     }
 
     #[test]

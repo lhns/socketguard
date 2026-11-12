@@ -114,6 +114,11 @@ pub fn set_record_path(config: &Path) {
     let _ = RECORD_PATH.set(socketguard_core::paths::setup_log_path(config));
 }
 
+/// The install record of the running daemon; None without a record path (tests).
+pub fn record() -> Option<Record> {
+    RECORD_PATH.get().map(|p| Record::new(p.clone()))
+}
+
 /// Windows: record the value `FWPM_ENGINE_COLLECT_NET_EVENTS` had before the daemon first
 /// set it. Only the first call counts, across restarts.
 pub fn record_wfp_option_once(prior: Option<u32>) {
@@ -421,11 +426,9 @@ pub fn undo_entry(
         Change::UnprivilegedAccount { name, created } => {
             r.extend(crate::account::undo(host, name, *created))
         }
-        // TODO(managed): the Wintun undo comes with managed Yggdrasil.
-        Change::WintunDriver { .. } => r.kept(
-            "Wintun driver",
-            "removed with the managed networks' data (not implemented yet)",
-        ),
+        Change::WintunDriver { present_before } => {
+            r.extend(crate::wintun::undo(host, *present_before))
+        }
         Change::Legacy => r.kept(
             "an entry of a removed feature",
             "entry of a removed feature; nothing to undo",
