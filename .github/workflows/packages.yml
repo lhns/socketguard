@@ -8,7 +8,7 @@ name: packages
 
 on:
   push:
-    branches: [installers, redesign, main, portable, bundled]
+    branches: [installers, redesign, main, portable, bundled, hardening]
   workflow_dispatch:
   workflow_call:
 
