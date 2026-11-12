@@ -428,9 +428,14 @@ impl Engine {
                         address: None,
                         peers: vec![],
                         peers_connected: None,
+                        bridges: vec![],
+                        bridges_unavailable: None,
                     });
                 if info.peers.is_empty() {
                     info.peers = active.config.backend.peers().to_vec();
+                }
+                if info.bridges.is_empty() {
+                    info.bridges = active.config.backend.bridges().to_vec();
                 }
                 info
             }),

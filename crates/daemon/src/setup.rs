@@ -530,6 +530,8 @@ mod tests {
                 address: None,
                 peers: vec![],
                 peers_connected: None,
+                bridges: vec![],
+                bridges_unavailable: None,
             }),
         };
         let existing =

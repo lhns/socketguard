@@ -89,6 +89,14 @@ function Get-ChildProcessState($Paths, [string]$Name) {
     return 'ABSENT'
 }
 
+# The obfs4 helper Tor starts for bridges (ADR 0052), from the shipped `third_party\tor`.
+function Get-HelperProcessState($Paths) {
+    foreach ($p in @($Paths)) {
+        if ($p -match '(?i)\\third_party\\tor\\pluggable_transports\\lyrebird\.exe$') { return 'PRESENT' }
+    }
+    return 'ABSENT'
+}
+
 # Names of the network adapters: the one SocketGuard creates for its Yggdrasil node.
 function Get-AdapterState($Names) {
     foreach ($n in @($Names)) { if ($n -ieq 'SocketGuard') { return 'PRESENT' } }
@@ -225,6 +233,9 @@ function Invoke-SelfTest {
     Assert-Equal 'child-yggdrasil' 'PRESENT' (Get-ChildProcessState $procs 'yggdrasil')
     Assert-Equal 'child-none' 'ABSENT' (Get-ChildProcessState @('C:\Program Files\Yggdrasil\yggdrasil.exe') 'yggdrasil')
     Assert-Equal 'child-name-exact' 'ABSENT' (Get-ChildProcessState @('C:\x\third_party\yggdrasil\yggdrasil.exe') 'tor')
+    Assert-Equal 'child-obfs4-helper' 'PRESENT' (Get-HelperProcessState @('C:\Program Files\SocketGuard\third_party\tor\pluggable_transports\lyrebird.exe'))
+    Assert-Equal 'child-obfs4-helper-absent' 'ABSENT' (Get-HelperProcessState $procs)
+    Assert-Equal 'child-obfs4-helper-other' 'ABSENT' (Get-HelperProcessState @('C:\tools\lyrebird.exe'))
     Assert-Equal 'adapter-present' 'PRESENT' (Get-AdapterState @('Ethernet', 'SocketGuard'))
     Assert-Equal 'adapter-absent' 'ABSENT' (Get-AdapterState @('Ethernet', 'Yggdrasil'))
     $enum = "Published Name:     oem12.inf`nOriginal Name:      wintun.inf`nProvider Name:      WireGuard LLC`n`nPublished Name:     oem3.inf`nOriginal Name:      prnms009.inf`n"
@@ -309,6 +320,7 @@ function Invoke-Live {
     $exes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object { $_.ExecutablePath } | Where-Object { $_ })
     $items += New-Item2 (Get-ChildProcessState $exes 'tor') 'child-tor'
     $items += New-Item2 (Get-ChildProcessState $exes 'yggdrasil') 'child-yggdrasil'
+    $items += New-Item2 (Get-HelperProcessState $exes) 'child-obfs4-helper'
     $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
     $items += New-Item2 (Get-AdapterState $adapters) 'adapter-SocketGuard'
     $items += New-Item2 (Get-WintunState ((& pnputil.exe /enum-drivers 2>&1) | Out-String) $WintunPresentBefore.IsPresent) 'wintun-driver'

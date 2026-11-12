@@ -12,6 +12,7 @@ use super::tor_control::{AuthOptions, Control, Endpoint};
 use crate::account::{self, Accounts};
 use crate::children::{ChildHealth, ChildSpec, ChildStatus, HealthCheck, RunAs, StatusHandle};
 use anyhow::{anyhow, Context, Result};
+use socketguard_core::bridge;
 use socketguard_core::config::TorAuth;
 use socketguard_core::{ChildState, ManagedInfo};
 use std::path::{Path, PathBuf};
@@ -114,7 +115,7 @@ fn quote(path: &Path) -> String {
 /// connects through it), a control endpoint only the daemon can reach, cookie
 /// authentication with the file at the path the daemon chose, and nothing else: no geoip
 /// files, no transports, no relay. The account is not set here: the daemon starts Tor as it.
-pub fn torrc(paths: &TorPaths, windows: bool) -> String {
+pub fn torrc(paths: &TorPaths, windows: bool, bridges: &[String]) -> String {
     let mut t = String::from(
         "# Written by SocketGuard each time it starts Tor; changes made here are overwritten.\n",
     );
@@ -137,7 +138,44 @@ pub fn torrc(paths: &TorPaths, windows: bool) -> String {
     t.push_str("CookieAuthentication 1\n");
     t.push_str(&format!("CookieAuthFile {}\n", quote(&paths.cookie)));
     t.push_str("Log notice stdout\n");
+    if !bridges.is_empty() {
+        // Only obfs4 is enabled, although the helper speaks more. `bridges` are canonical
+        // lines (`bridge::BridgeLine::canonical`): nothing else reaches this file.
+        t.push_str("UseBridges 1\n");
+        t.push_str(&format!(
+            "ClientTransportPlugin {} exec {}\n",
+            bridge::TRANSPORT,
+            helper_exec()
+        ));
+        for b in bridges {
+            t.push_str(&format!("Bridge {b}\n"));
+        }
+    }
     t
+}
+
+/// The directory of the obfs4 helper below the Tor directory, as the Tor Expert Bundle
+/// lays it out.
+pub const HELPER_DIR: &str = "pluggable_transports";
+/// The obfs4 helper (Tor Project's lyrebird; it also speaks other transports that stay
+/// disabled).
+pub const HELPER: &str = if cfg!(windows) {
+    "lyrebird.exe"
+} else {
+    "lyrebird"
+};
+
+/// The `exec` argument of `ClientTransportPlugin`. Tor splits that line at spaces and
+/// takes no quotes (tested with Tor 0.4.9: `"C:/Program Files/..."` and `\ ` both break the
+/// path), and installs live in paths with spaces (`C:\Program Files`, the macOS state
+/// directory). So the helper is named relative to Tor's working directory, which is the
+/// Tor directory when bridges are on, in the form Tor Browser's own `torrc-defaults` uses.
+pub fn helper_exec() -> String {
+    if cfg!(windows) {
+        format!("{HELPER_DIR}\\{HELPER}")
+    } else {
+        format!("./{HELPER_DIR}/{HELPER}")
+    }
 }
 
 /// `PORT=127.0.0.1:51234` in the file `ControlPortWriteToFile` produces.
@@ -187,10 +225,15 @@ impl ManagedTor {
             ChildState::Waiting => or(s.detail, "waiting"),
             ChildState::Unavailable => or(s.detail, "Tor is not available"),
             ChildState::Starting => "Tor is starting".into(),
-            ChildState::Bootstrapping => match (detailed, s.progress) {
-                (true, Some(p)) => format!("bootstrapping {p}%"),
-                _ => "Tor is bootstrapping".into(),
-            },
+            ChildState::Bootstrapping => {
+                let through = self.ctx.bridge_counts.get(&self.id) > 0;
+                match (detailed, s.progress, through) {
+                    (true, Some(p), true) => format!("connecting through bridges, {p}%"),
+                    (true, Some(p), false) => format!("bootstrapping {p}%"),
+                    (_, _, true) => "connecting through bridges".into(),
+                    _ => "Tor is bootstrapping".into(),
+                }
+            }
             ChildState::Exited => {
                 if detailed {
                     or(s.detail, "Tor exited")
@@ -215,6 +258,8 @@ impl ManagedTor {
             address: None,
             peers: vec![],
             peers_connected: None,
+            bridges: vec![],
+            bridges_unavailable: self.ctx.bundled.obfs4_helper().err(),
         }
     }
 
@@ -262,7 +307,19 @@ impl ManagedTor {
 
     /// The child to run, or why this build cannot run one.
     pub fn spec(&self) -> Result<ChildSpec, String> {
+        self.spec_with_bridges(&[])
+    }
+
+    /// [`ManagedTor::spec`] connecting through `bridges` (bridge lines; canonicalised here,
+    /// so whatever the configuration holds, only canonical lines reach the `torrc`). Needs
+    /// the obfs4 helper of this build.
+    pub fn spec_with_bridges(&self, bridges: &[String]) -> Result<ChildSpec, String> {
         let files = self.ctx.bundled.tor()?;
+        let bridges = bridge::normalize_bridges(bridges)?;
+        self.ctx.bridge_counts.set(&self.id, bridges.len());
+        if !bridges.is_empty() {
+            self.ctx.bundled.obfs4_helper()?;
+        }
         let paths = self.paths.clone()?;
         let run_as = resolve_run_as(self.ctx.accounts.as_ref());
         let mut env = vec![];
@@ -275,6 +332,14 @@ impl ManagedTor {
         }
         let prepare_paths = paths.clone();
         let prepare_as = run_as.clone();
+        let prepare_bridges = bridges.clone();
+        // With bridges Tor runs in its own directory, where the helper is found by a
+        // relative name (see `helper_exec`).
+        let cwd = if bridges.is_empty() {
+            paths.dir.clone()
+        } else {
+            files.dir.clone()
+        };
         Ok(ChildSpec {
             name: "tor".into(),
             program: files.binary,
@@ -286,7 +351,7 @@ impl ManagedTor {
                 self.ctx.daemon_pid.to_string(),
             ],
             env,
-            cwd: Some(paths.dir.clone()),
+            cwd: Some(cwd),
             run_as,
             data_dir: paths.dir,
             pid_file: Some(crate::children::pid_file(self.ctx.state_dir()?, &self.id)),
@@ -294,11 +359,14 @@ impl ManagedTor {
             // Every control check of the daemon is a "connection" in Tor's log.
             quiet_patterns: vec!["New control connection opened".into()],
             health: Some(Arc::new(TorHealth(self.clone()))),
-            before_start: Some(Arc::new(move || prepare(&prepare_paths, &prepare_as))),
+            before_start: Some(Arc::new(move || {
+                prepare(&prepare_paths, &prepare_as, &prepare_bridges)
+            })),
             on_exit: None,
             start_deadline: None,
             on_deadline: None,
-            config_tag: String::new(),
+            // The torrc differs with the bridges: a change restarts Tor.
+            config_tag: bridges.join("\n"),
         })
     }
 }
@@ -329,7 +397,7 @@ impl HealthCheck for TorHealth {
 /// Before each start: the data directory exists, is private to the account Tor runs as,
 /// holds no leftovers of an earlier run that could be mistaken for the new one, and has a
 /// fresh `torrc`.
-pub fn prepare(paths: &TorPaths, run_as: &RunAs) -> Result<(), String> {
+pub fn prepare(paths: &TorPaths, run_as: &RunAs, bridges: &[String]) -> Result<(), String> {
     let fail = |what: &str, e: &dyn std::fmt::Display| format!("{what}: {e}");
     std::fs::create_dir_all(&paths.dir)
         .map_err(|e| fail(&format!("cannot create {}", paths.dir.display()), &e))?;
@@ -363,7 +431,7 @@ pub fn prepare(paths: &TorPaths, run_as: &RunAs) -> Result<(), String> {
             Err(e) => return Err(fail(&format!("cannot remove {}", f.display()), &e)),
         }
     }
-    write_torrc(paths)?;
+    write_torrc(paths, bridges)?;
     #[cfg(unix)]
     if let RunAs::Account { uid, gid, .. } = run_as {
         chown(&paths.torrc, *uid, *gid)?;
@@ -436,8 +504,8 @@ pub(super) fn hand_over(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
 
 /// Create `torrc` fresh and exclusively: the directory belongs to the account Tor runs as,
 /// so a link planted there must not make the daemon write somewhere else.
-fn write_torrc(paths: &TorPaths) -> Result<(), String> {
-    write_fresh(&paths.torrc, &torrc(paths, cfg!(windows)), 0o644)
+fn write_torrc(paths: &TorPaths, bridges: &[String]) -> Result<(), String> {
+    write_fresh(&paths.torrc, &torrc(paths, cfg!(windows), bridges), 0o644)
 }
 
 /// Write `text` to a new file `path` (an old one is removed first), exclusively and never
@@ -478,7 +546,7 @@ mod tests {
     #[test]
     fn torrc_for_unix_is_exactly_this() {
         assert_eq!(
-            torrc(&paths(), false),
+            torrc(&paths(), false, &[]),
             "# Written by SocketGuard each time it starts Tor; changes made here are overwritten.\n\
              DataDirectory \"/var/lib/socketguard/tor\"\n\
              SocksPort 0\n\
@@ -494,7 +562,7 @@ mod tests {
     #[test]
     fn a_state_directory_with_a_space_stays_one_argument() {
         let p = TorPaths::new(Path::new("/Library/Application Support/SocketGuard"));
-        let t = torrc(&p, false);
+        let t = torrc(&p, false, &[]);
         assert!(t.contains(
             "ControlPort unix:\"/Library/Application Support/SocketGuard/tor/control\"\n"
         ));
@@ -504,7 +572,7 @@ mod tests {
     #[test]
     fn torrc_for_windows_lets_tor_pick_the_port_and_say_so() {
         let p = TorPaths::new(Path::new("C:/ProgramData/SocketGuard"));
-        let t = torrc(&p, true);
+        let t = torrc(&p, true, &[]);
         assert!(t.contains("ControlPort auto\n"));
         assert!(
             t.contains("ControlPortWriteToFile \"C:/ProgramData/SocketGuard/tor/control-port\"\n")
@@ -513,6 +581,96 @@ mod tests {
         for forbidden in ["GeoIP", "ClientTransportPlugin", "ORPort", "User "] {
             assert!(!t.contains(forbidden), "{forbidden}");
         }
+    }
+
+    const BRIDGE: &str = "obfs4 192.0.2.10:443 0123456789ABCDEF0123456789ABCDEF01234567 cert=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA iat-mode=0";
+
+    #[test]
+    fn torrc_with_bridges_is_exactly_this() {
+        let plain = torrc(&paths(), false, &[]);
+        let with = torrc(&paths(), false, &[BRIDGE.to_string()]);
+        assert_eq!(
+            with,
+            format!(
+                "{plain}UseBridges 1\n\
+                 ClientTransportPlugin obfs4 exec {}\n\
+                 Bridge {BRIDGE}\n",
+                helper_exec()
+            )
+        );
+        // Only obfs4 is enabled although the helper speaks more.
+        for other in [
+            "snowflake",
+            "meek",
+            "webtunnel",
+            "scramblesuit",
+            "obfs3",
+            "conjure",
+        ] {
+            assert!(!with.contains(other), "{other}");
+        }
+        // With a state directory or an install path that has spaces nothing is quoted: the
+        // helper is named relative to Tor's directory.
+        let spaced = torrc(
+            &TorPaths::new(Path::new("/Library/Application Support/SocketGuard")),
+            false,
+            &[BRIDGE.to_string()],
+        );
+        assert!(spaced.contains(&format!("exec {}\n", helper_exec())));
+        assert_eq!(
+            torrc(
+                &paths(),
+                true,
+                &[BRIDGE.to_string(), BRIDGE.replace("10:", "11:")]
+            )
+            .matches("\nBridge ")
+            .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn the_helper_is_named_relative_to_tors_directory() {
+        if cfg!(windows) {
+            assert_eq!(helper_exec(), "pluggable_transports\\lyrebird.exe");
+        } else {
+            assert_eq!(helper_exec(), "./pluggable_transports/lyrebird");
+        }
+        assert!(!helper_exec().contains(' '));
+    }
+
+    #[tokio::test]
+    async fn bridges_need_the_helper_and_change_the_launch() {
+        let d = state_dir();
+        let c = ctx(Some(d.clone()), FakeAccounts::present());
+        let t = ManagedTor::new("tor", &c);
+        let err = t.spec_with_bridges(&[BRIDGE.to_string()]).unwrap_err();
+        assert!(err.contains("obfs4 helper"), "{err}");
+        assert!(t.info().bridges_unavailable.is_some());
+
+        // Whatever the configuration holds, a hostile line never reaches the torrc.
+        let hostile = format!("{BRIDGE}\nSocksPort 1");
+        assert!(t.spec_with_bridges(&[hostile]).is_err());
+
+        let third = c.bundled.dir().unwrap().join("tor");
+        let helper = third.join(HELPER_DIR).join(HELPER);
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        std::fs::write(&helper, b"x").unwrap();
+        assert!(t.info().bridges_unavailable.is_none());
+        let plain = t.spec().unwrap();
+        let spec = t.spec_with_bridges(&[format!("Bridge {BRIDGE}")]).unwrap();
+        assert!(!spec.same_launch(&plain), "a bridge change restarts Tor");
+        assert_eq!(spec.config_tag, BRIDGE, "stored canonical");
+        assert_eq!(spec.cwd.as_deref(), Some(third.as_path()));
+        assert_eq!(plain.cwd.as_deref(), Some(d.join("tor").as_path()));
+        assert!(spec.same_launch(&t.spec_with_bridges(&[BRIDGE.to_string()]).unwrap()));
+
+        // The file Tor is started with.
+        (spec.before_start.unwrap())().unwrap();
+        let text = std::fs::read_to_string(d.join("tor").join("torrc")).unwrap();
+        assert!(text.contains(&format!("Bridge {BRIDGE}\n")));
+        assert!(text.contains("UseBridges 1\n"));
+        assert_eq!(c.bridge_counts.get("tor"), 1);
     }
 
     #[test]
@@ -838,12 +996,15 @@ mod tests {
         std::fs::write(&victim, b"precious").unwrap();
         std::os::unix::fs::symlink(&victim, &p.torrc).unwrap();
         std::os::unix::fs::symlink(&victim, &p.cookie).unwrap();
-        prepare(&p, &RunAs::Daemon { note: None }).unwrap();
+        prepare(&p, &RunAs::Daemon { note: None }, &[]).unwrap();
         assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
         let meta = std::fs::symlink_metadata(&p.torrc).unwrap();
         assert!(meta.is_file(), "torrc is a regular file again");
         assert!(!p.cookie.exists());
-        assert_eq!(std::fs::read_to_string(&p.torrc).unwrap(), torrc(&p, false));
+        assert_eq!(
+            std::fs::read_to_string(&p.torrc).unwrap(),
+            torrc(&p, false, &[])
+        );
     }
 
     #[test]
@@ -855,10 +1016,10 @@ mod tests {
             std::fs::write(f, b"stale").unwrap();
         }
         std::fs::write(&p.torrc, b"old").unwrap();
-        prepare(&p, &RunAs::Daemon { note: None }).unwrap();
+        prepare(&p, &RunAs::Daemon { note: None }, &[]).unwrap();
         assert_eq!(
             std::fs::read_to_string(&p.torrc).unwrap(),
-            torrc(&p, cfg!(windows))
+            torrc(&p, cfg!(windows), &[])
         );
         for f in [&p.control_socket, &p.control_port_file, &p.cookie] {
             assert!(!f.exists(), "{}", f.display());
@@ -870,6 +1031,6 @@ mod tests {
             assert_eq!(mode & 0o777, 0o700);
         }
         // Twice is the same.
-        prepare(&p, &RunAs::Daemon { note: None }).unwrap();
+        prepare(&p, &RunAs::Daemon { note: None }, &[]).unwrap();
     }
 }

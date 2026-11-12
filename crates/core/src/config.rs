@@ -71,6 +71,11 @@ pub enum BackendConfig {
         /// and cookie are chosen by the daemon; excludes every external field above.
         #[serde(default, skip_serializing_if = "is_false")]
         managed: bool,
+        /// obfs4 bridge lines for the managed Tor, in canonical form (see `bridge`); empty
+        /// (the default) connects directly. Only a managed Tor takes them: an existing
+        /// Tor has its own configuration.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bridges: Vec<String>,
     },
 }
 
@@ -121,6 +126,7 @@ impl BackendConfig {
             cookie_owner: None,
             allow_remote_control: false,
             managed: false,
+            bridges: vec![],
         }
     }
 
@@ -152,6 +158,14 @@ impl BackendConfig {
         )
     }
 
+    /// The bridge lines of a managed Tor network; empty otherwise.
+    pub fn bridges(&self) -> &[String] {
+        match self {
+            BackendConfig::Tor { bridges, .. } => bridges,
+            _ => &[],
+        }
+    }
+
     /// The peers of a managed Yggdrasil network; empty otherwise.
     pub fn peers(&self) -> &[String] {
         match self {
@@ -173,6 +187,7 @@ impl BackendConfig {
                 cookie_owner,
                 allow_remote_control,
                 managed: true,
+                bridges,
             } => {
                 let external = control != DEFAULT_TOR_CONTROL
                     || *auth != TorAuth::default()
@@ -186,8 +201,14 @@ impl BackendConfig {
                          settings; SocketGuard chooses them"
                         .into());
                 }
+                // The torrc is written from the canonical form, whatever the file holds.
+                crate::bridge::normalize_bridges(bridges)?;
                 Ok(())
             }
+            BackendConfig::Tor { bridges, .. } if !bridges.is_empty() => Err(
+                "bridges can only be set on a managed Tor network (an existing Tor has its own configuration)"
+                    .into(),
+            ),
             BackendConfig::Yggdrasil {
                 interface,
                 admin_endpoint,
@@ -906,6 +927,7 @@ mod tests {
             cookie_owner: None,
             allow_remote_control: false,
             managed: false,
+            bridges: vec![],
         };
         assert_eq!(tor.interface(), None);
         assert!(tor.is_singleton());
@@ -927,6 +949,7 @@ mod tests {
                 cookie_owner: None,
                 allow_remote_control: false,
                 managed: false,
+                bridges: vec![],
             }
         );
         for auth in [
@@ -946,6 +969,7 @@ mod tests {
                     cookie_owner: None,
                     allow_remote_control: false,
                     managed: false,
+                    bridges: vec![],
                 },
             };
             let json = serde_json::to_string(&inst).unwrap();
@@ -986,6 +1010,7 @@ mod tests {
                 cookie_owner: None,
                 allow_remote_control: false,
                 managed: false,
+                bridges: vec![],
             },
         };
         assert!(!format!("{inst:?}").contains("hunter2"));
@@ -1004,6 +1029,7 @@ mod tests {
                 cookie_owner: None,
                 allow_remote_control: false,
                 managed: false,
+                bridges: vec![],
             },
         };
         assert!(DaemonConfig::validate_backends(&[tor("tor")]).is_ok());
@@ -1161,6 +1187,27 @@ mod tests {
         // Peers belong to a managed node only.
         bad(r#"{"type":"yggdrasil","peers":["tls://a.b:1"]}"#);
         bad(r#"{"type":"yggdrasil","managed":true,"peers":["tls://a.b:1","tls://a.b:1"]}"#);
+    }
+
+    #[test]
+    fn bridges_belong_to_a_managed_tor_and_must_be_bridge_lines() {
+        let line = "obfs4 192.0.2.10:443 0123456789ABCDEF0123456789ABCDEF01234567 cert=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA iat-mode=0";
+        let json = |managed: bool, b: &str| {
+            format!(r#"{{"type":"tor","managed":{managed},"bridges":[{b}]}}"#)
+        };
+        let check = |j: String| {
+            let inst: BackendInstanceConfig = serde_json::from_str(&j).unwrap();
+            DaemonConfig::validate_backends(&[inst])
+        };
+        assert!(check(json(true, &format!("{line:?}"))).is_ok());
+        // Empty is the default and is not written.
+        assert!(BackendConfig::managed_tor().bridges().is_empty());
+        assert!(!serde_json::to_string(&BackendConfig::managed_tor())
+            .unwrap()
+            .contains("bridges"));
+        assert!(check(json(false, &format!("{line:?}"))).is_err());
+        assert!(check(json(true, r#""snowflake 192.0.2.3:80""#)).is_err());
+        assert!(check(json(true, r#""obfs4 1.2.3.4:5\nSocksPort 1""#)).is_err());
     }
 
     #[test]

@@ -396,6 +396,81 @@ async fn set_network_peers(id: String, peers: Vec<String>) -> CmdResult<Network>
 }
 
 #[tauri::command]
+async fn set_network_bridges(id: String, bridges: Vec<String>) -> CmdResult<Network> {
+    Ok(client().set_bridges(&id, &bridges).await?)
+}
+
+/// The pages the window may open in the system browser. A fixed list: the frontend names a
+/// page, it never supplies an address that something else interprets (`file:`, a program).
+/// Keep in step with `ui/src/links.ts`.
+///
+/// - Tor bridges: the Tor Project's BridgeDB, where bridge lines are requested.
+/// - Yggdrasil public peers: the project's own repository of public peers, the page its
+///   configuration documentation (https://yggdrasil-network.github.io/configuration.html,
+///   "Public Peers") links to.
+const OPEN_LINK_ALLOWED: &[&str] = &[
+    "https://bridges.torproject.org/",
+    "https://github.com/yggdrasil-network/public-peers",
+];
+
+/// Open an allow-listed page in the system browser.
+#[tauri::command]
+async fn open_link(url: String) -> CmdResult<()> {
+    if !OPEN_LINK_ALLOWED.contains(&url.as_str()) {
+        return Err(UiError {
+            code: "invalid".into(),
+            message: "that page cannot be opened from here".into(),
+            details: None,
+        });
+    }
+    open_in_browser(&url).map_err(|e| UiError {
+        code: "open_failed".into(),
+        message: format!("could not open the browser: {e}"),
+        details: None,
+    })
+}
+
+#[cfg(windows)]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let (verb, file) = (wide("open"), wide(url));
+    // SAFETY: both strings are NUL-terminated and outlive the call.
+    let r = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // Values above 32 mean success.
+    if r.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(format!("ShellExecute returned {}", r.0 as isize))
+    }
+}
+
+#[cfg(not(windows))]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(program)
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("{program}: {e}"))
+}
+
+#[tauri::command]
 async fn delete_network(id: String, force: bool, confirm_exposed: bool) -> CmdResult<()> {
     Ok(client().delete_network(&id, force, confirm_exposed).await?)
 }
@@ -1012,6 +1087,8 @@ fn main() {
             exposure,
             add_network,
             set_network_peers,
+            set_network_bridges,
+            open_link,
             delete_network,
             list_addresses,
             list_reservations,

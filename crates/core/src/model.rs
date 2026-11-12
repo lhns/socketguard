@@ -337,6 +337,14 @@ pub struct ManagedInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub peers_connected: Option<u32>,
+    /// Tor: the configured bridge lines (canonical form).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bridges: Vec<String>,
+    /// Tor: why bridges cannot be set in this build (the obfs4 helper is not shipped); None
+    /// when they can.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub bridges_unavailable: Option<String>,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]

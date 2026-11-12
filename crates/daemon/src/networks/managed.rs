@@ -25,6 +25,23 @@ pub struct ManagedCtx {
     pub keys: KeyRing,
     /// The admin valves of the managed Yggdrasil networks.
     pub valves: super::ygg_managed::Valves,
+    /// How many bridges each managed Tor network connects through (set when its child is
+    /// specified), for its status.
+    pub bridge_counts: BridgeCounts,
+}
+
+/// Bridge counts by network id.
+#[derive(Clone, Default)]
+pub struct BridgeCounts(Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>);
+
+impl BridgeCounts {
+    pub fn set(&self, id: &str, n: usize) {
+        self.0.lock().unwrap().insert(id.to_string(), n);
+    }
+
+    pub fn get(&self, id: &str) -> usize {
+        self.0.lock().unwrap().get(id).copied().unwrap_or(0)
+    }
 }
 
 impl ManagedCtx {
@@ -42,6 +59,7 @@ impl ManagedCtx {
             accounts,
             keys: KeyRing::default(),
             valves: Default::default(),
+            bridge_counts: Default::default(),
         }
     }
 
@@ -87,12 +105,14 @@ pub fn child_wish(
     backend: &BackendConfig,
 ) -> Desired {
     match backend {
-        BackendConfig::Tor { managed: true, .. } => {
-            match super::tor_managed::ManagedTor::new(id, ctx).spec() {
-                Ok(spec) => Desired::Run(Box::new(spec)),
-                Err(why) => Desired::Unavailable(why),
-            }
-        }
+        BackendConfig::Tor {
+            managed: true,
+            bridges,
+            ..
+        } => match super::tor_managed::ManagedTor::new(id, ctx).spec_with_bridges(bridges) {
+            Ok(spec) => Desired::Run(Box::new(spec)),
+            Err(why) => Desired::Unavailable(why),
+        },
         BackendConfig::Yggdrasil {
             managed: true,
             peers,
