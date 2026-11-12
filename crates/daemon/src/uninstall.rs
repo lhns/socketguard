@@ -60,6 +60,9 @@ pub fn strictly_inside(p: &Path, root: &Path) -> bool {
             .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
+/// How often (every 250 ms) the daemon is asked whether it has gone after the service stopped.
+const STOP_POLLS: u32 = 40;
+
 const DATA_QUESTION: &str = "Also delete settings and keys? Onion addresses cannot be recovered; \
 the export does not contain the onion private keys. [y/N]";
 
@@ -84,6 +87,14 @@ pub async fn uninstall(
 
     // 1. Stop the service; a daemon that still answers is not ours to stop here.
     mgr.stop()?;
+    // `launchctl bootout` and `systemctl stop` can return before the daemon (which first
+    // stops its children) has closed the socket.
+    for _ in 0..STOP_POLLS {
+        if !api_reachable() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
     if api_reachable() {
         bail!(
             "a SocketGuard daemon still answers on the API socket; stop it first (it is not the installed service)"
@@ -686,7 +697,7 @@ mod tests {
         std::fs::remove_dir_all(w.d).unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_daemon_that_still_answers_and_a_missing_administrator_right_refuse() {
         let w = world();
         let (mut host, mut mgr, mut groups) = (
