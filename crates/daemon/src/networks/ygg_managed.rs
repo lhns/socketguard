@@ -23,6 +23,7 @@ use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tracing::warn;
 
 /// The directory of the managed Yggdrasil under the state directory.
 pub const DIR: &str = "yggdrasil";
@@ -32,6 +33,13 @@ pub const OTHER_NODE: &str = "another Yggdrasil node is running on this host; So
 
 /// A start that ends sooner than this counts as a failed start.
 const QUICK_EXIT: Duration = Duration::from_secs(10);
+/// A node that runs but has not answered on its admin socket this long after its start is
+/// restarted without the admin socket (see [`AdminValve::engage`]).
+pub const ADMIN_DEADLINE: Duration = Duration::from_secs(20);
+
+/// What the card says while the node runs without an admin socket.
+pub const PEERS_UNAVAILABLE: &str = "peer information unavailable: the admin socket does not work";
+
 /// The longest admin socket path used; the system limit is 104 or 108 bytes.
 const MAX_SOCKET_PATH: usize = 100;
 
@@ -157,6 +165,12 @@ pub struct AdminValve {
 impl AdminValve {
     pub fn admin_on(&self) -> bool {
         !self.off
+    }
+
+    /// The node was up but never answered on its admin socket in time: close the valve.
+    /// Returns whether that changed anything (the next start differs).
+    pub fn engage(&mut self) -> bool {
+        !std::mem::replace(&mut self.off, true)
     }
 
     /// A process ended on its own after `ran_for`, last printing `last_line`.
@@ -311,20 +325,44 @@ impl ManagedYgg {
         self.admin_client()?.get_peers().ok()
     }
 
-    /// The card of the network (the configured peers are added by the engine).
+    /// The start deadline passed: unless the node answers on its admin socket after all,
+    /// close the valve so that the next start has none. Returns whether to restart.
+    fn admin_deadline_passed(&self) -> bool {
+        let Some(client) = self.admin_client() else {
+            return false;
+        };
+        let ours = self.key().map(|k| k.public_hex());
+        if matches!(client.get_self(), Ok(info) if Some(&info.key) == ours.as_ref()) {
+            return false;
+        }
+        warn!("Yggdrasil does not answer on its admin socket; restarting it without");
+        self.ctx
+            .valves
+            .lock()
+            .unwrap()
+            .entry(self.id.clone())
+            .or_default()
+            .engage()
+    }
+
+    /// The card of the network (the configured peers are added by the engine). Without a
+    /// working admin socket there is nothing to count: it says so.
     pub fn info(&self, peers_connected: Option<u32>) -> ManagedInfo {
         let s = self.child();
+        let no_admin = !self.admin_on();
         ManagedInfo {
             state: s.state,
             progress: None,
-            detail: s.detail,
+            detail: s
+                .detail
+                .or_else(|| no_admin.then(|| PEERS_UNAVAILABLE.to_string())),
             runs_as: s
                 .runs_as
                 .or_else(|| Some(resolve_run_as(self.ctx.accounts.as_ref()).describe())),
             version: self.ctx.bundled.version_of("yggdrasil"),
             address: self.node().map(|n| n.address.to_string()),
             peers: vec![],
-            peers_connected,
+            peers_connected: if no_admin { None } else { peers_connected },
         }
     }
 
@@ -369,11 +407,20 @@ impl ManagedYgg {
                     .record_exit(ran_for, last);
             }) as OnExit
         });
+        let ygg = self.clone();
+        let state_dir = self.ctx.state_dir()?.to_path_buf();
         Ok(ChildSpec {
             name: "yggdrasil".into(),
             program: files.binary,
             args,
             env: vec![],
+            // `-user` clears the parent-death signal: on Unix the child guard ends the node
+            // when the daemon goes.
+            guarded: cfg!(unix) && matches!(run_as, RunAs::DropsTo { .. }),
+            pid_file: Some(crate::children::pid_file(&state_dir, &self.id)),
+            quiet_patterns: vec![],
+            start_deadline: Some(ADMIN_DEADLINE),
+            on_deadline: Some(Arc::new(move || ygg.admin_deadline_passed())),
             // On the drive of the admin socket path (see `YggPaths::admin_listen`); the
             // DLL of the tun driver is found next to the executable, not here.
             cwd: Some(paths.dir.clone()),
@@ -644,6 +691,10 @@ mod tests {
             );
         }
         assert_eq!(spec.data_dir, d.join("yggdrasil"));
+        assert_eq!(spec.pid_file, Some(d.join("run").join("ygg.pid")));
+        assert!(!spec.pid_file.as_ref().unwrap().starts_with(&spec.data_dir));
+        assert_eq!(spec.guarded, cfg!(unix), "-user drops the death signal");
+        assert_eq!(spec.start_deadline, Some(ADMIN_DEADLINE));
         assert_eq!(spec.cwd.as_deref(), Some(d.join("yggdrasil").as_path()));
         assert_eq!(spec.config_tag, "tcp://192.0.2.1:9001");
         assert!(spec.health.is_some() && spec.before_start.is_some());
@@ -792,6 +843,59 @@ mod tests {
         assert!(after.contains(r#""AdminListen": "none""#), "{after}");
         assert!(!y.admin_on());
         assert!(y.admin_client().is_none());
+    }
+
+    /// The node runs but never answers on its admin socket: after the deadline it is
+    /// restarted without one, the adapter holding the address is then enough, and the card
+    /// says that peer information is unavailable.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_admin_socket_means_a_restart_without_it_after_the_deadline() {
+        use crate::children::fake::FakeSpawner;
+        use socketguard_core::ChildState;
+        let d = state_dir();
+        let fake = FakeSpawner::default();
+        let mut c = ctx(Some(d.clone()), FakeAccounts::own());
+        c.children = Arc::new(Supervisor::new(Arc::new(fake.clone())));
+        let net = ifaces();
+        let y = ygg(&c, &net);
+        let conf = d.join("yggdrasil").join("yggdrasil.conf");
+        c.children.set("ygg", Some(y.spec(&[]).unwrap()));
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        if y.paths.as_ref().unwrap().admin_listen().is_none() {
+            return;
+        }
+        assert!(std::fs::read_to_string(&conf).unwrap().contains("unix://"));
+
+        // Alive, adapter up with its address, but no answer on the admin socket.
+        let adapter = adapter_name().unwrap_or("utun7");
+        net.add_interface(adapter);
+        net.plant_address(adapter, key().node().address);
+        tokio::time::sleep(ADMIN_DEADLINE - Duration::from_secs(2)).await;
+        assert_eq!(fake.started(), 1, "not before the deadline");
+        assert_ne!(y.child().state, ChildState::Up);
+        assert!(y.admin_on());
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(
+            fake.proc(0).signals(),
+            ["term"],
+            "the first node was stopped"
+        );
+        assert_eq!(fake.started(), 2, "restarted");
+        assert!(!y.admin_on());
+        let after = std::fs::read_to_string(&conf).unwrap();
+        assert!(after.contains(r#""AdminListen": "none""#), "{after}");
+
+        // Without the admin socket the adapter holding the address makes it up.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(y.child().state, ChildState::Up);
+        let info = y.info(Some(2));
+        assert_eq!(info.detail.as_deref(), Some(PEERS_UNAVAILABLE));
+        assert_eq!(info.peers_connected, None);
+        assert_eq!(y.peers(), None);
+        // And it is not asked again.
+        tokio::time::sleep(ADMIN_DEADLINE * 2).await;
+        assert_eq!(fake.started(), 2);
     }
 
     #[tokio::test]

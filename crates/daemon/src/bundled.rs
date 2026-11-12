@@ -160,7 +160,10 @@ mod tests {
             Some(p) => assert_eq!(list[1], Path::new(p)),
             None => assert_eq!(list.len(), 2, "Windows: next to the executable only"),
         }
-        assert_eq!(candidates(None, None).len(), usize::from(PACKAGED.is_some()));
+        assert_eq!(
+            candidates(None, None).len(),
+            usize::from(PACKAGED.is_some())
+        );
 
         let (a, b) = (temp(), temp());
         let missing = a.join("nope");

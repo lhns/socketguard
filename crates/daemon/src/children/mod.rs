@@ -13,6 +13,8 @@
 //! object; macOS, and a child that changes its user id: a pid file that is checked at the
 //! next start).
 
+#[cfg(unix)]
+pub mod guard;
 #[cfg_attr(not(unix), allow(dead_code))]
 mod pidfile;
 mod rate;
@@ -24,6 +26,13 @@ mod win;
 pub mod fake;
 
 pub use system::SystemSpawner;
+#[cfg(windows)]
+pub(crate) use win::check_local_service_logon;
+
+/// Where the pid file of the child `id` goes: `<state dir>/run/<id>.pid`.
+pub fn pid_file(state_dir: &std::path::Path, id: &str) -> PathBuf {
+    pidfile::path(state_dir, id)
+}
 
 use rate::{RateLimiter, Take};
 use socketguard_core::ChildState;
@@ -36,7 +45,31 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
+
+/// One line a child printed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Line {
+    pub text: String,
+    /// It came from the child's stderr (which a program uses for what is wrong).
+    pub stderr: bool,
+}
+
+impl Line {
+    pub fn stdout(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            stderr: false,
+        }
+    }
+
+    pub fn stderr(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            stderr: true,
+        }
+    }
+}
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -93,7 +126,7 @@ pub trait Spawner: Send + Sync {
     fn spawn<'a>(
         &'a self,
         spec: &'a ChildSpec,
-        out: mpsc::Sender<String>,
+        out: mpsc::Sender<Line>,
     ) -> BoxFuture<'a, std::io::Result<Box<dyn ChildProc>>>;
 }
 
@@ -121,6 +154,11 @@ pub type BeforeStart = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 /// Runs when a process ended on its own: how long it ran and the last line it printed.
 pub type OnExit = Arc<dyn Fn(Duration, Option<&str>) + Send + Sync>;
 
+/// Runs when a running child is still not up at its start deadline. Returns whether the
+/// next start will differ (it changed something): then the child is restarted; if not, the
+/// child is left running and the deadline is not asked again.
+pub type OnDeadline = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// One child process to keep running.
 #[derive(Clone)]
 pub struct ChildSpec {
@@ -132,12 +170,27 @@ pub struct ChildSpec {
     pub env: Vec<(String, String)>,
     pub cwd: Option<PathBuf>,
     pub run_as: RunAs,
-    /// The child's data directory: macOS keeps `child.pid` here.
+    /// The child's data directory.
     pub data_dir: PathBuf,
+    /// Unix: where the daemon records the pid and start time of the process, to stop a
+    /// leftover of an earlier run. In a directory only the daemon can write, never in
+    /// `data_dir` (see `pidfile`). None: nothing is recorded.
+    pub pid_file: Option<PathBuf>,
+    /// Unix: start the program through `socketguard-daemon child-guard`, which ends it when
+    /// the daemon dies (for a program that drops its privileges and with them the
+    /// parent-death signal).
+    pub guarded: bool,
+    /// Output lines containing one of these (case-sensitive) are logged at debug instead of
+    /// info, unless they are warnings or errors (`[warn]`, `[err]`) or come from stderr.
+    pub quiet_patterns: Vec<String>,
     /// Without one the child counts as up as soon as it runs.
     pub health: Option<Arc<dyn HealthCheck>>,
     pub before_start: Option<BeforeStart>,
     pub on_exit: Option<OnExit>,
+    /// A child that is alive but not up this long after its start is handed to
+    /// `on_deadline`.
+    pub start_deadline: Option<Duration>,
+    pub on_deadline: Option<OnDeadline>,
     /// What else makes this a different launch although the command line is the same (a
     /// generated configuration file): a changed tag restarts the child.
     pub config_tag: String,
@@ -154,6 +207,10 @@ impl ChildSpec {
             && self.cwd == other.cwd
             && self.run_as == other.run_as
             && self.data_dir == other.data_dir
+            && self.pid_file == other.pid_file
+            && self.guarded == other.guarded
+            && self.quiet_patterns == other.quiet_patterns
+            && self.start_deadline == other.start_deadline
     }
 
     /// "Tor" for `tor`: how messages name the child.
@@ -558,7 +615,7 @@ impl Task {
                 }
             }
         }
-        let (out, mut lines) = mpsc::channel::<String>(256);
+        let (out, mut lines) = mpsc::channel::<Line>(256);
         let proc = match self.spawner.spawn(spec, out).await {
             Ok(p) => p,
             Err(e) => return self.failed(&label, format!("could not start {}: {e}", spec.name)),
@@ -582,6 +639,11 @@ impl Task {
         let mut probe: Option<JoinHandle<ChildHealth>> = None;
         let mut tick = tokio::time::interval(self.timing.probe_every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Not asked again once it declined to restart.
+        let mut deadline = spec
+            .start_deadline
+            .filter(|_| !up && spec.on_deadline.is_some())
+            .map(|d| started + d);
 
         loop {
             tokio::select! {
@@ -590,7 +652,7 @@ impl Task {
                     while let Ok(Some(l)) =
                         tokio::time::timeout(Duration::from_millis(200), lines.recv()).await
                     {
-                        relay(&spec.name, &mut limiter, &mut last_line, l);
+                        relay(spec, &mut limiter, &mut last_line, l);
                     }
                     relay_flush(&spec.name, &mut limiter);
                     let detail = match &last_line {
@@ -612,11 +674,36 @@ impl Task {
                     });
                     return End::Exited { ran_for };
                 }
-                Some(l) = lines.recv() => relay(&spec.name, &mut limiter, &mut last_line, l),
+                Some(l) = lines.recv() => relay(spec, &mut limiter, &mut last_line, l),
                 _ = self.rx.changed() => {
                     stop(proc.as_ref(), &mut exit, self.timing.stop_grace).await;
                     relay_flush(&spec.name, &mut limiter);
                     return End::Changed;
+                }
+                _ = async { tokio::time::sleep_until(deadline.expect("guarded")).await },
+                    if !up && deadline.is_some() =>
+                {
+                    deadline = None;
+                    // It may ask the child over a socket: not on the runtime's threads.
+                    let ask = spec.on_deadline.clone();
+                    let restart = tokio::task::spawn_blocking(move || ask.is_some_and(|f| f()))
+                        .await
+                        .unwrap_or(false);
+                    if restart {
+                        let secs = spec.start_deadline.map_or(0, |d| d.as_secs());
+                        warn!("{label} was not ready after {secs} s; restarting it");
+                        stop(proc.as_ref(), &mut exit, self.timing.stop_grace).await;
+                        relay_flush(&spec.name, &mut limiter);
+                        let ran_for = started.elapsed();
+                        self.status.update(|s| {
+                            s.state = ChildState::Exited;
+                            s.detail = Some(format!("{label} was not ready after {secs} s"));
+                            s.pid = None;
+                            s.progress = None;
+                            s.restarts += 1;
+                        });
+                        return End::Exited { ran_for };
+                    }
                 }
                 _ = tick.tick(), if !up && probe.is_none() => {
                     if let Some(h) = spec.health.clone() {
@@ -658,11 +745,27 @@ async fn stop(
     }
 }
 
-fn relay(name: &str, limiter: &mut RateLimiter, last: &mut Option<String>, line: String) {
-    let line = line.trim_end();
-    if line.trim().is_empty() {
+/// Whether a line is routine noise for the log: it matches one of the spec's quiet patterns
+/// and is neither a warning or error line (`[warn]`, `[err]`) nor from stderr.
+fn is_quiet(spec: &ChildSpec, line: &Line) -> bool {
+    !line.stderr
+        && !line.text.contains("[warn]")
+        && !line.text.contains("[err]")
+        && spec.quiet_patterns.iter().any(|p| line.text.contains(p))
+}
+
+fn relay(spec: &ChildSpec, limiter: &mut RateLimiter, last: &mut Option<String>, line: Line) {
+    let name = spec.name.as_str();
+    let text = line.text.trim_end();
+    if text.trim().is_empty() {
         return;
     }
+    if is_quiet(spec, &line) {
+        // Neither counted against the rate limit nor taken for the reason it exited.
+        debug!("[{name}] {text}");
+        return;
+    }
+    let line = text;
     *last = Some(line.to_string());
     match limiter.take(Instant::now()) {
         Take::Pass { dropped } => {
