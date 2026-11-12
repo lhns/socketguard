@@ -9,7 +9,11 @@
 #   (b) kill: the daemon is killed, no SocketGuard provider, sublayer or filter may remain (dynamic
 #       session), the leftover addresses are recorded, and the next start sweeps them;
 #   (c) coexistence: portable refuses to start while the service is installed, and the installed
-#       service refuses to run while a portable daemon does.
+#       service refuses to run while a portable daemon does;
+#   (d) managed Tor and Yggdrasil (ADR 0052) from the zip's third_party\: Tor bootstraps and runs as
+#       the account of the portable daemon (no installer account exists in portable mode), the node
+#       key is out of the allowed user's reach, the Wintun adapter appears, and a clean exit leaves no
+#       child, no adapter and no Wintun driver that was absent before (the footprint check agrees).
 #
 # Machine-wide changes, elevated, no prompts: never run it on a machine you use.
 # Everything worth reading afterwards (daemon output, `netsh wfp` dumps, footprint output) goes to -Out.
@@ -41,6 +45,8 @@ $script:daemonProc = $null
 $script:owner = $null
 $script:addedAddress = $null
 $script:listener = $null
+# Mn-* helpers and counters shared with test/msi.ps1.
+. (Join-Path $PSScriptRoot 'managed-helpers.ps1')
 
 function Section([string]$t) { $script:section = $t; Write-Host ''; Write-Host "== $t" -ForegroundColor Cyan }
 function Ok([string]$m) { Write-Host "  ok: $m" }
@@ -233,11 +239,14 @@ $script:addedAddress = @($adapter.ifIndex, $mine)
 $net = Run $Cli @('networks', 'add', 'slaac', '--interface', $alias, '--id', 'lan-test') 'fw-networks-add'
 Write-Host $net.Text
 if ($net.Code -ne 0) { Fail "networks add slaac exited $($net.Code)" }
-# An existing Tor or Yggdrasil node is refused in portable mode.
-$ygg = Run $Cli @('networks', 'add', 'yggdrasil') 'fw-networks-add-ygg'
-if ($ygg.Code -eq 0) { Fail 'networks add yggdrasil was accepted in portable mode' }
-if ($ygg.Text -notmatch '(?i)portable') { Fail "the refusal does not say portable: $($ygg.Text)" }
-Ok 'an existing Yggdrasil node is refused in portable mode'
+# An existing Tor or Yggdrasil node is refused in portable mode (SocketGuard's own, the default of
+# `networks add`, is allowed: section (d)).
+foreach ($kind in 'yggdrasil', 'tor') {
+  $ex = Run $Cli @('networks', 'add', $kind, '--existing') "fw-networks-add-$kind-existing"
+  if ($ex.Code -eq 0) { Fail "networks add $kind --existing was accepted in portable mode" }
+  if ($ex.Text -notmatch '(?i)portable') { Fail "the refusal does not say portable: $($ex.Text)" }
+  Ok "an existing $kind node is refused in portable mode"
+}
 
 function Start-Listener {
   $code = '$a=[Net.Sockets.TcpListener]::new([Net.IPAddress]::IPv6Any,50010);$a.Start();' +
@@ -383,7 +392,124 @@ $rm = Run $inst @('uninstall', '--purge', '--yes') 'c-uninstall-2'
 if ($rm.Code -ne 0) { Write-Host $rm.Text; Fail "uninstall --purge (2) exited $($rm.Code)" }
 Assert-Footprint @{ Expect = 'absent' } 'end'
 
+Section '(d) managed Tor and Yggdrasil (ADR 0052) in portable mode'
+# The bundle action must have run before the zip was built (packages.yml, portable job).
+foreach ($f in 'tor\tor.exe', 'yggdrasil\yggdrasil.exe', 'yggdrasil\wintun.dll', 'VERSIONS') {
+  if (-not (Test-Path (Join-Path $Dir "third_party\$f"))) { Mn-Fail "third_party\$f is not in the zip: run .github/actions/bundle before installer/windows/portable.ps1" }
+}
+Mn-Ok 'the zip has third_party\ with tor.exe, yggdrasil.exe, wintun.dll and VERSIONS'
+# Asked once, before the first managed Yggdrasil start, like the daemon does: the same pattern as the
+# footprint check, which compares the driver store with this answer after the exit.
+function Wintun-InStore { return [bool]((& pnputil.exe /enum-drivers 2>&1 | Out-String) -match '(?im)^[^:\r\n]+:\s*wintun\.inf\s*$') }
+$wintunBefore = Wintun-InStore
+Write-Host "  Wintun driver in the driver store before the managed Yggdrasil: $wintunBefore"
+$log5 = Start-Portable $Daemon 'managed'
+if (-not (Wait-Api)) { Mn-Fail "the start for the managed networks does not answer`n$(Daemon-Log $log5)" }
+
+# A managed network is SocketGuard's own copy: portable mode allows it (an existing node was refused above).
+$r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor') 'd-add-tor'
+Write-Host $r.Text
+if ($r.Code -ne 0) { Mn-Fail "networks add tor exited $($r.Code) in portable mode" }
+Write-Host '  waiting for the bootstrap (up to 5 minutes)'
+if (-not (Mn-WaitUp 'tor' 300)) { Mn-Fail 'the managed Tor network is not up after 5 minutes' }
+Mn-Ok 'the managed Tor network is up (bootstrapped)'
+$torProcs = Mn-Procs 'tor.exe'
+if ($torProcs.Count -eq 0) { Mn-Fail 'the network is up but no tor.exe from the portable folder is running' }
+$daemonCim = Get-CimInstance Win32_Process -Filter "ProcessId=$($script:daemonProc.Id)"
+$daemonOwner = Mn-Owner $daemonCim
+$torOwner = Mn-Owner $torProcs[0]
+$n = Mn-Net 'tor'
+Write-Host "  daemon owner: $daemonOwner; tor.exe (pid $($torProcs[0].ProcessId)) owner: $torOwner; the card says runs_as = '$($n.managed.runs_as)'"
+# No installer ran, so there is no LocalService or other account set up for the child: it is the
+# account of the elevated portable daemon, and nothing tries to log LocalService on.
+if ($torOwner -ne $daemonOwner) { Mn-Fail "tor.exe runs as $torOwner, the portable daemon as $daemonOwner (they must be the same account)" }
+Mn-Ok "tor.exe runs as the same account as the portable daemon ($torOwner)"
+if ("$($n.managed.runs_as)" -notmatch 'account running portable SocketGuard') { Mn-Fail "runs_as is '$($n.managed.runs_as)', not the account running portable SocketGuard" }
+Mn-Ok "the network card says it runs as $($n.managed.runs_as)"
+if (-not (Test-Path (Join-Path $Data 'tor'))) { Mn-Fail "no $Data\tor" }
+
+$r = Run $Cli @('networks', 'add', 'yggdrasil', '--id', 'ygg') 'd-add-ygg'
+Write-Host $r.Text
+if ($r.Code -ne 0) { Mn-Fail "networks add yggdrasil exited $($r.Code) in portable mode" }
+Write-Host '  waiting for the adapter (the Wintun driver is installed by wintun.dll on the first adapter; up to 2 minutes)'
+$seen = Wait-Until { [bool](Mn-Adapter) } 120
+$n = Mn-Net 'ygg'
+Write-Host "  ygg: $(Mn-Describe $n)"
+if ($n -and "$($n.managed.state)" -eq 'unavailable') { Mn-Fail "the Yggdrasil files are not part of this build: $(Mn-Describe $n)" }
+# The key and the cookie are not for the account that may read data\: the managed directories do not inherit its read access.
+$sidOf = { param($rule) try { $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { '' } }
+foreach ($sub in 'tor', 'yggdrasil') {
+  $p = Join-Path $Data $sub
+  if (-not (Wait-Until { Test-Path $p } 60)) { Mn-Fail "no $p; status: $(Mn-Describe (Mn-Net $(if ($sub -eq 'tor') { 'tor' } else { 'ygg' })))" }
+  $acl = Get-Acl $p
+  if (-not $acl.AreAccessRulesProtected) { Mn-Fail "$p inherits its access list from data\ (the allowed user's read access would reach it)`n$((& icacls $p) -join "`n")" }
+  $names = @($acl.Access | ForEach-Object { & $sidOf $_ })
+  if ($names -contains $Sid) { Write-Host "  note: $Sid has an entry on $p`: $((& icacls $p) -join ' ')" }
+  $open = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and ((& $sidOf $_) -in @('S-1-1-0', 'S-1-5-32-545', 'S-1-5-11')) })
+  if ($open.Count -gt 0) { Mn-Fail "$p admits Everyone, Users or Authenticated Users`n$((& icacls $p) -join "`n")" }
+  Mn-Ok "$sub`: the directory has a protected access list (SYSTEM, Administrators and the daemon's account)"
+}
+Set-Content (Join-Path $Out 'd-acl.txt') ((& icacls (Join-Path $Data 'tor')) + (& icacls (Join-Path $Data 'yggdrasil')) -join "`n")
+if (Wait-Until { try { $script:session = Get-Content (Join-Path $Data 'session.json') -Raw | ConvertFrom-Json; $null -ne $script:session.wintun_present_before } catch { $false } } 30) {
+  if ([bool]$script:session.wintun_present_before -ne $wintunBefore) { Mn-Fail "session.json says Wintun was present before: $($script:session.wintun_present_before), the driver store said $wintunBefore" }
+  Mn-Ok "session.json records that the Wintun driver was present before: $wintunBefore (no install record exists in portable mode)"
+} else {
+  Mn-Fail 'session.json has no wintun_present_before after the managed Yggdrasil was added'
+}
+$adapterSeen = $false
+if (-not $seen) {
+  $why = Mn-Describe $n
+  Set-Content -Path (Join-Path $Out 'ygg-adapter-error.txt') -Value ("no adapter after 120 s`n$why`n" + ($n | ConvertTo-Json -Depth 6) + "`n" + ((Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Format-Table Name, InterfaceDescription, Status -AutoSize | Out-String)) + "`n" + ((& pnputil /enum-drivers 2>&1 | Select-String -Pattern 'wintun' -Context 3, 3 | Out-String)))
+  Mn-Skip "portable managed Yggdrasil: no adapter 'SocketGuard' on this runner after 120 s. Status: $why. Details in ygg-adapter-error.txt"
+} else {
+  $adapterSeen = $true
+  $ad = Mn-Adapter
+  Mn-Ok "the adapter exists: $($ad.Name) ($($ad.InterfaceDescription), $($ad.Status))"
+  if (-not (Wintun-InStore)) { Mn-Fail 'the adapter exists but the Wintun driver is not in the driver store' }
+  if (-not (Mn-WaitUp 'ygg' 120)) { Mn-Fail 'the managed Yggdrasil network is not up 2 minutes after the adapter appeared' }
+  Mn-Ok 'the managed Yggdrasil network is up'
+  $yp = Mn-Procs 'yggdrasil.exe'
+  if ($yp.Count -eq 0) { Mn-Fail 'no yggdrasil.exe from the portable folder is running' }
+  $yo = Mn-Owner $yp[0]
+  if ($yo -ne $daemonOwner) { Mn-Fail "yggdrasil.exe runs as $yo, the portable daemon as $daemonOwner" }
+  Mn-Ok "yggdrasil.exe runs as the portable daemon's account ($yo)"
+}
+
+# Clean exit: the owner ends, the daemon stops both children, removes the Wintun driver if it was
+# absent before, and exits 0.
+$code = End-Cleanly
+Set-Content (Join-Path $Out 'daemon-5-exit.txt') "exit code $code`n$(Daemon-Log $log5)"
+if ($code -ne 0) { Mn-Fail "the daemon exited with $code after a clean end with managed networks" }
+Mn-Ok 'the daemon exited 0'
+$le = Get-Content (Join-Path $Data 'last-exit.log') -Raw
+if ($le -notmatch 'clean') { Mn-Fail "last-exit.log does not say clean: $le" }
+Mn-Ok "last-exit.log: $($le.Trim())"
+if (Test-Path (Join-Path $Data 'session.json')) { Mn-Fail 'session.json is left after a clean exit' }
+if (-not (Wait-Until { ((Mn-Procs 'tor.exe').Count -eq 0) -and ((Mn-Procs 'yggdrasil.exe').Count -eq 0) } 30)) { Mn-Fail 'tor.exe or yggdrasil.exe from the portable folder still runs after the clean exit' }
+Mn-Ok 'no tor.exe or yggdrasil.exe from the portable folder is running'
+if ($adapterSeen) {
+  if (-not (Wait-Until { -not (Mn-Adapter) } 30)) { Mn-Fail 'the SocketGuard adapter is still there after the clean exit' }
+  Mn-Ok 'the SocketGuard adapter is gone'
+}
+$wintunAfter = Wintun-InStore
+if ($adapterSeen -and -not $wintunBefore) {
+  Set-Content -Path (Join-Path $Out 'pnputil-after-portable-exit.txt') -Value (& pnputil.exe /enum-drivers 2>&1 | Out-String)
+  if ($wintunAfter) { Mn-Fail 'the Wintun driver was absent before, and is still in the driver store after the clean exit (pnputil-after-portable-exit.txt)' }
+  Mn-Ok 'the Wintun driver was absent before and is removed by the clean exit'
+} elseif ($wintunBefore) {
+  if (-not $wintunAfter) { Mn-Fail 'the Wintun driver was installed before SocketGuard, and the clean exit removed it' }
+  Mn-Ok 'the Wintun driver was installed before and stays'
+} else {
+  Write-Host "  no adapter was created: the driver store is asserted by the footprint check only (Wintun in store: $wintunAfter)"
+}
+Write-Host "  data\tor and data\yggdrasil stay in the portable folder: $((Test-Path (Join-Path $Data 'tor')) -and (Test-Path (Join-Path $Data 'yggdrasil')))"
+$fp = @{ Expect = 'absent' }
+if ($wintunBefore) { $fp.WintunPresentBefore = $true }
+Assert-Footprint $fp 'd-after-managed-exit'
+
 Section 'done'
+Write-Host "managed networks: $($script:mnOk) checks passed, $($script:mnSkipped.Count) skipped"
+foreach ($s in $script:mnSkipped) { Write-Host "  skipped: $s" }
 Write-Host 'OK'
 }
 finally {
