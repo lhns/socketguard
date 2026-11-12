@@ -5,7 +5,7 @@
 use socketguard_core::setup::{BundledInfo, NOT_INCLUDED};
 use std::path::{Path, PathBuf};
 
-/// Overrides the lookup next to the executable (development, tests).
+/// Last place searched, after next to the executable and the package location (development, tests).
 pub const THIRD_PARTY_ENV: &str = "SOCKETGUARD_THIRD_PARTY";
 
 const EXE: &str = if cfg!(windows) { ".exe" } else { "" };

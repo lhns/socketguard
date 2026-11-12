@@ -23,8 +23,9 @@ account to elevate with. Get the MSI from the release.
 6. Check from a normal (non-elevated) prompt: `sc query SocketGuard` shows RUNNING.
    `net localgroup "SocketGuard Users"` lists your account (only if the box was ticked).
 7. **Sign out and in again**, then open **SocketGuard** from the Start menu. Expect: the window
-   opens with no elevation prompt and shows the daemon as running; `socketguard status` works in
-   a new normal terminal (the install folder is on PATH).
+   opens with no elevation prompt and no connection banner (no "service is not installed", "stopped"
+   or "this account may not use it" message); `socketguard status` works in a new normal terminal
+   (the install folder is on PATH).
 8. Run the next MSI over it (double-click). Expect: no "uninstall first" message, the service
    keeps running afterwards (new process), your settings are still listed, one SocketGuard entry in
    Apps & features with the new version.
@@ -32,7 +33,7 @@ account to elevate with. Get the MSI from the release.
    SocketGuard` says the service does not exist; `C:\ProgramData\SocketGuard` still exists
    (settings and keys are kept).
 10. Purge, from an elevated terminal, with a copy of the daemon (it is gone after step 9; keep a
-    copy from step 7, or install again and purge first as the README says):
+    copy from step 7, or install again and purge first, see "Uninstall and purge" in the README):
     `socketguard-daemon uninstall --purge --yes`. Expect: it ends with "SocketGuard is uninstalled."
     and `C:\ProgramData\SocketGuard` is gone.
 
@@ -46,13 +47,14 @@ account to elevate with. Get the MSI from the release.
 3. In Terminal: `sudo launchctl print system/de.lhns.socketguard` shows the job; `sudo socketguard
    status` answers.
 4. Open **SocketGuard** from /Applications. Expect: Gatekeeper may ask once to confirm (right-click,
-   *Open*); the window opens and shows the daemon as running.
-5. Run `sudo socketguard-daemon access allow $USER`, sign out and in; the app then works without
-   `sudo`.
-6. In the app: Settings, **Remove SocketGuard...**, keep the data, confirm, authenticate. Expect:
-   the app reports it is removed and `sudo launchctl print system/de.lhns.socketguard` fails; the
-   app and the files in /usr/local/bin remain (a pkg cannot delete them): delete them as in the
+   *Open*); the window opens and, as your account is not allowed yet, says "The service is running,
+   but this account may not use it." with an **Allow my account** button.
+5. Run `sudo socketguard-daemon access allow $USER` (or use that button), sign out and in; the app
+   then opens with no banner and works without `sudo`.
+6. In the app: Settings, **Remove SocketGuard...**, leave "Also delete settings and keys?" unticked,
+   press **Remove SocketGuard**, authenticate. Expect: the app says "SocketGuard is removed" and `sudo launchctl print system/de.lhns.socketguard` fails;
+   the app and the files in /usr/local/bin remain (a pkg cannot delete them): delete them as in the
    README, then `sudo pkgutil --forget de.lhns.socketguard`.
-7. Install again and use **Remove SocketGuard...** with the purge option. Expect:
+7. Install again and use **Remove SocketGuard...** with "Also delete settings and keys?" ticked. Expect:
    `/Library/Application Support/SocketGuard` is gone and `/etc/pf.conf` has no `socketguard`
    anchor line.
