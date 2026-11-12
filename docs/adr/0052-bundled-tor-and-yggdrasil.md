@@ -55,3 +55,8 @@ Facts established for this decision (2026-11-11):
 - **Yggdrasil on Linux and macOS can outlive a killed daemon**, because dropping privileges clears the parent-death link. The rules stay in force, and the next start ends the leftover process. Closing this gap is wanted; until then it is listed in `docs/footprint.md`.
 - **The signing key** that is pinned is the Tor Browser Developers primary key; the fingerprint on the signatures is its subkey.
 - **No location database** is shipped: Tor bootstraps and serves onion services without it.
+
+## Amendment (2026-11-12): bridges for the managed Tor; a link to public Yggdrasil peers
+
+- **Bridges.** The obfs4 transport helper from the same verified Tor bundle is shipped. Bridges are off by default. The user pastes bridge lines obtained from the Tor Project into the managed Tor network's settings; SocketGuard ships no bridge list and fetches none. A bridge line is accepted only if it has the form of a bridge line for a shipped transport; it can never add another option to Tor's configuration (ADR 0040).
+- **Public peers.** Next to the peers of a managed Yggdrasil network there is a link to the project's public peers page. SocketGuard does not fetch or ship a list, and adds no peer on its own.

@@ -35,3 +35,10 @@ ADR 0026 closes the whole Yggdrasil interface once the network is managed. Netwo
 - Software installed by hand before it is added in SocketGuard is outside this guarantee until it is added; the network cards say so.
 - A node SocketGuard has never seen has no address to block yet; it is closed by its interface rule, or SocketGuard refuses to start it. A node SocketGuard creates itself has its address known before it starts.
 - Tor needs no block: it exposes nothing inbound until SocketGuard publishes a service.
+
+## Amendment (2026-11-12): the whole range for an existing node; ready means the rules are applied
+
+- **An existing Yggdrasil node is blocked by range.** For a network on a node the user runs themselves, the block matches the whole Yggdrasil address range (`200::/7`) as destination on any interface, not only the node's known address. No address has to be seen first, and a node that changes its key stays closed. This rests on one node per host (ADR 0052): the node handed to SocketGuard is the only one. SocketGuard's own node keeps the narrow block of its own address and subnet, so that it never touches a node it does not manage.
+- **An existing node is added only while it answers.** A node that is not running cannot be added; SocketGuard does not start software it did not ship.
+- **Ready means the rules are applied.** On Linux the service reports ready to the service manager only after its first ruleset is in force. The unit is ordered before the network, so the network waits for it. The first ruleset does not wait for Tor or Yggdrasil, and a start that takes too long fails visibly instead of holding the boot.
+- **Not kept across a reboot.** The last ruleset is not saved and loaded before the daemon (the owner's choice): if the daemon cannot start, nothing is filtered and the machine stays reachable for repair. On macOS, where the service manager has no ordering, the gap at boot stays and is listed in `docs/footprint.md`.
