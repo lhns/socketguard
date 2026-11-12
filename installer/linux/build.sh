@@ -22,6 +22,10 @@ if [ -n "$(find installer/payload/linux -type f ! -name .gitkeep ! -name README.
     mkdir "$work/third_party"
     cp -a installer/payload/linux/. "$work/third_party/"
     rm -f "$work/third_party/.gitkeep" "$work/third_party/README.md"
+    # Tor runs as the unprivileged account socketguard-net (ADR 0052): everyone reads the tree and
+    # runs the programs, only root writes. nfpm keeps the modes of a tree's files; archives
+    # extracted by fetch.sh may have left some owner-only.
+    chmod -R u+rwX,go+rX,go-w "$work/third_party"
     line="  - src: $work/third_party/
     dst: /usr/lib/socketguard/third_party/
     type: tree"

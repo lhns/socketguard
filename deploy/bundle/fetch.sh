@@ -113,6 +113,11 @@ check_sha() { # check_sha <file> <expected> <what>
 unzip_to() { # unzip_to <zip> <dir>
     if command -v unzip >/dev/null 2>&1; then unzip -q -o "$1" -d "$2"
     elif command -v bsdtar >/dev/null 2>&1; then bsdtar -xf "$1" -C "$2"
+    elif command -v cygpath >/dev/null 2>&1 && command -v powershell.exe >/dev/null 2>&1; then
+        # Git Bash on Windows (no unzip there): the Windows PowerShell that every Windows has.
+        powershell.exe -NoProfile -NonInteractive -Command \
+            "Expand-Archive -LiteralPath '$(cygpath -w "$1")' -DestinationPath '$(cygpath -w "$2")' -Force" \
+            || die "Expand-Archive failed for $1"
     else die "need unzip (or bsdtar) to extract $1; please install unzip"; fi
 }
 

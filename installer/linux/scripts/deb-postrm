@@ -1,10 +1,25 @@
 #!/bin/sh
 # Debian postrm. `purge` deletes the data. The binary is gone by now, so this removes exactly
 # the files `socketguard-daemon uninstall --purge` names (crates/daemon/src/uninstall.rs
-# named_files; a unit test keeps this list in step). It never removes a directory tree.
+# named_files; a unit test keeps this list in step). The only trees it removes are the data
+# directories of the managed networks (ADR 0052), and the account the children run as when the
+# install record says the install created it.
 set -e
 case "$1" in
 purge)
+    # The record is deleted below: read it first (whitespace stripped, so the match does not
+    # depend on how it is indented).
+    created_account=
+    if [ -f /etc/socketguard/setup-log.json ] &&
+        tr -d ' \t\r\n' </etc/socketguard/setup-log.json |
+        grep -q '"type":"unprivileged_account","name":"socketguard-net","created":true'; then
+        created_account=1
+    fi
+    rm -rf /var/lib/socketguard/tor /var/lib/socketguard/yggdrasil
+    if [ -n "$created_account" ] && getent passwd socketguard-net >/dev/null 2>&1; then
+        userdel socketguard-net >/dev/null 2>&1 || echo "socketguard: could not remove the account socketguard-net." >&2
+        getent group socketguard-net >/dev/null 2>&1 && groupdel socketguard-net >/dev/null 2>&1 || true
+    fi
     for f in \
         /etc/socketguard/socketguard.json \
         /etc/socketguard/setup-log.json \

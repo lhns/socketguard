@@ -6,6 +6,7 @@
   Preprocessor variables, passed by build.ps1:
     BinDir       directory holding socketguard-daemon.exe, socketguard.exe, socketguard-ui.exe
     Version      major.minor.build (validated by build.ps1)
+    RepoRoot     the repository root (LICENSE, THIRD_PARTY_NOTICES.md)
     IconFile     the .ico used for the shortcut and the Add/Remove Programs entry
     ThirdParty   defined only when installer/payload/windows holds files (see installer/payload/README.md);
                  build.ps1 then also compiles a generated fragment with the ComponentGroup "ThirdParty"
@@ -56,6 +57,7 @@
       <Directory Id="INSTALLFOLDER" Name="SocketGuard">
         <!-- Extra binaries bundled later (Tor, Yggdrasil, wintun.dll): installer/payload/README.md -->
         <Directory Id="THIRDPARTYDIR" Name="third_party" />
+        <Directory Id="LICENSESDIR" Name="licenses" />
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
@@ -140,6 +142,13 @@
                        Type="integer" Value="1" KeyPath="yes" />
         <Environment Id="E.Path" Name="PATH" Value="[INSTALLFOLDER]"
                      Part="last" Action="set" System="yes" Permanent="no" />
+      </Component>
+
+      <!-- SocketGuard's licence and the notices for the bundled programs; their licence texts are in
+           third_party\licenses (installer/payload/README.md). -->
+      <Component Id="C.Licenses" Directory="LICENSESDIR">
+        <File Id="F.License" Name="LICENSE.txt" Source="$(RepoRoot)\LICENSE" KeyPath="yes" />
+        <File Id="F.Notices" Name="THIRD_PARTY_NOTICES.md" Source="$(RepoRoot)\THIRD_PARTY_NOTICES.md" />
       </Component>
 
       <Component Id="C.Shortcut" Directory="ProgramMenuFolder">
