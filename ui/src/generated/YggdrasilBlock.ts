@@ -5,11 +5,12 @@
  */
 export type YggdrasilBlock = { 
 /**
- * The ruleset in force denies the node's own addresses on any interface.
+ * The ruleset in force denies the node by destination on any interface: the whole
+ * range `200::/7` for an existing node, the node's own addresses for a managed one.
  */
 closed: boolean, 
 /**
- * The same, by address (needs the node to have been seen once).
+ * The same as `closed`.
  */
 address_blocked: boolean, 
 /**

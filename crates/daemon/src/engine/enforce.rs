@@ -179,6 +179,25 @@ impl Engine {
             &self.managed,
         )
         .map_err(|e| EngineError::Invalid(format!("cannot create network: {e}")))?;
+        if matches!(
+            inst.backend,
+            BackendConfig::Yggdrasil { managed: false, .. }
+        ) {
+            // SocketGuard does not start software it did not ship, so an existing node is
+            // added only while it answers (ADR 0051). A config file entry for a node that is
+            // down is not checked: the range block applies anyway.
+            let probe = n.clone();
+            let answers = tokio::task::spawn_blocking(move || probe.node().is_some())
+                .await
+                .map_err(|e| EngineError::Internal(e.into()))?;
+            if !answers {
+                return Err(EngineError::Invalid(
+                    "the Yggdrasil node does not answer; start it first, or let SocketGuard run \
+                     its own node (managed)"
+                        .into(),
+                ));
+            }
+        }
         if matches!(inst.backend, BackendConfig::Yggdrasil { managed: true, .. }) {
             // The node's addresses follow from its key: with them remembered, the first
             // ruleset already closes them, before any software runs (ADR 0051).
