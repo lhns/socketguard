@@ -181,8 +181,7 @@ fn remove_confirmed(
 }
 
 /// The firewall rules by name, without the database. `disable` always runs (it tolerates
-/// absence on every backend, and also removes the legacy `ip6` table); the checks before
-/// and after only decide the label.
+/// absence on every backend); the checks before and after only decide the label.
 pub async fn disable_firewall_by_name(firewall: Arc<dyn Firewall>) -> Report {
     let mut r = Report::default();
     let what = "firewall rules";

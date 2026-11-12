@@ -169,17 +169,13 @@ pub fn render(rs: &DesiredRuleset) -> String {
 }
 
 /// The full transaction piped to `nft -f -`: create-if-missing, delete, recreate. One
-/// transaction, so the previous table stays in force if anything fails. Also removes the
-/// pre-ADR-0029 `ip6 socketguard` table, whose per-socket rules would otherwise linger.
+/// transaction, so the previous table stays in force if anything fails.
 fn transaction(rs: &DesiredRuleset) -> String {
     format!(
-        "table inet {TABLE} {{}}\ndelete table inet {TABLE}\n{}\n{LEGACY_CLEANUP}",
+        "table inet {TABLE} {{}}\ndelete table inet {TABLE}\n{}",
         render(rs)
     )
 }
-
-/// Drops the pre-ADR-0029 table; installations from before it may still have one.
-const LEGACY_CLEANUP: &str = "table ip6 socketguard {}\ndelete table ip6 socketguard\n";
 
 fn run_nft(args: &[&str], stdin: Option<&str>) -> Result<std::process::Output> {
     run_with_stdin("nft", args, stdin)
@@ -336,16 +332,13 @@ impl Firewall for NftablesFirewall {
     }
 
     fn verify(&self) -> Result<bool> {
-        // The table of earlier versions (`ip6`) counts too: it is ours and disable removes it.
-        for family in ["inet", "ip6"] {
-            let out = run_nft(&["list", "table", family, TABLE], None)?;
-            if out.status.success() {
-                return Ok(true);
-            }
-            let err = String::from_utf8_lossy(&out.stderr);
-            if !err.contains("No such file or directory") {
-                bail!("nft list table failed: {}", err.trim());
-            }
+        let out = run_nft(&["list", "table", "inet", TABLE], None)?;
+        if out.status.success() {
+            return Ok(true);
+        }
+        let err = String::from_utf8_lossy(&out.stderr);
+        if !err.contains("No such file or directory") {
+            bail!("nft list table failed: {}", err.trim());
         }
         Ok(false)
     }
@@ -369,12 +362,6 @@ impl Firewall for NftablesFirewall {
         let err = String::from_utf8_lossy(&out.stderr);
         if !out.status.success() && !err.contains("No such file or directory") {
             bail!("nft delete table failed: {}", err.trim());
-        }
-        // The table of earlier versions (`table ip6 socketguard`), if one is still around.
-        let out = run_nft(&["delete", "table", "ip6", TABLE], None)?;
-        let err = String::from_utf8_lossy(&out.stderr);
-        if !out.status.success() && !err.contains("No such file or directory") {
-            bail!("nft delete table (legacy ip6) failed: {}", err.trim());
         }
         Ok(())
     }

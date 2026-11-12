@@ -441,10 +441,6 @@ pub fn undo_entry(
         Change::WintunDriver { present_before } => {
             r.extend(crate::wintun::undo(host, *present_before))
         }
-        Change::Legacy => r.kept(
-            "an entry of a removed feature",
-            "entry of a removed feature; nothing to undo",
-        ),
         Change::DirectoryCreated { .. } | Change::OwnedDirectory { .. } => {}
     }
     r

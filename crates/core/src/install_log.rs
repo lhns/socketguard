@@ -41,11 +41,6 @@ pub enum Change {
     /// Windows: whether the Wintun driver was in the driver store before the first managed
     /// Yggdrasil start. Purge removes it only if it was not (and nothing else uses it).
     WintunDriver { present_before: bool },
-
-    /// An entry of an older version (network setup, ADR 0048: packages, services, torrc
-    /// lines). It is no longer written and no longer undone; uninstall reports it as kept.
-    #[serde(other)]
-    Legacy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,27 +121,4 @@ pub fn remove_lines(text: &str, lines: &[String]) -> String {
         }
     }
     parts.concat()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn entries_of_the_removed_network_setup_still_parse() {
-        let old = r#"{"entries":[
-            {"time":"t","kind":"tor","type":"network_added","id":"tor"},
-            {"time":"t","kind":"yggdrasil","type":"package_installed","manager":"apt","package":"tor","install":"x","uninstall":[]},
-            {"time":"t","type":"access_group","name":"socketguard","created":true}]}"#;
-        let e = parse(old).unwrap();
-        assert_eq!(e.len(), 3);
-        assert_eq!(e[0].change, Change::Legacy);
-        assert_eq!(e[1].change, Change::Legacy);
-        let text = render(&[Entry::now(Change::UnprivilegedAccount {
-            name: "socketguard-net".into(),
-            created: true,
-        })]);
-        assert!(!text.contains("\"kind\""));
-        assert_eq!(parse(&text).unwrap().len(), 1);
-    }
 }

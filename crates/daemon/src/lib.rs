@@ -13,7 +13,6 @@ pub mod firewall;
 pub mod host;
 pub mod iface;
 pub mod install;
-pub mod legacy;
 pub mod metrics;
 pub mod monitor;
 pub mod networks;

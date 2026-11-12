@@ -346,8 +346,7 @@ pub struct ExportDocument {
     pub settings: Settings,
     pub peers: Vec<ExportPeer>,
     pub groups: Vec<ExportGroup>,
-    /// Documents written before the rename call this `socket_groups`.
-    #[serde(default, alias = "socket_groups")]
+    #[serde(default)]
     pub port_groups: Vec<ExportPortGroup>,
     pub grants: Vec<ExportGrant>,
     #[serde(default)]
@@ -991,22 +990,5 @@ impl ApiEvent {
                 data: data.to_string(),
             },
         }
-    }
-}
-
-#[cfg(test)]
-mod export_document_tests {
-    use super::*;
-
-    #[test]
-    fn document_with_the_old_socket_groups_key_still_loads() {
-        let json = r#"{"version":1,"settings":{"protect_host_interfaces":[]},"peers":[],
-            "groups":[],"grants":[],
-            "socket_groups":[{"label":"web","ports":[],"apps":[]}]}"#;
-        let doc: ExportDocument = serde_json::from_str(json).unwrap();
-        assert_eq!(doc.port_groups.len(), 1);
-        assert_eq!(doc.port_groups[0].label, "web");
-        let out = serde_json::to_value(&doc).unwrap();
-        assert!(out.get("port_groups").is_some() && out.get("socket_groups").is_none());
     }
 }
