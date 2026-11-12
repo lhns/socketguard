@@ -21,6 +21,19 @@ docker run --rm -v "$rpmfile:/pkg.rpm:ro" fedora:latest bash -euxo pipefail -c '
     grep -q "uninstall --keep-data --yes" /tmp/scripts
     ldd /usr/bin/socketguard-daemon | tee /tmp/ldd; ! grep -q "not found" /tmp/ldd
     ldd /usr/bin/socketguard-ui | tee /tmp/ldd; ! grep -q "not found" /tmp/ldd
+    # The bundled Tor and Yggdrasil (ADR 0052): in the package, readable and runnable by an unprivileged
+    # account (the daemon runs them as socketguard-net), with the libz they need, and the notices.
+    TP=/usr/lib/socketguard/third_party
+    grep -qx "$TP/tor/tor" /tmp/files
+    grep -qx "$TP/yggdrasil/yggdrasil" /tmp/files
+    grep -qx "$TP/VERSIONS" /tmp/files
+    grep -qx "$TP/licenses/tor.txt" /tmp/files
+    grep -qx /usr/share/doc/socketguard/THIRD_PARTY_NOTICES.md /tmp/files
+    rpm -qR socketguard | grep -qx zlib
+    LD_LIBRARY_PATH=$TP/tor ldd $TP/tor/tor | tee /tmp/ldd; ! grep -q "not found" /tmp/ldd
+    setpriv --reuid=65534 --regid=65534 --clear-groups env LD_LIBRARY_PATH=$TP/tor $TP/tor/tor --version
+    setpriv --reuid=65534 --regid=65534 --clear-groups $TP/yggdrasil/yggdrasil -version
+    cat $TP/VERSIONS
     socketguard-daemon --help | head -3
     socketguard --version
     rpm -e socketguard

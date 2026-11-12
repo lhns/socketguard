@@ -6,10 +6,24 @@ packages stay thin. Definitions: `installer/windows/` (WiX), `installer/linux/` 
 real runner and checks the host from outside with `deploy/ci/footprint-check.*`;
 `release.yml` reuses it.
 
+**Bundled Tor and Yggdrasil (ADR 0052).** Each package job first runs `.github/actions/bundle`,
+which calls `deploy/bundle/fetch.sh --require-signature --build-yggdrasil <os>-<arch>
+installer/payload/<os>/` (Tor Expert Bundle with its Tor Project signature, Yggdrasil built from the
+pinned commit with Go, `wintun.dll` on Windows; `gpg` and Go are installed on the runner when
+missing, downloads are cached on `hashFiles('deploy/bundle/versions.toml')`). The build scripts then
+pick the files up (`installer/payload/README.md`). They land in `C:\Program Files\SocketGuard	hird_party\`,
+`/usr/lib/socketguard/third_party/` and `/usr/local/lib/socketguard/third_party/`; the daemon looks
+there (and next to its executable, then `$SOCKETGUARD_THIRD_PARTY`). Modes are set so the
+unprivileged account the children run as can run them: `socketguard-net` on Linux and macOS (the
+Linux packages depend on `zlib1g` / `zlib` for the `libz.so.1` Tor needs), LocalService on Windows
+(Program Files is readable by everyone). The CI builds Windows x86_64, Linux x86_64 (the nfpm file
+says `arch: amd64`) and macOS for the runner's architecture (Apple silicon); the other targets are
+fetchable (`fetch.sh linux-aarch64`, `macos-x86_64`) but no job builds or tests them.
+
 | | Install | Upgrade | Remove | Purge |
 |---|---|---|---|---|
 | **MSI** (Windows, per machine) | `service install`; `access allow <ALLOWUSER>` when given | the same, after the old version is removed without `uninstall`; the service is restarted | `uninstall --keep-data --yes` | `socketguard-daemon uninstall --purge` (the MSI never deletes data) |
-| **deb** | postinst `configure`: `service install` | the same (`configure` runs again); a running daemon is restarted | prerm `remove`: `uninstall --keep-data --yes` | postrm `purge`: deletes the named files (`apt purge`) |
+| **deb** | postinst `configure`: `service install` | the same (`configure` runs again); a running daemon is restarted | prerm `remove`: `uninstall --keep-data --yes` | postrm `purge`: deletes the named files, `<state>/tor`, `<state>/yggdrasil`, and `socketguard-net` when the install record says the install created it (`apt purge`) |
 | **rpm** | `%post`: `service install` | the same (`$1` is 2); restarted | `%preun` with `$1` = 0: `uninstall --keep-data --yes` | none: run `socketguard-daemon uninstall --purge` before erasing |
 | **pkg** (macOS) | postinstall: `service install` | the same; restarted | no uninstaller: `sudo socketguard-daemon uninstall`, then delete the files (README) | `sudo socketguard-daemon uninstall --purge` |
 
@@ -23,7 +37,8 @@ service before replacing the file (`ServiceControl`, stop only) and `service ins
 
 ## Windows
 
-- Per machine, `C:\Program Files\SocketGuard`, the three binaries, the install folder appended to
+- Per machine, `C:\Program Files\SocketGuard`, the three binaries, `third_party\` (Tor, Yggdrasil,
+  `wintun.dll`, their licence texts, `VERSIONS`), `licenses\` (`LICENSE.txt`, `THIRD_PARTY_NOTICES.md`), the install folder appended to
   the system `PATH`, a Start menu shortcut for the app, an Add/Remove Programs entry.
   `UpgradeCode` `F3E0B72B-FD6F-4C59-878D-68BA159A16B3` must never change.
 - **Who may use SocketGuard.** The dialog has a box, ticked by default: "Let *account* manage
@@ -55,7 +70,9 @@ service before replacing the file (`ServiceControl`, stop only) and `service ins
   The systemd unit is **not** a package file: `service install` writes it from the text the daemon
   embeds (`deploy/systemd/socketguard.service`) with `ExecStart=/usr/bin/socketguard-daemon`, so a
   second copy cannot drift.
-- Dependencies: nftables, iproute2, conntrack, libwebkit2gtk-4.1, GTK 3 (Fedora names in the rpm).
+- Dependencies: nftables, iproute2, conntrack, libwebkit2gtk-4.1, GTK 3, zlib (Fedora names in the rpm).
+- Documentation: `/usr/share/doc/socketguard/{LICENSE,THIRD_PARTY_NOTICES.md}`; the licence texts of
+  the bundled programs are in `third_party/licenses/`.
 - No systemd (a container): the scripts print a note and do nothing; run
   `socketguard-daemon service install` where systemd runs.
 - `SOCKETGUARD_FORCE_REMOVE=1` makes the remove scripts pass `--force` and ignore a failure.
@@ -67,14 +84,15 @@ service before replacing the file (`ServiceControl`, stop only) and `service ins
 ## macOS
 
 - `pkgbuild` and `productbuild`. `/usr/local/bin/{socketguard-daemon,socketguard}` and
-  `/Applications/SocketGuard.app`, assembled by hand (the binary, `Info.plist`, `icon.icns`, an
+  `/Applications/SocketGuard.app` (with `LICENSE` and `THIRD_PARTY_NOTICES.md` in `Contents/Resources`, and
+  again in `/usr/local/share/doc/socketguard`), assembled by hand (the binary, `Info.plist`, `icon.icns`, an
   ad-hoc signature). Tauri's bundler would need `@tauri-apps/cli`, a `bundle` section and a second
   build path beside `build.sh` for the same two files. The app finds the CLI and the daemon in
   `/usr/local/bin` (`sibling_candidates` in `ui/src-tauri/src/main.rs`); the launchd plist names
   `/usr/local/bin/socketguard-daemon`, a stable path.
 - A pkg has no uninstaller. **To remove:** `sudo socketguard-daemon uninstall` (add `--purge` to
   delete settings and keys), then
-  `sudo rm -rf /Applications/SocketGuard.app /usr/local/bin/socketguard-daemon /usr/local/bin/socketguard /usr/local/lib/socketguard`
+  `sudo rm -rf /Applications/SocketGuard.app /usr/local/bin/socketguard-daemon /usr/local/bin/socketguard /usr/local/lib/socketguard /usr/local/share/doc/socketguard`
   and `sudo pkgutil --forget de.lhns.socketguard`. The app's "Remove SocketGuard..." runs the first
   command.
 - Unsigned: Gatekeeper blocks a downloaded pkg ("cannot be opened because it is from an
@@ -85,7 +103,9 @@ service before replacing the file (`ServiceControl`, stop only) and `service ins
 
 Push a tag `v<version>` (the workspace version in `Cargo.toml`). `release.yml` checks they match,
 builds and tests all packages, and creates a **draft** release with the MSI, deb, rpm, pkg and
-`SHA256SUMS`. *Run workflow* on a branch is a dry run: the same files, uploaded as a workflow
+`SHA256SUMS`. The release notes name the shipped Tor, Yggdrasil and Wintun versions (read from
+`deploy/bundle/versions.toml`), link the pinned Yggdrasil source commit and the Tor version page, and
+point to `THIRD_PARTY_NOTICES.md`; the same text is the job summary of a dry run. *Run workflow* on a branch is a dry run: the same files, uploaded as a workflow
 artifact, no release.
 
 ### Signing and notarization (not done)
@@ -105,7 +125,34 @@ Provide these repository secrets and add the marked steps (`SIGN` comments in
 
 ## What CI proves, and what it does not
 
-`packages.yml` on every push to `installers`, `redesign` and `main`, and for each release:
+`packages.yml` on every push to `installers`, `redesign` and `main`, and for each release. Every
+job also has the **managed networks section** (`test/managed.sh` on Linux and macOS, `test/msi.ps1`
+on Windows), summarised in a line `managed networks: N checks passed, M skipped`:
+
+- after the install: `status --json` names the bundled `tor` and `yggdrasil` with the versions of
+  `third_party/VERSIONS` and the directory the daemon found; the licence texts and notices are
+  installed; the unprivileged account can run the installed `tor` and `yggdrasil` (Linux, macOS:
+  `socketguard-net`; Windows: a task as LocalService, plus the ACL);
+- after the upgrade: `networks add tor` becomes up (bootstrapped, up to 5 minutes), tor runs as
+  `socketguard-net` (Windows: NT AUTHORITY\LOCAL SERVICE, the test fails and prints `runs_as`
+  otherwise); removing the network ends tor; it is added again and left for the uninstall steps;
+- `networks add yggdrasil`: the node address is known and in the firewall ruleset before the adapter
+  exists (Linux: `nft list table inet socketguard` against `sgygg0`, polled every 0.2 s; macOS:
+  `pfctl -a socketguard -sr` against the address on a `utun`), yggdrasil runs as `socketguard-net`
+  after creating the tun (Linux); Windows: the `SocketGuard` Wintun adapter holds the node address,
+  and whether the admin socket answers (`peers_connected`) is reported;
+- removal keeping the data: both children and the adapter are gone, `<state>/tor` and
+  `<state>/yggdrasil` stay; purge: they are gone, `socketguard-net` is removed when the install
+  record says the install created it, Wintun is gone from the driver store when the record says it
+  was absent before (Windows); then `footprint-check` expects the host clean.
+
+Runner-dependent: the Yggdrasil adapter needs `/dev/net/tun` (Linux; skipped with a warning when
+missing), the ability to create a `utun` (macOS) and to install the Wintun driver (Windows: when no
+adapter appears, the status detail is written to `ygg-adapter-error.txt` in `msi-test-output`
+and the Yggdrasil assertions are SKIPPED with that reason, not faked); Tor needs the Tor network.
+
+`.github/workflows/e2e.yml` (nightly and on request, not on push) runs the Docker tests of
+`deploy/e2e/`: `managed-ygg-e2e.sh`, `managed-tor-e2e.sh`, `ygg-e2e.sh`, `tor-e2e.sh`.
 
 - **MSI** (Windows runner): silent install with `ALLOWUSER`; service running; the pipe answers; the
   group has the account; WFP provider, sublayer and filters present; a LAN network on a ULA /64
@@ -118,7 +165,8 @@ Provide these repository secrets and add the marked steps (`SIGN` comments in
 - **deb** (Ubuntu 22.04 VM with systemd): install, unit active and enabled, socket answers, nft
   table, upgrade restarts onto the new binary and keeps the database inode and state, remove, purge.
 - **rpm**: dependency resolution, file list, scriptlets and library check in a Fedora container
-  without systemd. The service steps of the rpm are not run.
+  without systemd. The service steps of the rpm are not run. It also checks that the bundled `tor` and
+  `yggdrasil` are in the package, run as an unprivileged user (`setpriv`) and find their libraries.
 - **pkg** (macOS runner): install, launchd daemon answering, pf anchor line, upgrade restart,
   `uninstall --purge` restores `/etc/pf.conf`, then the manual removal.
 
