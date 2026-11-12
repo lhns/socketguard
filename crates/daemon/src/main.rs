@@ -35,6 +35,11 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::ChildGuard {
+            pid_file,
+            program,
+            args,
+        } => child_guard(pid_file.as_deref(), &program, &args),
         Command::Service(ServiceCmd::Run) => service_run(),
         Command::Service(c) => commands::service_cmd(c),
         Command::Disable { force } => runtime().block_on(commands::disable_cmd(force)),
@@ -56,6 +61,17 @@ fn main() -> ExitCode {
         )),
     };
     ExitCode::from(code as u8)
+}
+
+#[cfg(unix)]
+fn child_guard(pid_file: Option<&std::path::Path>, program: &str, args: &[String]) -> i32 {
+    socketguard_daemon::children::guard::run(pid_file, program, args)
+}
+
+#[cfg(not(unix))]
+fn child_guard(_: Option<&std::path::Path>, _: &str, _: &[String]) -> i32 {
+    eprintln!("`child-guard` is for Unix; Windows uses a job object");
+    2
 }
 
 /// Started by the Windows service control manager: the daemon runs until the control

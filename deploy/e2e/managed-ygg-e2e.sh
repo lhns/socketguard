@@ -83,7 +83,7 @@ JSON
 daemon_start
 
 # The pid of the running yggdrasil of the daemon (a zombie has no command line).
-ygg_pid() { docker exec "$NODE_A" pgrep -f "third_party/yggdrasil/yggdrasil -useconffile" | head -1 | grep .; }
+ygg_pid() { docker exec "$NODE_A" pgrep -f "^$TP/yggdrasil/yggdrasil -useconffile" | head -1 | grep .; }
 ygg_gone() { ! ygg_pid >/dev/null; }
 net_json() { docker exec "$NODE_A" $SG networks list --json; }
 net_up() { net_json | jq -e '.[0].kind == "yggdrasil" and .[0].status.state == "up"' >/dev/null; }
@@ -166,17 +166,19 @@ step "enabled: the grant is in force again" retry 60 fetch_granted
 
 # ── The daemon is killed ─────────────────────────────────────────────────────
 # Yggdrasil changes its user id after creating the tun, which clears the parent-death
-# signal: it outlives a killed daemon (the rules stay in force), and the next daemon ends
-# the leftover through the pid file before starting its own.
+# signal; the daemon therefore starts it through `child-guard`, a root parent that holds the
+# node's stdin pipe to the daemon and ends the node when the daemon is gone. The firewall
+# rules stay in force meanwhile.
+step "yggdrasil is started through the child guard" sh -c "docker exec $NODE_A ps -eo args | grep -q 'socketguard-daemon child-guard .*third_party/yggdrasil/yggdrasil'"
 OLD_YGG="$(ygg_pid)"
-A pkill -9 -x socketguard-dae
-sleep 3
-step "yggdrasil outlives a killed daemon (the firewall rules stay)" sh -c "[ \"\$(docker exec $NODE_A pgrep -f 'third_party/yggdrasil/yggdrasil -useconffile' | head -1)\" = '$OLD_YGG' ]"
+# Only the daemon (the oldest process of that name; the guard has the same name).
+A sh -c 'kill -9 "$(pgrep -o -x socketguard-dae)"'
+step "no yggdrasil outlives a killed daemon" retry 20 ygg_gone
+step "no child guard is left either" sh -c "! docker exec $NODE_A pgrep -f 'socketguard-daemon child-guard'"
 step "the table stays while the daemon is gone" table_exists
-step "the granted port still answers" fetch_granted
 step "the node's own address is still closed" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
 step "the daemon starts again" daemon_start
-step "the leftover yggdrasil is ended and a new one runs" retry 60 sh -c "[ -n \"\$(docker exec $NODE_A pgrep -f 'third_party/yggdrasil/yggdrasil -useconffile' | head -1)\" ] && [ \"\$(docker exec $NODE_A pgrep -f 'third_party/yggdrasil/yggdrasil -useconffile' | head -1)\" != '$OLD_YGG' ]"
+step "a new yggdrasil runs" retry 60 sh -c "[ -n \"\$(docker exec $NODE_A pgrep -f '^$TP/yggdrasil/yggdrasil -useconffile' | head -1)\" ] && [ \"\$(docker exec $NODE_A pgrep -f '^$TP/yggdrasil/yggdrasil -useconffile' | head -1)\" != '$OLD_YGG' ]"
 step "the network comes back" wait_up 90
 step "the grant is in force again" retry 60 fetch_granted
 
