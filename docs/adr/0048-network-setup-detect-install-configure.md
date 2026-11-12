@@ -6,6 +6,8 @@ Accepted. Extends ADR 0038 (networks in the config file) and ADR 0040 (who may c
 
 The detection states named below were reduced by ADR 0052 to ready, added and absent.
 
+What remained (detection of installed Tor and Yggdrasil) is superseded by ADR 0056.
+
 ## Date
 
 2026-11-11

@@ -6,6 +6,8 @@ Accepted. Extends ADR 0026 (protection scope) and ADR 0048 (network setup).
 
 Amended below. Superseded in part by ADR 0052: SocketGuard no longer installs or starts third-party software through setup; close-first applies to the networks it runs itself.
 
+Superseded in part by ADR 0056: nodes the user runs themselves are no longer supported, so the whole-range block and the exposure shown when leaving are gone.
+
 ## Date
 
 2026-11-11

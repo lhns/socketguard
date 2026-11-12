@@ -6,6 +6,8 @@ Accepted. Supersedes ADR 0039 (which stays as history); refines ADR 0037.
 
 Amended in part by ADR 0047: one service per granted row, and a reservation's service takes only grants on the reservation (recorded as the last amendment of ADR 0039).
 
+Superseded by ADR 0056: SocketGuard only runs its own Tor, so there are no control settings to trust.
+
 ## Date
 
 2026-11-10

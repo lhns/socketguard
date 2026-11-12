@@ -63,6 +63,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0053](0053-no-review-state.md) | New Apps Are Just Closed; There Is No Review State | Accepted (supersedes 0027 and 0042 in part) |
 | [0054](0054-portable-mode-on-windows.md) | A Portable Mode on Windows That Leaves Nothing Behind | Accepted; amended (exception to 0026, 0030, 0050) |
 | [0055](0055-no-compatibility-before-the-first-release.md) | No Compatibility With States From Before the First Release | Accepted |
+| [0056](0056-only-socketguards-own-tor-and-yggdrasil.md) | Only SocketGuard's Own Tor and Yggdrasil | Accepted (supersedes 0040; 0048, 0051, 0052 in part) |
 
 ## Format
 

@@ -6,6 +6,8 @@ Accepted. Supersedes the install and configure steps of ADR 0048 (detection and 
 
 Amended below; read the amendments in order.
 
+Superseded in part by ADR 0056: an existing node can no longer be used; every Tor and Yggdrasil network is SocketGuard's own.
+
 ## Date
 
 2026-11-11
