@@ -1,7 +1,9 @@
 //! What `uninstall --purge` deletes by name, as one list (docs/footprint.md, ADR 0057).
 //!
 //! The daemon deletes from this list at run time ([`purge_items`], used by
-//! `uninstall::named_files`). The Debian postrm cannot run the daemon (the binary is gone at
+//! `uninstall::named_files` for the files and by `uninstall::uninstall` for the `Tree` items,
+//! which go whether or not the install record lists them, if strictly inside the state
+//! directory). The Debian postrm cannot run the daemon (the binary is gone at
 //! purge), so `installer/linux/build.sh` asks the built daemon for the list of the fixed
 //! installed paths (`socketguard-daemon uninstall --print-purge-list`) and embeds it in the
 //! script. The tests in `tests/footprint_list.rs` check the list against
