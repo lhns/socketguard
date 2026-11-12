@@ -59,6 +59,8 @@ pub fn prepare_dir(file: &Path) -> std::io::Result<()> {
         return Ok(());
     };
     std::fs::create_dir_all(dir)?;
+    // Purge removes it with the other directories of the children (install record).
+    crate::install::record_owned_directory_once(dir);
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};

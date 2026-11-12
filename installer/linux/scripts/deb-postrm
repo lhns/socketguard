@@ -15,7 +15,7 @@ purge)
         grep -q '"type":"unprivileged_account","name":"socketguard-net","created":true'; then
         created_account=1
     fi
-    rm -rf /var/lib/socketguard/tor /var/lib/socketguard/yggdrasil
+    rm -rf /var/lib/socketguard/tor /var/lib/socketguard/yggdrasil /var/lib/socketguard/run
     if [ -n "$created_account" ] && getent passwd socketguard-net >/dev/null 2>&1; then
         userdel socketguard-net >/dev/null 2>&1 || echo "socketguard: could not remove the account socketguard-net." >&2
         getent group socketguard-net >/dev/null 2>&1 && groupdel socketguard-net >/dev/null 2>&1 || true

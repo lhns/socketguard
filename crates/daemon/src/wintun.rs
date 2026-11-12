@@ -140,6 +140,56 @@ pub fn record_before_first_start() {
     }
 }
 
+/// The instance ids of the devices in `pnputil /enum-devices` output that use the driver
+/// package `published`. Blocks of `Label: value` lines; labels are translated, so the values
+/// are recognised by shape: an instance id has a backslash and no colon (`ROOT\NET\0001`),
+/// the driver is the `oemNN.inf` name.
+pub fn parse_devices_using(text: &str, published: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut block: Vec<&str> = Vec::new();
+    let mut flush = |block: &mut Vec<&str>| {
+        let (mut id, mut uses) = (None, false);
+        for line in block.drain(..) {
+            let Some((_, value)) = line.split_once(':') else {
+                continue;
+            };
+            let value = value.trim();
+            if value.contains('\\') && !value.contains(':') && id.is_none() {
+                id = Some(value.to_string());
+            } else if value.eq_ignore_ascii_case(published) {
+                uses = true;
+            }
+        }
+        if let (Some(id), true) = (id, uses) {
+            out.push(id);
+        }
+    };
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            flush(&mut block);
+        } else {
+            block.push(line);
+        }
+    }
+    flush(&mut block);
+    out
+}
+
+/// Remove the devices that use `published` (`pnputil /remove-device`, never forced): how
+/// many were removed.
+fn remove_devices_on(host: &mut dyn Host, published: &str) -> usize {
+    let Ok(listing) = host.run_ok("pnputil", &["/enum-devices", "/class", "Net"]) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for id in parse_devices_using(&listing.stdout, published) {
+        if host.run_ok("pnputil", &["/remove-device", &id]).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// Reverse a [`Change::WintunDriver`]: the driver is removed only when it was not in the
 /// store before SocketGuard and removing it without force succeeds (Windows refuses while
 /// an adapter or other software uses it).
@@ -157,7 +207,18 @@ pub fn undo(host: &mut dyn Host, present_before: bool) -> Report {
         Err(e) => r.left(what, format!("{e:#}")),
         Ok(None) => r.absent(what),
         Ok(Some(published)) => {
-            let deleted = host.run_ok("pnputil", &["/delete-driver", &published]);
+            let mut deleted = host.run_ok("pnputil", &["/delete-driver", &published]);
+            if deleted.is_err() {
+                // Wintun's adapter is removed when Yggdrasil closes it. A process that was
+                // ended by force (a child stopped with the daemon) leaves the device behind
+                // ("One or more devices are presently installed using the specified INF"). The
+                // driver was not here before SocketGuard (checked above), so a device on it
+                // is ours: remove those, then try again, still without force.
+                let removed = remove_devices_on(host, &published);
+                if removed > 0 {
+                    deleted = host.run_ok("pnputil", &["/delete-driver", &published]);
+                }
+            }
             match (deleted, installed(host)) {
                 (Ok(_), Ok(None)) => r.removed(what),
                 // Windows refuses (without /force) while a device or other software uses the
@@ -233,6 +294,53 @@ Class Name:         Network adapters\r\n";
         let mut h = FakeHost::new("windows");
         h.answer("pnputil /enum-drivers", 0, listing);
         h
+    }
+
+    /// A device left behind by a child that was ended by force blocks the delete (found by the
+    /// first real Windows runs: "One or more devices are presently installed using the
+    /// specified INF"): the device is removed, then the delete is tried again, never forced.
+    #[test]
+    fn a_leftover_device_is_removed_and_the_delete_retried() {
+        const DEVICES: &str = "Microsoft PnP Utility\r\n\
+\r\n\
+Instance ID:                ROOT\\NET\\0001\r\n\
+Device Description:         Intel Ethernet\r\n\
+Class Name:                 Net\r\n\
+Driver Name:                oem5.inf\r\n\
+\r\n\
+Instance ID:                SWD\\WINTUN\\{ABCD-0001}\r\n\
+Device Description:         SocketGuard\r\n\
+Class Name:                 Net\r\n\
+Driver Name:                oem12.inf\r\n";
+        assert_eq!(
+            parse_devices_using(DEVICES, "oem12.inf"),
+            ["SWD\\WINTUN\\{ABCD-0001}"]
+        );
+        let mut h = FakeHost::new("windows");
+        let out = |code: i32, stdout: &str| Output {
+            code,
+            stdout: stdout.into(),
+            stderr: String::new(),
+        };
+        h.answer_in_order(
+            "pnputil /enum-drivers",
+            vec![out(0, ENUM), out(0, ENUM_WITHOUT)],
+        );
+        h.answer_in_order(
+            "pnputil /delete-driver",
+            vec![
+                out(-536870339, "Failed to delete driver package"),
+                out(0, ""),
+            ],
+        );
+        h.answer("pnputil /enum-devices", 0, DEVICES);
+        let r = undo(&mut h, false);
+        assert!(r.complete(), "{}", r.render());
+        assert!(r.render().contains("removed"), "{}", r.render());
+        assert!(h.ran("pnputil /remove-device SWD\\WINTUN\\{ABCD-0001}"));
+        assert!(!h.commands.iter().any(|c| c.contains("/force")));
+        // The device of another driver is not touched.
+        assert!(!h.ran("pnputil /remove-device ROOT"));
     }
 
     #[test]
