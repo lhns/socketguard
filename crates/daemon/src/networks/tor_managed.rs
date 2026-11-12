@@ -50,17 +50,7 @@ impl TorPaths {
 pub fn resolve_run_as(accounts: &dyn Accounts) -> RunAs {
     let (_, root) = accounts.daemon();
     if cfg!(windows) {
-        // Only SYSTEM may log LocalService on; decided here, before the data directory is
-        // prepared for it, so the directory and the vetting of the cookie agree.
-        return if root {
-            RunAs::LocalService
-        } else {
-            RunAs::Daemon {
-                note: Some(
-                    "the daemon is not SYSTEM, so it cannot start Tor as LocalService".into(),
-                ),
-            }
-        };
+        return resolve_windows(accounts, root);
     }
     match accounts.lookup(account::NAME) {
         Some(ids) if root => RunAs::Account {
@@ -77,6 +67,32 @@ pub fn resolve_run_as(accounts: &dyn Accounts) -> RunAs {
         None => RunAs::Daemon {
             note: Some(format!("{} does not exist", account::NAME)),
         },
+    }
+}
+
+/// Windows: LocalService when the daemon can really log it on (only SYSTEM may), else the
+/// daemon's own account, saying why. Decided here, before the data directory is protected
+/// for the account and the owner of the cookie is expected, so those, the account shown and
+/// the way the child is started all follow the same answer.
+fn resolve_windows(accounts: &dyn Accounts, is_system: bool) -> RunAs {
+    let why = if !is_system {
+        "the daemon is not SYSTEM, so it cannot start Tor as LocalService".to_string()
+    } else {
+        match accounts.local_service_logon() {
+            Ok(()) => return RunAs::LocalService,
+            Err(e) => format!("could not log LocalService on: {e}"),
+        }
+    };
+    RunAs::Daemon { note: Some(why) }
+}
+
+/// Windows: the SID that owns the files the child writes (the cookie): LocalService's when
+/// it runs as that, else `own`, the daemon's account.
+fn cookie_owner(run_as: &RunAs, own: Option<String>) -> Option<String> {
+    if *run_as == RunAs::LocalService {
+        Some("S-1-5-19".into())
+    } else {
+        own
     }
 }
 
@@ -126,6 +142,7 @@ pub fn parse_port_file(text: &str) -> Option<String> {
 /// The managed Tor of one network: how to reach it, how to start it, how it stands.
 #[derive(Clone)]
 pub struct ManagedTor {
+    id: String,
     ctx: ManagedCtx,
     status: StatusHandle,
     paths: Result<TorPaths, String>,
@@ -134,6 +151,7 @@ pub struct ManagedTor {
 impl ManagedTor {
     pub fn new(id: &str, ctx: &ManagedCtx) -> Self {
         Self {
+            id: id.to_string(),
             status: ctx.children.handle(id),
             paths: ctx.state_dir().map(TorPaths::new),
             ctx: ctx.clone(),
@@ -216,11 +234,7 @@ impl ManagedTor {
         if cfg!(windows) {
             // LocalService owns the files it writes; when the daemon's own account runs
             // Tor, that account's SID does.
-            opts.cookie_owner = if run_as == RunAs::LocalService {
-                Some("S-1-5-19".into())
-            } else {
-                own_sid()
-            };
+            opts.cookie_owner = cookie_owner(&run_as, own_sid());
         } else if cfg!(target_os = "linux") {
             // Only Linux can tell who is on the other end of a Unix socket.
             opts.expect_tor_uid = Some(match &run_as {
@@ -266,9 +280,15 @@ impl ManagedTor {
             cwd: Some(paths.dir.clone()),
             run_as,
             data_dir: paths.dir,
+            pid_file: Some(crate::children::pid_file(self.ctx.state_dir()?, &self.id)),
+            guarded: false,
+            // Every control check of the daemon is a "connection" in Tor's log.
+            quiet_patterns: vec!["New control connection opened".into()],
             health: Some(Arc::new(TorHealth(self.clone()))),
             before_start: Some(Arc::new(move || prepare(&prepare_paths, &prepare_as))),
             on_exit: None,
+            start_deadline: None,
+            on_deadline: None,
             config_tag: String::new(),
         })
     }
@@ -513,6 +533,38 @@ mod tests {
             .contains("not running as root"));
     }
 
+    /// A LocalService logon that fails means the daemon's own account runs Tor, and the
+    /// directory, the expected owner of the cookie and the account shown all say so.
+    #[test]
+    fn when_the_logon_fails_the_daemons_account_is_used_for_acl_and_cookie_owner() {
+        let works = FakeAccounts::present();
+        assert_eq!(resolve_windows(&works, true), RunAs::LocalService);
+        assert_eq!(
+            cookie_owner(&RunAs::LocalService, Some("S-1-5-21-1".into())).as_deref(),
+            Some("S-1-5-19")
+        );
+
+        let broken = FakeAccounts {
+            local_service_error: Some("LogonUser: access denied".into()),
+            ..FakeAccounts::present()
+        };
+        let run_as = resolve_windows(&broken, true);
+        assert!(matches!(run_as, RunAs::Daemon { .. }));
+        assert_eq!(
+            run_as.describe(),
+            "the daemon's account (could not log LocalService on: LogonUser: access denied)"
+        );
+        // ACL: no entry for LocalService; cookie: the daemon's own SID.
+        assert_ne!(run_as, RunAs::LocalService);
+        assert_eq!(
+            cookie_owner(&run_as, Some("S-1-5-21-1".into())).as_deref(),
+            Some("S-1-5-21-1")
+        );
+        // Not SYSTEM: not even asked.
+        let not_system = resolve_windows(&works, false);
+        assert!(not_system.describe().contains("not SYSTEM"));
+    }
+
     fn ctx(dir: Option<PathBuf>, accounts: FakeAccounts) -> ManagedCtx {
         let third = std::env::temp_dir().join(format!("sg-tor3p-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(third.join("tor")).unwrap();
@@ -548,6 +600,10 @@ mod tests {
             ]
         );
         assert_eq!(spec.data_dir, d.join("tor"));
+        // The pid file is where only the daemon writes, not in the child's directory.
+        assert_eq!(spec.pid_file, Some(d.join("run").join("tor.pid")));
+        assert!(!spec.pid_file.as_ref().unwrap().starts_with(&spec.data_dir));
+        assert_eq!(spec.quiet_patterns, ["New control connection opened"]);
         assert_eq!(spec.cwd.as_deref(), Some(d.join("tor").as_path()));
         if cfg!(target_os = "linux") {
             let third = c.bundled.dir().unwrap().join("tor");
@@ -626,6 +682,34 @@ mod tests {
         std::fs::write(&paths.cookie, [7u8; 32]).unwrap();
         std::fs::write(&paths.control_port_file, "PORT=127.0.0.1:1\n").unwrap();
         let (_, opts) = t.connect_params().unwrap();
+        super::super::tor_control::read_cookie_file(&paths.cookie.display().to_string(), &opts)
+            .unwrap();
+    }
+
+    /// The daemon is SYSTEM but the LocalService logon fails: the same happens as above, and
+    /// the status says why.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn on_windows_a_failed_localservice_logon_runs_tor_as_the_daemon_and_vets_that() {
+        let d = state_dir();
+        let accounts = FakeAccounts {
+            local_service_error: Some("LogonUser: access denied".into()),
+            ..FakeAccounts::present()
+        };
+        let c = ctx(Some(d.clone()), accounts);
+        let t = ManagedTor::new("tor", &c);
+        let spec = t.spec().unwrap();
+        assert!(matches!(spec.run_as, RunAs::Daemon { .. }));
+        assert!(spec
+            .run_as
+            .describe()
+            .contains("could not log LocalService on: LogonUser: access denied"));
+        (spec.before_start.unwrap())().unwrap();
+        let paths = TorPaths::new(&d);
+        std::fs::write(&paths.cookie, [7u8; 32]).unwrap();
+        std::fs::write(&paths.control_port_file, "PORT=127.0.0.1:1\n").unwrap();
+        let (_, opts) = t.connect_params().unwrap();
+        assert_eq!(opts.cookie_owner, own_sid());
         super::super::tor_control::read_cookie_file(&paths.cookie.display().to_string(), &opts)
             .unwrap();
     }
