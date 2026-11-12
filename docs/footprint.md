@@ -6,6 +6,8 @@ Stopping the daemon removes nothing on purpose: rules and addresses stay so the 
 
 `socketguard-daemon uninstall` stops the service, disables (refusing to go on while something is LEFT, unless `--force`), reverses the install record in `setup-log.json` newest first, removes the service, and, only on request (`--purge`, or "yes" to the question it asks on a terminal), deletes the data files by name. It prints per item *removed*, *already absent*, *kept* or *LEFT* and exits non-zero if anything it owns is LEFT. `deploy/ci/footprint-check.{sh,ps1}` checks the list below from outside.
 
+What `--purge` deletes by name is one list in the daemon (`crates/daemon/src/footprint.rs`; `socketguard-daemon uninstall --print-purge-list [--os linux|macos|windows]` prints it for the fixed installed paths, and the deb's postrm is generated from it, ADR 0057). The files, directories and account in it must appear in this document and in the checker of that system: the cargo test `crates/daemon/tests/footprint_list.rs` fails otherwise. Reading the Files and Tor sections below, the list is: the database with `-wal` and `-shm`, the config, its temp files, the setup log, the Unix socket, the directories `<state dir>/tor`, `<state dir>/yggdrasil` and (Unix) `<state dir>/run`, the config and state directories when empty, and the account `socketguard-net` when the install created it.
+
 ## Firewall
 
 | Item | System | Survives stop / reboot | Removed by | How to check |
@@ -44,7 +46,7 @@ Default locations (ADR 0050): Windows `%ProgramData%\SocketGuard`, Linux `/etc/s
 
 | Item | Where | Removed by |
 |---|---|---|
-| Database `socketguard.db` (keys, ledger, settings), `-wal`, `-shm` | `db_path` | `uninstall --purge` |
+| Database `socketguard.db` (keys, ledger, settings), `socketguard.db-wal`, `socketguard.db-shm` | `db_path` | `uninstall --purge` |
 | Config `socketguard.json`, written when a network is added or removed | `SOCKETGUARD_CONFIG` or the config directory | `uninstall --purge` |
 | Temp file `socketguard.tmp-<pid>-<uuid>` | next to the config | removed on error; left after a crash: `uninstall --purge` |
 | Install record and setup log `setup-log.json` | next to the config | `uninstall --purge`; kept (with the entries still to undo) otherwise |

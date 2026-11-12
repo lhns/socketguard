@@ -14,13 +14,14 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 name=sg-fedora
 img="${FEDORA_IMAGE:-fedora:latest}"
 
+# shellcheck source=test/lib.sh
+. "$here/test/lib.sh"
+
 cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
-fail() {
-    echo "FAIL: $*" >&2
+on_fail() {
     docker exec "$name" journalctl -u socketguard --no-pager -n 60 2>&1 || true
     docker exec "$name" systemctl status socketguard --no-pager 2>&1 || true
-    exit 1
 }
 x() { docker exec "$name" bash -euo pipefail -c "$*"; }
 
@@ -42,12 +43,12 @@ case "$s" in running|degraded) ;; *) fail "systemd did not come up ($s)" ;; esac
 docker exec "$name" nft --version >/dev/null 2>&1 || true
 
 fp() { docker exec "$name" bash /repo/deploy/ci/footprint-check.sh "$@"; }
-answers() { for _ in $(seq 1 60); do docker exec "$name" socketguard status --json >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
-active() { for _ in $(seq 1 40); do docker exec "$name" systemctl is-active --quiet socketguard && return 0; sleep 1; done; return 1; }
+answers() { wait_until 60 docker exec "$name" socketguard status --json; }
+active() { wait_until 40 docker exec "$name" systemctl is-active --quiet socketguard; }
 mainpid() { docker exec "$name" systemctl show -p MainPID --value socketguard; }
 db=/var/lib/socketguard/socketguard.db
 
-echo "== install"
+step "install"
 x "dnf install -y /p1.rpm"
 # Type=notify (ADR 0051): the start returned only after the first ruleset, so the table exists
 # now, with no waiting in between.
@@ -63,7 +64,7 @@ fp expect-present --require nft-table-inet,socket
 x "socketguard port-groups add 7000-7010/tcp --label upgrade-marker >/dev/null"
 inode=$(x "stat -c %i $db"); pid1=$(mainpid)
 
-echo "== restart ordering"
+step "restart ordering"
 # `systemctl restart` must return only after the rules are back: delete the table, restart,
 # list at once (no sleep). A real reboot cannot be simulated in this container (systemd is PID 1
 # of a container sharing the host kernel, whose nftables state survives the daemon), so this
@@ -76,7 +77,7 @@ active || fail "unit not active after the restart"
 answers || fail "no answer after the restart"
 pid1=$(mainpid)
 
-echo "== upgrade"
+step "upgrade"
 x "dnf install -y /p2.rpm || dnf upgrade -y /p2.rpm"
 x "rpm -q socketguard"
 active || fail "unit not active after the upgrade"
@@ -86,7 +87,7 @@ answers || fail "no answer after the upgrade"
 x 'grep -q upgrade-marker <<<"$(socketguard port-groups list)"' || fail "state lost"
 x "nft list table inet socketguard >/dev/null"
 
-echo "== dnf remove (data kept)"
+step "dnf remove (data kept)"
 x "dnf remove -y socketguard"
 x "! systemctl is-active --quiet socketguard"
 x "! test -e /etc/systemd/system/socketguard.service"
@@ -94,7 +95,7 @@ x "! nft list table inet socketguard >/dev/null 2>&1" || fail "nft table left af
 x "test -e $db" || fail "remove deleted the data"
 fp expect-absent --allow-data
 
-echo "== round two: install, purge by command, erase"
+step "round two: install, purge by command, erase"
 x "dnf install -y /p1.rpm"
 active || fail "unit not active (round two)"
 answers || fail "no answer (round two)"

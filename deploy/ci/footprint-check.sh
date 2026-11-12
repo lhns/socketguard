@@ -109,6 +109,7 @@ FILE_ITEMS=(
     "temp-file|/socketguard\.tmp-"
     "dir-tor|/tor$"
     "dir-yggdrasil|/yggdrasil$"
+    "dir-run|/run$"
 )
 
 add_file_items() { # path list
@@ -245,9 +246,11 @@ self_test() {
     expect list-tmp PRESENT "$(state_listed "$list" '/socketguard\.tmp-')"
     expect list-unit PRESENT "$(state_listed "$list" 'systemd/system/socketguard\.service$')"
     expect list-dir-exact ABSENT "$(state_listed "$list" '^/var/lib/socketguard$')"
-    local mlist=$'/var/lib/socketguard/tor\n/var/lib/socketguard/yggdrasil'
+    local mlist=$'/var/lib/socketguard/tor\n/var/lib/socketguard/yggdrasil\n/var/lib/socketguard/run'
     expect list-tor-dir PRESENT "$(state_listed "$mlist" '/tor$')"
     expect list-ygg-dir PRESENT "$(state_listed "$mlist" '/yggdrasil$')"
+    expect list-run-dir PRESENT "$(state_listed "$mlist" '/run$')"
+    expect list-run-dir-needs-exact-name ABSENT "$(state_listed "$list" '/run$')"
     expect list-tor-dir-needs-exact-name ABSENT "$(state_listed "$list" '/tor$')"
     expect list-third-party PRESENT "$(state_listed "/usr/lib/socketguard/third_party" '/third_party$')"
 
@@ -299,7 +302,7 @@ self_test() {
 
 usage() { echo "usage: $0 expect-absent|expect-present [--allow-data] [--require NAME[,NAME]] [--ledger-export FILE] | --self-test" >&2; exit 2; }
 
-DATA_ITEMS=" config-dir data-dir config-json database database-wal database-shm setup-log temp-file dir-tor dir-yggdrasil account-socketguard-net "
+DATA_ITEMS=" config-dir data-dir config-json database database-wal database-shm setup-log temp-file dir-tor dir-yggdrasil dir-run account-socketguard-net "
 ALLOWED=" "
 mode="" ledger="" selftest=0 extra_required=""
 while [ $# -gt 0 ]; do

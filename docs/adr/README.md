@@ -64,6 +64,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0054](0054-portable-mode-on-windows.md) | A Portable Mode on Windows That Leaves Nothing Behind | Accepted; amended (exception to 0026, 0030, 0050) |
 | [0055](0055-no-compatibility-before-the-first-release.md) | No Compatibility With States From Before the First Release | Accepted |
 | [0056](0056-only-socketguards-own-tor-and-yggdrasil.md) | Only SocketGuard's Own Tor and Yggdrasil | Accepted (supersedes 0040; 0048, 0051, 0052 in part) |
+| [0057](0057-one-staged-tree-and-one-purge-list.md) | One Staged Tree per System, One Purge List | Accepted (refines 0050, 0052) |
 
 ## Format
 

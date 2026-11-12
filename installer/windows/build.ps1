@@ -1,18 +1,17 @@
 # Build the Windows MSI.
 #
-#   installer/windows/build.ps1 -Version 0.1.0 -BinDir target/release -Out dist/SocketGuard-0.1.0-x64.msi
+#   installer/windows/build.ps1 -Version 0.1.0 -Stage dist/stage -Out dist/SocketGuard-0.1.0-x64.msi
 #
-# -BinDir holds socketguard-daemon.exe, socketguard.exe and socketguard-ui.exe (./build.sh
-# puts them in target/release). Needs WiX v5 with the UI and Util extensions, which
-# .github/actions/setup-wix installs. PowerShell because WiX only runs on Windows.
-#
-# Files in installer/payload/windows/ (a directory tree, except README/.gitkeep) are
-# installed under <install dir>\third_party\ (installer/payload/README.md).
+# -Stage is the staged tree (./build.sh --stage, docs/packaging.md): socketguard-daemon.exe,
+# socketguard.exe, socketguard-ui.exe, LICENSE, THIRD_PARTY_NOTICES.md and third_party\ (Tor,
+# Yggdrasil, wintun.dll). Everything in third_party\ is installed under <install dir>\third_party\.
+# Needs WiX v5 with the UI and Util extensions, which .github/actions/setup-wix installs.
+# PowerShell because WiX only runs on Windows.
 
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)][string]$Version,
-  [Parameter(Mandatory = $true)][string]$BinDir,
+  [Parameter(Mandatory = $true)][string]$Stage,
   [Parameter(Mandatory = $true)][string]$Out,
   [string]$Arch = 'x64'
 )
@@ -32,9 +31,9 @@ if ($parts[0] -gt 255 -or $parts[1] -gt 255 -or $parts[2] -gt 65535) {
   exit 1
 }
 
-foreach ($f in 'socketguard-daemon.exe', 'socketguard.exe', 'socketguard-ui.exe') {
-  if (-not (Test-Path -PathType Leaf (Join-Path $BinDir $f))) {
-    Write-Host "missing $f in $BinDir"
+foreach ($f in 'socketguard-daemon.exe', 'socketguard.exe', 'socketguard-ui.exe', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'third_party\VERSIONS') {
+  if (-not (Test-Path -PathType Leaf (Join-Path $Stage $f))) {
+    Write-Host "missing $f in $Stage (run ./build.sh --stage)"
     exit 1
   }
 }
@@ -50,11 +49,8 @@ function Get-Id([string]$prefix, [string]$text) {
   return $prefix + $h.Substring(0, 20)
 }
 
-# A fragment for installer/payload/windows: one component per file, directories nested.
+# A WiX fragment for the stage's third_party\: one component per file, directories nested.
 function New-ThirdPartyFragment([string]$dir, [string]$outFile) {
-  $files = @(Get-ChildItem -LiteralPath $dir -Recurse -File |
-      Where-Object { $_.Name -notin @('.gitkeep', 'README.md') })
-  if ($files.Count -eq 0) { return $false }
   $sb = New-Object System.Text.StringBuilder
   [void]$sb.AppendLine('<?xml version="1.0" encoding="utf-8"?>')
   [void]$sb.AppendLine('<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"><Fragment>')
@@ -66,7 +62,7 @@ function New-ThirdPartyFragment([string]$dir, [string]$outFile) {
       [void]$sb.AppendLine("<DirectoryRef Id=`"$parentId`"><Directory Id=`"$did`" Name=`"$($d.Name)`" /></DirectoryRef>")
       & $emit $d.FullName $did
     }
-    foreach ($f in Get-ChildItem -LiteralPath $path -File | Where-Object { $_.Name -notin @('.gitkeep', 'README.md') }) {
+    foreach ($f in Get-ChildItem -LiteralPath $path -File) {
       $cid = Get-Id 'C_' $f.FullName
       $ids.Add($cid)
       [void]$sb.AppendLine("<Component Id=`"$cid`" Directory=`"$parentId`"><File Id=`"$(Get-Id 'F_' $f.FullName)`" Name=`"$($f.Name)`" Source=`"$($f.FullName)`" KeyPath=`"yes`" /></Component>")
@@ -77,14 +73,13 @@ function New-ThirdPartyFragment([string]$dir, [string]$outFile) {
   foreach ($c in $ids) { [void]$sb.AppendLine("<ComponentRef Id=`"$c`" />") }
   [void]$sb.AppendLine('</ComponentGroup></Fragment></Wix>')
   [System.IO.File]::WriteAllText($outFile, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
-  return $true
 }
 
 try {
   # The licence the UI shows, derived from LICENSE rather than committed as a second copy.
   $rtf = New-Object System.Text.StringBuilder
   [void]$rtf.Append("{\rtf1\ansi\deff0{\fonttbl{\f0 Courier New;}}\fs18`r`n")
-  foreach ($line in Get-Content (Join-Path $root 'LICENSE')) {
+  foreach ($line in Get-Content (Join-Path $Stage 'LICENSE')) {
     $escaped = $line -replace '\\', '\\\\' -replace '\{', '\{' -replace '\}', '\}'
     [void]$rtf.Append("$escaped\par`r`n")
   }
@@ -93,27 +88,20 @@ try {
 
   $outDir = Split-Path -Parent $Out
   if ($outDir) { New-Item -ItemType Directory -Force -Path $outDir | Out-Null }
-  $binAbs = (Resolve-Path $BinDir).Path.TrimEnd('\')
+  $stageAbs = (Resolve-Path $Stage).Path.TrimEnd('\')
   $icon = Join-Path $root 'ui/src-tauri/icons/icon.ico'
 
-  $inputs = @((Join-Path $here 'socketguard.wxs'))
-  $defs = @('-d', "BinDir=$binAbs", '-d', "Version=$Version", '-d', "IconFile=$icon", '-d', "RepoRoot=$($root.TrimEnd('\'))")
-  $payload = Join-Path $root 'installer/payload/windows'
   $frag = Join-Path $work 'third_party.wxs'
-  if ((Test-Path $payload) -and (New-ThirdPartyFragment $payload $frag)) {
-    $inputs += $frag
-    $defs += @('-d', 'ThirdParty=1')
-    Write-Host "third_party payload included from $payload"
-  }
+  New-ThirdPartyFragment (Join-Path $stageAbs 'third_party') $frag
 
   wix build `
     -arch $Arch `
     -ext WixToolset.UI.wixext `
     -ext WixToolset.Util.wixext `
     -bindpath $work `
-    @defs `
+    -d "StageDir=$stageAbs" -d "Version=$Version" -d "IconFile=$icon" `
     -o $Out `
-    @inputs
+    (Join-Path $here 'socketguard.wxs') $frag
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 finally {

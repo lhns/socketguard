@@ -35,11 +35,10 @@ $DataDir = Join-Path $env:ProgramData 'SocketGuard'
 $Aside = Join-Path ([IO.Path]::GetTempPath()) 'sg-aside'
 $Footprint = Join-Path $Root 'deploy/ci/footprint-check.ps1'
 $User = $env:USERNAME
-$script:section = ''
 $script:soft = New-Object System.Collections.Generic.List[string]
+# Section, Ok, Skip, Fail, Run, Wait-Until, Assert-Footprint and friends.
+. (Join-Path $PSScriptRoot 'lib.ps1')
 
-function Section([string]$t) { $script:section = $t; Write-Host ''; Write-Host "== $t" -ForegroundColor Cyan }
-function Ok([string]$m) { Write-Host "  ok: $m" }
 function Soft([string]$m) {
   if ($StrictFirewall) { Fail $m }
   $script:soft.Add("[$script:section] $m"); Write-Host "  SOFT-FAIL: $m" -ForegroundColor Yellow; Write-Host "::warning::$m"
@@ -48,7 +47,7 @@ function Soft([string]$m) {
 # What a failed start looks like from the outside: the service reports Running before the
 # daemon has initialised and writes no log, so look at the event log and run the daemon in the
 # foreground for a few seconds to see its stderr.
-function Dump-Diagnostics {
+function On-Fail {
   Write-Host '--- diagnostics ---'
   try {
     Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager' } -MaxEvents 15 -ErrorAction Stop |
@@ -77,12 +76,6 @@ function Dump-Diagnostics {
   Get-ChildItem $Out -Filter *.log | ForEach-Object { Write-Host "== $($_.Name) (tail)"; Get-Content $_.FullName -Tail 80 | Write-Host }
 }
 
-function Fail([string]$m) {
-  Write-Host "FAIL [$script:section] $m" -ForegroundColor Red
-  Dump-Diagnostics
-  exit 1
-}
-
 function Invoke-Msi([string[]]$Arguments, [string]$Tag, [int]$Expect = 0) {
   $log = Join-Path $Out "$Tag.log"
   $all = $Arguments + @('/qn', '/l*v', $log)
@@ -103,23 +96,6 @@ function Invoke-Msi([string[]]$Arguments, [string]$Tag, [int]$Expect = 0) {
   Ok "msiexec ($Tag) exited $Expect"
 }
 
-# Run a program, keep its output in $Out, return @{Code; Text}.
-function Run([string]$Exe, [string[]]$Arguments, [string]$Tag) {
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $Exe
-  foreach ($a in $Arguments) { [void]$psi.ArgumentList.Add($a) }
-  $psi.UseShellExecute = $false
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $p = [System.Diagnostics.Process]::Start($psi)
-  $o = $p.StandardOutput.ReadToEndAsync()
-  $e = $p.StandardError.ReadToEndAsync()
-  if (-not $p.WaitForExit(120000)) { Stop-Process -Id $p.Id -Force; Fail "$Exe $($Arguments -join ' ') hung" }
-  $text = $o.Result + $e.Result
-  if ($Tag) { Set-Content -Path (Join-Path $Out "$Tag.txt") -Value "$Exe $($Arguments -join ' ')`nexit $($p.ExitCode)`n$text" }
-  return @{ Code = $p.ExitCode; Text = $text }
-}
-
 function Save-Wfp([string]$Tag) {
   foreach ($w in @(@('filters', "wfp-filters-$Tag.xml"), @('state', "wfp-state-$Tag.xml"), @('netevents', "wfp-netevents-$Tag.xml"))) {
     try { & netsh wfp show $w[0] file=(Join-Path $Out $w[1]) 2>&1 | Out-Null } catch { Write-Host "netsh wfp show $($w[0]) failed: $_" }
@@ -133,39 +109,9 @@ function Save-Wfp([string]$Tag) {
   if (Test-Path $log) { Copy-Item $log (Join-Path $Out "setup-log-$Tag.json") -ErrorAction SilentlyContinue }
 }
 
-function Wait-Until([scriptblock]$Cond, [int]$Seconds, [string]$What) {
-  $end = (Get-Date).AddSeconds($Seconds)
-  while ((Get-Date) -lt $end) {
-    if (& $Cond) { return $true }
-    Start-Sleep -Milliseconds 700
-  }
-  return $false
-}
-
-function Service-State { $s = Get-Service SocketGuard -ErrorAction SilentlyContinue; if ($s) { return "$($s.Status)" } return 'absent' }
 function Service-Pid { $c = Get-CimInstance Win32_Service -Filter "Name='SocketGuard'" -ErrorAction SilentlyContinue; if ($c) { return [int]$c.ProcessId } return 0 }
 
-function Assert-Footprint([hashtable]$Params, [string]$Tag) {
-  $o = & $Footprint @Params 2>&1 | Out-String
-  $code = $LASTEXITCODE
-  Set-Content -Path (Join-Path $Out "footprint-$Tag.txt") -Value $o
-  Write-Host $o
-  if ($code -ne 0) { Fail "footprint-check exited $code" }
-  Ok "footprint-check $Tag"
-}
-
 # ---- the firewall exercise: the first real run of the WFP code ---------------------------
-
-function Try-Connect([string]$Ip, [int]$Port, [string]$From) {
-  try {
-    $c = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
-    if ($From) { $c.Client.Bind((New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Parse($From), 0))) }
-    $t = $c.ConnectAsync([System.Net.IPAddress]::Parse($Ip), $Port)
-    $ok = $t.Wait(4000) -and $c.Connected
-    $c.Close()
-    return [bool]$ok
-  } catch { return $false }
-}
 
 function Invoke-FirewallExercise {
   Section 'firewall: network, listener, port range, connections'
@@ -254,36 +200,40 @@ function Invoke-FirewallExercise {
 }
 
 # ---- managed networks (ADR 0052): the bundled Tor and Yggdrasil ------------------------------
-# The Mn-* helpers and counters are shared with test/portable.ps1. A check the runner cannot do
+# The Mn-* helpers are shared with test/portable.ps1 (test/networks.ps1). A check the runner cannot do
 # is SKIPPED with the exact reason and listed at the end, never faked.
-. (Join-Path $PSScriptRoot 'managed-helpers.ps1')
+. (Join-Path $PSScriptRoot 'networks.ps1')
 
 # The installed files, what `status` says about them, and that LocalService (the account Tor
 # runs as) can run what is in Program Files.
 function Assert-Bundled {
-  Section 'managed networks: the bundled files'
+  Section 'networks: the bundled files'
+  # The portable marker belongs to the zip only (installer/windows/portable.ps1): in the install
+  # directory it would turn the installed program into a portable one.
+  if (Test-Path (Join-Path $InstallDir 'portable')) { Fail "$InstallDir\portable exists: the installed product would start in portable mode" }
+  Ok 'the install directory has no portable marker file'
   $tp = Join-Path $InstallDir 'third_party'
   foreach ($f in 'tor\tor.exe', 'tor\pluggable_transports\lyrebird.exe', 'yggdrasil\yggdrasil.exe', 'yggdrasil\wintun.dll', 'VERSIONS', 'licenses\tor.txt', 'licenses\lyrebird.txt', 'licenses\yggdrasil.txt', 'licenses\wintun.txt') {
     if (-not (Test-Path (Join-Path $tp $f))) { Mn-Fail "missing $tp\$f" }
   }
-  Mn-Ok "third_party has tor.exe, the obfs4 helper (lyrebird.exe), yggdrasil.exe, wintun.dll, VERSIONS and the licence texts"
+  Ok "third_party has tor.exe, the obfs4 helper (lyrebird.exe), yggdrasil.exe, wintun.dll, VERSIONS and the licence texts"
   foreach ($f in 'LICENSE.txt', 'THIRD_PARTY_NOTICES.md') {
     if (-not (Test-Path (Join-Path $InstallDir "licenses\$f"))) { Mn-Fail "missing $InstallDir\licenses\$f" }
   }
-  Mn-Ok 'licenses\LICENSE.txt and licenses\THIRD_PARTY_NOTICES.md are installed'
+  Ok 'licenses\LICENSE.txt and licenses\THIRD_PARTY_NOTICES.md are installed'
 
   $st = Run $Cli @('status', '--json') 'mn-status'
   try { $j = $st.Text | ConvertFrom-Json } catch { Mn-Fail "status --json is not JSON: $($st.Text)" }
   Write-Host "  status.bundled: $($j.bundled | ConvertTo-Json -Compress -Depth 5)"
   if (-not $j.bundled.dir) { Mn-Fail 'status shows no bundled directory' }
   if ((Resolve-Path $j.bundled.dir).Path.TrimEnd('\') -ne (Resolve-Path $tp).Path.TrimEnd('\')) { Mn-Fail "the daemon found its third_party at '$($j.bundled.dir)', expected $tp" }
-  Mn-Ok "the daemon found $tp"
+  Ok "the daemon found $tp"
   foreach ($name in 'tor', 'yggdrasil') {
     $got = @($j.bundled.versions | Where-Object { $_.name -eq $name })
     if ($got.Count -ne 1) { Mn-Fail "status does not name the bundled $name" }
     $line = Get-Content (Join-Path $tp 'VERSIONS') | Where-Object { $_ -match "^$name\s+(\S+)" } | Select-Object -First 1
     if (-not $line -or ($line -split '\s+')[1] -ne $got[0].version) { Mn-Fail "$name`: status says '$($got[0].version)', VERSIONS says '$line'" }
-    Mn-Ok "$name $($got[0].version) (as in VERSIONS)"
+    Ok "$name $($got[0].version) (as in VERSIONS)"
   }
 
   # Inherited from Program Files: Users may read and run it. Then the real test, as LocalService.
@@ -293,7 +243,7 @@ function Assert-Bundled {
     (([int]$_.FileSystemRights -band 0x1200A9) -eq 0x1200A9)
   }
   if (-not $rx) { Mn-Fail "no ACL entry lets Users or LocalService read and run $tor`n$((& icacls $tor) -join "`n")" }
-  Mn-Ok "$tor is readable and runnable by $(($rx | ForEach-Object { $_.IdentityReference.Value }) -join ', ')"
+  Ok "$tor is readable and runnable by $(($rx | ForEach-Object { $_.IdentityReference.Value }) -join ', ')"
   $work = 'C:\Windows\Temp\sg-localservice'
   Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force -Path $work | Out-Null
@@ -310,50 +260,50 @@ function Assert-Bundled {
   } catch { Write-Host "  scheduled task as LocalService failed: $_" }
   finally { Unregister-ScheduledTask -TaskName 'sg-localservice-check' -Confirm:$false -ErrorAction SilentlyContinue }
   if (-not $ran) {
-    Mn-Skip "could not run tor.exe as LocalService with a scheduled task (the task did not finish); the ACL check above stands"
+    Skip "could not run tor.exe as LocalService with a scheduled task (the task did not finish); the ACL check above stands"
   } else {
     Copy-Item "$work\*" $Out -ErrorAction SilentlyContinue
     $t = Get-Content "$work\tor.txt" -Raw; $y = Get-Content "$work\ygg.txt" -Raw
     if ($t -notmatch 'Tor version') { Mn-Fail "tor.exe --version as LocalService printed: $t" }
-    Mn-Ok "LocalService runs the installed tor.exe: $($t.Trim())"
+    Ok "LocalService runs the installed tor.exe: $($t.Trim())"
     if ($y -notmatch '\d+\.\d+') { Mn-Fail "yggdrasil.exe -version as LocalService printed: $y" }
-    Mn-Ok "LocalService runs the installed yggdrasil.exe: $($y.Trim())"
+    Ok "LocalService runs the installed yggdrasil.exe: $($y.Trim())"
   }
   Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }
 
 function Invoke-ManagedNetworks {
-  Section 'managed networks: Tor'
+  Section 'networks: Tor'
   $r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor') 'mn-add-tor'
   Write-Host $r.Text
   if ($r.Code -ne 0) { Mn-Fail "networks add tor exited $($r.Code)" }
   Write-Host '  waiting for the bootstrap (up to 10 minutes)'
   if (-not (Mn-WaitUp 'tor' 600)) { Mn-Fail 'the managed Tor network is not up after 10 minutes' }
-  Mn-Ok 'the managed Tor network is up (bootstrapped)'
+  Ok 'the managed Tor network is up (bootstrapped)'
   $procs = Mn-Procs 'tor.exe'
   if ($procs.Count -eq 0) { Mn-Fail 'the network is up but no tor.exe from third_party is running' }
   $owner = Mn-Owner $procs[0]
   $n = Mn-Net 'tor'
   Write-Host "  tor.exe (pid $($procs[0].ProcessId)) owner: $owner; the network card says runs_as = '$($n.managed.runs_as)', version $($n.managed.version)"
   if ($owner -notmatch 'LOCAL SERVICE') { Mn-Fail "tor.exe runs as $owner, not NT AUTHORITY\LOCAL SERVICE (runs_as: '$($n.managed.runs_as)')" }
-  Mn-Ok 'tor.exe runs as NT AUTHORITY\LOCAL SERVICE'
+  Ok 'tor.exe runs as NT AUTHORITY\LOCAL SERVICE'
   if ("$($n.managed.runs_as)" -notmatch 'LocalService|LOCAL SERVICE') { Mn-Fail "runs_as is '$($n.managed.runs_as)'" }
-  Mn-Ok "the network card says it runs as $($n.managed.runs_as)"
+  Ok "the network card says it runs as $($n.managed.runs_as)"
   if (-not (Wait-Until { Test-Path (Join-Path $DataDir 'tor') } 20 'tor dir')) { Mn-Fail "no $DataDir\tor" }
 
   $r = Run $Cli @('networks', 'rm', 'tor') 'mn-rm-tor'
   Write-Host $r.Text
   if ($r.Code -ne 0) { Mn-Fail "networks rm tor exited $($r.Code)" }
   if (-not (Wait-Until { (Mn-Procs 'tor.exe').Count -eq 0 } 60 'tor gone')) { Mn-Fail 'tor.exe still runs 60 s after the network was removed' }
-  Mn-Ok 'removing the network ends tor.exe'
+  Ok 'removing the network ends tor.exe'
   # Added again and left configured: the uninstall steps look at what a stop keeps and a purge removes.
   $r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor') 'mn-add-tor-again'
   if ($r.Code -ne 0) { Mn-Fail "networks add tor (again) exited $($r.Code): $($r.Text)" }
   if (-not (Wait-Until { (Mn-Procs 'tor.exe').Count -gt 0 } 60 'tor again')) { Mn-Fail 'tor.exe did not start again' }
   if (-not (Wait-Until { Test-Path (Join-Path $DataDir 'tor') } 20 'tor dir')) { Mn-Fail "no $DataDir\tor after adding the network again" }
-  Mn-Ok "added again; $DataDir\tor exists"
+  Ok "added again; $DataDir\tor exists"
 
-  Section 'managed networks: Yggdrasil'
+  Section 'networks: Yggdrasil'
   $r = Run $Cli @('networks', 'add', 'yggdrasil', '--id', 'ygg') 'mn-add-ygg'
   Write-Host $r.Text
   if ($r.Code -ne 0) { Mn-Fail "networks add yggdrasil exited $($r.Code)" }
@@ -365,14 +315,14 @@ function Invoke-ManagedNetworks {
   if (-not $seen) {
     $why = Mn-Describe $n
     Set-Content -Path (Join-Path $Out 'ygg-adapter-error.txt') -Value ("no adapter after 120 s`n$why`n" + ($n | ConvertTo-Json -Depth 6) + "`n" + ((Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Format-Table Name, InterfaceDescription, Status -AutoSize | Out-String)) + "`n" + ((& pnputil /enum-drivers 2>&1 | Select-String -Pattern 'wintun' -Context 3, 3 | Out-String)))
-    Mn-Skip "managed Yggdrasil: no adapter 'SocketGuard' on this runner after 120 s. Status: $why. Details in ygg-adapter-error.txt"
+    Skip "managed Yggdrasil: no adapter 'SocketGuard' on this runner after 120 s. Status: $why. Details in ygg-adapter-error.txt"
     return
   }
   $script:mnAdapterSeen = $true
   $ad = Mn-Adapter
-  Mn-Ok "the adapter exists: $($ad.Name) ($($ad.InterfaceDescription), $($ad.Status))"
+  Ok "the adapter exists: $($ad.Name) ($($ad.InterfaceDescription), $($ad.Status))"
   if (-not (Mn-WaitUp 'ygg' 120)) { Mn-Fail 'the managed Yggdrasil network is not up 2 minutes after the adapter appeared' }
-  Mn-Ok 'the managed Yggdrasil network is up'
+  Ok 'the managed Yggdrasil network is up'
   $n = Mn-Net 'ygg'
   $addr = "$($n.managed.address)"
   if (-not $addr) { Mn-Fail 'the network card shows no node address' }
@@ -381,7 +331,7 @@ function Invoke-ManagedNetworks {
     $null -ne ($ips | Where-Object { [System.Net.IPAddress]::Parse(($_.IPAddress -split '%')[0]).Equals([System.Net.IPAddress]::Parse($addr)) })
   } 30 'address on adapter'
   if (-not $onAdapter) { Mn-Fail "the adapter does not hold the node address $addr" }
-  Mn-Ok "the adapter holds the node address $addr"
+  Ok "the adapter holds the node address $addr"
   $yp = Mn-Procs 'yggdrasil.exe'
   if ($yp.Count -eq 0) { Mn-Fail 'no yggdrasil.exe from third_party is running' }
   Write-Host "  yggdrasil.exe owner: $(Mn-Owner $yp[0]) (Windows cannot drop privileges after the adapter exists); runs_as: '$($n.managed.runs_as)'"
@@ -390,11 +340,11 @@ function Invoke-ManagedNetworks {
   $known = Wait-Until { $n = Mn-Net 'ygg'; $null -ne $n.managed.peers_connected } 45 'peers_connected known'
   $n = Mn-Net 'ygg'
   if ($null -ne $n.managed.peers_connected) {
-    Mn-Ok "the admin socket works: peers_connected = $($n.managed.peers_connected) (no peers are configured here)"
+    Ok "the admin socket works: peers_connected = $($n.managed.peers_connected) (no peers are configured here)"
   } else {
     Write-Host "  peers_connected is unknown: the admin endpoint did not answer or the valve engaged. Detail: '$($n.managed.detail)'" -ForegroundColor Yellow
-    Write-Host '::warning::managed networks: Yggdrasil admin socket: peer information unavailable on this runner'
-    $script:mnSkipped.Add("Yggdrasil admin socket: peers_connected unknown (detail: '$($n.managed.detail)')")
+    Write-Host '::warning::networks: Yggdrasil admin socket: peer information unavailable on this runner'
+    $script:skipped.Add("Yggdrasil admin socket: peers_connected unknown (detail: '$($n.managed.detail)')")
   }
   Assert-PrefixBlock $addr
 }
@@ -417,9 +367,9 @@ function Invoke-ManagedNetworks {
 # SKIPPED, not failed, when only that half does not hold.
 # The /7 range block of an existing node is covered by the plan test only (no real-engine proof).
 function Assert-PrefixBlock([string]$NodeAddr) {
-  Section 'managed networks: a prefix block drops a connection (real WFP engine)'
+  Section 'networks: a prefix block drops a connection (real WFP engine)'
   $ad = Mn-Adapter
-  if (-not $ad) { Mn-Skip 'prefix block: the adapter is gone'; return }
+  if (-not $ad) { Skip 'prefix block: the adapter is gone'; return }
   $bytes = [System.Net.IPAddress]::Parse($NodeAddr).GetAddressBytes()
   $bytes[0] = 0x03                       # the node's subnet: 0300:<next 48 bits>::/64
   for ($i = 8; $i -lt 16; $i++) { $bytes[$i] = 0 }
@@ -429,14 +379,14 @@ function Assert-PrefixBlock([string]$NodeAddr) {
   $fromAddr = & $mk 0x58
   Write-Host "  node subnet $pfx/64; extra addresses $listenAddr (listens) and $fromAddr (connects), on $($ad.Name)"
   foreach ($a in $listenAddr, $fromAddr) {
-    try { New-NetIPAddress -InterfaceIndex $ad.ifIndex -IPAddress $a -PrefixLength 128 -ErrorAction Stop | Out-Null } catch { Mn-Skip "prefix block: cannot add $a to $($ad.Name): $_"; return }
+    try { New-NetIPAddress -InterfaceIndex $ad.ifIndex -IPAddress $a -PrefixLength 128 -ErrorAction Stop | Out-Null } catch { Skip "prefix block: cannot add $a to $($ad.Name): $_"; return }
   }
   $listener = $null; $granted = $null
   try {
     & netsh wfp set options netevents=on 2>&1 | Out-Null
     # The extra address must be usable (not tentative) before binding to it.
     if (-not (Wait-Until { (Get-NetIPAddress -IPAddress $listenAddr -ErrorAction SilentlyContinue).AddressState -eq 'Preferred' } 30 'preferred')) {
-      Mn-Skip "prefix block: $listenAddr never became preferred"; return
+      Skip "prefix block: $listenAddr never became preferred"; return
     }
     # 50041 on the extra address; 50042 and 50043 on every address (one will be granted).
     $code = "`$a=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse('$listenAddr'),50041);`$a.Start();" +
@@ -444,8 +394,8 @@ function Assert-PrefixBlock([string]$NodeAddr) {
       '$c=[Net.Sockets.TcpListener]::new([Net.IPAddress]::IPv6Any,50043);$c.Start();Start-Sleep 600'
     $listener = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile', '-Command', $code -PassThru -WindowStyle Hidden
     # Control from the loopback path of the same kind of connection: the listener itself works.
-    if (-not (Wait-Until { Try-Connect '::1' 50042 $null } 30 'listener up')) { Mn-Skip 'prefix block: the test listener never answered on ::1'; return }
-    Mn-Ok 'control: the test listener answers on ::1 (loopback is always allowed)'
+    if (-not (Wait-Until { Try-Connect '::1' 50042 $null } 30 'listener up')) { Skip 'prefix block: the test listener never answered on ::1'; return }
+    Ok 'control: the test listener answers on ::1 (loopback is always allowed)'
 
     $app = $null
     $found = Wait-Until {
@@ -477,21 +427,21 @@ function Assert-PrefixBlock([string]$NodeAddr) {
     & netsh wfp show netevents file=(Join-Path $Out 'wfp-netevents-prefix.xml') 2>&1 | Out-Null
     & netsh wfp show filters file=(Join-Path $Out 'wfp-filters-prefix.xml') 2>&1 | Out-Null
     if ($reach) { Mn-Fail "the connection to $listenAddr (inside the node's /64) succeeded: the prefix block did not drop it. See wfp-netevents-prefix.xml and the comment above Assert-PrefixBlock" }
-    Mn-Ok "the connection to $listenAddr inside the node's /64 was dropped (NOT proof of the /64 filter alone: the interface scope overlay:ygg0 of the same adapter drops it too; see footprint.md)"
+    Ok "the connection to $listenAddr inside the node's /64 was dropped (NOT proof of the /64 filter alone: the interface scope overlay:ygg0 of the same adapter drops it too; see footprint.md)"
     $ev = Join-Path $Out 'wfp-netevents-prefix.xml'
     if ((Test-Path $ev) -and ([IO.File]::ReadAllText($ev) -match 'overlay:ygg:subnet')) {
-      Mn-Ok 'the WFP net events attribute a drop to the scope overlay:ygg:subnet'
+      Ok 'the WFP net events attribute a drop to the scope overlay:ygg:subnet'
     } else {
       Write-Host '  note: no net event names overlay:ygg:subnet (events carry a filter id; compare wfp-netevents-prefix.xml with wfp-filters-prefix.xml)' -ForegroundColor Yellow
     }
 
-    if (-not $assigned) { Mn-Skip "prefix block: SocketGuard assigned the listener no address in $pfx/64 (grant or app discovery failed), so the granted-port half did not run"; return }
+    if (-not $assigned) { Skip "prefix block: SocketGuard assigned the listener no address in $pfx/64 (grant or app discovery failed), so the granted-port half did not run"; return }
     $reachIn = Try-Connect $assigned 50042 $fromAddr
     $reachOut = Try-Connect $assigned 50043 $fromAddr
     Write-Host "  $fromAddr -> ${assigned}: granted port 50042 reachable=$reachIn; port 50043 (not granted) reachable=$reachOut"
     if ($reachOut) { Mn-Fail "port 50043 on $assigned (not granted) was reachable inside the node's /64" }
-    if ($reachIn) { Mn-Ok "the granted port 50042 on $assigned (SocketGuard's address in the same /64) is reachable, the ungranted one is not" }
-    else { Mn-Skip "prefix block: the granted port 50042 on $assigned was not reachable from $fromAddr; the permit names the adapter as arrival interface, which a local-to-local connection may not carry (see the comment above Assert-PrefixBlock)" }
+    if ($reachIn) { Ok "the granted port 50042 on $assigned (SocketGuard's address in the same /64) is reachable, the ungranted one is not" }
+    else { Skip "prefix block: the granted port 50042 on $assigned was not reachable from $fromAddr; the permit names the adapter as arrival interface, which a local-to-local connection may not carry (see the comment above Assert-PrefixBlock)" }
   } finally {
     if ($listener -and -not $listener.HasExited) { Stop-Process -Id $listener.Id -Force -ErrorAction SilentlyContinue }
     foreach ($a in $listenAddr, $fromAddr) { Remove-NetIPAddress -IPAddress $a -Confirm:$false -ErrorAction SilentlyContinue }
@@ -581,12 +531,12 @@ Invoke-Msi @('/x', $MsiNext) 'uninstall'
 if ((Service-State) -ne 'absent') { Fail "service is still $(Service-State)" }
 Ok 'service gone'
 if (-not (Wait-Until { ((Mn-Procs 'tor.exe').Count -eq 0) -and ((Mn-Procs 'yggdrasil.exe').Count -eq 0) } 60 'children')) { Mn-Fail 'tor.exe or yggdrasil.exe still runs after the removal' }
-Mn-Ok 'tor.exe and yggdrasil.exe are stopped'
+Ok 'tor.exe and yggdrasil.exe are stopped'
 if ($script:mnAdapterSeen -and -not (Wait-Until { -not (Mn-Adapter) } 30 'adapter gone')) { Mn-Fail 'the SocketGuard adapter is still there after the removal' }
-if ($script:mnAdapterSeen) { Mn-Ok 'the Yggdrasil adapter is gone' }
+if ($script:mnAdapterSeen) { Ok 'the Yggdrasil adapter is gone' }
 if (-not (Test-Path (Join-Path $DataDir 'tor'))) { Mn-Fail "the removal deleted $DataDir\tor" }
 if ($script:mnAdapterSeen -and -not (Test-Path (Join-Path $DataDir 'yggdrasil'))) { Mn-Fail "the removal deleted $DataDir\yggdrasil" }
-Mn-Ok "the data directories of the networks are kept ($DataDir\tor$(if ($script:mnAdapterSeen) { ', yggdrasil' }))"
+Ok "the data directories of the networks are kept ($DataDir\tor$(if ($script:mnAdapterSeen) { ', yggdrasil' }))"
 if (Test-Path $InstallDir) {
   $left = Get-ChildItem $InstallDir -Recurse -File
   if ($left) { Fail "$InstallDir still holds: $(($left | ForEach-Object Name) -join ', ')" }
@@ -606,16 +556,16 @@ if ($pu.Code -ne 0) { Fail "uninstall --purge exited $($pu.Code)" }
 Ok 'uninstall --purge --yes exited 0'
 Save-Wfp 'purged'
 if ((Test-Path (Join-Path $DataDir 'tor')) -or (Test-Path (Join-Path $DataDir 'yggdrasil'))) { Mn-Fail "the purge left $DataDir\tor or $DataDir\yggdrasil" }
-Mn-Ok 'the purge removed the data directories of the networks'
+Ok 'the purge removed the data directories of the networks'
 if ($script:mnWintun -and -not $script:mnWintun.present_before) {
   $drv = (& pnputil /enum-drivers 2>&1 | Out-String)
   Set-Content -Path (Join-Path $Out 'pnputil-after-purge.txt') -Value $drv
   if ($drv -match '(?i)wintun') {
     $why = 'the install record says Wintun was not present before, but pnputil still lists it after the purge (the purge reported it as kept; see pnputil-after-purge.txt and the purge output above for the reason)'
-    Write-Host "::warning::managed networks: $why"
-    $script:mnSkipped.Add("Wintun removal on purge: $why")
+    Write-Host "::warning::networks: $why"
+    $script:skipped.Add("Wintun removal on purge: $why")
   } else {
-    Mn-Ok 'Wintun was not present before the install and is not in the driver store after the purge'
+    Ok 'Wintun was not present before the install and is not in the driver store after the purge'
   }
 } elseif ($script:mnWintun) {
   Write-Host '  the install record says Wintun was present before the install: the purge keeps it (not asserted)'
@@ -625,8 +575,7 @@ if ($script:mnWintun -and -not $script:mnWintun.present_before) {
 Assert-Footprint @{ Expect = 'absent' } 'absent'
 
 Section 'done'
-Write-Host "managed networks: $($script:mnOk) checks passed, $($script:mnSkipped.Count) skipped"
-foreach ($s in $script:mnSkipped) { Write-Host "  skipped: $s" }
+Write-Summary 'networks'
 if ($script:soft.Count -gt 0) {
   Write-Host 'Soft failures (the firewall exercise only reports until -StrictFirewall):'
   $script:soft | ForEach-Object { Write-Host "  $_" }

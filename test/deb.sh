@@ -5,7 +5,7 @@
 #
 # install -> service active, answers on the socket, nft table, footprint present;
 # upgrade -> data kept, service restarted onto the new binary, no uninstall;
-# managed networks (test/managed.sh, ADR 0052): the bundled versions in `status`, a managed Tor
+# networks (test/networks.sh, ADR 0052): the bundled versions in `status`, a managed Tor
 #           that bootstraps and runs as socketguard-net, a managed Yggdrasil whose address is
 #           blocked before its adapter exists;
 # remove  -> service, rules and children gone, data (incl. <state>/tor, /yggdrasil) kept;
@@ -17,7 +17,10 @@ fp="bash $here/deploy/ci/footprint-check.sh"
 db=/var/lib/socketguard/socketguard.db
 
 
-# The managed networks section (test/managed.sh): the installed files, and what it reads of the host.
+# shellcheck source=test/lib.sh
+. "$here/test/lib.sh"
+
+# The networks section (test/networks.sh): the installed files, and what it reads of the host.
 SG="sudo socketguard"
 TP=/usr/lib/socketguard/third_party
 STATE=/var/lib/socketguard
@@ -32,18 +35,15 @@ mn_block_in_force() {
     local r; r="$(sudo nft list table inet socketguard 2>/dev/null)" || return 1
     printf '%s' "$r" | grep -qiF -e "$1" -e "${2%/64}"
 }
-# shellcheck source=test/managed.sh
-. "$here/test/managed.sh"
-
-step() { printf '\n== %s\n' "$*"; }
-fail() {
-    echo "FAIL: $*" >&2
+on_fail() {
     echo "--- journal ---"; sudo journalctl -u socketguard --no-pager -n 60 || true
     echo "--- status ---"; systemctl status socketguard --no-pager || true
-    exit 1
 }
-wait_active() { for _ in $(seq 1 40); do systemctl is-active --quiet socketguard && return 0; sleep 0.5; done; return 1; }
-wait_answers() { for _ in $(seq 1 60); do sudo socketguard status --json >/dev/null 2>&1 && return 0; sleep 0.5; done; return 1; }
+# shellcheck source=test/networks.sh
+. "$here/test/networks.sh"
+
+wait_active() { wait_until 20 systemctl is-active --quiet socketguard; }
+wait_answers() { wait_until 30 sudo socketguard status --json; }
 mainpid() { systemctl show -p MainPID --value socketguard; }
 
 step "install"
@@ -83,7 +83,7 @@ sudo nft list table inet socketguard >/dev/null || fail "the rules are gone afte
 dpkg-query -W -f='${Version}\n' socketguard
 sudo $fp expect-present --require nft-table-inet,socket
 
-# ---- managed networks (ADR 0052): a Tor and a Yggdrasil run from the installed files ----------
+# ---- networks (ADR 0052): a Tor and a Yggdrasil run from the installed files ----------
 mn_step "Tor"
 mn_tor
 mn_step "Yggdrasil"
@@ -94,15 +94,15 @@ if [ -e /dev/net/tun ]; then
     [ -n "$ygg_pid" ] || mn_die "the network is up but no yggdrasil from third_party is running"
     # Yggdrasil creates its adapter as root and then drops to the unprivileged account.
     ygg_dropped() { [ "$(mn_uid "$ygg_pid")" = "$(id -u socketguard-net)" ]; }
-    mn_until 30 ygg_dropped \
+    wait_until 30 ygg_dropped \
         || mn_die "yggdrasil (pid $ygg_pid) runs as uid $(mn_uid "$ygg_pid"), expected socketguard-net"
-    mn_ok "yggdrasil runs as socketguard-net after creating $ADAPTER"
+    ok "yggdrasil runs as socketguard-net after creating $ADAPTER"
     grep -qiF "$MN_YGG_ADDR" <<<"$(ip -6 addr show dev "$ADAPTER")" || mn_die "$ADAPTER does not hold $MN_YGG_ADDR"
-    mn_ok "$ADAPTER holds the node's address"
+    ok "$ADAPTER holds the node's address"
 else
-    mn_skip "managed Yggdrasil: this runner has no /dev/net/tun"
+    skip "managed Yggdrasil: this runner has no /dev/net/tun"
 fi
-mn_summary
+summary networks
 sudo cp /etc/socketguard/setup-log.json "${RUNNER_TEMP:-/tmp}/setup-log.before-remove.json"
 sudo chmod 644 "${RUNNER_TEMP:-/tmp}/setup-log.before-remove.json"
 if mn_account_created "${RUNNER_TEMP:-/tmp}/setup-log.before-remove.json"; then account_created=1; else account_created=0; fi
@@ -123,5 +123,5 @@ sudo apt-get purge -y socketguard
 mn_data_purged
 mn_account_after_purge "$account_created"
 sudo $fp expect-absent
-mn_summary
+summary networks
 echo OK

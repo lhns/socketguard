@@ -10,6 +10,7 @@ pub mod config_file;
 pub mod disable;
 pub mod engine;
 pub mod firewall;
+pub mod footprint;
 pub mod host;
 pub mod iface;
 pub mod install;

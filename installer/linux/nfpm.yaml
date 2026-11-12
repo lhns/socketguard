@@ -1,5 +1,5 @@
 # One description for the deb and the rpm (nfpm). Rendered by installer/linux/build.sh, which
-# sets VERSION and BIN_DIR and fills in the third_party line. The systemd unit is NOT shipped:
+# sets VERSION, STAGE (the staged tree, docs/packaging.md) and POSTRM. The systemd unit is NOT shipped:
 # `socketguard-daemon service install` writes it (from the same text the daemon embeds, with
 # ExecStart naming /usr/bin/socketguard-daemon), so a package file could only drift from it.
 name: socketguard
@@ -28,15 +28,15 @@ depends:
   - zlib1g
 
 contents:
-  - src: ${BIN_DIR}/socketguard-daemon
+  - src: ${STAGE}/socketguard-daemon
     dst: /usr/bin/socketguard-daemon
     file_info:
       mode: 0755
-  - src: ${BIN_DIR}/socketguard
+  - src: ${STAGE}/socketguard
     dst: /usr/bin/socketguard
     file_info:
       mode: 0755
-  - src: ${BIN_DIR}/socketguard-ui
+  - src: ${STAGE}/socketguard-ui
     dst: /usr/bin/socketguard-ui
     file_info:
       mode: 0755
@@ -44,18 +44,22 @@ contents:
     dst: /usr/share/applications/socketguard.desktop
   - src: ui/src-tauri/icons/128x128.png
     dst: /usr/share/icons/hicolor/128x128/apps/socketguard.png
-  - src: LICENSE
+  - src: ${STAGE}/LICENSE
     dst: /usr/share/doc/socketguard/LICENSE
-  - src: THIRD_PARTY_NOTICES.md
+  - src: ${STAGE}/THIRD_PARTY_NOTICES.md
     dst: /usr/share/doc/socketguard/THIRD_PARTY_NOTICES.md
-  # THIRD_PARTY (build.sh replaces this line with a tree entry when installer/payload/linux has files)
+  # Tor runs as the unprivileged account socketguard-net (ADR 0052): the stage has fixed the modes
+  # of the tree (everyone reads and runs, only root writes); nfpm keeps them.
+  - src: ${STAGE}/third_party/
+    dst: /usr/lib/socketguard/third_party/
+    type: tree
 
 overrides:
   deb:
     scripts:
       postinstall: installer/linux/scripts/deb-postinst
       preremove: installer/linux/scripts/deb-prerm
-      postremove: installer/linux/scripts/deb-postrm
+      postremove: ${POSTRM}
   rpm:
     depends:
       - nftables

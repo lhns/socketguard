@@ -6,22 +6,60 @@ packages stay thin. Definitions: `installer/windows/` (WiX), `installer/linux/` 
 real runner and checks the host from outside with `deploy/ci/footprint-check.*`;
 `release.yml` reuses it.
 
-**Bundled Tor and Yggdrasil (ADR 0052).** Each package job first runs `.github/actions/bundle`,
-which calls `deploy/bundle/fetch.sh --require-signature --build-yggdrasil <os>-<arch>
-installer/payload/<os>/` (Tor Expert Bundle with its Tor Project signature, Yggdrasil built from the
-pinned commit with Go, `wintun.dll` on Windows; the action sets up the Go version `versions.toml`
-asks for and installs `gpg` when the runner has none, downloads are cached on
-`hashFiles('deploy/bundle/versions.toml')`). The build scripts then
-pick the files up (`installer/payload/README.md`). They land in `C:\Program Files\SocketGuard\third_party\`,
-`/usr/lib/socketguard/third_party/` and `/usr/local/lib/socketguard/third_party/`; the daemon looks
-there (it looks next to its executable first, then at the platform's package location, then in
-`$SOCKETGUARD_THIRD_PARTY`). Modes are set so the
-unprivileged account the children run as can run them: `socketguard-net` on Linux and macOS (the
-Linux packages depend on `zlib1g` / `zlib` for the `libz.so.1` Tor needs), LocalService on Windows
-(Program Files is readable by everyone). The CI builds Windows x86_64, Linux x86_64 (the nfpm file
-says `arch: amd64`) and macOS for both architectures (an Apple silicon and an Intel runner each build and test
-their own pkg). Linux aarch64 and Windows aarch64 are fetchable (`fetch.sh linux-aarch64`,
-`windows-aarch64`) but no job builds or tests them.
+**One staged tree per system (ADR 0057).** `./build.sh --stage [dir]` (default `dist/stage`; the
+directory is emptied first) builds in release mode and fetches the pinned Tor, Yggdrasil and
+Wintun (`deploy/bundle/fetch.sh`, ADR 0052), and leaves everything a package of the host system and
+architecture ships in one flat directory:
+
+    dist/stage/
+      socketguard-daemon  socketguard  socketguard-ui       (.exe on Windows)
+      LICENSE  THIRD_PARTY_NOTICES.md
+      third_party/
+        tor/               the Tor binary, its libraries, pluggable_transports/lyrebird
+        yggdrasil/         yggdrasil, and wintun.dll on Windows
+        licenses/<name>.txt
+        VERSIONS           what `socketguard status` reports
+
+`third_party/` has its modes fixed (everyone reads and runs, only the owner writes) because the
+children run as an unprivileged account. The `portable` marker is **not** in the stage: only the zip
+step makes it, so no other package can carry it (`test/msi.ps1` checks the install directory has
+none). The package builders wrap the stage and take nothing else:
+
+| Builder | Takes | Result |
+|---|---|---|
+| `installer/windows/build.ps1 -Version v -Stage dir -Out f.msi` | the three exes, `LICENSE`, `THIRD_PARTY_NOTICES.md`, every file of `third_party\` (a WiX fragment with one component per file is generated) | `C:\Program Files\SocketGuard\` with `third_party\` and `licenses\` |
+| `installer/windows/portable.ps1 -Stage dir -Out f.zip` | the exes and `third_party\`; adds the `portable` marker, `LICENSE.txt`, `NOTICE.txt`, `README.txt` | the portable folder |
+| `installer/linux/build.sh version dir [outdir]` | the three programs, `LICENSE`, `THIRD_PARTY_NOTICES.md`, `third_party/` as a `type: tree` | deb and rpm; `/usr/lib/socketguard/third_party/`; the deb's postrm is generated here (below) |
+| `installer/macos/build.sh version dir [outdir]` | the same, into the pkg payload | `/usr/local/lib/socketguard/third_party/`, the app and `/usr/local/bin` |
+
+A package is built a second time with the next patch version (`deploy/ci/version.sh --next`) from
+the same stage, for the upgrade test.
+
+The stage also runs the product: the daemon finds `third_party` next to its executable (then at the
+package location of its platform, then in `$SOCKETGUARD_THIRD_PARTY`), so `dist/stage/socketguard-daemon`
+works in place. `./build.sh --with-bundled` stays for development runs from `target/<profile>`: it
+fetches into `target/<profile>/third_party` without staging.
+
+`--stage` needs network, git, Go (the version in `versions.toml`; Yggdrasil is built from the pinned
+commit) and, with `--require-signature` (CI), `gpg` for the Tor Project signature. Downloads and the
+Yggdrasil source are cached in `target/bundle-cache` (`SOCKETGUARD_BUNDLE_CACHE`). In CI
+`.github/actions/bundle` provides Go, gpg and a cache directory keyed on `versions.toml` (`.bundle-cache`)
+before `build.sh`. Supported targets: `windows-x86_64`, `linux-x86_64`, `macos-x86_64`,
+`macos-aarch64` (`fetch.sh` also knows `linux-aarch64` and `windows-aarch64`; no job builds those).
+The packages depend on the system zlib (`zlib1g`, `zlib`); the Tor bundle does not carry `libz.so.1`.
+Licence texts: `third_party/licenses/` holds those of the programs; `THIRD_PARTY_NOTICES.md` and
+`LICENSE` are installed to `Program Files\SocketGuard\licenses` (Windows), `/usr/share/doc/socketguard/`
+(Linux) and the app's `Contents/Resources` plus `/usr/local/share/doc/socketguard/` (macOS). Files
+installed this way belong to the package; what SocketGuard creates at run time (a Tor data directory,
+Yggdrasil keys) is in the install record (ADR 0050).
+
+In CI each system builds once (`packages.yml`): the Windows job produces the MSI, the MSI of the next
+version (artifact `msi-next`, not in the release) and the zip; the `msi` and `portable` test jobs
+download those finished files and run in parallel. Only finished packages travel between jobs, never
+the stage (an artifact upload drops the execute bits).
+
+The repository's composite actions: `.github/actions/setup` (Rust, cargo cache, Node, npm cache and
+`npm ci`, and the Linux desktop build dependencies), `setup-wix`, `setup-nfpm`, `bundle`.
 
 | | Install | Upgrade | Remove | Purge |
 |---|---|---|---|---|
@@ -66,11 +104,10 @@ service before replacing the file (`ServiceControl`, stop only) and `service ins
 
 ## Windows, portable zip (ADR 0054)
 
-- `installer/windows/portable.ps1 -BinDir target/release -Out dist/portable/SocketGuard-portable-windows-x64.zip`
-  builds one folder: the three programs, the `portable` marker, README, LICENSE and NOTICE, and
-  `third_party\` (Tor, Yggdrasil, `wintun.dll`, licences, `VERSIONS`) when `installer/payload/windows/`
-  holds them. The `portable` job of `packages.yml` runs the same `.github/actions/bundle` step as the
-  MSI job before building the zip, so the zip carries them and Tor and Yggdrasil work from it.
+- `installer/windows/portable.ps1 -Stage dist/stage -Out dist/SocketGuard-portable-windows-x64.zip`
+  builds one folder from the stage: the three programs, `third_party\` (Tor, Yggdrasil, `wintun.dll`,
+  licences, `VERSIONS`), and what only the zip has: the `portable` marker, README, LICENSE and NOTICE.
+  It is built in the same Windows job as the MSI, from the same stage.
 - No installer ran, so nothing set up an account for the children: Tor and Yggdrasil run as
   the account of the elevated portable daemon (the card says "the account running portable
   SocketGuard"), and `data\tor` and `data\yggdrasil` have a protected access list that the read
@@ -96,9 +133,14 @@ service before replacing the file (`ServiceControl`, stop only) and `service ins
 - No systemd (a container): the install scripts print a note and do nothing, the remove scripts do
   nothing; run `socketguard-daemon service install` where systemd runs.
 - `SOCKETGUARD_FORCE_REMOVE=1` makes the remove scripts pass `--force` and ignore a failure.
-- The deb `postrm` cannot run the daemon (the file is gone at purge). It deletes the same named
-  files; `the_debian_postrm_names_what_purge_deletes` (crates/daemon/src/uninstall.rs) fails when
-  the list and `named_files` differ.
+- The deb `postrm` cannot run the daemon (the file is gone at purge). `installer/linux/build.sh`
+  runs the staged daemon's `uninstall --print-purge-list --os linux` (hidden; one item per line:
+  `file`, `glob`, `tree`, `dir`, `account-if-created`; the list is `crates/daemon/src/footprint.rs`,
+  which `uninstall --purge` itself deletes from) and embeds it in `installer/linux/scripts/deb-postrm.in`,
+  whose loop is the whole interpreter. The account lookup in the install record stays in the script.
+  `crates/daemon/tests/footprint_list.rs` (a cargo test, so it runs in `ci.yml` on all three systems)
+  checks that every item the daemon lists for Linux, macOS and Windows is looked for by
+  `deploy/ci/footprint-check.*` and described in `docs/footprint.md`.
 - Built on Ubuntu 22.04 (glibc 2.35) so the binaries run on it and on newer systems.
 
 ## macOS
@@ -145,11 +187,11 @@ Provide these repository secrets and add the marked steps (`SIGN` comments in
 
 ## What CI proves, and what it does not
 
-`packages.yml` on every push to `installers`, `redesign`, `main`, `portable` and `bundled`, on
-request, and for each release. The MSI, portable, deb and pkg jobs also have the **Tor and Yggdrasil
-section** (`test/managed.sh` for the deb and the pkg, `test/managed-helpers.ps1` shared by
-`test/msi.ps1` and `test/portable.ps1` on Windows), summarised in a line
-`managed networks: N checks passed, M skipped` (the label the scripts print); the rpm jobs check the bundled files only (below):
+`packages.yml` on every push to `main`, on request, and for each release. The MSI, portable, deb and pkg jobs also have the **Tor and Yggdrasil
+section** (`test/networks.sh` for the deb and the pkg, `test/networks.ps1` shared by
+`test/msi.ps1` and `test/portable.ps1` on Windows; the helpers they all use are `test/lib.sh` and
+`test/lib.ps1`), summarised in a line
+`networks: N checks passed, M skipped` (the label the scripts print); the rpm jobs check the bundled files only (below):
 
 - after the install: `status --json` names the bundled `tor` and `yggdrasil` with the versions of
   `third_party/VERSIONS` and the directory the daemon found; the licence texts and notices are
@@ -193,7 +235,7 @@ and the Yggdrasil assertions are SKIPPED with that reason, not faked); Tor needs
   `--portable`; real WFP filters admit a granted port and block another; a clean exit and a kill
   (no SocketGuard filter may remain, the next start sweeps the addresses); portable and the
   installed service refuse to run side by side. Then, with the Tor and Yggdrasil section shared with the MSI
-  test (`test/managed-helpers.ps1`): a Tor becomes up (bootstrapped, up to 10 minutes) and
+  test (`test/networks.ps1`): a Tor becomes up (bootstrapped, up to 10 minutes) and
   `tor.exe` runs as the same account as the portable daemon; a Yggdrasil creates the
   `SocketGuard` adapter (SKIPPED with the exact error in `ygg-adapter-error.txt` when the runner
   cannot, never faked); `data\tor` and `data\yggdrasil` are not inherited from `data\`; after the

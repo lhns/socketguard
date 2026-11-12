@@ -1,57 +1,43 @@
 # Build the portable zip (ADR 0054): SocketGuard-portable-windows-x64.zip, one folder that runs
 # from anywhere, including a removable drive, and leaves nothing on the computer once it is closed.
 #
-#   installer/windows/portable.ps1 -BinDir target/release -Out dist/SocketGuard-portable-windows-x64.zip
+#   installer/windows/portable.ps1 -Stage dist/stage -Out dist/SocketGuard-portable-windows-x64.zip
 #
-# -BinDir holds socketguard-daemon.exe, socketguard.exe and socketguard-ui.exe (./build.sh puts them
-# in target/release). The file named `portable` next to the programs is what turns portable mode on.
-# Files in installer/payload/windows/ are copied to third_party\ like the MSI does.
+# -Stage is the staged tree (./build.sh --stage, docs/packaging.md). The zip holds its programs and
+# third_party\ (Tor, Yggdrasil, wintun.dll, licences, VERSIONS) like the MSI, plus what only this
+# package has: the file named `portable` next to the programs, which is what turns portable mode
+# on (made here, never part of the stage, so no other package can carry it), LICENSE.txt,
+# NOTICE.txt and README.txt.
 
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)][string]$BinDir,
+  [Parameter(Mandatory = $true)][string]$Stage,
   [Parameter(Mandatory = $true)][string]$Out
 )
 
 $ErrorActionPreference = 'Stop'
 
-foreach ($f in 'socketguard-daemon.exe', 'socketguard.exe', 'socketguard-ui.exe') {
-  if (-not (Test-Path -PathType Leaf (Join-Path $BinDir $f))) {
-    Write-Host "missing $f in $BinDir"
+foreach ($f in 'socketguard-daemon.exe', 'socketguard.exe', 'socketguard-ui.exe', 'LICENSE', 'third_party\VERSIONS') {
+  if (-not (Test-Path -PathType Leaf (Join-Path $Stage $f))) {
+    Write-Host "missing $f in $Stage (run ./build.sh --stage)"
     exit 1
   }
 }
 
-$here = Split-Path -Parent $PSCommandPath
-$root = Split-Path -Parent (Split-Path -Parent $here)
 $name = 'SocketGuard-portable-windows-x64'
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
-$stage = Join-Path $work $name
-New-Item -ItemType Directory -Force -Path $stage | Out-Null
+$dest = Join-Path $work $name
+New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
 try {
   foreach ($f in 'socketguard-daemon.exe', 'socketguard.exe', 'socketguard-ui.exe') {
-    Copy-Item (Join-Path $BinDir $f) $stage
+    Copy-Item (Join-Path $Stage $f) $dest
   }
+  Copy-Item -Recurse (Join-Path $Stage 'third_party') (Join-Path $dest 'third_party')
   # The marker. Its content is not read; the text is for whoever finds it.
-  Set-Content -Path (Join-Path $stage 'portable') -Encoding ascii -Value 'This file turns on SocketGuard portable mode. See README.txt.'
+  Set-Content -Path (Join-Path $dest 'portable') -Encoding ascii -Value 'This file turns on SocketGuard portable mode. See README.txt.'
 
-  $payload = Join-Path $root 'installer/payload/windows'
-  if (Test-Path $payload) {
-    $files = @(Get-ChildItem -LiteralPath $payload -Recurse -File | Where-Object { $_.Name -notin @('.gitkeep', 'README.md') })
-    if ($files.Count -gt 0) {
-      $dest = Join-Path $stage 'third_party'
-      foreach ($f in $files) {
-        $rel = $f.FullName.Substring((Resolve-Path $payload).Path.TrimEnd('\').Length + 1)
-        $target = Join-Path $dest $rel
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
-        Copy-Item $f.FullName $target
-      }
-      Write-Host "third_party payload included from $payload"
-    }
-  }
-
-  Copy-Item (Join-Path $root 'LICENSE') (Join-Path $stage 'LICENSE.txt')
+  Copy-Item (Join-Path $Stage 'LICENSE') (Join-Path $dest 'LICENSE.txt')
   # Bundled third-party software carries its own licences next to its files (third_party\);
   # this file says which they are.
   $notice = @(
@@ -59,7 +45,7 @@ try {
     'Programs bundled in third_party\ (when present) keep their own licences, which are',
     'in their folders there.'
   )
-  Set-Content -Path (Join-Path $stage 'NOTICE.txt') -Encoding ascii -Value $notice
+  Set-Content -Path (Join-Path $dest 'NOTICE.txt') -Encoding ascii -Value $notice
 
   $readme = @'
 SocketGuard, portable
@@ -99,12 +85,12 @@ How to remove it
   Close SocketGuard, then delete this folder. Your settings are in its data folder: keep
   that folder to keep them.
 '@
-  Set-Content -Path (Join-Path $stage 'README.txt') -Encoding ascii -Value $readme
+  Set-Content -Path (Join-Path $dest 'README.txt') -Encoding ascii -Value $readme
 
   $outDir = Split-Path -Parent $Out
   if ($outDir) { New-Item -ItemType Directory -Force -Path $outDir | Out-Null }
   if (Test-Path $Out) { Remove-Item -Force $Out }
-  Compress-Archive -Path $stage -DestinationPath $Out -CompressionLevel Optimal
+  Compress-Archive -Path $dest -DestinationPath $Out -CompressionLevel Optimal
 }
 finally {
   Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue

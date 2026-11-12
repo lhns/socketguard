@@ -4,12 +4,12 @@
   file. Per machine only: the service runs as LocalSystem and the firewall is system-wide.
 
   Preprocessor variables, passed by build.ps1:
-    BinDir       directory holding socketguard-daemon.exe, socketguard.exe, socketguard-ui.exe
+    StageDir     the staged tree (docs/packaging.md): socketguard-daemon.exe, socketguard.exe,
+                 socketguard-ui.exe, LICENSE, THIRD_PARTY_NOTICES.md and third_party\
     Version      major.minor.build (validated by build.ps1)
-    RepoRoot     the repository root (LICENSE, THIRD_PARTY_NOTICES.md)
     IconFile     the .ico used for the shortcut and the Add/Remove Programs entry
-    ThirdParty   defined only when installer/payload/windows holds files (see installer/payload/README.md);
-                 build.ps1 then also compiles a generated fragment with the ComponentGroup "ThirdParty"
+    (build.ps1 also compiles a generated fragment with the ComponentGroup "ThirdParty": the files
+    of third_party\ in the stage)
 
   Packages only call commands of the daemon binary (ADR 0050). Nothing in here knows how a
   service is made, or what a firewall rule is:
@@ -55,7 +55,7 @@
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="SocketGuard">
-        <!-- Extra binaries bundled later (Tor, Yggdrasil, wintun.dll): installer/payload/README.md -->
+        <!-- Tor, Yggdrasil and wintun.dll from the stage (ComponentGroup ThirdParty, generated) -->
         <Directory Id="THIRDPARTYDIR" Name="third_party" />
         <Directory Id="LICENSESDIR" Name="licenses" />
       </Directory>
@@ -119,7 +119,7 @@
              Description="The service, the command line and the desktop app.">
 
       <Component Id="C.Daemon" Directory="INSTALLFOLDER">
-        <File Id="F.Daemon" Name="socketguard-daemon.exe" Source="$(BinDir)\socketguard-daemon.exe" KeyPath="yes" />
+        <File Id="F.Daemon" Name="socketguard-daemon.exe" Source="$(StageDir)\socketguard-daemon.exe" KeyPath="yes" />
         <!--
           Only stops the service, before a file is replaced or removed (the running exe is
           locked). It never removes it: that is `service uninstall`, run by the daemon.
@@ -129,11 +129,11 @@
       </Component>
 
       <Component Id="C.Cli" Directory="INSTALLFOLDER">
-        <File Id="F.Cli" Name="socketguard.exe" Source="$(BinDir)\socketguard.exe" KeyPath="yes" />
+        <File Id="F.Cli" Name="socketguard.exe" Source="$(StageDir)\socketguard.exe" KeyPath="yes" />
       </Component>
 
       <Component Id="C.Ui" Directory="INSTALLFOLDER">
-        <File Id="F.Ui" Name="socketguard-ui.exe" Source="$(BinDir)\socketguard-ui.exe" KeyPath="yes" />
+        <File Id="F.Ui" Name="socketguard-ui.exe" Source="$(StageDir)\socketguard-ui.exe" KeyPath="yes" />
       </Component>
 
       <!-- The CLI is the primary frontend: on the system PATH (appended, never prepended). -->
@@ -145,12 +145,12 @@
       </Component>
 
       <!-- SocketGuard's licence and the notices for the bundled programs; their licence texts are in
-           third_party\licenses (installer/payload/README.md). -->
+           third_party\licenses. -->
       <Component Id="C.Licenses" Directory="LICENSESDIR">
-        <File Id="F.License" Name="LICENSE.txt" Source="$(RepoRoot)\LICENSE" KeyPath="yes" />
+        <File Id="F.License" Name="LICENSE.txt" Source="$(StageDir)\LICENSE" KeyPath="yes" />
       </Component>
       <Component Id="C.Notices" Directory="LICENSESDIR">
-        <File Id="F.Notices" Name="THIRD_PARTY_NOTICES.md" Source="$(RepoRoot)\THIRD_PARTY_NOTICES.md" KeyPath="yes" />
+        <File Id="F.Notices" Name="THIRD_PARTY_NOTICES.md" Source="$(StageDir)\THIRD_PARTY_NOTICES.md" KeyPath="yes" />
       </Component>
 
       <Component Id="C.Shortcut" Directory="ProgramMenuFolder">
@@ -160,9 +160,7 @@
                        Type="integer" Value="1" KeyPath="yes" />
       </Component>
 
-      <?ifdef ThirdParty?>
       <ComponentGroupRef Id="ThirdParty" />
-      <?endif?>
     </Feature>
 
     <!-- ===== Custom actions =============================================================== -->
