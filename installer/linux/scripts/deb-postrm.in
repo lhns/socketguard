@@ -1,0 +1,46 @@
+#!/bin/sh
+# Debian postrm. `purge` deletes the data. The binary is gone by now, so this cannot ask the
+# daemon: installer/linux/build.sh runs the built `socketguard-daemon uninstall
+# --print-purge-list` and puts its output between the PURGE_LIST lines below (ADR 0057). The
+# loop is the whole interpreter; it knows these kinds of line (crates/daemon/src/footprint.rs):
+#   file <path>               rm -f
+#   glob <pattern>            rm -f of every match
+#   tree <path>               rm -rf (the data of the networks' child processes)
+#   dir <path>                rmdir when empty, else say it stays
+#   account-if-created <name> userdel when the install record says the install created it
+set -e
+case "$1" in
+purge)
+    # The record is one of the files deleted below: read it first (whitespace stripped, so the
+    # match does not depend on how it is indented).
+    created_account=
+    if [ -f /etc/socketguard/setup-log.json ] &&
+        tr -d ' \t\r\n' </etc/socketguard/setup-log.json |
+        grep -q '"type":"unprivileged_account","name":"socketguard-net","created":true'; then
+        created_account=1
+    fi
+    while read -r kind path; do
+        case "$kind" in
+        file) rm -f "$path" ;;
+        glob)
+            # shellcheck disable=SC2086 # the pattern is meant to expand
+            rm -f $path
+            ;;
+        tree) rm -rf "$path" ;;
+        dir)
+            rmdir "$path" 2>/dev/null || true
+            [ -d "$path" ] && echo "socketguard: $path is not empty; left in place." >&2
+            ;;
+        account-if-created)
+            if [ -n "$created_account" ] && getent passwd "$path" </dev/null >/dev/null 2>&1; then
+                userdel "$path" </dev/null >/dev/null 2>&1 || echo "socketguard: could not remove the account $path." >&2
+                getent group "$path" </dev/null >/dev/null 2>&1 && groupdel "$path" </dev/null >/dev/null 2>&1 || true
+            fi
+            ;;
+        esac
+    done <<'PURGE_LIST'
+@PURGE_LIST@
+PURGE_LIST
+    ;;
+esac
+exit 0

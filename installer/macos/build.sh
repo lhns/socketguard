@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Build the macOS installer package (unsigned).
 #
-#   installer/macos/build.sh <version> [outdir]      # after ./build.sh, on macOS
+#   installer/macos/build.sh <version> <stage> [outdir]      # after ./build.sh --stage, on macOS
 #
+# <stage> is the staged tree (docs/packaging.md): the three programs, third_party/, LICENSE and
+# THIRD_PARTY_NOTICES.md.
 # Payload: /usr/local/bin/{socketguard-daemon,socketguard} and /Applications/SocketGuard.app
 # (the UI binary, assembled by hand: Tauri's bundler would need @tauri-apps/cli, a bundle
 # section in tauri.conf.json and a second build path next to build.sh, for an Info.plist and an
 # icon). The app finds the CLI and the daemon in /usr/local/bin. postinstall runs
-# `socketguard-daemon service install`. Files in installer/payload/macos (README.md and
-# .gitkeep excepted) go to /usr/local/lib/socketguard/third_party/ (installer/payload/README.md).
+# `socketguard-daemon service install`. The stage's third_party/ goes to
+# /usr/local/lib/socketguard/third_party/.
 # LICENSE and THIRD_PARTY_NOTICES.md go into the app's Resources and /usr/local/share/doc/socketguard.
 #
 # SIGNING (not done yet): see docs/packaging.md for the secrets. Where it would go is marked
@@ -16,9 +18,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-version="${1:?usage: build.sh <version> [outdir]}"
-out="${2:-dist}"
-bin="${BIN_DIR:-target/release}"
+version="${1:?usage: build.sh <version> <stage> [outdir]}"
+stage="${2:?usage: build.sh <version> <stage> [outdir]}"
+out="${3:-dist}"
+for f in socketguard-daemon socketguard socketguard-ui LICENSE THIRD_PARTY_NOTICES.md third_party/VERSIONS; do
+    [ -e "$stage/$f" ] || { echo "missing $f in $stage (run ./build.sh --stage)" >&2; exit 1; }
+done
 mkdir -p "$out"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -26,8 +31,8 @@ trap 'rm -rf "$work"' EXIT
 root="$work/root"
 app="$root/Applications/SocketGuard.app"
 mkdir -p "$root/usr/local/bin" "$app/Contents/MacOS" "$app/Contents/Resources"
-install -m 0755 "$bin/socketguard-daemon" "$bin/socketguard" "$root/usr/local/bin/"
-install -m 0755 "$bin/socketguard-ui" "$app/Contents/MacOS/socketguard-ui"
+install -m 0755 "$stage/socketguard-daemon" "$stage/socketguard" "$root/usr/local/bin/"
+install -m 0755 "$stage/socketguard-ui" "$app/Contents/MacOS/socketguard-ui"
 cp ui/src-tauri/icons/icon.icns "$app/Contents/Resources/icon.icns"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -48,19 +53,16 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-if [ -n "$(find installer/payload/macos -type f ! -name .gitkeep ! -name README.md -print -quit)" ]; then
-    mkdir -p "$root/usr/local/lib/socketguard/third_party"
-    cp -a installer/payload/macos/. "$root/usr/local/lib/socketguard/third_party/"
-    rm -f "$root/usr/local/lib/socketguard/third_party/.gitkeep" "$root/usr/local/lib/socketguard/third_party/README.md"
-    # Tor runs as the unprivileged account socketguard-net (ADR 0052): everyone reads the tree and
-    # runs the programs, only root writes (pkgbuild --ownership recommended makes root the owner).
-    chmod -R u+rwX,go+rX,go-w "$root/usr/local/lib/socketguard"
-fi
+mkdir -p "$root/usr/local/lib/socketguard"
+cp -R "$stage/third_party" "$root/usr/local/lib/socketguard/third_party"
+# Tor runs as the unprivileged account socketguard-net (ADR 0052): everyone reads the tree and
+# runs the programs, only root writes (pkgbuild --ownership recommended makes root the owner).
+chmod -R u+rwX,go+rX,go-w "$root/usr/local/lib/socketguard"
 
 # Licence and third-party notices, in the app and beside the other documentation.
 mkdir -p "$root/usr/local/share/doc/socketguard"
 for d in "$app/Contents/Resources" "$root/usr/local/share/doc/socketguard"; do
-    install -m 0644 LICENSE THIRD_PARTY_NOTICES.md "$d/"
+    install -m 0644 "$stage/LICENSE" "$stage/THIRD_PARTY_NOTICES.md" "$d/"
 done
 
 # An ad-hoc signature: Apple silicon will not run an unsigned bundle. It is not an identity.

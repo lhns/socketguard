@@ -1,9 +1,10 @@
-# Installers (ADR 0050): the Windows MSI, the Linux deb and rpm, the macOS pkg. Each job builds
-# with ./build.sh, lays out the bundled Tor and Yggdrasil (ADR 0052, .github/actions/bundle),
-# builds the package (and a second one with the next patch version, by repackaging, for the
-# upgrade test), then installs it on the runner, runs managed Tor and Yggdrasil networks from
-# the installed files and checks the host from outside (deploy/ci/footprint-check.*). Reused by
-# release.yml. Unsigned.
+# Installers (ADR 0050, 0057): the Windows MSI and portable zip, the Linux deb and rpm, the macOS pkg.
+# Each system builds ONCE with `./build.sh --stage` (the programs plus the pinned Tor, Yggdrasil and
+# Wintun, ADR 0052; docs/packaging.md) and wraps that tree in its packages, and a second set with
+# the next patch version, by repackaging, for the upgrade test. Then the packages are installed on
+# the runner, run Tor and Yggdrasil from the installed files and are checked from outside
+# (deploy/ci/footprint-check.*). Between jobs only finished packages travel, never the staged tree.
+# Reused by release.yml. Unsigned.
 name: packages
 
 on:
@@ -21,158 +22,124 @@ permissions:
   contents: read
 
 jobs:
-  msi:
+  # One build for both Windows packages.
+  windows:
     runs-on: windows-latest
-    timeout-minutes: 75
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup
         with:
-          cache-on-failure: true
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-      - name: Install the frontend dependencies
-        run: npm ci
-        working-directory: ui
-      - name: Build (./build.sh)
-        shell: bash
-        run: bash ./build.sh
+          node: "true"
       - uses: ./.github/actions/setup-wix
-      - name: Bundle Tor, Yggdrasil and wintun.dll (installer/payload/windows)
-        uses: ./.github/actions/bundle
-        with:
-          target: windows-x86_64
-          outdir: installer/payload/windows
+      - uses: ./.github/actions/bundle
+      - name: Build and stage (./build.sh --stage)
+        shell: bash
+        run: bash ./build.sh --stage --require-signature
       # SIGN (not done, docs/packaging.md): import WINDOWS_SIGNING_CERT_PFX and sign the three
-      # target\release\*.exe here with `signtool sign /fd sha256 /tr <timestamp url> /td sha256`,
+      # dist\stage\*.exe here with `signtool sign /fd sha256 /tr <timestamp url> /td sha256`,
       # then sign the MSIs after the next step the same way.
-      - name: Build the MSIs (this version, and the next patch for the upgrade test)
+      - name: Build the packages (the MSI, the MSI of the next patch version for the upgrade test, the portable zip)
         shell: bash
         run: |
           v=$(bash deploy/ci/version.sh)
           next=$(bash deploy/ci/version.sh --next)
           echo "version $v, next $next"
-          pwsh -File installer/windows/build.ps1 -Version "$v" -BinDir target/release -Out "dist/SocketGuard-$v-x64.msi"
-          pwsh -File installer/windows/build.ps1 -Version "$next" -BinDir target/release -Out "dist/next/SocketGuard-$next-x64.msi"
-          echo "V=$v" >> "$GITHUB_ENV"
-          echo "NEXT=$next" >> "$GITHUB_ENV"
+          pwsh -File installer/windows/build.ps1 -Version "$v" -Stage dist/stage -Out "dist/SocketGuard-$v-x64.msi"
+          pwsh -File installer/windows/build.ps1 -Version "$next" -Stage dist/stage -Out "dist/next/SocketGuard-$next-x64.msi"
+          pwsh -File installer/windows/portable.ps1 -Stage dist/stage -Out dist/SocketGuard-portable-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msi
+          path: dist/SocketGuard-*-x64.msi
+          if-no-files-found: error
+      # Not part of the release: release.yml downloads `msi` by name.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msi-next
+          path: dist/next/SocketGuard-*-x64.msi
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-zip
+          path: dist/SocketGuard-portable-windows-x64.zip
+          if-no-files-found: error
+
+  msi:
+    needs: windows
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: msi
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: msi-next
+          path: dist/next
       - name: Self-test of the footprint check
         shell: pwsh
         run: ./deploy/ci/footprint-check.ps1 -SelfTest
       - name: Install, exercise, upgrade, remove, purge
         shell: pwsh
         timeout-minutes: 45
-        run: ./test/msi.ps1 -Msi "dist/SocketGuard-$env:V-x64.msi" -MsiNext "dist/next/SocketGuard-$env:NEXT-x64.msi" -Out dist/msi-test -StrictFirewall
+        run: |
+          $msi = (Get-ChildItem dist/SocketGuard-*-x64.msi).FullName
+          $next = (Get-ChildItem dist/next/SocketGuard-*-x64.msi).FullName
+          ./test/msi.ps1 -Msi $msi -MsiNext $next -Out dist/msi-test -StrictFirewall
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: msi-test-output
           path: dist/msi-test
           if-no-files-found: ignore
-      - uses: actions/upload-artifact@v4
-        with:
-          name: msi
-          path: dist/SocketGuard-*-x64.msi
-          if-no-files-found: error
 
   # Portable mode on a clean runner (ADR 0054): real firewall, clean exit, kill, coexistence with
   # the service, and the bundled Tor and Yggdrasil (ADR 0052) from the zip's third_party\. Elevated,
   # machine-wide changes, no prompts; the runner is thrown away.
   portable:
-    # Its own build, in parallel with the msi job: it needs nothing from it.
+    needs: windows
     runs-on: windows-latest
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
         with:
-          cache-on-failure: true
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-      - name: Install the frontend dependencies
-        run: npm ci
-        working-directory: ui
-      - name: Build (./build.sh)
-        shell: bash
-        run: bash ./build.sh
-      - name: Bundle Tor, Yggdrasil and wintun.dll (installer/payload/windows, copied to third_party\ in the zip)
-        uses: ./.github/actions/bundle
-        with:
-          target: windows-x86_64
-          outdir: installer/payload/windows
-      - name: Build the portable zip
-        shell: pwsh
-        run: ./installer/windows/portable.ps1 -BinDir target/release -Out dist/portable/SocketGuard-portable-windows-x64.zip
-      - name: Start, exercise, end, kill, coexist, managed Tor and Yggdrasil
+          name: portable-zip
+          path: dist
+      - name: Start, exercise, end, kill, coexist, Tor and Yggdrasil
         shell: pwsh
         timeout-minutes: 45
-        run: ./test/portable.ps1 -Zip dist/portable/SocketGuard-portable-windows-x64.zip -Out dist/portable-test
+        run: ./test/portable.ps1 -Zip dist/SocketGuard-portable-windows-x64.zip -Out dist/portable-test
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: portable-test-output
           path: dist/portable-test
           if-no-files-found: ignore
-      - uses: actions/upload-artifact@v4
-        with:
-          name: portable-zip
-          path: dist/portable/SocketGuard-portable-windows-x64.zip
-          if-no-files-found: error
 
   linux:
     # 22.04: the oldest glibc and webkit2gtk-4.1 the packages should run on.
     runs-on: ubuntu-22.04
     timeout-minutes: 60
-    env:
-      NFPM_VERSION: 2.47.0
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup
         with:
-          cache-on-failure: true
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-      - name: Build dependencies of the desktop app
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev patchelf
-      - name: Install the frontend dependencies
-        run: npm ci
-        working-directory: ui
-      - name: Build (./build.sh)
-        run: bash ./build.sh
-      - name: Install nfpm (pinned, checksum verified)
-        run: |
-          base="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}"
-          curl -fsSLO "$base/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
-          curl -fsSLO "$base/checksums.txt"
-          grep " nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz$" checksums.txt | sha256sum -c -
-          tar -xzf "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" nfpm
-          sudo install -m 0755 nfpm /usr/local/bin/nfpm
-          nfpm --version
-      - name: Bundle Tor and Yggdrasil (installer/payload/linux)
-        uses: ./.github/actions/bundle
-        with:
-          target: linux-x86_64
-          outdir: installer/payload/linux
+          node: "true"
+          desktop-deps: "true"
+      - uses: ./.github/actions/setup-nfpm
+      - uses: ./.github/actions/bundle
+      - name: Build and stage (./build.sh --stage)
+        run: bash ./build.sh --stage --require-signature
       - name: Build the packages (this version, and the next patch for the upgrade test)
         run: |
           v=$(bash deploy/ci/version.sh)
           next=$(bash deploy/ci/version.sh --next)
-          bash installer/linux/build.sh "$v" dist
-          bash installer/linux/build.sh "$next" dist/next
+          bash installer/linux/build.sh "$v" dist/stage dist
+          bash installer/linux/build.sh "$next" dist/stage dist/next
       - name: Self-test of the footprint check
         run: bash deploy/ci/footprint-check.sh --self-test
       - name: deb - install, upgrade, remove, purge (a VM with systemd)
@@ -202,39 +169,19 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup
         with:
-          cache-on-failure: true
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-      - name: Install the frontend dependencies
-        run: npm ci
-        working-directory: ui
-      - name: Build (./build.sh)
-        run: bash ./build.sh
-      # The pkg is built for the runner's architecture (uname -m; macos-latest is Apple silicon).
-      - name: Architecture of the bundle
-        id: arch
-        run: |
-          case "$(uname -m)" in
-            arm64|aarch64) echo "target=macos-aarch64" >> "$GITHUB_OUTPUT" ;;
-            *) echo "target=macos-x86_64" >> "$GITHUB_OUTPUT" ;;
-          esac
-      - name: Bundle Tor and Yggdrasil (installer/payload/macos)
-        uses: ./.github/actions/bundle
-        with:
-          target: ${{ steps.arch.outputs.target }}
-          outdir: installer/payload/macos
+          node: "true"
+      - uses: ./.github/actions/bundle
+      # The stage and the pkg are for the runner's architecture (uname -m; macos-latest is Apple silicon).
+      - name: Build and stage (./build.sh --stage)
+        run: bash ./build.sh --stage --require-signature
       - name: Build the pkgs (this version, and the next patch for the upgrade test)
         run: |
           v=$(bash deploy/ci/version.sh)
           next=$(bash deploy/ci/version.sh --next)
-          bash installer/macos/build.sh "$v" dist
-          bash installer/macos/build.sh "$next" dist/next
+          bash installer/macos/build.sh "$v" dist/stage dist
+          bash installer/macos/build.sh "$next" dist/stage dist/next
       - name: Self-test of the footprint check
         run: bash deploy/ci/footprint-check.sh --self-test
       - name: Install, upgrade, purge

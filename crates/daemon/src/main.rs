@@ -20,6 +20,17 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Hidden, and independent of the machine it runs on (a portable marker, environment
+    // overrides, the system): it prints fixed paths for a build script.
+    if let Command::PurgeList { os } = &cmd {
+        let os = os.as_deref().unwrap_or(std::env::consts::OS);
+        if !matches!(os, "linux" | "macos" | "windows") {
+            eprintln!("socketguard-daemon: --os is linux, macos or windows");
+            return ExitCode::from(2);
+        }
+        socketguard_core::out!("{}", socketguard_daemon::footprint::print_list(os));
+        return ExitCode::SUCCESS;
+    }
     if let Err(e) = socketguard_core::portable::ensure_supported() {
         eprintln!("socketguard-daemon: {e}");
         return ExitCode::from(2);
@@ -35,6 +46,7 @@ fn main() -> ExitCode {
             socketguard_core::out!("{}", args::USAGE);
             0
         }
+        Command::PurgeList { .. } => unreachable!("handled above"),
         Command::Run(opts) => {
             let rt = runtime();
             let started = portable::prepare(&opts).and_then(|()| {

@@ -10,7 +10,5 @@ ui/src-tauri/gen/
 .claude/settings.local.json
 .claude/worktrees/
 
-# Third-party files fetched for the installers (installer/payload/README.md) and their download cache
-/installer/payload/*/*
-!/installer/payload/*/.gitkeep
+# CI's download cache of the third-party files (.github/actions/bundle)
 /.bundle-cache/

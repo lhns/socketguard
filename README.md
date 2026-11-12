@@ -182,7 +182,7 @@ when it starts and leaves it in place when it stops (portable mode excepted).
 | `crates/client/` | Typed client for the local API, shared by the CLI and the app |
 | `crates/cli/` | The `socketguard` command line |
 | `ui/`, `ui/src-tauri/` | Desktop app: React frontend and its Tauri v2 Rust backend |
-| `installer/` | MSI (WiX), portable zip, deb and rpm (nfpm), macOS pkg; `installer/payload/` receives the bundled Tor and Yggdrasil |
+| `installer/` | MSI (WiX), portable zip, deb and rpm (nfpm), macOS pkg, each made from the staged tree of `./build.sh --stage` |
 | `deploy/` | `bundle/` (pinned third-party programs), `ci/`, `e2e/` (Docker tests), `otel/` (telemetry stack), `systemd/` |
 | `test/` | Package tests run by `packages.yml` |
 | `docs/` | API, command line, packaging, footprint, manual checks, `adr/` |
@@ -330,9 +330,10 @@ once, then:
 ./build.sh                 # release build: frontend, then all crates
 ./build.sh --debug         # debug build
 ./build.sh --with-bundled  # also fetch the pinned Tor, Yggdrasil and Wintun next to the build
+./build.sh --stage         # also collect what a package ships in dist/stage (docs/packaging.md)
 ```
 
-`--with-bundled` needs network access, git and Go (`deploy/bundle/fetch.sh`). Binaries land in
+`--with-bundled` and `--stage` need network access, git and Go (`deploy/bundle/fetch.sh`). Binaries land in
 `target/<profile>/`: `socketguard-daemon`, `socketguard` and `socketguard-ui`. Always use
 `./build.sh`, not `cargo build` or `npm run build` alone.
 

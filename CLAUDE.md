@@ -8,7 +8,8 @@ Always use the unified build script:
 
     ./build.sh                  # Release build (frontend + all crates)
     ./build.sh --debug          # Debug build
-    ./build.sh --with-bundled   # also fetch the pinned Tor, Yggdrasil, Wintun (network, git, Go)
+    ./build.sh --with-bundled   # also fetch the pinned Tor, Yggdrasil, Wintun into target/<profile>/third_party (network, git, Go)
+    ./build.sh --stage [dir]    # release build + the staged tree the packages are made from (default dist/stage; fetches the bundled files)
 
 NEVER run `cargo build` or `npm run build` separately. The script checks versions, builds the
 frontend first, then the Rust crates (release by default).
@@ -26,20 +27,23 @@ fine to run directly.
     - networks/   ip/ (Local, LAN, Yggdrasil, DHCPv6), tor, SocketGuard's own Tor and Yggdrasil children (managed.rs, *_managed.rs)
     - children/   the child processes of Tor and Yggdrasil (guard, pidfile)
     - firewall/   nftables, pf, wfp/ (plan + Windows FFI); iface/ (addresses on OS interfaces); monitor/
-    - service, install, uninstall, access, account, disable, portable (ADR 0050, 0054); ruleset,
+    - service, install, uninstall, footprint (the list `--purge` deletes, ADR 0057), access, account,
+      disable, portable (ADR 0050, 0054); ruleset,
       local API (api.rs), telemetry
 - crates/client/  — Typed client for the local API (shared by CLI and UI)
 - crates/cli/     — `socketguard` CLI, the primary frontend
 - ui/             — React frontend; ui/src-tauri is the Tauri v2 Rust backend (crate socketguard-ui);
                     ui/src/generated is produced by `cargo test -p socketguard-core --features ts export_bindings`
-- installer/      — windows/ (WiX MSI, portable zip), linux/ (nfpm deb/rpm), macos/ (pkg), payload/
-                    (bundled third-party files per platform)
+- installer/      — windows/ (WiX MSI, portable zip), linux/ (nfpm deb/rpm), macos/ (pkg); each builder
+                    takes the staged tree of `./build.sh --stage` (docs/packaging.md)
 - deploy/         — bundle/ (fetch pinned Tor/Yggdrasil/Wintun), ci/ (version and footprint checks,
                     macOS smoke), e2e/ (Docker tests), otel/ (telemetry stack), systemd/
-- test/           — Package tests: msi.ps1, portable.ps1, deb.sh, rpm.sh, rpm-systemd.sh, pkg.sh, managed.sh, managed-helpers.ps1 (sourced by the others)
+- test/           — Package tests: msi.ps1, portable.ps1, deb.sh, rpm.sh, rpm-systemd.sh, pkg.sh; shared helpers
+                    lib.sh, lib.ps1; the Tor and Yggdrasil checks networks.sh, networks.ps1
 - docs/           — adr/, api.md, cli.md, footprint.md, packaging.md, manual-checks.md
 - .github/workflows/ — ci, packages (builds and installs each package), e2e (nightly/dispatch),
-                    release (tags); .forgejo/workflows/ci.yml
+                    release (tags); .forgejo/workflows/ci.yml; .github/actions/ (setup, setup-wix,
+                    setup-nfpm, bundle)
 
 ## Testing
 

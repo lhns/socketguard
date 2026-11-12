@@ -39,28 +39,17 @@ $Data = Join-Path $Dir 'data'
 $ProgramDataDir = Join-Path $env:ProgramData 'SocketGuard'
 $Sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $ProviderGuid = '534F434B-4755-4152-4400-000000000001'
-$script:section = ''
 $script:run = 0
 $script:daemonProc = $null
 $script:owner = $null
 $script:addedAddress = $null
 $script:listener = $null
-# Mn-* helpers and counters shared with test/msi.ps1.
-. (Join-Path $PSScriptRoot 'managed-helpers.ps1')
+# Section, Ok, Skip, Fail, Run, Wait-Until, Assert-Footprint and friends.
+. (Join-Path $PSScriptRoot 'lib.ps1')
+# Mn-* helpers shared with test/msi.ps1 (test/networks.ps1).
+. (Join-Path $PSScriptRoot 'networks.ps1')
 
-function Section([string]$t) { $script:section = $t; Write-Host ''; Write-Host "== $t" -ForegroundColor Cyan }
-function Ok([string]$m) { Write-Host "  ok: $m" }
-
-function Wait-Until([scriptblock]$Cond, [int]$Seconds) {
-  $end = (Get-Date).AddSeconds($Seconds)
-  while ((Get-Date) -lt $end) {
-    if (& $Cond) { return $true }
-    Start-Sleep -Milliseconds 500
-  }
-  return $false
-}
-
-function Dump-Diagnostics {
+function On-Fail {
   Write-Host '--- diagnostics ---'
   Get-ChildItem $Out -Filter 'daemon-*.txt' -ErrorAction SilentlyContinue | ForEach-Object {
     Write-Host "== $($_.Name) (tail)"; Get-Content $_.FullName -Tail 60 | Write-Host
@@ -72,6 +61,7 @@ function Dump-Diagnostics {
   }
   Save-Wfp 'failure'
   try { & whoami /groups | Select-String 'Label|Administrators' | Write-Host } catch {}
+  Cleanup
 }
 
 function Cleanup {
@@ -79,30 +69,6 @@ function Cleanup {
     if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
   }
   if ($script:addedAddress) { Remove-NetIPAddress -InterfaceIndex $script:addedAddress[0] -IPAddress $script:addedAddress[1] -Confirm:$false -ErrorAction SilentlyContinue }
-}
-
-function Fail([string]$m) {
-  Write-Host "FAIL [$script:section] $m" -ForegroundColor Red
-  Dump-Diagnostics
-  Cleanup
-  exit 1
-}
-
-# Run a program to completion, keep its output in $Out, return @{Code; Text}.
-function Run([string]$Exe, [string[]]$Arguments, [string]$Tag, [int]$TimeoutSec = 120) {
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $Exe
-  foreach ($a in $Arguments) { [void]$psi.ArgumentList.Add($a) }
-  $psi.UseShellExecute = $false
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $p = [System.Diagnostics.Process]::Start($psi)
-  $o = $p.StandardOutput.ReadToEndAsync()
-  $e = $p.StandardError.ReadToEndAsync()
-  if (-not $p.WaitForExit($TimeoutSec * 1000)) { Stop-Process -Id $p.Id -Force; Fail "$Exe $($Arguments -join ' ') hung" }
-  $text = $o.Result + $e.Result
-  if ($Tag) { Set-Content -Path (Join-Path $Out "$Tag.txt") -Value "$Exe $($Arguments -join ' ')`nexit $($p.ExitCode)`n$text" }
-  return @{ Code = $p.ExitCode; Text = $text }
 }
 
 # The WFP objects of SocketGuard, from the engine's own dump.
@@ -126,8 +92,6 @@ function Save-Wfp([string]$Tag) {
   try { & netsh wfp show filters file=(Join-Path $Out "wfp-filters-$Tag.xml") 2>&1 | Out-Null } catch {}
 }
 
-function Service-State { $s = Get-Service SocketGuard -ErrorAction SilentlyContinue; if ($s) { return "$($s.Status)" } return 'absent' }
-
 function Pipe-Exists([string]$Name) { return [bool]([IO.Directory]::GetFiles('\\.\pipe\') | Where-Object { $_ -match "(?i)\\$([regex]::Escape($Name))$" }) }
 
 # A process this script controls: the portable daemon ends when it does.
@@ -149,26 +113,6 @@ function Start-Portable([string]$Exe, [string]$Tag) {
 function Daemon-Log([string]$Base) { return ((Get-Content $Base -Raw -ErrorAction SilentlyContinue) + (Get-Content "$Base.err" -Raw -ErrorAction SilentlyContinue)) }
 
 function Wait-Api { return (Wait-Until { (Run $Cli @('status', '--json') $null).Code -eq 0 } 90) }
-
-function Try-Connect([string]$Ip, [int]$Port, [string]$From) {
-  try {
-    $c = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
-    if ($From) { $c.Client.Bind((New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Parse($From), 0))) }
-    $t = $c.ConnectAsync([System.Net.IPAddress]::Parse($Ip), $Port)
-    $ok = $t.Wait(4000) -and $c.Connected
-    $c.Close()
-    return [bool]$ok
-  } catch { return $false }
-}
-
-function Assert-Footprint([hashtable]$Params, [string]$Tag) {
-  $o = & $Footprint @Params 2>&1 | Out-String
-  $code = $LASTEXITCODE
-  Set-Content -Path (Join-Path $Out "footprint-$Tag.txt") -Value $o
-  Write-Host $o
-  if ($code -ne 0) { Fail "footprint-check exited $code" }
-  Ok "footprint-check $Tag"
-}
 
 # Stop the owner and wait for the daemon to end by itself. Returns its exit code.
 function End-Cleanly {
@@ -386,9 +330,9 @@ Assert-Footprint @{ Expect = 'absent' } 'end'
 Section '(d) managed Tor and Yggdrasil (ADR 0052) in portable mode'
 # The bundle action must have run before the zip was built (packages.yml, portable job).
 foreach ($f in 'tor\tor.exe', 'tor\pluggable_transports\lyrebird.exe', 'yggdrasil\yggdrasil.exe', 'yggdrasil\wintun.dll', 'VERSIONS') {
-  if (-not (Test-Path (Join-Path $Dir "third_party\$f"))) { Mn-Fail "third_party\$f is not in the zip: run .github/actions/bundle before installer/windows/portable.ps1" }
+  if (-not (Test-Path (Join-Path $Dir "third_party\$f"))) { Mn-Fail "third_party\$f is not in the zip (installer/windows/portable.ps1 copies it from the stage, ./build.sh --stage)" }
 }
-Mn-Ok 'the zip has third_party\ with tor.exe, lyrebird.exe, yggdrasil.exe, wintun.dll and VERSIONS'
+Ok 'the zip has third_party\ with tor.exe, lyrebird.exe, yggdrasil.exe, wintun.dll and VERSIONS'
 # Asked once, before the first managed Yggdrasil start, like the daemon does: the same pattern as the
 # footprint check, which compares the driver store with this answer after the exit.
 function Wintun-InStore { return [bool]((& pnputil.exe /enum-drivers 2>&1 | Out-String) -match '(?im)^[^:\r\n]+:\s*wintun\.inf\s*$') }
@@ -404,7 +348,7 @@ Write-Host $r.Text
 if ($r.Code -ne 0) { Mn-Fail "networks add tor exited $($r.Code) in portable mode" }
 Write-Host '  waiting for the bootstrap (up to 10 minutes)'
 if (-not (Mn-WaitUp 'tor' 600)) { Mn-Fail 'the managed Tor network is not up after 10 minutes' }
-Mn-Ok 'the managed Tor network is up (bootstrapped)'
+Ok 'the managed Tor network is up (bootstrapped)'
 $torProcs = Mn-Procs 'tor.exe'
 if ($torProcs.Count -eq 0) { Mn-Fail 'the network is up but no tor.exe from the portable folder is running' }
 $daemonCim = Get-CimInstance Win32_Process -Filter "ProcessId=$($script:daemonProc.Id)"
@@ -415,9 +359,9 @@ Write-Host "  daemon owner: $daemonOwner; tor.exe (pid $($torProcs[0].ProcessId)
 # No installer ran, so there is no LocalService or other account set up for the child: it is the
 # account of the elevated portable daemon, and nothing tries to log LocalService on.
 if ($torOwner -ne $daemonOwner) { Mn-Fail "tor.exe runs as $torOwner, the portable daemon as $daemonOwner (they must be the same account)" }
-Mn-Ok "tor.exe runs as the same account as the portable daemon ($torOwner)"
+Ok "tor.exe runs as the same account as the portable daemon ($torOwner)"
 if ("$($n.managed.runs_as)" -notmatch 'account running portable SocketGuard') { Mn-Fail "runs_as is '$($n.managed.runs_as)', not the account running portable SocketGuard" }
-Mn-Ok "the network card says it runs as $($n.managed.runs_as)"
+Ok "the network card says it runs as $($n.managed.runs_as)"
 if (-not (Test-Path (Join-Path $Data 'tor'))) { Mn-Fail "no $Data\tor" }
 
 $r = Run $Cli @('networks', 'add', 'yggdrasil', '--id', 'ygg') 'd-add-ygg'
@@ -445,7 +389,7 @@ foreach ($sub in $subs) {
   if ($names -contains $Sid) { Mn-Fail "$p has an access entry for the allowed account $Sid`n$((& icacls $p) -join "`n")" }
   $open = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and ((& $sidOf $_) -in @('S-1-1-0', 'S-1-5-32-545', 'S-1-5-11')) })
   if ($open.Count -gt 0) { Mn-Fail "$p admits Everyone, Users or Authenticated Users`n$((& icacls $p) -join "`n")" }
-  Mn-Ok "$sub`: the directory has a protected access list (SYSTEM, Administrators and the daemon's account)"
+  Ok "$sub`: the directory has a protected access list (SYSTEM, Administrators and the daemon's account)"
 }
 Set-Content (Join-Path $Out 'd-acl.txt') ((& icacls (Join-Path $Data 'tor')) -join "`n")
 # The Wintun fact is recorded before the first Yggdrasil start; when the adapter never appeared the
@@ -454,7 +398,7 @@ if (-not $seen) {
   Write-Host '  session.json and data\yggdrasil are not asserted: the adapter did not appear'
 } elseif (Wait-Until { try { $script:session = Get-Content (Join-Path $Data 'session.json') -Raw | ConvertFrom-Json; $null -ne $script:session.wintun_present_before } catch { $false } } 30) {
   if ([bool]$script:session.wintun_present_before -ne $wintunBefore) { Mn-Fail "session.json says Wintun was present before: $($script:session.wintun_present_before), the driver store said $wintunBefore" }
-  Mn-Ok "session.json records that the Wintun driver was present before: $wintunBefore (no install record exists in portable mode)"
+  Ok "session.json records that the Wintun driver was present before: $wintunBefore (no install record exists in portable mode)"
 } else {
   Mn-Fail 'session.json has no wintun_present_before after the managed Yggdrasil was added'
 }
@@ -462,19 +406,19 @@ $adapterSeen = $false
 if (-not $seen) {
   $why = Mn-Describe $n
   Set-Content -Path (Join-Path $Out 'ygg-adapter-error.txt') -Value ("no adapter after 120 s`n$why`n" + ($n | ConvertTo-Json -Depth 6) + "`n" + ((Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Format-Table Name, InterfaceDescription, Status -AutoSize | Out-String)) + "`n" + ((& pnputil /enum-drivers 2>&1 | Select-String -Pattern 'wintun' -Context 3, 3 | Out-String)))
-  Mn-Skip "portable managed Yggdrasil: no adapter 'SocketGuard' on this runner after 120 s. Status: $why. Details in ygg-adapter-error.txt"
+  Skip "portable managed Yggdrasil: no adapter 'SocketGuard' on this runner after 120 s. Status: $why. Details in ygg-adapter-error.txt"
 } else {
   $adapterSeen = $true
   $ad = Mn-Adapter
-  Mn-Ok "the adapter exists: $($ad.Name) ($($ad.InterfaceDescription), $($ad.Status))"
+  Ok "the adapter exists: $($ad.Name) ($($ad.InterfaceDescription), $($ad.Status))"
   if (-not (Wintun-InStore)) { Mn-Fail 'the adapter exists but the Wintun driver is not in the driver store' }
   if (-not (Mn-WaitUp 'ygg' 120)) { Mn-Fail 'the managed Yggdrasil network is not up 2 minutes after the adapter appeared' }
-  Mn-Ok 'the managed Yggdrasil network is up'
+  Ok 'the managed Yggdrasil network is up'
   $yp = Mn-Procs 'yggdrasil.exe'
   if ($yp.Count -eq 0) { Mn-Fail 'no yggdrasil.exe from the portable folder is running' }
   $yo = Mn-Owner $yp[0]
   if ($yo -ne $daemonOwner) { Mn-Fail "yggdrasil.exe runs as $yo, the portable daemon as $daemonOwner" }
-  Mn-Ok "yggdrasil.exe runs as the portable daemon's account ($yo)"
+  Ok "yggdrasil.exe runs as the portable daemon's account ($yo)"
 }
 
 # Clean exit: the owner ends, the daemon stops both children, removes the Wintun driver if it was
@@ -482,25 +426,25 @@ if (-not $seen) {
 $code = End-Cleanly
 Set-Content (Join-Path $Out 'daemon-5-exit.txt') "exit code $code`n$(Daemon-Log $log5)"
 if ($code -ne 0) { Mn-Fail "the daemon exited with $code after a clean end with managed networks" }
-Mn-Ok 'the daemon exited 0'
+Ok 'the daemon exited 0'
 $le = Get-Content (Join-Path $Data 'last-exit.log') -Raw
 if ($le -notmatch 'clean') { Mn-Fail "last-exit.log does not say clean: $le" }
-Mn-Ok "last-exit.log: $($le.Trim())"
+Ok "last-exit.log: $($le.Trim())"
 if (Test-Path (Join-Path $Data 'session.json')) { Mn-Fail 'session.json is left after a clean exit' }
 if (-not (Wait-Until { ((Mn-Procs 'tor.exe').Count -eq 0) -and ((Mn-Procs 'yggdrasil.exe').Count -eq 0) } 30)) { Mn-Fail 'tor.exe or yggdrasil.exe from the portable folder still runs after the clean exit' }
-Mn-Ok 'no tor.exe or yggdrasil.exe from the portable folder is running'
+Ok 'no tor.exe or yggdrasil.exe from the portable folder is running'
 if ($adapterSeen) {
   if (-not (Wait-Until { -not (Mn-Adapter) } 30)) { Mn-Fail 'the SocketGuard adapter is still there after the clean exit' }
-  Mn-Ok 'the SocketGuard adapter is gone'
+  Ok 'the SocketGuard adapter is gone'
 }
 $wintunAfter = Wintun-InStore
 if ($adapterSeen -and -not $wintunBefore) {
   Set-Content -Path (Join-Path $Out 'pnputil-after-portable-exit.txt') -Value (& pnputil.exe /enum-drivers 2>&1 | Out-String)
   if ($wintunAfter) { Mn-Fail 'the Wintun driver was absent before, and is still in the driver store after the clean exit (pnputil-after-portable-exit.txt)' }
-  Mn-Ok 'the Wintun driver was absent before and is removed by the clean exit'
+  Ok 'the Wintun driver was absent before and is removed by the clean exit'
 } elseif ($wintunBefore) {
   if (-not $wintunAfter) { Mn-Fail 'the Wintun driver was installed before SocketGuard, and the clean exit removed it' }
-  Mn-Ok 'the Wintun driver was installed before and stays'
+  Ok 'the Wintun driver was installed before and stays'
 } else {
   Write-Host "  no adapter was created: the driver store is asserted by the footprint check only (Wintun in store: $wintunAfter)"
 }
@@ -510,8 +454,7 @@ if ($wintunBefore) { $fp.WintunPresentBefore = $true }
 Assert-Footprint $fp 'd-after-managed-exit'
 
 Section 'done'
-Write-Host "managed networks: $($script:mnOk) checks passed, $($script:mnSkipped.Count) skipped"
-foreach ($s in $script:mnSkipped) { Write-Host "  skipped: $s" }
+Write-Summary 'networks'
 Write-Host 'OK'
 }
 finally {

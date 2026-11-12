@@ -4,6 +4,7 @@
 //! child process of ours, strictly inside the state directory.
 
 use crate::access::GroupManager;
+use crate::footprint::{purge_items, Item};
 use crate::host::{require_admin, Host};
 use crate::install::{undo_entry, Platform, Record};
 use crate::report::Report;
@@ -283,20 +284,15 @@ pub async fn uninstall(
     Ok(report)
 }
 
-/// The files `--purge` deletes, by name.
+/// The files `--purge` deletes, by name (the file and temp-file items of [`purge_items`]).
 pub fn named_files(paths: &UninstallPaths) -> Vec<PathBuf> {
     let mut out = vec![];
-    let db = paths.db.to_string_lossy().into_owned();
-    for suffix in ["", "-wal", "-shm"] {
-        out.push(PathBuf::from(format!("{db}{suffix}")));
-    }
-    out.push(paths.config.clone());
-    if let Some(dir) = paths.config.parent() {
-        out.extend(list_prefixed(dir, "socketguard.tmp-"));
-    }
-    out.push(socketguard_core::paths::setup_log_path(&paths.config));
-    if let Some(s) = &paths.socket {
-        out.push(s.clone());
+    for item in purge_items(paths, std::env::consts::OS) {
+        match item {
+            Item::File(p) => out.push(p),
+            Item::Prefixed { dir, prefix } => out.extend(list_prefixed(&dir, &prefix)),
+            _ => {}
+        }
     }
     out
 }
@@ -857,35 +853,6 @@ mod tests {
                 assert!(text.contains("shared with other software"), "{text}");
             }
             std::fs::remove_dir_all(w.d).unwrap();
-        }
-    }
-
-    /// The Debian postrm cannot run the daemon (the binary is gone at purge) and deletes the
-    /// same files by a list of its own: this keeps that list in step with `named_files`.
-    #[test]
-    fn the_debian_postrm_names_what_purge_deletes() {
-        let script = include_str!("../../../installer/linux/scripts/deb-postrm");
-        let l = socketguard_core::paths::locations_for("linux", None);
-        let unix = |p: &Path| p.to_string_lossy().replace('\\', "/");
-        let (config, db) = (l.config(), l.db());
-        let p = UninstallPaths {
-            config: config.clone(),
-            db: db.clone(),
-            socket: None,
-            state_dir: l.state_dir.clone(),
-        };
-        // Files that exist by name; the prefixed ones (temp files) are
-        // matched below by their prefix.
-        for f in named_files(&p) {
-            assert!(
-                script.contains(&unix(&f)),
-                "postrm does not delete {}",
-                f.display()
-            );
-        }
-        assert!(script.contains(&unix(&l.config_dir.join("socketguard.tmp-"))));
-        for d in l.dirs() {
-            assert!(script.contains(&unix(&d)), "postrm leaves {}", d.display());
         }
     }
 

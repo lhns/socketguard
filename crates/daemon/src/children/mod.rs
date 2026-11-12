@@ -25,6 +25,7 @@ mod win;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 
+pub use pidfile::RUN_DIR;
 pub use system::SystemSpawner;
 #[cfg(windows)]
 pub(crate) use win::check_local_service_logon;

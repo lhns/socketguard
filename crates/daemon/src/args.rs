@@ -50,6 +50,11 @@ pub enum Command {
         force: bool,
         export: Option<PathBuf>,
     },
+    /// Hidden: print what `uninstall --purge` deletes at the fixed installed paths of a system
+    /// (this one by default), for the package builders and tests (`footprint::print_list`).
+    PurgeList {
+        os: Option<String>,
+    },
     /// Hidden: the daemon's own start of a child that must end with the daemon (Unix).
     ChildGuard {
         /// Where to record the program's pid (see `children::pidfile`).
@@ -115,9 +120,11 @@ fn take_run_options(args: &[String]) -> Result<(crate::portable::RunOptions, Vec
 /// (a service, a group, an install record) or is the installed service's entry point.
 pub fn portable_refusal(cmd: &Command) -> Option<&'static str> {
     match cmd {
-        Command::Run(_) | Command::Help | Command::Disable { .. } | Command::ChildGuard { .. } => {
-            None
-        }
+        Command::Run(_)
+        | Command::Help
+        | Command::Disable { .. }
+        | Command::ChildGuard { .. }
+        | Command::PurgeList { .. } => None,
         Command::Service(ServiceCmd::Status { .. }) => None,
         Command::Service(_) => Some("portable mode registers no service"),
         Command::Access(_) => Some("portable mode creates no access group"),
@@ -188,6 +195,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         ["access", "allow", who] => Ok(Command::Access(AccessCmd::Allow(who.to_string()))),
         ["access", "deny", who] => Ok(Command::Access(AccessCmd::Deny(who.to_string()))),
         ["access", "list"] => Ok(Command::Access(AccessCmd::List)),
+        ["uninstall", "--print-purge-list"] => Ok(Command::PurgeList { os: None }),
+        ["uninstall", "--print-purge-list", "--os", os] => Ok(Command::PurgeList {
+            os: Some(os.to_string()),
+        }),
         ["uninstall", rest @ ..] => {
             let (mut purge, mut keep_data, mut yes, mut force, mut export) =
                 (false, false, false, false, None);

@@ -1,21 +1,10 @@
-# Helpers for the managed Tor and Yggdrasil checks (ADR 0052) of test/msi.ps1 and
-# test/portable.ps1. Dot-sourced: the including script defines $Cli, $Out, Run, Fail and
-# Wait-Until (Cond, Seconds[, What]) and gets its own counters.
-#
-# Own counters and summary lines; a check the runner cannot do is SKIPPED with the exact reason
-# and listed at the end, never faked.
+# Helpers for the Tor and Yggdrasil checks (ADR 0052) of test/msi.ps1 and test/portable.ps1.
+# Dot-sourced after test/lib.ps1 (Ok, Skip, Fail, Run, Wait-Until); the including script defines
+# $Cli, and $script:MnLogBase with Daemon-Log for the daemon log.
 
-$script:mnOk = 0
-$script:mnSkipped = New-Object System.Collections.Generic.List[string]
 $script:mnAdapterSeen = $false
 $script:mnWintun = $null
 
-function Mn-Ok([string]$m) { $script:mnOk++; Write-Host "  ok: $m" }
-function Mn-Skip([string]$m) {
-  $script:mnSkipped.Add($m)
-  Write-Host "  SKIPPED: $m" -ForegroundColor Yellow
-  Write-Host "::warning::managed networks: SKIPPED: $m"
-}
 function Mn-Net([string]$Id) {
   $r = Run $Cli @('networks', 'list', '--json') $null
   if ($r.Code -ne 0) { return $null }
@@ -44,7 +33,7 @@ function Mn-Adapter {
     Where-Object { $_.Name -eq 'SocketGuard' -or $_.InterfaceDescription -match 'Wintun' } | Select-Object -First 1
 }
 function Mn-Fail([string]$m) {
-  Write-Host "managed networks: $m" -ForegroundColor Red
+  Write-Host "networks: $m" -ForegroundColor Red
   Write-Host '--- socketguard networks list ---'
   Write-Host (Run $Cli @('networks', 'list') 'mn-networks-list').Text
   Write-Host (Run $Cli @('networks', 'list', '--json') 'mn-networks-json').Text
@@ -57,7 +46,7 @@ function Mn-Fail([string]$m) {
   }
   Write-Host '--- adapters ---'
   Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Format-Table Name, InterfaceDescription, Status -AutoSize | Out-String | Write-Host
-  Fail "managed networks: $m"
+  Fail "networks: $m"
 }
 function Mn-WaitUp([string]$Id, [int]$Seconds) {
   $end = (Get-Date).AddSeconds($Seconds); $last = ''

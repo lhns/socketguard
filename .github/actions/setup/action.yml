@@ -1,0 +1,56 @@
+name: setup
+description: >-
+  The toolchain a job builds with: Rust (with the cargo cache), Node with the npm cache and
+  `npm ci` for the frontend, and on Linux the desktop app's build dependencies.
+
+# One place for the steps ci.yml and packages.yml repeated. Everything is optional, so a job
+# that only needs Rust (the Rust checks) or only the frontend (lint, tests) pays for just that.
+inputs:
+  rust:
+    description: Install Rust and cache cargo ("true" or "false")
+    required: false
+    default: "true"
+  components:
+    description: Extra Rust components, e.g. "rustfmt, clippy"
+    required: false
+    default: ""
+  node:
+    description: Install Node, restore the npm cache and run `npm ci` in ui ("true" or "false")
+    required: false
+    default: "false"
+  desktop-deps:
+    description: On Linux, install the webkit2gtk and GTK build dependencies of the Tauri app
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - if: inputs.rust == 'true'
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.components }}
+
+    - if: inputs.rust == 'true'
+      uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+
+    - if: inputs.node == 'true'
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: ui/package-lock.json
+
+    - if: inputs.desktop-deps == 'true' && runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+          libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev patchelf
+
+    - if: inputs.node == 'true'
+      shell: bash
+      run: npm ci
+      working-directory: ui
