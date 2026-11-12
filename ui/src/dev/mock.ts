@@ -11,10 +11,10 @@ const T0 = "2026-01-01T00:00:00Z";
 let networks: Network[] = [
   { id: "n-local", kind: "local", name: "Local", interface: "lo", grants_apply: false, status: { state: "up" } },
   { id: "n-ygg", kind: "yggdrasil", name: "Yggdrasil", interface: "ygg0", grants_apply: true, status: { state: "up" },
-    managed: { state: "up", runs_as: "the daemon's account (Windows cannot drop it)", version: "0.5.12", address: "200:8af8:ba35:56ae:bef0:6284:981f:5972", peers: ["tls://ygg.example.org:443"], peers_connected: 1 } },
+    child: { state: "up", runs_as: "the daemon's account (Windows cannot drop it)", version: "0.5.12", address: "200:8af8:ba35:56ae:bef0:6284:981f:5972", peers: ["tls://ygg.example.org:443"], peers_connected: 1 } },
   { id: "n-lan", kind: "lan", name: "LAN", interface: "eth0", grants_apply: true, status: { state: "up" } },
   { id: "n-tor", kind: "tor", name: "Tor", interface: null, grants_apply: true, status: { state: "up" },
-    managed: { state: "bootstrapping", progress: 62, runs_as: "socketguard-net", version: "0.4.8.12", peers: [] } },
+    child: { state: "bootstrapping", progress: 62, runs_as: "socketguard-net", version: "0.4.8.12", peers: [] } },
 ];
 
 let seq = 100;
@@ -541,16 +541,16 @@ export function installMock(kind?: string | null) {
         case "network_setup": return networkSetup;
         case "set_network_peers": {
           const n = networks.find((x) => x.id === a.id);
-          if (n?.managed) n.managed = { ...n.managed, peers: a.peers as string[], state: "starting", peers_connected: undefined };
+          if (n?.child) n.child = { ...n.child, peers: a.peers as string[], state: "starting", peers_connected: undefined };
           return done(n);
         }
         case "set_network_bridges": {
           const n = networks.find((x) => x.id === a.id);
-          if (n?.managed) n.managed = { ...n.managed, bridges: a.bridges as string[], state: "starting" };
+          if (n?.child) n.child = { ...n.child, bridges: a.bridges as string[], state: "starting" };
           return n;
         }
         case "open_link": return undefined;
-        case "add_network": return { id: a.req.type, kind: a.req.type === "slaac" ? "lan" : a.req.type, name: a.req.type, interface: a.req.interface ?? null, grants_apply: true, status: { state: "up" }, ...(a.req.type === "yggdrasil" || a.req.type === "tor" ? { managed: { state: "starting", peers: a.req.peers ?? [] } } : {}) };
+        case "add_network": return { id: a.req.type, kind: a.req.type === "slaac" ? "lan" : a.req.type, name: a.req.type, interface: a.req.interface ?? null, grants_apply: true, status: { state: "up" }, ...(a.req.type === "yggdrasil" || a.req.type === "tor" ? { child: { state: "starting", peers: a.req.peers ?? [] } } : {}) };
         case "get_settings": return { protect_host_interfaces: ["eth0"] };
         case "activity": return [];
         case "share_app": return { tor: [] };

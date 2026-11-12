@@ -72,16 +72,14 @@ CERT=$(printf 'A%.0s' $(seq 70))
 BRIDGE="obfs4 192.0.2.10:443 $FP cert=$CERT iat-mode=0"
 BRIDGE2="obfs4 [2001:db8::5]:9001 $FP cert=$CERT iat-mode=2"
 
-tor_pid() { docker exec "$NODE_A" sh -c "ps -eo pid=,stat=,comm= | awk '\$3 == \"tor\" && \$2 !~ /^Z/ { print \$1; exit }'" | grep .; }
 helper_pids() { docker exec "$NODE_A" sh -c "ps -eo pid=,user:32=,args= | awk '\$2 == \"socketguard-net\" && \$3 ~ /pluggable_transports\\/lyrebird\$/ { print \$1 }'" | grep .; }
 helper_gone() { ! helper_pids >/dev/null; }
-net_json() { docker exec "$NODE_A" $SG networks list --json; }
 net_up() { net_json | jq -e '.[0].status.state == "up"' >/dev/null; }
 net_reason() { net_json | jq -r '.[0] | (.status.reason // .status.state)'; }
 torrc_tail() { docker exec "$NODE_A" sh -c "sed -n '/^Log notice stdout\$/,\$p' '$TORRC' | tail -n +2"; }
 torrc_is() { [ "$(torrc_tail)" = "$1" ]; }
 reason_says_bridges() { net_reason | grep -q "connecting through bridges"; }
-bridges_json() { net_json | jq -c '.[0].managed.bridges // []'; }
+bridges_json() { net_json | jq -c '.[0].child.bridges // []'; }
 bridges_cli() { docker exec "$NODE_A" $SG networks bridges tor --json | jq -c .; }
 is() { [ "$1" = "$2" ]; }                       # is ACTUAL EXPECTED
 tor_changed_from() { [ "$(tor_pid)" != "$1" ]; }

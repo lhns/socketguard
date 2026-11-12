@@ -198,7 +198,7 @@ fn networks() -> Vec<Network> {
             status: NetworkStatus::Up,
             prefix: None,
             vlan_id: None,
-            managed: None,
+            child: None,
         },
         Network {
             id: "ygg".into(),
@@ -209,7 +209,7 @@ fn networks() -> Vec<Network> {
             status: NetworkStatus::Up,
             prefix: None,
             vlan_id: None,
-            managed: None,
+            child: None,
         },
         Network {
             id: "lan".into(),
@@ -222,7 +222,7 @@ fn networks() -> Vec<Network> {
             },
             prefix: None,
             vlan_id: None,
-            managed: None,
+            child: None,
         },
     ]
 }
@@ -281,9 +281,9 @@ fn status() {
 }
 
 #[test]
-fn managed_networks_in_the_table() {
-    use socketguard_core::{ChildState, ManagedInfo};
-    let info = |state, progress, peers_connected, address: Option<&str>| ManagedInfo {
+fn tor_and_yggdrasil_networks_in_the_table() {
+    use socketguard_core::{ChildInfo, ChildState};
+    let info = |state, progress, peers_connected, address: Option<&str>| ChildInfo {
         state,
         progress,
         detail: None,
@@ -295,7 +295,7 @@ fn managed_networks_in_the_table() {
         bridges: vec![],
         bridges_unavailable: None,
     };
-    let net = |id: &str, kind, managed| Network {
+    let net = |id: &str, kind, child| Network {
         id: id.into(),
         kind,
         name: id.into(),
@@ -304,7 +304,7 @@ fn managed_networks_in_the_table() {
         status: NetworkStatus::Up,
         prefix: None,
         vlan_id: None,
-        managed,
+        child,
     };
     let out = render::networks(&[
         net(

@@ -281,21 +281,19 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
             let Some(network) = networks.iter().find(|n| n.id == id) else {
                 bail!("no network {id}");
             };
-            let Some(managed) = network
-                .managed
+            let Some(child) = network
+                .child
                 .as_ref()
                 .filter(|_| network.kind == socketguard_core::NetworkKind::Yggdrasil)
             else {
                 bail!("{id} is not a Yggdrasil network");
             };
             if add.is_empty() && rm.is_empty() {
-                return c.print(&managed.peers, || {
-                    render::network_peers(&id, &managed.peers)
-                });
+                return c.print(&child.peers, || render::network_peers(&id, &child.peers));
             }
-            let peers = edited_peers(&managed.peers, &add, &rm)?;
+            let peers = edited_peers(&child.peers, &add, &rm)?;
             let n = c.client.set_peers(&id, &peers).await?;
-            let now = n.managed.map(|m| m.peers).unwrap_or(peers);
+            let now = n.child.map(|m| m.peers).unwrap_or(peers);
             c.print(&now, || render::network_peers(&id, &now))
         }
         NetworksCmd::Bridges { id, add, rm, clear } => {
@@ -303,25 +301,25 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
             let Some(network) = networks.iter().find(|n| n.id == id) else {
                 bail!("no network {id}");
             };
-            let Some(managed) = network
-                .managed
+            let Some(child) = network
+                .child
                 .as_ref()
                 .filter(|_| network.kind == socketguard_core::NetworkKind::Tor)
             else {
                 bail!("{id} is not a Tor network");
             };
             if add.is_empty() && rm.is_empty() && !clear {
-                return c.print(&managed.bridges, || {
-                    render::network_bridges(&id, &managed.bridges)
+                return c.print(&child.bridges, || {
+                    render::network_bridges(&id, &child.bridges)
                 });
             }
             let bridges = if clear {
                 vec![]
             } else {
-                edited_bridges(&managed.bridges, &add, &rm)?
+                edited_bridges(&child.bridges, &add, &rm)?
             };
             let n = c.client.set_bridges(&id, &bridges).await?;
-            let now = n.managed.map(|m| m.bridges).unwrap_or(bridges);
+            let now = n.child.map(|m| m.bridges).unwrap_or(bridges);
             c.print(&now, || render::network_bridges(&id, &now))
         }
         NetworksCmd::Rm { id, force } => {

@@ -5,8 +5,8 @@
 #
 # install -> service active, answers on the socket, nft table, footprint present;
 # upgrade -> data kept, service restarted onto the new binary, no uninstall;
-# networks (test/networks.sh, ADR 0052): the bundled versions in `status`, a managed Tor
-#           that bootstraps and runs as socketguard-net, a managed Yggdrasil whose address is
+# networks (test/networks.sh, ADR 0052): the bundled versions in `status`, Tor
+#           that bootstraps and runs as socketguard-net, Yggdrasil whose address is
 #           blocked before its adapter exists;
 # remove  -> service, rules and children gone, data (incl. <state>/tor, /yggdrasil) kept;
 # purge   -> nothing left, the account the install created removed.
@@ -100,7 +100,7 @@ if [ -e /dev/net/tun ]; then
     grep -qiF "$MN_YGG_ADDR" <<<"$(ip -6 addr show dev "$ADAPTER")" || mn_die "$ADAPTER does not hold $MN_YGG_ADDR"
     ok "$ADAPTER holds the node's address"
 else
-    skip "managed Yggdrasil: this runner has no /dev/net/tun"
+    skip "Yggdrasil: this runner has no /dev/net/tun"
 fi
 summary networks
 sudo cp /etc/socketguard/setup-log.json "${RUNNER_TEMP:-/tmp}/setup-log.before-remove.json"

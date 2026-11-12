@@ -1,12 +1,12 @@
-//! The managed Yggdrasil network (ADR 0052) in the engine, over the fake supervisor: the
+//! The Yggdrasil network (ADR 0052) in the engine, over the fake supervisor: the
 //! node's key and addresses exist before anything runs, the child starts only after the
 //! ruleset that closes its addresses is in force and no other node runs on the host, and
 //! its state is what the network card shows.
 
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig, DaemonConfig};
 use socketguard_core::{ChildState, Network, NetworkStatus};
+use socketguard_daemon::networks::ygg_child::OTHER_NODE;
 use socketguard_daemon::networks::ygg_key::YggKey;
-use socketguard_daemon::networks::ygg_managed::OTHER_NODE;
 use socketguard_daemon::test_support::*;
 use socketguard_daemon::AppState;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ const ADAPTER: &str = if cfg!(windows) {
     "sgygg0"
 };
 
-fn managed_ygg(peers: &[&str]) -> BackendInstanceConfig {
+fn ygg_instance(peers: &[&str]) -> BackendInstanceConfig {
     BackendInstanceConfig {
         id: ID.into(),
         backend: BackendConfig::yggdrasil(peers.iter().map(|p| p.to_string()).collect()),
@@ -50,13 +50,13 @@ async fn network(state: &AppState) -> Network {
         .expect("the network")
 }
 
-async fn add(h: &ManagedHarness, peers: &[&str]) -> (Arc<AppState>, anyhow::Result<()>) {
+async fn add(h: &ChildHarness, peers: &[&str]) -> (Arc<AppState>, anyhow::Result<()>) {
     let state = h.app_state(DaemonConfig::default()).await;
     let (_, applied) = state
         .engine
         .write()
         .await
-        .add_network(&state, managed_ygg(peers))
+        .add_network(&state, ygg_instance(peers))
         .await
         .unwrap();
     (state, applied)
@@ -66,11 +66,11 @@ async fn reconcile(state: &AppState) {
     state.engine.read().await.reconcile(state).await.unwrap();
 }
 
-fn key(h: &ManagedHarness) -> YggKey {
+fn key(h: &ChildHarness) -> YggKey {
     h.ctx.keys.get(ID).expect("the key of the network")
 }
 
-fn overlay_scopes(h: &ManagedHarness) -> Vec<String> {
+fn overlay_scopes(h: &ChildHarness) -> Vec<String> {
     applied(&h.fw_calls)
         .last()
         .map(|r| r.scopes.iter().map(|s| s.id.clone()).collect())
@@ -79,7 +79,7 @@ fn overlay_scopes(h: &ManagedHarness) -> Vec<String> {
 
 #[tokio::test]
 async fn the_key_and_the_remembered_node_exist_when_the_network_is_added() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let (state, applied) = add(&h, &[]).await;
     applied.unwrap();
     let key = key(&h);
@@ -96,13 +96,13 @@ async fn the_key_and_the_remembered_node_exist_when_the_network_is_added() {
     assert!(scopes.contains(&"overlay:ygg:subnet"), "{scopes:?}");
 }
 
-fn applied_rulesets(h: &ManagedHarness) -> Vec<socketguard_daemon::firewall::DesiredRuleset> {
+fn applied_rulesets(h: &ChildHarness) -> Vec<socketguard_daemon::firewall::DesiredRuleset> {
     applied(&h.fw_calls)
 }
 
 #[tokio::test]
 async fn the_private_key_is_not_in_the_export() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let (state, applied) = add(&h, &[]).await;
     applied.unwrap();
     let engine = state.engine.read().await;
@@ -118,7 +118,7 @@ async fn the_private_key_is_not_in_the_export() {
 
 #[tokio::test]
 async fn the_child_starts_after_the_ruleset_with_the_adr_command_line_and_a_private_conf() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let (state, applied) = add(&h, &["tcp://192.0.2.1:9001"]).await;
     applied.unwrap();
     wait_until("the child to start", || h.spawner.started() == 1).await;
@@ -167,7 +167,7 @@ async fn the_child_starts_after_the_ruleset_with_the_adr_command_line_and_a_priv
     if !cfg!(target_os = "macos") {
         assert_eq!(n.interface.as_deref(), Some(ADAPTER));
     }
-    let m = n.managed.expect("managed info");
+    let m = n.child.expect("child info");
     assert_eq!(m.state, ChildState::Starting);
     assert_eq!(m.address, Some(key(&h).node().address.to_string()));
     assert_eq!(m.peers, ["tcp://192.0.2.1:9001"]);
@@ -189,7 +189,7 @@ async fn the_child_starts_after_the_ruleset_with_the_adr_command_line_and_a_priv
 
 #[tokio::test]
 async fn a_failed_apply_keeps_the_child_unstarted_and_the_status_says_why() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     h.fw.set_failing(true);
     let (state, applied) = add(&h, &[]).await;
     assert!(applied.is_err());
@@ -203,7 +203,7 @@ async fn a_failed_apply_keeps_the_child_unstarted_and_the_status_says_why() {
     assert!(overlay_scopes(&h).contains(&"overlay:ygg:addr".to_string()));
 
     let n = network(&state).await;
-    let m = n.managed.expect("managed info");
+    let m = n.child.expect("child info");
     assert_eq!(m.state, ChildState::Waiting);
     let detail = m.detail.expect("a reason");
     assert!(
@@ -218,14 +218,14 @@ async fn a_failed_apply_keeps_the_child_unstarted_and_the_status_says_why() {
     reconcile(&state).await;
     wait_until("the child to start", || h.spawner.started() == 1).await;
     assert_eq!(
-        network(&state).await.managed.unwrap().state,
+        network(&state).await.child.unwrap().state,
         ChildState::Starting
     );
 }
 
 #[tokio::test]
 async fn another_node_on_the_host_holds_it_back_until_it_is_gone() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     h.ifaces.add_interface("ygg0");
     h.ifaces
         .plant_address("ygg0", "200:1111:2222::1".parse().unwrap());
@@ -234,7 +234,7 @@ async fn another_node_on_the_host_holds_it_back_until_it_is_gone() {
     settle().await;
     assert_eq!(h.spawner.started(), 0);
     let n = network(&state).await;
-    let m = n.managed.unwrap();
+    let m = n.child.unwrap();
     assert_eq!(m.state, ChildState::Waiting);
     assert_eq!(m.detail.as_deref(), Some(OTHER_NODE));
     assert_eq!(
@@ -260,7 +260,7 @@ async fn another_node_on_the_host_holds_it_back_until_it_is_gone() {
 
 #[tokio::test]
 async fn our_own_adapter_does_not_count_as_another_node() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let (state, applied) = add(&h, &[]).await;
     applied.unwrap();
     wait_until("the child to start", || h.spawner.started() == 1).await;
@@ -271,7 +271,7 @@ async fn our_own_adapter_does_not_count_as_another_node() {
     settle().await;
     assert_eq!(h.spawner.started(), 1, "not restarted, not held");
     assert_ne!(
-        network(&state).await.managed.unwrap().state,
+        network(&state).await.child.unwrap().state,
         ChildState::Waiting
     );
 }
@@ -279,7 +279,7 @@ async fn our_own_adapter_does_not_count_as_another_node() {
 #[tokio::test]
 async fn the_node_is_up_when_its_admin_socket_answers_and_the_adapter_has_the_address() {
     use socketguard_daemon::networks::ip::ygg_admin::fake::*;
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let (state, applied) = add(&h, &["tcp://192.0.2.1:9001"]).await;
     applied.unwrap();
     wait_until("the child to start", || h.spawner.started() == 1).await;
@@ -298,7 +298,7 @@ async fn the_node_is_up_when_its_admin_socket_answers_and_the_adapter_has_the_ad
     );
     // The admin answers, but the adapter has no address yet: not up.
     settle().await;
-    assert_ne!(network(&state).await.managed.unwrap().state, ChildState::Up);
+    assert_ne!(network(&state).await.child.unwrap().state, ChildState::Up);
 
     h.ifaces.add_interface(ADAPTER);
     h.ifaces.plant_address(ADAPTER, node.address);
@@ -313,14 +313,14 @@ async fn the_node_is_up_when_its_admin_socket_answers_and_the_adapter_has_the_ad
     assert_eq!(st.status(ID).state, ChildState::Up);
     let n = network(&state).await;
     assert_eq!(n.status, NetworkStatus::Up);
-    let m = n.managed.unwrap();
+    let m = n.child.unwrap();
     assert_eq!(m.state, ChildState::Up);
     assert_eq!(m.peers_connected, Some(1), "one of the two peers is up");
 }
 
 #[tokio::test]
 async fn new_peers_restart_the_child_with_a_new_conf() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let (state, applied) = add(&h, &["tcp://192.0.2.1:9001"]).await;
     applied.unwrap();
     wait_until("the child to start", || h.spawner.started() == 1).await;
@@ -339,14 +339,14 @@ async fn new_peers_restart_the_child_with_a_new_conf() {
         serde_json::from_str(&std::fs::read_to_string(&conf_path).unwrap()).unwrap();
     assert_eq!(conf["Peers"], serde_json::json!(["tls://example.org:443"]));
     assert_eq!(
-        network(&state).await.managed.unwrap().peers,
+        network(&state).await.child.unwrap().peers,
         ["tls://example.org:443"]
     );
 }
 
 #[tokio::test]
 async fn turning_socketguard_off_stops_the_child_and_on_starts_it_again() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let (state, applied) = add(&h, &[]).await;
     applied.unwrap();
     wait_until("the child to start", || h.spawner.started() == 1).await;
@@ -357,7 +357,7 @@ async fn turning_socketguard_off_stops_the_child_and_on_starts_it_again() {
         "disable waits for the child"
     );
     let n = network(&state).await;
-    assert_eq!(n.managed.as_ref().unwrap().state, ChildState::Stopped);
+    assert_eq!(n.child.as_ref().unwrap().state, ChildState::Stopped);
     assert_eq!(
         n.status,
         NetworkStatus::Down {
@@ -375,7 +375,7 @@ async fn turning_socketguard_off_stops_the_child_and_on_starts_it_again() {
 
 #[tokio::test]
 async fn removing_the_network_stops_the_child_and_deletes_the_key() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let (state, applied) = add(&h, &[]).await;
     applied.unwrap();
     wait_until("the child to start", || h.spawner.started() == 1).await;
@@ -403,7 +403,7 @@ async fn removing_the_network_stops_the_child_and_deletes_the_key() {
             .engine
             .write()
             .await
-            .add_network(&state, managed_ygg(&[]))
+            .add_network(&state, ygg_instance(&[]))
             .await
             .unwrap();
         ((), a)
@@ -414,7 +414,7 @@ async fn removing_the_network_stops_the_child_and_deletes_the_key() {
 
 #[tokio::test]
 async fn the_key_survives_a_restart_of_the_daemon() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let (state, applied) = add(&h, &[]).await;
     applied.unwrap();
     let before = key(&h);

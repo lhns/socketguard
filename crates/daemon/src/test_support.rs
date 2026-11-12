@@ -25,8 +25,6 @@ pub enum FirewallCall {
 pub struct MockFirewall {
     pub calls: Arc<Mutex<Vec<FirewallCall>>>,
     fail_apply: AtomicBool,
-    /// Interface rules hold for adapters that do not exist yet (nftables, pf; not WFP).
-    absent_ok: AtomicBool,
     /// SocketGuard's ruleset is installed (applied, or planted by a test).
     installed: AtomicBool,
     /// The next `verify` reports the installed state as gone.
@@ -42,7 +40,6 @@ impl MockFirewall {
         Self {
             calls,
             fail_apply: AtomicBool::new(false),
-            absent_ok: AtomicBool::new(true),
             installed: AtomicBool::new(false),
             drifted: AtomicBool::new(false),
             verifies: AtomicUsize::new(0),
@@ -90,11 +87,6 @@ impl MockFirewall {
         self.installed.store(installed, Ordering::Relaxed);
     }
 
-    /// Act like WFP: an interface rule cannot be made for an adapter that is not there.
-    pub fn set_blocks_absent_interfaces(&self, holds: bool) {
-        self.absent_ok.store(holds, Ordering::Relaxed);
-    }
-
     /// Make `apply` fail (the call is still recorded).
     pub fn set_failing(&self, failing: bool) {
         self.fail_apply.store(failing, Ordering::Relaxed);
@@ -115,8 +107,9 @@ pub fn applied(calls: &Mutex<Vec<FirewallCall>>) -> Vec<DesiredRuleset> {
 }
 
 impl Firewall for MockFirewall {
+    /// Like nftables and pf: interface rules hold for adapters that do not exist yet.
     fn blocks_absent_interfaces(&self) -> bool {
-        self.absent_ok.load(Ordering::Relaxed)
+        true
     }
 
     fn apply(&self, desired: &DesiredRuleset) -> Result<()> {
@@ -369,10 +362,6 @@ struct MockBackendInner {
     base: Ipv6Addr,
     prefix: Option<Prefix>,
     failing: bool,
-    /// The node's addresses, when the mock stands in for a Yggdrasil node that answers.
-    node: Option<crate::ruleset::OverlayNode>,
-    /// Why the network is down, like a status reason of the real backend.
-    problem: Option<String>,
 }
 
 impl MockIpv6Backend {
@@ -383,8 +372,6 @@ impl MockIpv6Backend {
                 base: prefix.parse().unwrap(),
                 prefix: None,
                 failing: false,
-                node: None,
-                problem: None,
             })),
             prefix_len,
             interface: interface.to_string(),
@@ -398,23 +385,6 @@ impl MockIpv6Backend {
     /// Make `allocate` fail (e.g. Yggdrasil is down).
     pub fn set_failing(&self, failing: bool) {
         self.inner.lock().unwrap().failing = failing;
-    }
-
-    /// Report the node's addresses (`node()`), or none: the node does not answer.
-    pub fn set_node(&self, address: &str, subnet: &str) {
-        self.inner.lock().unwrap().node = Some(crate::ruleset::OverlayNode {
-            address: address.parse().unwrap(),
-            subnet: subnet.parse().unwrap(),
-        });
-    }
-
-    pub fn clear_node(&self) {
-        self.inner.lock().unwrap().node = None;
-    }
-
-    /// Make the network report itself down with `reason`, or up again.
-    pub fn set_problem(&self, reason: Option<&str>) {
-        self.inner.lock().unwrap().problem = reason.map(str::to_string);
     }
 
     /// Start (or change) reporting a /64 prefix; later allocations use it.
@@ -431,14 +401,6 @@ impl Ipv6Backend for MockIpv6Backend {
     /// the mock stands in for.
     fn interface(&self) -> Option<String> {
         Some(self.interface.clone())
-    }
-
-    fn node(&self) -> Option<crate::ruleset::OverlayNode> {
-        self.inner.lock().unwrap().node
-    }
-
-    fn problem(&self) -> Option<String> {
-        self.inner.lock().unwrap().problem.clone()
     }
 
     fn current_prefix(&self) -> Result<Option<Prefix>> {
@@ -533,10 +495,10 @@ pub async fn test_app_state_with(
     bundled: crate::bundled::Bundled,
 ) -> Arc<AppState> {
     let db = crate::state::Database::new(":memory:").await.unwrap();
-    db.migrate().await.unwrap();
+    db.init_schema().await.unwrap();
 
     let (events_tx, _) = tokio::sync::broadcast::channel(64);
-    // The engine builds managed networks from the same files the API checks.
+    // The engine builds Tor and Yggdrasil networks from the same files the API checks.
     let bundled = Arc::new(bundled);
     engine.set_bundled(bundled.clone());
 
@@ -551,19 +513,32 @@ pub async fn test_app_state_with(
     })
 }
 
-/// The pieces of a managed-network test: the fake processes, a state directory in a temp
+/// A `third_party` directory in a temp folder: each of `files` (relative paths) holds "x",
+/// and `VERSIONS` says `versions`.
+pub fn third_party_dir(files: &[&str], versions: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("sg-third-party-{}", uuid::Uuid::new_v4()));
+    for f in files {
+        let p = dir.join(f);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"x").unwrap();
+    }
+    std::fs::write(dir.join("VERSIONS"), versions).unwrap();
+    dir
+}
+
+/// The pieces of a Tor or Yggdrasil network test: the fake processes, a state directory in a temp
 /// directory and the accounts, with the supervisor's pauses shortened to milliseconds.
-pub struct ManagedHarness {
+pub struct ChildHarness {
     pub spawner: crate::children::fake::FakeSpawner,
     pub state_dir: std::path::PathBuf,
-    pub ctx: crate::networks::ManagedCtx,
+    pub ctx: crate::networks::ChildCtx,
     /// The firewall and the interfaces of the engines it builds.
     pub fw: Arc<MockFirewall>,
     pub fw_calls: Arc<Mutex<Vec<FirewallCall>>>,
     pub ifaces: MockInterfaceManager,
 }
 
-impl ManagedHarness {
+impl ChildHarness {
     /// `third_party` has a Tor and a Yggdrasil; the account `socketguard-net` exists (with
     /// the ids of the test process, so preparing the directories works without root).
     pub fn new() -> Self {
@@ -597,7 +572,7 @@ impl ManagedHarness {
         let state_dir = root.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
         let spawner = crate::children::fake::FakeSpawner::default();
-        let ctx = crate::networks::ManagedCtx::new(
+        let ctx = crate::networks::ChildCtx::new(
             Arc::new(crate::bundled::Bundled::from_dir(third)),
             Some(state_dir.clone()),
             Arc::new(crate::children::Supervisor::new(Arc::new(spawner.clone()))),
@@ -614,7 +589,7 @@ impl ManagedHarness {
         }
     }
 
-    /// An engine over mocks with no networks that runs managed networks on this harness.
+    /// An engine over mocks with no networks that runs Tor and Yggdrasil networks on this harness.
     pub fn engine(&self) -> crate::engine::Engine {
         let mut engine = crate::engine::Engine::new_injectable(
             Box::new(MockSocketMonitor::new(vec![])),
@@ -622,17 +597,17 @@ impl ManagedHarness {
             Arc::new(self.ifaces.clone()),
             HashMap::new(),
         );
-        engine.set_managed_ctx(self.ctx.clone());
+        engine.set_child_ctx(self.ctx.clone());
         engine
     }
 
-    /// A daemon state over [`ManagedHarness::engine`] that knows the same shipped files.
+    /// A daemon state over [`ChildHarness::engine`] that knows the same shipped files.
     pub async fn app_state(&self, config: DaemonConfig) -> Arc<AppState> {
         test_app_state_with(self.engine(), config, None, (*self.ctx.bundled).clone()).await
     }
 }
 
-impl Default for ManagedHarness {
+impl Default for ChildHarness {
     fn default() -> Self {
         Self::new()
     }
@@ -903,7 +878,7 @@ impl MockTorControl {
             cookie_path: Some(cookie_path.clone()),
             // The test's cookie file belongs to the account running the test.
             #[cfg(windows)]
-            cookie_owner: crate::networks::tor_control::winacl::current_user_sid().ok(),
+            cookie_owner: socketguard_core::winsid::current_user_sid(),
             ..AuthOptions::default()
         }
     }

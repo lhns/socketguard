@@ -883,47 +883,6 @@ async fn portable_last_exit() -> CmdResult<Option<PortableExit>> {
         .map(|(at, left)| PortableExit { at, left }))
 }
 
-/// The SID of the account this window runs as (its own token, not the elevated one a
-/// credentials prompt may start the daemon with).
-#[cfg(windows)]
-fn current_user_sid() -> Option<String> {
-    use windows::core::PWSTR;
-    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
-    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    // SAFETY: token queries on the current process; the buffer is sized by the first call.
-    unsafe {
-        let mut token = HANDLE::default();
-        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
-        let mut len = 0u32;
-        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
-        let mut buf = vec![0u8; len as usize];
-        let sid = if len > 0
-            && GetTokenInformation(
-                token,
-                TokenUser,
-                Some(buf.as_mut_ptr().cast()),
-                len,
-                &mut len,
-            )
-            .is_ok()
-        {
-            let user = (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid;
-            let mut out = PWSTR::null();
-            ConvertSidToStringSidW(user, &mut out).ok().and_then(|()| {
-                let s = out.to_string().ok();
-                let _ = LocalFree(Some(HLOCAL(out.0.cast())));
-                s
-            })
-        } else {
-            None
-        };
-        let _ = CloseHandle(token);
-        sid
-    }
-}
-
 /// Start `socketguard-daemon --portable --owner-pid <this window> --allow-user <this account>`
 /// with administrator rights, hidden, and wait until its pipe answers. The daemon ends when
 /// this process does. Reported like the other elevated runs: `exit_code` 0 is a daemon that
@@ -943,7 +902,7 @@ async fn start_portable_daemon() -> CmdResult<SetupRun> {
     }
     #[cfg(windows)]
     {
-        let Some(sid) = current_user_sid() else {
+        let Some(sid) = socketguard_core::winsid::current_user_sid() else {
             return Err(internal("cannot tell which account this is".into()));
         };
         let args: Vec<String> = [

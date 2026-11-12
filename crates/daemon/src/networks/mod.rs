@@ -7,18 +7,18 @@
 //! The trait is blocking: IP allocation already runs commands, and the Tor client uses
 //! plain sockets. The engine calls it from `spawn_blocking`.
 
+pub mod child;
 pub mod ip;
 pub mod ledger;
-pub mod managed;
 pub mod onion_key;
 pub mod tor;
+pub mod tor_child;
 pub mod tor_client_key;
 pub mod tor_control;
-pub mod tor_managed;
+pub mod ygg_child;
 pub mod ygg_key;
-pub mod ygg_managed;
 
-pub use managed::ManagedCtx;
+pub use child::ChildCtx;
 
 use crate::iface::InterfaceManager;
 use crate::ruleset::{subject_credentials, Snapshot};
@@ -118,9 +118,9 @@ pub trait Network: Send + Sync {
     fn node(&self) -> Option<crate::ruleset::OverlayNode> {
         None
     }
-    /// How the child process of a managed network stands (ADR 0052); None for networks
+    /// How the child process of a Tor or Yggdrasil network stands (ADR 0052); None for networks
     /// that SocketGuard does not run itself.
-    fn managed(&self) -> Option<socketguard_core::ManagedInfo> {
+    fn child_info(&self) -> Option<socketguard_core::ChildInfo> {
         None
     }
     /// The /64 this network allocates from, for re-homing addresses; None if it has none.
@@ -155,7 +155,7 @@ pub trait Network: Send + Sync {
 
 /// Create the network for `config`.
 /// `id` is the network's id (the child process of a Tor or Yggdrasil network is named after
-/// it), `ula_global_id` the installation's persisted ULA global ID, `managed` what those
+/// it), `ula_global_id` the installation's persisted ULA global ID, `ctx` what those
 /// networks need from the daemon.
 ///
 /// Only an invalid configuration is an error. What depends on the system (a missing
@@ -166,11 +166,11 @@ pub fn create(
     config: &BackendConfig,
     ula_global_id: [u8; 5],
     net: Arc<dyn InterfaceManager>,
-    managed: &ManagedCtx,
+    ctx: &ChildCtx,
 ) -> Result<Arc<dyn Network>> {
     match config {
         BackendConfig::Tor { .. } => Ok(Arc::new(tor::TorNetwork::new(
-            tor_managed::ManagedTor::new(id, managed),
+            tor_child::TorChild::new(id, ctx),
             tor::CHECK_INTERVAL,
         ))),
         BackendConfig::Ula { .. } => Ok(ip_network(
@@ -180,9 +180,9 @@ pub fn create(
         )),
         BackendConfig::Yggdrasil { .. } => Ok(ip_network(
             config,
-            ip::yggdrasil_managed::ManagedYggBackend::new(ygg_managed::ManagedYgg::new(
+            ip::yggdrasil_child::YggChildBackend::new(ygg_child::YggChild::new(
                 id,
-                managed,
+                ctx,
                 net.clone(),
             )),
             net,
@@ -342,7 +342,7 @@ mod tests {
             status: NetworkStatus::Up,
             prefix: None,
             vlan_id: None,
-            managed: None,
+            child: None,
         }
     }
 
@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn declared_verification_agrees_with_reach() {
         let tor = tor::TorNetwork::new(
-            tor_managed::ManagedTor::with_control("127.0.0.1:1".into(), Default::default()),
+            tor_child::TorChild::with_control("127.0.0.1:1".into(), Default::default()),
             tor::CHECK_INTERVAL,
         );
         let ygg = IpNetwork::new(

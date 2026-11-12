@@ -114,7 +114,7 @@ pub async fn run(
     }
 
     let db = state::Database::new(&config.db_path).await?;
-    db.migrate().await?;
+    db.init_schema().await?;
     info!("Database initialized at {}", config.db_path);
 
     let ula_global_id = db.ula_global_id().await?;
@@ -210,7 +210,7 @@ pub async fn run(
     // Wait for reconciliation loop to finish
     let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), recon_handle).await;
 
-    // The children of managed networks end with the daemon (gracefully, then by force).
+    // The children of Tor and Yggdrasil networks end with the daemon (gracefully, then by force).
     // Their onion services end with them; the ruleset does not.
     {
         let children = state.engine.read().await.children().clone();

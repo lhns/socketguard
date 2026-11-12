@@ -13,10 +13,10 @@ function Mn-Net([string]$Id) {
 function Mn-Describe($n) {
   if (-not $n) { return 'no such network' }
   $extra = ''
-  if ($n.managed -and $n.managed.progress) { $extra = " $($n.managed.progress)%" }
+  if ($n.child -and $n.child.progress) { $extra = " $($n.child.progress)%" }
   $ms = ''
   $detail = ''
-  if ($n.managed) { $ms = "$($n.managed.state)"; $detail = "$($n.managed.detail)" }
+  if ($n.child) { $ms = "$($n.child.state)"; $detail = "$($n.child.detail)" }
   return "$($n.status.state) $($n.status.reason) [$ms$extra] $detail"
 }
 function Mn-Procs([string]$Name) {

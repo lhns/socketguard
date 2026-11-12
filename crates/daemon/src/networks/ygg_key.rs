@@ -1,4 +1,4 @@
-//! The key of a managed Yggdrasil node (ADR 0052), generated here instead of by Yggdrasil:
+//! The key of a Yggdrasil node (ADR 0052), generated here instead of by Yggdrasil:
 //! the node's address and its /64 follow from the key alone, so the ruleset that blocks them
 //! can be applied before any Yggdrasil software runs (ADR 0051).
 //!
@@ -13,7 +13,7 @@ use socketguard_core::yggdrasil::{derive_yggdrasil_ipv6, subnet_for_key};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// The settings key prefix of a managed node's private key; the network id follows.
+/// The settings key prefix of a node's private key; the network id follows.
 pub const KEY_PREFIX: &str = "ygg_key:";
 
 #[derive(Clone, PartialEq, Eq)]
@@ -89,7 +89,7 @@ impl YggKey {
     }
 }
 
-/// The keys of the managed Yggdrasil networks by network id, shared between the engine
+/// The keys of the Yggdrasil networks by network id, shared between the engine
 /// (which loads and creates them) and the networks (which read them).
 #[derive(Clone, Default)]
 pub struct KeyRing(Arc<Mutex<HashMap<String, YggKey>>>);

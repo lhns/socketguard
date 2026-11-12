@@ -1316,7 +1316,7 @@ async fn ula_global_id_survives_restart() {
         let db = socketguard_daemon::state::Database::new(path_str)
             .await
             .unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         let id = db.ula_global_id().await.unwrap();
         let b = UlaBackend::new(id);
         (id, b.allocate(None).unwrap().address.octets())
@@ -1326,7 +1326,7 @@ async fn ula_global_id_survives_restart() {
     let db = socketguard_daemon::state::Database::new(path_str)
         .await
         .unwrap();
-    db.migrate().await.unwrap();
+    db.init_schema().await.unwrap();
     let id = db.ula_global_id().await.unwrap();
     assert_eq!(id, first.0);
     let b = UlaBackend::new(id);

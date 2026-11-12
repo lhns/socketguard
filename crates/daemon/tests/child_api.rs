@@ -1,5 +1,5 @@
-//! ADR 0052 at the API: the managed form of a network is accepted from any caller when the
-//! build ships the files, `/api/status` lists them, and a managed Yggdrasil's peers change
+//! ADR 0052 at the API: a Tor or Yggdrasil network is accepted from any caller when the
+//! build ships the files, `/api/status` lists them, and a Yggdrasil's peers change
 //! through `PUT /api/networks/{id}/peers`.
 
 mod common;
@@ -15,14 +15,7 @@ use socketguard_daemon::test_support::*;
 use std::sync::Arc;
 
 fn third_party(files: &[&str]) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("sg-managed-{}", uuid::Uuid::new_v4()));
-    for f in files {
-        let p = d.join(f);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, b"x").unwrap();
-    }
-    std::fs::write(d.join("VERSIONS"), "tor 16.0.1\nyggdrasil v0.5.15 abc\n").unwrap();
-    d
+    third_party_dir(files, "tor 16.0.1\nyggdrasil v0.5.15 abc\n")
 }
 
 struct Fixture {
@@ -42,9 +35,9 @@ impl Fixture {
         call(&self.app, method, path, body).await
     }
 
-    /// A managed Yggdrasil network `ygg` over a mock allocator, without a child (the settings
-    /// and the API are tested here; the child is in `managed_ygg.rs`).
-    async fn with_managed_ygg(&self, peers: &[&str]) {
+    /// A Yggdrasil network `ygg` over a mock allocator, without a child (the settings
+    /// and the API are tested here; the child is in `child_ygg.rs`).
+    async fn with_ygg_child(&self, peers: &[&str]) {
         let inst = BackendInstanceConfig {
             id: "ygg".into(),
             backend: BackendConfig::yggdrasil(peers.iter().map(|p| p.to_string()).collect()),
@@ -64,7 +57,7 @@ fn exe(name: &str) -> String {
 }
 
 #[tokio::test]
-async fn a_build_without_the_files_refuses_managed_networks_and_says_so() {
+async fn a_build_without_the_files_refuses_tor_and_yggdrasil_networks_and_says_so() {
     let f = Fixture::new(Bundled::none()).await;
     for body in [json!({"type": "tor"}), json!({"type": "yggdrasil"})] {
         let (s, e) = f.call(Method::POST, "/api/networks", Some(body)).await;
@@ -133,8 +126,8 @@ async fn complete_files_pass_the_checks_and_status_lists_them() {
     assert_eq!(s, StatusCode::CREATED, "{n}");
     assert_eq!(n["kind"], "tor");
     // (a daemon with no state directory has nowhere to keep Tor's data)
-    assert_eq!(n["managed"]["state"], "unavailable");
-    assert_eq!(n["managed"]["version"], "16.0.1");
+    assert_eq!(n["child"]["state"], "unavailable");
+    assert_eq!(n["child"]["version"], "16.0.1");
     assert_eq!(n["status"]["state"], "down");
 }
 
@@ -155,7 +148,7 @@ async fn incomplete_files_are_refused_with_a_sentence() {
 #[tokio::test]
 async fn peers_are_replaced_validated_and_saved() {
     let f = Fixture::new(Bundled::none()).await;
-    f.with_managed_ygg(&["tls://a.example:1"]).await;
+    f.with_ygg_child(&["tls://a.example:1"]).await;
     let put = |peers: Value| {
         f.call(
             Method::PUT,
@@ -168,7 +161,7 @@ async fn peers_are_replaced_validated_and_saved() {
     assert_eq!(s, StatusCode::OK, "{n}");
     assert_eq!(n["id"], "ygg");
     assert_eq!(
-        n["managed"]["peers"],
+        n["child"]["peers"],
         json!(["tls://b.example:2", "tcp://[2001:db8::1]:9"])
     );
     let configs = f.state.engine.read().await.backend_configs();

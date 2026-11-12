@@ -12,7 +12,6 @@ use socketguard_daemon::api;
 use socketguard_daemon::firewall::{Dst, ScopeMatch};
 use socketguard_daemon::test_support::*;
 use std::net::IpAddr;
-use std::sync::Arc;
 
 const KEY: &str = "ba83a2e554a8a087cebdb3f053468cd3ff915b5dd94bf11b7a5fc2e36f13158b";
 
@@ -874,9 +873,6 @@ async fn moving_an_anyone_grant_needs_confirmation() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(r.of_app(&new, "ygg").await.len(), 1);
 }
-
-#[allow(dead_code)]
-fn unused(_: Arc<()>) {}
 
 // ─── Export and apply ────────────────────────────────────────────────────────
 

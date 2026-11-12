@@ -60,7 +60,7 @@ jobs:
       - run: cargo clippy -p socketguard-ui --all-targets -- -D warnings
       - run: cargo test -p socketguard-ui
 
-  # The Windows code (WFP, the service, ACLs, the managed-network spawner) has no other
+  # The Windows code (WFP, the service, ACLs, the child spawner) has no other
   # cfg(windows) coverage than this job and the MSI test in packages.yml.
   windows:
     runs-on: windows-latest

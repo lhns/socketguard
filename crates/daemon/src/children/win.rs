@@ -148,7 +148,7 @@ fn pipe() -> io::Result<(HANDLE, HANDLE)> {
 
 /// Start the child with the LocalService token (needs a daemon that may log it on, in
 /// practice SYSTEM). Whether that works is checked beforehand, when the account is chosen
-/// (`tor_managed::resolve_run_as`); a spec with `RunAs::LocalService` is not started any
+/// (`tor_child::resolve_run_as`); a spec with `RunAs::LocalService` is not started any
 /// other way.
 pub(super) async fn spawn_local_service(
     spec: &ChildSpec,

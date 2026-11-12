@@ -9,7 +9,7 @@ use crate::state::{NewActivity, Write};
 use crate::AppState;
 use chrono::Utc;
 use socketguard_core::api_types::{BatchChange, Change, ChangeItem, ChangeKind, ChangeOp};
-use socketguard_core::{new_id, ActivityKind, App, GrantReach, Scope, Subject, Tag, TagMember};
+use socketguard_core::{new_id, ActivityKind, App, GrantReach, Scope, Tag, TagMember};
 
 /// The patterns as stored: trimmed, no blanks, no duplicates.
 pub(super) fn clean_patterns(patterns: &[String]) -> Vec<String> {
@@ -358,20 +358,7 @@ impl Engine {
             // The reach depends on the covered ports, so it is read once the
             // member is in the catalog.
             let reach: Vec<GrantReach> = grants.iter().flat_map(|g| plan.grant_reach(g)).collect();
-            let who: Vec<String> = grants
-                .iter()
-                .map(|g| match &g.subject {
-                    Subject::Anyone => "Anyone".to_string(),
-                    Subject::Peer(id) => plan
-                        .cat
-                        .peer(id)
-                        .map_or_else(|| id.clone(), |p| p.label.clone()),
-                    Subject::Group(id) => plan
-                        .cat
-                        .group(id)
-                        .map_or_else(|| id.clone(), |g| format!("group {}", g.label)),
-                })
-                .collect();
+            let who = plan.who(&grants);
             plan.activities.push(
                 NewActivity::new(
                     ActivityKind::TagChanged,

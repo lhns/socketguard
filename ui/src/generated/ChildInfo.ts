@@ -4,7 +4,7 @@ import type { ChildState } from "./ChildState";
 /**
  * A Tor or Yggdrasil network: how its child process is doing.
  */
-export type ManagedInfo = { state: ChildState, 
+export type ChildInfo = { state: ChildState, 
 /**
  * Tor: bootstrap progress in percent while `bootstrapping`.
  */

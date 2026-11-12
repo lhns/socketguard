@@ -9,11 +9,6 @@ pub fn config_path() -> PathBuf {
     socketguard_core::paths::config_path()
 }
 
-/// Whether the config file is in the default place (no `SOCKETGUARD_CONFIG`).
-pub fn is_default_location(path: &Path) -> bool {
-    path == socketguard_core::paths::default_config_path()
-}
-
 /// The config as the daemon uses it: where it is, what it says and the database it names.
 pub struct Resolved {
     pub config_path: PathBuf,

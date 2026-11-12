@@ -163,7 +163,7 @@ pub fn create_protected(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The data directory of a managed child (ADR 0052): SYSTEM and Administrators, and
+/// The data directory of a child (ADR 0052): SYSTEM and Administrators, and
 /// LocalService when the child runs as it, inherited by what is created inside (the child
 /// writes there). When neither SYSTEM nor an elevated administrator runs the daemon, its
 /// own account gets an entry too.
@@ -199,7 +199,7 @@ pub fn protect_dir(path: &Path) -> anyhow::Result<()> {
     protect_with(path, &dir_sddl())
 }
 
-/// [`protect`] the data directory of a managed child, see [`service_dir_sddl`].
+/// [`protect`] the data directory of a child, see [`service_dir_sddl`].
 pub fn protect_service_dir(path: &Path, local_service: bool) -> anyhow::Result<()> {
     protect_with(path, &service_dir_sddl(local_service))
 }
@@ -282,7 +282,7 @@ pub(crate) mod tests {
     async fn windows_database_files_have_a_protected_dacl() {
         let path = temp_db_path("acl");
         let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         db.insert_app(&app("a1")).await.unwrap();
         for suffix in ["", "-wal", "-shm"] {
             let file = with_suffix(&path, suffix);
@@ -353,13 +353,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_managed_directory_is_protected_and_names_nobody_from_the_portable_folder() {
+    fn a_child_directory_is_protected_and_names_nobody_from_the_portable_folder() {
         let user = "S-1-5-21-1-2-3-1001";
         // Portable: no LocalService, and the user of the window is never an entry.
         let p = service_dir_sddl_for(false, None);
         assert_eq!(p, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
         assert!(!p.contains(user) && !p.contains(";;;LS)") && !p.contains("FRFX"));
-        // The folder's own DACL names the user; the managed one is protected, so it does
+        // The folder's own DACL names the user; the child's one is protected, so it does
         // not inherit that entry.
         assert!(portable_dir_sddl(Some(user)).contains(user));
         assert!(p.starts_with("D:P"));
@@ -370,11 +370,11 @@ pub(crate) mod tests {
         );
     }
 
-    /// What a managed child's directory below the portable data folder ends up with: the
+    /// What a child's directory below the portable data folder ends up with: the
     /// user's entry on `data\` is not inherited, by the directory or by what is created in it.
     #[cfg(windows)]
     #[test]
-    fn windows_a_managed_directory_below_the_portable_folder_does_not_inherit_the_users_read() {
+    fn windows_a_child_directory_below_the_portable_folder_does_not_inherit_the_users_read() {
         let data = std::env::temp_dir().join(format!("sg-pdata-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&data).unwrap();
         // Everyone (S-1-1-0) stands in for the allowed user.
@@ -406,7 +406,7 @@ pub(crate) mod tests {
         std::fs::write(&path, b"").unwrap();
         assert!(!dacl_sddl(&path).starts_with("D:P"));
         let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         assert!(dacl_sddl(&path).starts_with("D:P"), "{}", dacl_sddl(&path));
         db.pool.close().await;
         for suffix in ["", "-wal", "-shm"] {

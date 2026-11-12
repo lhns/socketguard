@@ -7,7 +7,7 @@
 # install the next version over it -> daemon restarted, data kept;
 # `uninstall --purge` -> footprint absent, pf.conf back to what it was; then the manual removal
 # of the files a pkg cannot remove, and `pkgutil --forget`.
-# Between the upgrade and the removal: the managed Tor and Yggdrasil networks (test/networks.sh, ADR 0052).
+# Between the upgrade and the removal: the Tor and Yggdrasil networks (test/networks.sh, ADR 0052).
 set -euo pipefail
 pkg="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 next="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
@@ -108,7 +108,7 @@ mn_ygg_start
 mn_ygg_up
 ygg_pid=$(mn_ygg_pid)
 [ -n "$ygg_pid" ] || mn_die "the network is up but no yggdrasil from third_party is running"
-note "yggdrasil runs as uid $(mn_uid "$ygg_pid") ($(ps -o user= -p "$ygg_pid" | tr -d ' ')); runs_as: $(mn_field ygg .managed.runs_as)"
+note "yggdrasil runs as uid $(mn_uid "$ygg_pid") ($(ps -o user= -p "$ygg_pid" | tr -d ' ')); runs_as: $(mn_field ygg .child.runs_as)"
 ok "the node address $MN_YGG_ADDR is on a utun interface: $(awk -v a="$MN_YGG_ADDR" '/^[a-z0-9]+:/ { i = $1 } index($0, "inet6 " a " ") { print i; exit }' <<<"$(ifconfig)")"
 summary networks
 sudo cp "$STATE/setup-log.json" "${RUNNER_TEMP:-/tmp}/setup-log.before-uninstall.json"

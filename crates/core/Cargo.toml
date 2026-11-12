@@ -16,6 +16,14 @@ sha2 = "0.10"
 
 ts-rs = { version = "11", optional = true, features = ["chrono-impl", "serde-json-impl"] }
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
 [features]
 # Derive TypeScript bindings; see docs/api.md.
 ts = ["dep:ts-rs"]

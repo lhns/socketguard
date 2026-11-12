@@ -20,7 +20,7 @@
 # with an `addresses` array of strings (the addresses the daemon owned). Each one still returned
 # by Get-NetIPAddress makes the item `ledger-addresses` PRESENT. Never required.
 #
-# Managed networks (ADR 0052) add: the programs tor.exe and yggdrasil.exe running from a
+# Tor and Yggdrasil (ADR 0052) add: the programs tor.exe and yggdrasil.exe running from a
 # `third_party` directory, the directories <ProgramData>\SocketGuard\tor and \yggdrasil, the
 # adapter `SocketGuard`, the Wintun driver in the driver store (-WintunPresentBefore says the
 # install record had it there before SocketGuard: then it is shared and expected to stay) and
@@ -314,7 +314,7 @@ function Invoke-Live {
     # Portable mode (ADR 0054): its own pipe, and it must be gone once the daemon has ended.
     $items += New-Item2 (Get-ListedState $pipes '(?i)\\socketguard-portable$') 'named-pipe-portable'
 
-    # Managed networks (ADR 0052).
+    # Tor and Yggdrasil (ADR 0052).
     $exes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object { $_.ExecutablePath } | Where-Object { $_ })
     $items += New-Item2 (Get-ChildProcessState $exes 'tor') 'child-tor'
     $items += New-Item2 (Get-ChildProcessState $exes 'yggdrasil') 'child-yggdrasil'

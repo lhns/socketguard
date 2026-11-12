@@ -353,16 +353,14 @@ pub(crate) mod winacl {
     use super::AuthOptions;
     use anyhow::{bail, Context, Result};
     use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+    use windows::Win32::Foundation::{LocalFree, HANDLE, HLOCAL};
     use windows::Win32::Security::Authorization::{
         ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT,
     };
     use windows::Win32::Security::{
-        AclSizeInformation, GetAce, GetAclInformation, GetTokenInformation, TokenUser, ACE_HEADER,
-        ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSID,
-        TOKEN_QUERY, TOKEN_USER,
+        AclSizeInformation, GetAce, GetAclInformation, ACE_HEADER, ACL, ACL_SIZE_INFORMATION,
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSID,
     };
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     /// SYSTEM and BUILTIN\Administrators.
     const TRUSTED: [&str; 2] = ["S-1-5-18", "S-1-5-32-544"];
@@ -384,30 +382,6 @@ pub(crate) mod winacl {
             let s = out.to_string();
             let _ = LocalFree(Some(HLOCAL(out.0.cast())));
             Ok(s?)
-        }
-    }
-
-    /// The SID string of the account running this process.
-    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
-    pub(crate) fn current_user_sid() -> Result<String> {
-        // SAFETY: plain token query on the current process; the buffer is sized by the
-        // first call.
-        unsafe {
-            let mut token = HANDLE::default();
-            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)?;
-            let mut len = 0u32;
-            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
-            let mut buf = vec![0u8; len as usize];
-            let r = GetTokenInformation(
-                token,
-                TokenUser,
-                Some(buf.as_mut_ptr().cast()),
-                len,
-                &mut len,
-            );
-            let sid = r.map(|_| sid_string((*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid));
-            let _ = CloseHandle(token);
-            sid?
         }
     }
 
@@ -1102,7 +1076,7 @@ mod tests {
     #[test]
     fn windows_cookie_file_must_be_trusted_owned_and_not_writable_by_others() {
         let (dir, path) = cookie_file(&COOKIE);
-        let me = winacl::current_user_sid().unwrap();
+        let me = socketguard_core::winsid::current_user_sid().unwrap();
         let icacls = |args: &[&str]| {
             let out = std::process::Command::new("icacls")
                 .arg(&path)

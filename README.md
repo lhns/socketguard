@@ -280,7 +280,7 @@ Entries of `backends` (`"type"` selects the kind):
 | `tor` | `bridges` | string array | `[]` | obfs4 bridge lines (`obfs4 IP:port FINGERPRINT cert=... iat-mode=0`), stored in this form; Tor then connects through them |
 
 An unknown key, at the top level or in a `backends` entry, makes the daemon refuse the file and name
-the key and the file. The keys of earlier versions (`managed`, `control`, `auth`, `cookie_path`,
+the key and the file. Keys the daemon no longer reads (`managed`, `control`, `auth`, `cookie_path`,
 `interface` on Yggdrasil, ...) must be removed.
 
 Environment variables:

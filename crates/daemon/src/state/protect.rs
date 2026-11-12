@@ -167,7 +167,7 @@ pub fn protect_dir(path: &Path, shared: bool) -> Result<()> {
     Ok(())
 }
 
-/// Windows: protect the data directory of a managed child (ADR 0052) so that SYSTEM and
+/// Windows: protect the data directory of a child (ADR 0052) so that SYSTEM and
 /// Administrators, and LocalService when `local_service`, and nobody else, can use it and
 /// what is created inside. Elsewhere the caller sets mode and owner itself.
 #[cfg(windows)]
@@ -188,9 +188,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let path = temp_db_path("perms");
         let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         db.set_setting("k", "v").await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         for suffix in ["", "-wal", "-shm"] {
             let f = with_suffix(&path, suffix);
             if let Ok(m) = std::fs::metadata(&f) {

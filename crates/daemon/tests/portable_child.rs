@@ -1,4 +1,4 @@
-//! Managed Tor and Yggdrasil (ADR 0052) under the portable teardown (ADR 0054): the one place
+//! Tor and Yggdrasil (ADR 0052) under the portable teardown (ADR 0054): the one place
 //! portable mode ends the run is `portable::teardown`, and when it has returned no child of
 //! SocketGuard is left running.
 
@@ -19,8 +19,8 @@ async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
 }
 
 #[tokio::test]
-async fn the_teardown_waits_for_a_managed_tor_and_a_managed_yggdrasil_to_be_gone() {
-    let h = ManagedHarness::new();
+async fn the_teardown_waits_for_tor_and_yggdrasil_to_be_gone() {
+    let h = ChildHarness::new();
     let state = h.app_state(DaemonConfig::default()).await;
     for inst in [
         BackendInstanceConfig {
@@ -80,7 +80,7 @@ async fn the_teardown_waits_for_a_managed_tor_and_a_managed_yggdrasil_to_be_gone
 /// not hang on children that are already gone, and nothing is left.
 #[tokio::test]
 async fn the_teardown_after_the_supervisor_shutdown_returns_with_nothing_left() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let state = h.app_state(DaemonConfig::default()).await;
     let (_, applied) = state
         .engine

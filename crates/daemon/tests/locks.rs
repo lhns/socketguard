@@ -66,7 +66,7 @@ async fn daemon(
         backends,
     );
     let db = Database::new(path.to_str().unwrap()).await.unwrap();
-    db.migrate().await.unwrap();
+    db.init_schema().await.unwrap();
     let state = Arc::new(AppState {
         config: tokio::sync::RwLock::new(DaemonConfig {
             backends: configs,

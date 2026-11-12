@@ -1,4 +1,4 @@
-//! ADR 0052 at the API: `PUT /api/networks/{id}/bridges` of a managed Tor network validates
+//! ADR 0052 at the API: `PUT /api/networks/{id}/bridges` of a Tor network validates
 //! every line against the one supported form, stores it in canonical form, and needs the
 //! obfs4 helper of the build.
 
@@ -35,7 +35,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// A daemon whose build ships Tor, and the obfs4 helper when `helper`, with a managed
+    /// A daemon whose build ships Tor, and the obfs4 helper when `helper`, with a
     /// Tor network `tor`.
     async fn new(helper: bool) -> Self {
         let f = Self::new_empty(helper).await;
@@ -48,17 +48,10 @@ impl Fixture {
 
     /// The same without a network.
     async fn new_empty(helper: bool) -> Self {
-        let d = std::env::temp_dir().join(format!("sg-bridges-{}", uuid::Uuid::new_v4()));
-        let mut files = vec![format!("tor/{}", exe("tor"))];
-        if helper {
-            files.push(format!("tor/pluggable_transports/{}", exe("lyrebird")));
-        }
-        for f in files {
-            let p = d.join(f);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, b"x").unwrap();
-        }
-        std::fs::write(d.join("VERSIONS"), "tor 16.0.1\n").unwrap();
+        let tor = format!("tor/{}", exe("tor"));
+        let lyrebird = format!("tor/pluggable_transports/{}", exe("lyrebird"));
+        let files: &[&str] = if helper { &[&tor, &lyrebird] } else { &[&tor] };
+        let d = third_party_dir(files, "tor 16.0.1\n");
         let state = test_app_state_with(
             empty_engine(),
             DaemonConfig::default(),
@@ -100,8 +93,8 @@ async fn bridges_are_validated_normalised_deduplicated_and_saved() {
     );
     let (s, n) = f.put(json!([lower, bridge(1), bridge(2)])).await;
     assert_eq!(s, StatusCode::OK, "{n}");
-    assert_eq!(n["managed"]["bridges"], json!([bridge(1), bridge(2)]));
-    assert!(n["managed"].get("bridges_unavailable").is_none());
+    assert_eq!(n["child"]["bridges"], json!([bridge(1), bridge(2)]));
+    assert!(n["child"].get("bridges_unavailable").is_none());
     assert_eq!(f.configured().await, [bridge(1), bridge(2)]);
 
     for hostile in [
@@ -127,7 +120,7 @@ async fn bridges_are_validated_normalised_deduplicated_and_saved() {
 
     let (s, n) = f.put(json!([])).await;
     assert_eq!(s, StatusCode::OK, "{n}");
-    assert!(n["managed"].get("bridges").is_none());
+    assert!(n["child"].get("bridges").is_none());
     assert!(f.configured().await.is_empty());
 
     let (s, e) = f
@@ -160,7 +153,7 @@ async fn without_the_helper_bridges_cannot_be_set_and_the_card_says_why() {
     // Turning bridges off is always possible.
     let (s, n) = f.put(json!([])).await;
     assert_eq!(s, StatusCode::OK, "{n}");
-    assert!(n["managed"]["bridges_unavailable"]
+    assert!(n["child"]["bridges_unavailable"]
         .as_str()
         .unwrap()
         .contains("obfs4 helper"));
@@ -186,7 +179,7 @@ async fn bridges_in_a_new_network_follow_the_same_rules() {
         )
         .await;
     assert_eq!(s, StatusCode::CREATED, "{n}");
-    assert_eq!(n["managed"]["bridges"], json!([bridge(1)]));
+    assert_eq!(n["child"]["bridges"], json!([bridge(1)]));
 
     let f = Fixture::new_empty(false).await;
     let (s, e) = f

@@ -595,7 +595,7 @@ mod tests {
             status: NetworkStatus::Up,
             prefix: None,
             vlan_id: None,
-            managed: None,
+            child: None,
         }
     }
 

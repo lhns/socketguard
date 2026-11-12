@@ -1,4 +1,4 @@
-//! What managed networks (ADR 0052) share: the context the engine hands to the networks it
+//! What Tor and Yggdrasil networks (ADR 0052) share: the context the engine hands to the networks it
 //! builds, and the choice of the child to run for a network's configuration.
 
 use super::ygg_key::KeyRing;
@@ -10,10 +10,10 @@ use socketguard_core::config::BackendConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// The daemon's side of managed networks: the shipped files, the state directory their data
+/// The daemon's side of Tor and Yggdrasil networks: the shipped files, the state directory their data
 /// lives under, the supervisor that runs them, and the accounts they may run as.
 #[derive(Clone)]
-pub struct ManagedCtx {
+pub struct ChildCtx {
     pub bundled: Arc<Bundled>,
     /// The directory of the database (`<state dir>/tor`, ...). None when there is none (an
     /// in-memory database).
@@ -21,11 +21,11 @@ pub struct ManagedCtx {
     pub daemon_pid: u32,
     pub children: Arc<Supervisor>,
     pub accounts: Arc<dyn Accounts>,
-    /// The keys of the managed Yggdrasil networks (loaded and created by the engine).
+    /// The keys of the Yggdrasil networks (loaded and created by the engine).
     pub keys: KeyRing,
-    /// The admin valves of the managed Yggdrasil networks.
-    pub valves: super::ygg_managed::Valves,
-    /// How many bridges each managed Tor network connects through (set when its child is
+    /// The admin valves of the Yggdrasil networks.
+    pub valves: super::ygg_child::Valves,
+    /// How many bridges each Tor network connects through (set when its child is
     /// specified), for its status.
     pub bridge_counts: BridgeCounts,
 }
@@ -44,7 +44,7 @@ impl BridgeCounts {
     }
 }
 
-impl ManagedCtx {
+impl ChildCtx {
     pub fn new(
         bundled: Arc<Bundled>,
         state_dir: Option<PathBuf>,
@@ -78,7 +78,7 @@ impl ManagedCtx {
         )
     }
 
-    /// Builds managed networks for display and teardown only: no files, and nothing is ever
+    /// Builds Tor and Yggdrasil networks for display and teardown only: no files, and nothing is ever
     /// started (the commands that run without a daemon, tests that need no children).
     pub fn inert() -> Self {
         Self::new(
@@ -96,23 +96,23 @@ impl ManagedCtx {
     }
 }
 
-/// What the supervisor should do for the managed network `id` configured as `backend`, when
+/// What the supervisor should do for the Tor or Yggdrasil network `id` configured as `backend`, when
 /// nothing holds it back: run its child, or say why that cannot be.
 pub fn child_wish(
-    ctx: &ManagedCtx,
+    ctx: &ChildCtx,
     ifaces: &Arc<dyn InterfaceManager>,
     id: &str,
     backend: &BackendConfig,
 ) -> Desired {
     match backend {
         BackendConfig::Tor { bridges } => {
-            match super::tor_managed::ManagedTor::new(id, ctx).spec_with_bridges(bridges) {
+            match super::tor_child::TorChild::new(id, ctx).spec_with_bridges(bridges) {
                 Ok(spec) => Desired::Run(Box::new(spec)),
                 Err(why) => Desired::Unavailable(why),
             }
         }
         BackendConfig::Yggdrasil { peers } => {
-            match super::ygg_managed::ManagedYgg::new(id, ctx, ifaces.clone()).spec(peers) {
+            match super::ygg_child::YggChild::new(id, ctx, ifaces.clone()).spec(peers) {
                 Ok(spec) => Desired::Run(Box::new(spec)),
                 Err(why) => Desired::Unavailable(why),
             }

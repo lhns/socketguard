@@ -199,7 +199,7 @@ function Invoke-FirewallExercise {
   if ($script:addedAddress) { Remove-NetIPAddress -InterfaceIndex $script:addedAddress[0] -IPAddress $script:addedAddress[1] -Confirm:$false -ErrorAction SilentlyContinue }
 }
 
-# ---- managed networks (ADR 0052): the bundled Tor and Yggdrasil ------------------------------
+# ---- Tor and Yggdrasil networks (ADR 0052): the bundled Tor and Yggdrasil ------------------------------
 # The Mn-* helpers are shared with test/portable.ps1 (test/networks.ps1). A check the runner cannot do
 # is SKIPPED with the exact reason and listed at the end, never faked.
 . (Join-Path $PSScriptRoot 'networks.ps1')
@@ -272,23 +272,23 @@ function Assert-Bundled {
   Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }
 
-function Invoke-ManagedNetworks {
+function Invoke-TorAndYggdrasil {
   Section 'networks: Tor'
   $r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor') 'mn-add-tor'
   Write-Host $r.Text
   if ($r.Code -ne 0) { Mn-Fail "networks add tor exited $($r.Code)" }
   Write-Host '  waiting for the bootstrap (up to 10 minutes)'
-  if (-not (Mn-WaitUp 'tor' 600)) { Mn-Fail 'the managed Tor network is not up after 10 minutes' }
-  Ok 'the managed Tor network is up (bootstrapped)'
+  if (-not (Mn-WaitUp 'tor' 600)) { Mn-Fail 'the Tor network is not up after 10 minutes' }
+  Ok 'the Tor network is up (bootstrapped)'
   $procs = Mn-Procs 'tor.exe'
   if ($procs.Count -eq 0) { Mn-Fail 'the network is up but no tor.exe from third_party is running' }
   $owner = Mn-Owner $procs[0]
   $n = Mn-Net 'tor'
-  Write-Host "  tor.exe (pid $($procs[0].ProcessId)) owner: $owner; the network card says runs_as = '$($n.managed.runs_as)', version $($n.managed.version)"
-  if ($owner -notmatch 'LOCAL SERVICE') { Mn-Fail "tor.exe runs as $owner, not NT AUTHORITY\LOCAL SERVICE (runs_as: '$($n.managed.runs_as)')" }
+  Write-Host "  tor.exe (pid $($procs[0].ProcessId)) owner: $owner; the network card says runs_as = '$($n.child.runs_as)', version $($n.child.version)"
+  if ($owner -notmatch 'LOCAL SERVICE') { Mn-Fail "tor.exe runs as $owner, not NT AUTHORITY\LOCAL SERVICE (runs_as: '$($n.child.runs_as)')" }
   Ok 'tor.exe runs as NT AUTHORITY\LOCAL SERVICE'
-  if ("$($n.managed.runs_as)" -notmatch 'LocalService|LOCAL SERVICE') { Mn-Fail "runs_as is '$($n.managed.runs_as)'" }
-  Ok "the network card says it runs as $($n.managed.runs_as)"
+  if ("$($n.child.runs_as)" -notmatch 'LocalService|LOCAL SERVICE') { Mn-Fail "runs_as is '$($n.child.runs_as)'" }
+  Ok "the network card says it runs as $($n.child.runs_as)"
   if (-not (Wait-Until { Test-Path (Join-Path $DataDir 'tor') } 20 'tor dir')) { Mn-Fail "no $DataDir\tor" }
 
   $r = Run $Cli @('networks', 'rm', 'tor') 'mn-rm-tor'
@@ -311,20 +311,20 @@ function Invoke-ManagedNetworks {
   $seen = Wait-Until { [bool](Mn-Adapter) } 120 'adapter'
   $n = Mn-Net 'ygg'
   Write-Host "  ygg: $(Mn-Describe $n)"
-  if ($n -and "$($n.managed.state)" -eq 'unavailable') { Mn-Fail "the Yggdrasil files are not part of this build: $(Mn-Describe $n)" }
+  if ($n -and "$($n.child.state)" -eq 'unavailable') { Mn-Fail "the Yggdrasil files are not part of this build: $(Mn-Describe $n)" }
   if (-not $seen) {
     $why = Mn-Describe $n
     Set-Content -Path (Join-Path $Out 'ygg-adapter-error.txt') -Value ("no adapter after 120 s`n$why`n" + ($n | ConvertTo-Json -Depth 6) + "`n" + ((Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Format-Table Name, InterfaceDescription, Status -AutoSize | Out-String)) + "`n" + ((& pnputil /enum-drivers 2>&1 | Select-String -Pattern 'wintun' -Context 3, 3 | Out-String)))
-    Skip "managed Yggdrasil: no adapter 'SocketGuard' on this runner after 120 s. Status: $why. Details in ygg-adapter-error.txt"
+    Skip "Yggdrasil: no adapter 'SocketGuard' on this runner after 120 s. Status: $why. Details in ygg-adapter-error.txt"
     return
   }
   $script:mnAdapterSeen = $true
   $ad = Mn-Adapter
   Ok "the adapter exists: $($ad.Name) ($($ad.InterfaceDescription), $($ad.Status))"
-  if (-not (Mn-WaitUp 'ygg' 120)) { Mn-Fail 'the managed Yggdrasil network is not up 2 minutes after the adapter appeared' }
-  Ok 'the managed Yggdrasil network is up'
+  if (-not (Mn-WaitUp 'ygg' 120)) { Mn-Fail 'the Yggdrasil network is not up 2 minutes after the adapter appeared' }
+  Ok 'the Yggdrasil network is up'
   $n = Mn-Net 'ygg'
-  $addr = "$($n.managed.address)"
+  $addr = "$($n.child.address)"
   if (-not $addr) { Mn-Fail 'the network card shows no node address' }
   $onAdapter = Wait-Until {
     $ips = @(Get-NetIPAddress -InterfaceIndex (Mn-Adapter).ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue)
@@ -334,22 +334,22 @@ function Invoke-ManagedNetworks {
   Ok "the adapter holds the node address $addr"
   $yp = Mn-Procs 'yggdrasil.exe'
   if ($yp.Count -eq 0) { Mn-Fail 'no yggdrasil.exe from third_party is running' }
-  Write-Host "  yggdrasil.exe owner: $(Mn-Owner $yp[0]) (Windows cannot drop privileges after the adapter exists); runs_as: '$($n.managed.runs_as)'"
+  Write-Host "  yggdrasil.exe owner: $(Mn-Owner $yp[0]) (Windows cannot drop privileges after the adapter exists); runs_as: '$($n.child.runs_as)'"
   # Is the admin socket usable? peers_connected is known when it is; otherwise the valve engaged.
   # The count is cached for a few seconds after the node comes up: poll before judging.
-  $known = Wait-Until { $n = Mn-Net 'ygg'; $null -ne $n.managed.peers_connected } 45 'peers_connected known'
+  $known = Wait-Until { $n = Mn-Net 'ygg'; $null -ne $n.child.peers_connected } 45 'peers_connected known'
   $n = Mn-Net 'ygg'
-  if ($null -ne $n.managed.peers_connected) {
-    Ok "the admin socket works: peers_connected = $($n.managed.peers_connected) (no peers are configured here)"
+  if ($null -ne $n.child.peers_connected) {
+    Ok "the admin socket works: peers_connected = $($n.child.peers_connected) (no peers are configured here)"
   } else {
-    Write-Host "  peers_connected is unknown: the admin endpoint did not answer or the valve engaged. Detail: '$($n.managed.detail)'" -ForegroundColor Yellow
+    Write-Host "  peers_connected is unknown: the admin endpoint did not answer or the valve engaged. Detail: '$($n.child.detail)'" -ForegroundColor Yellow
     Write-Host '::warning::networks: Yggdrasil admin socket: peer information unavailable on this runner'
-    $script:skipped.Add("Yggdrasil admin socket: peers_connected unknown (detail: '$($n.managed.detail)')")
+    $script:skipped.Add("Yggdrasil admin socket: peers_connected unknown (detail: '$($n.child.detail)')")
   }
   Assert-PrefixBlock $addr
 }
 
-# A PREFIX block drops a connection on the real WFP engine (ADR 0051). The managed node's own
+# A PREFIX block drops a connection on the real WFP engine (ADR 0051). The Yggdrasil node's own
 # 300::/64 subnet is denied by the scope `overlay:ygg:subnet`, a LocalNet (address + mask)
 # condition. The runner adds an address inside that subnet by hand (nothing SocketGuard
 # assigned, so only the prefix can deny it), listens on it and connects from a second address of
@@ -365,7 +365,6 @@ function Invoke-ManagedNetworks {
 # assertion. The granted-port half also depends on that path (the permit names the adapter as
 # arrival interface, which a local-to-local connection may not carry) and is reported as
 # SKIPPED, not failed, when only that half does not hold.
-# The /7 range block of an existing node is covered by the plan test only (no real-engine proof).
 function Assert-PrefixBlock([string]$NodeAddr) {
   Section 'networks: a prefix block drops a connection (real WFP engine)'
   $ad = Mn-Adapter
@@ -519,7 +518,7 @@ if ($pgBefore -ne $pgAfter) { Fail "port groups changed over the upgrade:`nbefor
 Ok 'the stored state is the same after the upgrade'
 Assert-Footprint @{ Expect = 'present'; Require = @('wfp-provider', 'wfp-sublayer', 'named-pipe') } 'present-upgraded'
 
-Invoke-ManagedNetworks
+Invoke-TorAndYggdrasil
 # What the install record says about the Wintun driver, read before the purge deletes it.
 try {
   $rec = Get-Content (Join-Path $DataDir 'setup-log.json') -Raw | ConvertFrom-Json

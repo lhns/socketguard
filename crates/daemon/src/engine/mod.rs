@@ -35,7 +35,7 @@ use crate::firewall::{DesiredRuleset, DropEvent, Firewall};
 use crate::iface::{self, InterfaceManager};
 use crate::metrics::{CounterKey, Metrics};
 use crate::monitor::{self, SocketMonitor};
-use crate::networks::{self, ManagedCtx};
+use crate::networks::{self, ChildCtx};
 use crate::ruleset::LockoutRisk;
 use crate::state::{Database, NewActivity};
 use crate::AppState;
@@ -144,9 +144,9 @@ pub struct Engine {
     ifaces: Arc<dyn InterfaceManager>,
     /// Persisted ULA global ID handed to ULA backends.
     ula_global_id: [u8; 5],
-    /// What managed networks (ADR 0052) run on: the shipped files, the supervisor, the
+    /// What Tor and Yggdrasil networks (ADR 0052) run on: the shipped files, the supervisor, the
     /// state directory. `sync_children` is how the engine uses it.
-    managed: ManagedCtx,
+    child_ctx: ChildCtx,
     /// Interfaces already reported as unavailable (avoids a warning every poll).
     unavailable_ifaces: Mutex<HashSet<String>>,
     /// Networks whose last allocation failed (log once per outage).
@@ -204,7 +204,7 @@ impl Engine {
         )
     }
 
-    /// [`Engine::new`] over the given monitor, firewall and interfaces; managed networks
+    /// [`Engine::new`] over the given monitor, firewall and interfaces; Tor and Yggdrasil networks
     /// get the real supervisor and the files beside the executable.
     pub fn new_with_deps(
         config: &DaemonConfig,
@@ -219,11 +219,11 @@ impl Engine {
             monitor,
             firewall,
             ifaces,
-            ManagedCtx::system(&config.db_path),
+            ChildCtx::system(&config.db_path),
         )
     }
 
-    /// [`Engine::new_with_deps`] with the context of managed networks (tests give it a
+    /// [`Engine::new_with_deps`] with the context of Tor and Yggdrasil networks (tests give it a
     /// fake supervisor).
     pub fn new_with_ctx(
         config: &DaemonConfig,
@@ -231,7 +231,7 @@ impl Engine {
         monitor: Box<dyn SocketMonitor>,
         firewall: Arc<dyn Firewall>,
         ifaces: Arc<dyn InterfaceManager>,
-        managed: ManagedCtx,
+        child_ctx: ChildCtx,
     ) -> anyhow::Result<Self> {
         let mut backends = HashMap::new();
         for inst in &config.backends {
@@ -240,7 +240,7 @@ impl Engine {
                 &inst.backend,
                 ula_global_id,
                 ifaces.clone(),
-                &managed,
+                &child_ctx,
             )?;
             backends.insert(
                 inst.id.clone(),
@@ -256,7 +256,7 @@ impl Engine {
             ifaces,
             backends,
             ula_global_id,
-            managed,
+            child_ctx,
         ))
     }
 
@@ -273,32 +273,32 @@ impl Engine {
             ifaces,
             backends,
             crate::networks::ip::ula::UlaBackend::random_global_id(),
-            ManagedCtx::inert(),
+            ChildCtx::inert(),
         );
         // Tests drive passes back to back: verify on every one unless they say otherwise.
         engine.verify_interval = Duration::ZERO;
         engine
     }
 
-    /// Replace what managed networks run on (a fake supervisor, files in a temp directory)
+    /// Replace what Tor and Yggdrasil networks run on (a fake supervisor, files in a temp directory)
     /// — for tests only.
-    pub fn set_managed_ctx(&mut self, managed: ManagedCtx) {
-        self.managed = managed;
+    pub fn set_child_ctx(&mut self, child_ctx: ChildCtx) {
+        self.child_ctx = child_ctx;
     }
 
     /// The shipped files; shared with `AppState::bundled`.
     pub fn bundled(&self) -> Arc<crate::bundled::Bundled> {
-        self.managed.bundled.clone()
+        self.child_ctx.bundled.clone()
     }
 
     /// Use `bundled` as the shipped files (the API and the engine must agree) — for tests.
     pub fn set_bundled(&mut self, bundled: Arc<crate::bundled::Bundled>) {
-        self.managed.bundled = bundled;
+        self.child_ctx.bundled = bundled;
     }
 
-    /// The supervisor that runs the children of managed networks.
+    /// The supervisor that runs the children of Tor and Yggdrasil networks.
     pub fn children(&self) -> &Arc<crate::children::Supervisor> {
-        &self.managed.children
+        &self.child_ctx.children
     }
 
     /// Override [`VERIFY_INTERVAL`] — for tests only.
@@ -317,7 +317,7 @@ impl Engine {
         ifaces: Arc<dyn InterfaceManager>,
         backends: HashMap<String, ActiveBackend>,
         ula_global_id: [u8; 5],
-        managed: ManagedCtx,
+        child_ctx: ChildCtx,
     ) -> Self {
         Self {
             monitor,
@@ -325,7 +325,7 @@ impl Engine {
             firewall,
             ifaces,
             ula_global_id,
-            managed,
+            child_ctx,
             unavailable_ifaces: Mutex::default(),
             alloc_failing: Mutex::default(),
             alloc_lock: tokio::sync::Mutex::default(),
@@ -416,11 +416,11 @@ impl Engine {
             vlan_id: None,
             // The live state of the child process, from the network; a network
             // whose kind does not report one yet shows only what its config says.
-            managed: active.config.backend.runs_child().then(|| {
+            child: active.config.backend.runs_child().then(|| {
                 let mut info = active
                     .network
-                    .managed()
-                    .unwrap_or(socketguard_core::ManagedInfo {
+                    .child_info()
+                    .unwrap_or(socketguard_core::ChildInfo {
                         state: socketguard_core::ChildState::Unavailable,
                         progress: None,
                         detail: None,
@@ -492,7 +492,7 @@ impl Engine {
     /// [`Engine::startup_reconcile`], calling `ready` once the first ruleset apply attempt
     /// has completed (ADR 0051). That is the point where the service manager may let the
     /// network come up. Everything before it works from stored state and local kernel calls;
-    /// the Tor control port (`enforce_networks`) and the managed children
+    /// the Tor control port (`enforce_networks`) and the children
     /// (`sync_children`) come after it, so nothing that needs the network can hold it.
     pub async fn startup_reconcile_with(
         &self,
@@ -505,7 +505,7 @@ impl Engine {
             warn!("Could not adopt existing onion services: {e:#}");
         }
         // Before the first ruleset: the node's addresses are known from its key.
-        self.ensure_managed_keys(state).await;
+        self.ensure_child_keys(state).await;
         self.detect_unadopted(state).await;
         // Like `apply_firewall`, but `ready` fires between the apply and the enforcement
         // of the networks' services, which talks to Tor.
@@ -601,7 +601,7 @@ impl Engine {
             self.ifaces.clone(),
         )
         .await;
-        // The onion services are gone; now the managed children go too (they would take
+        // The onion services are gone; now the children go too (they would take
         // the services with them, but a stopped child also costs nothing).
         self.sync_children_and_wait(state).await;
         self.commit(state, removed, None, &[DaemonEvent::SettingsChanged])
@@ -616,7 +616,7 @@ impl Engine {
         state.db.set_unadopted(false).await?;
         state.db.clear_fresh().await?;
         // Children first, so the networks read "starting" and not "turned off" while the
-        // ruleset goes in; a child with a gate (managed Yggdrasil) stays held until the
+        // ruleset goes in; a child with a gate (Yggdrasil) stays held until the
         // second sync, after the apply.
         self.sync_children(state).await;
         let applied = self.apply_and_ensure(state).await;
@@ -775,7 +775,7 @@ mod tests {
     #[tokio::test]
     async fn disable_everything_tears_down_networks_even_when_an_address_stays() {
         let db = Database::new(":memory:").await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         let addr: Ipv6Addr = "fd00::1".parse().unwrap();
         db.claim_address(addr, "lo", Some("local")).await.unwrap();
         let net = MockInterfaceManager::new(Arc::new(Mutex::new(vec![])));

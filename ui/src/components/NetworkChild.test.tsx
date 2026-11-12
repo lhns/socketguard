@@ -2,18 +2,18 @@ import { describe, expect, it } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import NetworksSection from "./NetworksSection";
-import { bridgeError, childStateText, peerError } from "./ManagedNetwork";
+import { bridgeError, childStateText, peerError } from "./NetworkChild";
 import { ALLOWED_LINKS } from "../links";
 import { mockDaemon, renderWithProviders, saved } from "../test/helpers";
-import type { ManagedInfo, Network } from "../api";
+import type { ChildInfo, Network } from "../api";
 
-const ygg = (managed?: ManagedInfo): Network => ({
-  id: "n-ygg", kind: "yggdrasil", name: "Yggdrasil", interface: "ygg0", grants_apply: true, status: { state: "up" }, managed,
+const ygg = (child?: ChildInfo): Network => ({
+  id: "n-ygg", kind: "yggdrasil", name: "Yggdrasil", interface: "ygg0", grants_apply: true, status: { state: "up" }, child,
 });
 const row = async (name: string) => within((await screen.findByRole("button", { name: `Remove network ${name}` })).closest("li") as HTMLElement);
 
 describe("child state in words", () => {
-  const t = (m: Partial<ManagedInfo>) => childStateText({ state: "up", ...m });
+  const t = (m: Partial<ChildInfo>) => childStateText({ state: "up", ...m });
   it("says each state plainly", () => {
     expect(t({ state: "starting" })).toBe("Starting");
     expect(t({ state: "bootstrapping", progress: 40 })).toBe("Bootstrapping 40%");
@@ -41,7 +41,7 @@ describe("Configured networks", () => {
     mockDaemon({
       list_networks: () => [
         ygg({ state: "up", runs_as: "socketguard-net", version: "0.5.12", peers: [] }),
-        { id: "n-tor", kind: "tor", name: "Tor", interface: null, grants_apply: true, status: { state: "up" }, managed: { state: "bootstrapping", progress: 62, peers: [] } },
+        { id: "n-tor", kind: "tor", name: "Tor", interface: null, grants_apply: true, status: { state: "up" }, child: { state: "bootstrapping", progress: 62, peers: [] } },
       ],
     });
     renderWithProviders(<NetworksSection />);
@@ -129,8 +129,8 @@ describe("Configured networks", () => {
 const FP = "0123456789ABCDEF0123456789ABCDEF01234567";
 const CERT = "A".repeat(70);
 const bridge = (host: number, port = 443) => `obfs4 192.0.2.${host}:${port} ${FP} cert=${CERT} iat-mode=0`;
-const tor = (managed?: ManagedInfo): Network => ({
-  id: "n-tor", kind: "tor", name: "Tor", interface: null, grants_apply: true, status: { state: "up" }, managed,
+const tor = (child?: ChildInfo): Network => ({
+  id: "n-tor", kind: "tor", name: "Tor", interface: null, grants_apply: true, status: { state: "up" }, child,
 });
 
 describe("bridge lines", () => {

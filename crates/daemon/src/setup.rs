@@ -5,7 +5,7 @@
 
 use crate::bundled::Bundled;
 use crate::iface::HostInterface;
-use crate::networks::ygg_managed;
+use crate::networks::ygg_child;
 use anyhow::Result;
 use socketguard_core::setup::{KindSetup, LanCandidate, NetworkSetup, SetupState, SetupStatus};
 use socketguard_core::{Network, NetworkKind};
@@ -83,7 +83,7 @@ pub fn detect(
     );
     // Added, the network's own status says it waits; before, the card does.
     if !existing.yggdrasil && yggdrasil.available && another_node_running(p) {
-        yggdrasil.reason = Some(ygg_managed::OTHER_NODE.to_string());
+        yggdrasil.reason = Some(ygg_child::OTHER_NODE.to_string());
     }
     NetworkSetup {
         lan: detect_lan(p, existing),
@@ -148,11 +148,11 @@ fn kind(added: bool, unavailable: Option<String>, version: Option<String>) -> Ki
 /// Whether an adapter other than SocketGuard's own holds an address in Yggdrasil's range:
 /// another node runs on this host.
 fn another_node_running(p: &dyn Probes) -> bool {
-    let ours = ygg_managed::adapter_name();
+    let ours = ygg_child::adapter_name();
     p.interfaces().unwrap_or_default().iter().any(|i| {
         Some(i.name.as_str()) != ours
             && p.addresses(&i.name)
-                .is_ok_and(|a| a.iter().any(ygg_managed::in_yggdrasil_range))
+                .is_ok_and(|a| a.iter().any(ygg_child::in_yggdrasil_range))
     })
 }
 
@@ -256,13 +256,13 @@ mod tests {
             .insert("tun0".into(), vec!["200:8af8::1".parse().unwrap()]);
         let s = detect(&p, &Existing::default(), None, &bundled);
         assert!(s.yggdrasil.available);
-        assert_eq!(s.yggdrasil.reason.as_deref(), Some(ygg_managed::OTHER_NODE));
+        assert_eq!(s.yggdrasil.reason.as_deref(), Some(ygg_child::OTHER_NODE));
         assert_eq!(
-            ygg_managed::OTHER_NODE,
+            ygg_child::OTHER_NODE,
             "Another Yggdrasil node is running on this computer. SocketGuard's Yggdrasil cannot run next to it."
         );
         // Our own adapter does not count, and once added the network speaks for itself.
-        let own = ygg_managed::adapter_name().map(str::to_string);
+        let own = ygg_child::adapter_name().map(str::to_string);
         if let Some(own) = own {
             p.addrs.remove("tun0");
             p.ifaces.push(iface(&own));

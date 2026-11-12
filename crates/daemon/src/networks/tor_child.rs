@@ -7,13 +7,13 @@
 //! from what Tor says about itself (ADR 0040), and the cookie is vetted against the account
 //! Tor runs as.
 
-use super::managed::ManagedCtx;
+use super::child::ChildCtx;
 use super::tor_control::{AuthOptions, Control, Endpoint};
 use crate::account::{self, Accounts};
 use crate::children::{ChildHealth, ChildSpec, ChildStatus, HealthCheck, RunAs, StatusHandle};
 use anyhow::{anyhow, Context, Result};
 use socketguard_core::bridge;
-use socketguard_core::{ChildState, ManagedInfo};
+use socketguard_core::{ChildInfo, ChildState};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,12 +22,14 @@ use std::time::Duration;
 pub const DIR: &str = "tor";
 
 /// Tor is restarted when its bootstrap has made no progress for this long (it sometimes stalls
-/// for good, e.g. while loading relay descriptors). Only the start is watched.
+/// for good, e.g. while loading relay descriptors). Only the start is watched. A host with no
+/// internet never gets anywhere: the supervisor lets the limit grow with each such restart
+/// (`ChildSpec::stall_limit`).
 pub const BOOTSTRAP_STALL: Duration = Duration::from_secs(3 * 60);
 /// The same through bridges, whose bootstrap is slower.
 pub const BOOTSTRAP_STALL_BRIDGES: Duration = Duration::from_secs(10 * 60);
 
-/// Where the managed Tor keeps its files.
+/// Where Tor keeps its files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TorPaths {
     pub dir: PathBuf,
@@ -52,7 +54,7 @@ impl TorPaths {
     }
 }
 
-/// Who the managed Tor runs as: the unprivileged account when it exists and the daemon may
+/// Who Tor runs as: the unprivileged account when it exists and the daemon may
 /// start processes as it, else the daemon's own account, saying why.
 pub fn resolve_run_as(accounts: &dyn Accounts) -> RunAs {
     let (_, root) = accounts.daemon();
@@ -192,19 +194,19 @@ pub fn parse_port_file(text: &str) -> Option<String> {
         .filter(|a| !a.is_empty())
 }
 
-/// The managed Tor of one network: how to reach it, how to start it, how it stands.
+/// The Tor child of one network: how to reach it, how to start it, how it stands.
 #[derive(Clone)]
-pub struct ManagedTor {
+pub struct TorChild {
     id: String,
-    ctx: ManagedCtx,
+    ctx: ChildCtx,
     status: StatusHandle,
     paths: Result<TorPaths, String>,
     /// Tests: a control port to use instead of the child's, and a child that is up.
     fixed: Option<(Endpoint, AuthOptions)>,
 }
 
-impl ManagedTor {
-    pub fn new(id: &str, ctx: &ManagedCtx) -> Self {
+impl TorChild {
+    pub fn new(id: &str, ctx: &ChildCtx) -> Self {
         Self {
             id: id.to_string(),
             status: ctx.children.handle(id),
@@ -220,7 +222,7 @@ impl ManagedTor {
     pub fn with_control(control: String, opts: AuthOptions) -> Self {
         Self {
             fixed: Some((Endpoint::Tcp(control), opts)),
-            ..Self::new("tor", &ManagedCtx::inert())
+            ..Self::new("tor", &ChildCtx::inert())
         }
     }
 
@@ -269,9 +271,9 @@ impl ManagedTor {
     }
 
     /// The card of the network.
-    pub fn info(&self) -> ManagedInfo {
+    pub fn info(&self) -> ChildInfo {
         let s = self.child();
-        ManagedInfo {
+        ChildInfo {
             state: s.state,
             progress: s.progress,
             detail: s.detail,
@@ -336,7 +338,7 @@ impl ManagedTor {
         self.spec_with_bridges(&[])
     }
 
-    /// [`ManagedTor::spec`] connecting through `bridges` (bridge lines; canonicalised here,
+    /// [`TorChild::spec`] connecting through `bridges` (bridge lines; canonicalised here,
     /// so whatever the configuration holds, only canonical lines reach the `torrc`). Needs
     /// the obfs4 helper of this build.
     pub fn spec_with_bridges(&self, bridges: &[String]) -> Result<ChildSpec, String> {
@@ -404,7 +406,7 @@ impl ManagedTor {
 
 #[cfg(windows)]
 fn own_sid() -> Option<String> {
-    super::tor_control::winacl::current_user_sid().ok()
+    socketguard_core::winsid::current_user_sid()
 }
 
 #[cfg(not(windows))]
@@ -413,7 +415,7 @@ fn own_sid() -> Option<String> {
 }
 
 /// Up when Tor has bootstrapped, asked over the control port.
-struct TorHealth(ManagedTor);
+struct TorHealth(TorChild);
 
 impl HealthCheck for TorHealth {
     fn check(&self) -> ChildHealth {
@@ -674,7 +676,7 @@ mod tests {
     async fn bridges_need_the_helper_and_change_the_launch() {
         let d = state_dir();
         let c = ctx(Some(d.clone()), FakeAccounts::absent());
-        let t = ManagedTor::new("tor", &c);
+        let t = TorChild::new("tor", &c);
         let err = t.spec_with_bridges(&[BRIDGE.to_string()]).unwrap_err();
         assert!(err.contains("obfs4 helper"), "{err}");
         assert!(t.info().bridges_unavailable.is_some());
@@ -778,12 +780,12 @@ mod tests {
         assert!(not_system.describe().contains("not SYSTEM"));
     }
 
-    fn ctx(dir: Option<PathBuf>, accounts: FakeAccounts) -> ManagedCtx {
+    fn ctx(dir: Option<PathBuf>, accounts: FakeAccounts) -> ChildCtx {
         let third = std::env::temp_dir().join(format!("sg-tor3p-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(third.join("tor")).unwrap();
         let exe = if cfg!(windows) { "tor.exe" } else { "tor" };
         std::fs::write(third.join("tor").join(exe), b"x").unwrap();
-        ManagedCtx::new(
+        ChildCtx::new(
             Arc::new(Bundled::from_dir(third)),
             dir,
             Arc::new(Supervisor::system()),
@@ -801,7 +803,7 @@ mod tests {
     async fn the_spec_has_the_command_line_environment_and_paths_of_the_adr() {
         let d = state_dir();
         let c = ctx(Some(d.clone()), FakeAccounts::present());
-        let spec = ManagedTor::new("tor", &c).spec().unwrap();
+        let spec = TorChild::new("tor", &c).spec().unwrap();
         let torrc = d.join("tor").join("torrc").display().to_string();
         assert_eq!(
             spec.args,
@@ -830,13 +832,13 @@ mod tests {
 
     #[tokio::test]
     async fn without_files_or_a_state_directory_the_spec_says_why() {
-        let none = ManagedCtx::inert();
+        let none = ChildCtx::inert();
         assert_eq!(
-            ManagedTor::new("tor", &none).spec().unwrap_err(),
+            TorChild::new("tor", &none).spec().unwrap_err(),
             socketguard_core::setup::NOT_INCLUDED
         );
         let c = ctx(None, FakeAccounts::present());
-        assert!(ManagedTor::new("tor", &c)
+        assert!(TorChild::new("tor", &c)
             .spec()
             .unwrap_err()
             .contains("no state directory"));
@@ -846,7 +848,7 @@ mod tests {
     async fn the_control_endpoint_comes_from_our_paths_and_the_cookie_is_pinned() {
         let d = state_dir();
         let c = ctx(Some(d.clone()), FakeAccounts::present());
-        let t = ManagedTor::new("tor", &c);
+        let t = TorChild::new("tor", &c);
         if cfg!(windows) {
             // Nothing written yet.
             assert!(t.connect_params().is_err());
@@ -884,7 +886,7 @@ mod tests {
             ..FakeAccounts::present()
         };
         let c = ctx(Some(d.clone()), accounts);
-        let t = ManagedTor::new("tor", &c);
+        let t = TorChild::new("tor", &c);
         let spec = t.spec().unwrap();
         assert!(matches!(spec.run_as, RunAs::Daemon { .. }));
         (spec.before_start.unwrap())().unwrap();
@@ -908,7 +910,7 @@ mod tests {
             ..FakeAccounts::present()
         };
         let c = ctx(Some(d.clone()), accounts);
-        let t = ManagedTor::new("tor", &c);
+        let t = TorChild::new("tor", &c);
         let spec = t.spec().unwrap();
         assert!(matches!(spec.run_as, RunAs::Daemon { .. }));
         assert!(spec
@@ -968,7 +970,7 @@ mod tests {
         );
     }
 
-    /// A managed Tor in portable mode: the directory under the data folder is protected
+    /// Tor in portable mode: the directory under the data folder is protected
     /// (not inheriting the allowed user's read access), Tor's cookie is vetted as the
     /// daemon's own.
     #[cfg(windows)]
@@ -985,7 +987,7 @@ mod tests {
             ..FakeAccounts::present()
         };
         let c = ctx(Some(d.clone()), accounts);
-        let t = ManagedTor::new("tor", &c);
+        let t = TorChild::new("tor", &c);
         let spec = t.spec().unwrap();
         assert_eq!(spec.run_as, RunAs::Portable);
         (spec.before_start.unwrap())().unwrap();
@@ -1009,7 +1011,7 @@ mod tests {
     async fn the_reasons_follow_the_child() {
         let d = state_dir();
         let c = ctx(Some(d), FakeAccounts::present());
-        let t = ManagedTor::new("tor", &c);
+        let t = TorChild::new("tor", &c);
         assert_eq!(t.reason(true), "SocketGuard is turned off");
         assert!(!t.is_up());
         assert_eq!(t.info().state, ChildState::Stopped);

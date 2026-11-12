@@ -14,6 +14,8 @@ pub mod scope;
 pub mod setup;
 pub mod tags;
 pub mod types;
+#[cfg(windows)]
+pub mod winsid;
 pub mod yggdrasil;
 
 pub use addressing::*;
