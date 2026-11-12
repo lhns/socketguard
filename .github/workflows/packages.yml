@@ -8,7 +8,7 @@ name: packages
 
 on:
   push:
-    branches: [main, own-nodes]
+    branches: [main]
   workflow_dispatch:
   workflow_call:
 
