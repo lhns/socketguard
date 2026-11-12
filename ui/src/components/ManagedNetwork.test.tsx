@@ -212,6 +212,23 @@ describe("Bridges of the managed Tor", () => {
     expect(t.getByRole("button", { name: "Save bridges" })).toBeDisabled();
   });
 
+  it("that are already saved can still be removed when the build has no helper", async () => {
+    const why = "bridges are not available: this build does not include the obfs4 helper (lyrebird)";
+    const d = mockDaemon({
+      list_networks: () => [tor({ state: "up", peers: [], bridges: [bridge(1)], bridges_unavailable: why })],
+      set_network_bridges: () => tor(),
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<NetworksSection />);
+    const t = await row("Tor");
+    const save = t.getByRole("button", { name: "Save bridges" });
+    expect(save).toBeDisabled();
+    await user.clear(t.getByLabelText("Bridge lines"));
+    await user.click(save);
+    await waitFor(() => expect(d.count("set_network_bridges")).toBe(1));
+    expect(d.last("set_network_bridges")?.args).toEqual({ id: "n-tor", bridges: [] });
+  });
+
   it("show the daemon's refusal", async () => {
     mockDaemon({
       list_networks: () => [tor({ state: "up", peers: [] })],

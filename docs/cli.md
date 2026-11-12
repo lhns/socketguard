@@ -118,6 +118,9 @@ networks add yggdrasil --existing [--interface ygg0] [--admin-endpoint unix:///v
 networks add tor --existing [--control 127.0.0.1:9051|unix:/path] [--password-env VAR | --password-stdin]
 networks add ula|slaac|dhcpv6 [--interface eth0] [--id ID]
 networks peers yggdrasil [--add URI] [--rm URI]         show or change the peers of the managed node
+networks bridges tor [--add LINE] [--rm LINE] [--clear]   show or change the obfs4 bridges of the managed Tor;
+                                        LINE is `[Bridge ]obfs4 IP:port FINGERPRINT cert=CERT iat-mode=0` (other
+                                        transports are refused); changing them restarts Tor; --clear turns them off
 networks rm ID [--force] [-y]           --force: remove a Tor network Tor cannot confirm is clean
 ```
 

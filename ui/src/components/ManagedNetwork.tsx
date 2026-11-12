@@ -245,7 +245,9 @@ function BridgesEditor({ id, saved, unavailable }: { id: string; saved: string[]
   const lines = bridgeLines(text);
   const problems = lines.map((l, i) => ({ line: i + 1, why: bridgeError(l) })).filter((p) => p.why !== null);
   const dirty = JSON.stringify(lines) !== JSON.stringify(saved);
+  // Without the helper nothing can be set, but bridges that are already saved can be removed.
   const blocked = unavailable !== undefined;
+  const locked = blocked && saved.length === 0;
 
   return (
     <div role="group" aria-label="Bridges">
@@ -262,7 +264,7 @@ function BridgesEditor({ id, saved, unavailable }: { id: string; saved: string[]
         spellCheck={false}
         placeholder="obfs4 192.0.2.1:443 FINGERPRINT cert=… iat-mode=0"
         value={text}
-        disabled={blocked}
+        disabled={locked}
         onChange={(e) => {
           setText(e.target.value);
           setError(null);
@@ -275,7 +277,7 @@ function BridgesEditor({ id, saved, unavailable }: { id: string; saved: string[]
       <div className="actions">
         <button
           className="btn btn-primary btn-sm"
-          disabled={blocked || !dirty || problems.length > 0 || set.isPending}
+          disabled={!dirty || (blocked && lines.length > 0) || problems.length > 0 || set.isPending}
           onClick={() =>
             set.mutate(
               { id, bridges: lines },

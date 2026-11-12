@@ -1080,7 +1080,12 @@ fn check_managed(state: &AppState, backend: &BackendConfig) -> Result<(), ApiErr
         BackendConfig::Tor { .. } => state.bundled.tor().map(|_| ()),
         _ => state.bundled.yggdrasil().map(|_| ()),
     };
-    files.map_err(ApiErr::invalid)
+    files.map_err(ApiErr::invalid)?;
+    // Bridges given when the network is made need the obfs4 helper just like `PUT .../bridges`.
+    if !backend.bridges().is_empty() {
+        state.bundled.obfs4_helper().map_err(ApiErr::invalid)?;
+    }
+    Ok(())
 }
 
 /// The Tor settings the API accepts: the defaults, or exactly what the config file already

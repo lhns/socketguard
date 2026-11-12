@@ -257,7 +257,7 @@ mod tests {
             format!("OBFS4 192.0.2.10:443 {FP} cert={CERT} iat-mode=0"),
             // Other transports and a bridge without a transport.
             format!("snowflake 192.0.2.3:80 {FP} fingerprint={FP} url=https://x.example/ fronts=a.example"),
-            format!("meek_lite 192.0.2.20:80 url=https://x.example/ front=a.example utls=HelloRandomizedALPN"),
+            "meek_lite 192.0.2.20:80 url=https://x.example/ front=a.example utls=HelloRandomizedALPN".to_string(),
             format!("webtunnel [2001:db8::1]:443 {FP} url=https://x.example/y ver=0.0.3"),
             format!("scramblesuit 192.0.2.10:443 {FP} password=ABCD"),
             format!("obfs3 192.0.2.10:443 {FP}"),

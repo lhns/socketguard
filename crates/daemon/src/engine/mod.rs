@@ -435,7 +435,10 @@ impl Engine {
                     info.peers = active.config.backend.peers().to_vec();
                 }
                 if info.bridges.is_empty() {
-                    info.bridges = active.config.backend.bridges().to_vec();
+                    // Shown in canonical form, whatever a hand-edited config file holds.
+                    let configured = active.config.backend.bridges();
+                    info.bridges = socketguard_core::bridge::normalize_bridges(configured)
+                        .unwrap_or_else(|_| configured.to_vec());
                 }
                 info
             }),

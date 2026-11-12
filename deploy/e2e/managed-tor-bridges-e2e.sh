@@ -73,7 +73,7 @@ BRIDGE="obfs4 192.0.2.10:443 $FP cert=$CERT iat-mode=0"
 BRIDGE2="obfs4 [2001:db8::5]:9001 $FP cert=$CERT iat-mode=2"
 
 tor_pid() { docker exec "$NODE_A" sh -c "ps -eo pid=,stat=,comm= | awk '\$3 == \"tor\" && \$2 !~ /^Z/ { print \$1; exit }'" | grep .; }
-helper_pids() { docker exec "$NODE_A" sh -c "ps -eo pid=,user=,args= | awk '\$2 == \"socketguard-net\" && \$3 ~ /pluggable_transports\\/lyrebird\$/ { print \$1 }'" | grep .; }
+helper_pids() { docker exec "$NODE_A" sh -c "ps -eo pid=,user:32=,args= | awk '\$2 == \"socketguard-net\" && \$3 ~ /pluggable_transports\\/lyrebird\$/ { print \$1 }'" | grep .; }
 helper_gone() { ! helper_pids >/dev/null; }
 net_json() { docker exec "$NODE_A" $SG networks list --json; }
 net_up() { net_json | jq -e '.[0].status.state == "up"' >/dev/null; }
@@ -86,9 +86,10 @@ bridges_cli() { docker exec "$NODE_A" $SG networks bridges tor --json | jq -c .;
 is() { [ "$1" = "$2" ]; }                       # is ACTUAL EXPECTED
 tor_changed_from() { [ "$(tor_pid)" != "$1" ]; }
 net_down() { ! net_up; }
-helper_path_ok() { # the helper runs from the installed directory (the path has a space)
-  local pid; pid="$(helper_pids | head -1)" && [ -n "$pid" ] \
-    && [ "$(docker exec "$NODE_A" readlink "/proc/$pid/exe")" = "$TP/tor/pluggable_transports/lyrebird" ]
+helper_by_relative_name() { # Tor ran the helper by the relative name, from the directory with a space in its path
+  # (the container has no ptrace right, so /proc/PID/exe cannot be read; the only helper Tor can
+  # reach by this name is the one in "$TP/tor", which is the cwd it was started in)
+  local pid; pid="$(helper_pids | head -1)" && [ -n "$pid" ] && [ "$(docker exec "$NODE_A" ps -o args= -p "$pid" | tr -d ' ')" = "./pluggable_transports/lyrebird" ]
 }
 
 SG=/target/debug/socketguard
@@ -119,7 +120,7 @@ step "the torrc has no other transport and no other option from the lines" sh -c
   "[ \$(docker exec $NODE_A grep -c ClientTransportPlugin '$TORRC') = 1 ] && [ \$(docker exec $NODE_A grep -c -E 'SocksPort [1-9]|ControlPort 9' '$TORRC') = 0 ]"
 step "changing the bridges restarted Tor" retry 60 tor_changed_from "$FIRST_TOR"
 step "Tor started the obfs4 helper, as the unprivileged account" retry 90 helper_pids
-step "the helper was found by its relative name and runs from the path with a space" helper_path_ok
+step "the helper was found by its relative name and is run by Tor from the directory with a space" helper_by_relative_name
 step "the network says it is connecting through bridges" retry 60 reason_says_bridges
 sleep 20
 step "the bridge does not exist: the network is not up" net_down

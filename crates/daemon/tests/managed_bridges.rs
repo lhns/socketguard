@@ -38,6 +38,20 @@ impl Fixture {
     /// A daemon whose build ships Tor, and the obfs4 helper when `helper`, with a managed
     /// Tor network `tor`.
     async fn new(helper: bool) -> Self {
+        let f = Self::new_empty(helper).await;
+        let (s, n) = f
+            .call(
+                Method::POST,
+                "/api/networks",
+                Some(json!({"type": "tor", "managed": true})),
+            )
+            .await;
+        assert_eq!(s, StatusCode::CREATED, "{n}");
+        f
+    }
+
+    /// The same without a network.
+    async fn new_empty(helper: bool) -> Self {
         let d = std::env::temp_dir().join(format!("sg-bridges-{}", uuid::Uuid::new_v4()));
         let mut files = vec![format!("tor/{}", exe("tor"))];
         if helper {
@@ -57,16 +71,7 @@ impl Fixture {
         )
         .await;
         let app = api::router(state.clone());
-        let f = Self { state, app };
-        let (s, n) = f
-            .call(
-                Method::POST,
-                "/api/networks",
-                Some(json!({"type": "tor", "managed": true})),
-            )
-            .await;
-        assert_eq!(s, StatusCode::CREATED, "{n}");
-        f
+        Self { state, app }
     }
 
     async fn call(&self, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -163,6 +168,43 @@ async fn without_the_helper_bridges_cannot_be_set_and_the_card_says_why() {
         .as_str()
         .unwrap()
         .contains("obfs4 helper"));
+}
+
+#[tokio::test]
+async fn bridges_in_a_new_network_follow_the_same_rules() {
+    let body = |b: Value| json!({"type": "tor", "managed": true, "bridges": b});
+    let f = Fixture::new_empty(true).await;
+    let (s, e) = f
+        .call(
+            Method::POST,
+            "/api/networks",
+            Some(body(json!([format!("{} X", bridge(1))]))),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    let (s, n) = f
+        .call(
+            Method::POST,
+            "/api/networks",
+            Some(body(json!([bridge(1)]))),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{n}");
+    assert_eq!(n["managed"]["bridges"], json!([bridge(1)]));
+
+    let f = Fixture::new_empty(false).await;
+    let (s, e) = f
+        .call(
+            Method::POST,
+            "/api/networks",
+            Some(body(json!([bridge(1)]))),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    assert!(
+        e["message"].as_str().unwrap().contains("obfs4 helper"),
+        "{e}"
+    );
 }
 
 #[tokio::test]
