@@ -39,7 +39,7 @@ WireGuard (existing interfaces) and an mTLS gateway are planned; see ADR 0036/00
 ### Adding networks
 
 SocketGuard runs its own Tor and Yggdrasil: nothing is installed or changed on your system, and
-the programs stop when SocketGuard stops (ADR 0052). So this is the default:
+the programs stop when SocketGuard stops (ADR 0052; if the daemon is killed, Yggdrasil keeps running on Linux and macOS behind the unchanged firewall rules until the daemon starts again and ends it). So this is the default:
 
 ```bash
 socketguard networks add tor                      # SocketGuard's own Tor

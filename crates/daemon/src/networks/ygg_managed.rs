@@ -248,8 +248,10 @@ impl ManagedYgg {
 
     fn admin_client(&self) -> Option<AdminClient> {
         let paths = self.paths.as_ref().ok()?;
+        // The callers are the status of the network and the health check: a node that
+        // hangs must not hold them up for the 10 s the protocol allows.
         (self.admin_on() && paths.admin_listen().is_some())
-            .then(|| AdminClient::new(&paths.admin_socket))
+            .then(|| AdminClient::new(&paths.admin_socket).with_deadline(Duration::from_secs(2)))
     }
 
     /// The interface of the node: the adapter SocketGuard names, else (macOS) the one that

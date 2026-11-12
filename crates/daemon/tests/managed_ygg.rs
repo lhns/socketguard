@@ -101,6 +101,22 @@ fn applied_rulesets(h: &ManagedHarness) -> Vec<socketguard_daemon::firewall::Des
 }
 
 #[tokio::test]
+async fn the_private_key_is_not_in_the_export() {
+    let h = ManagedHarness::new();
+    let (state, applied) = add(&h, &[]).await;
+    applied.unwrap();
+    let engine = state.engine.read().await;
+    let doc = socketguard_daemon::apply::export(&engine, &state)
+        .await
+        .map_err(|e| format!("{e:?}"))
+        .unwrap();
+    let text = serde_json::to_string(&doc).unwrap();
+    let private = key(&h).private_hex();
+    let seed = &private[..64];
+    assert!(!text.contains(seed), "the seed is not exported");
+}
+
+#[tokio::test]
 async fn the_child_starts_after_the_ruleset_with_the_adr_command_line_and_a_private_conf() {
     let h = ManagedHarness::new();
     let (state, applied) = add(&h, &["tcp://192.0.2.1:9001"]).await;
@@ -346,6 +362,32 @@ async fn turning_socketguard_off_stops_the_child_and_on_starts_it_again() {
 
     state.engine.read().await.enable(&state).await.unwrap();
     wait_until("the child to start again", || h.spawner.started() == 2).await;
+}
+
+#[tokio::test]
+async fn a_managed_node_leaves_nothing_reachable_when_its_network_goes() {
+    let h = ManagedHarness::new();
+    let (state, applied) = add(&h, &[]).await;
+    applied.unwrap();
+    wait_until("the child to start", || h.spawner.started() == 1).await;
+    // Even with the node up (its adapter has the address and the child counts as up),
+    // removing the network or turning SocketGuard off stops it: no confirmation needed.
+    h.ifaces.add_interface(ADAPTER);
+    h.ifaces.plant_address(ADAPTER, key(&h).node().address);
+    let exposure = state
+        .engine
+        .read()
+        .await
+        .exposure(&state, Some(ID))
+        .await
+        .unwrap();
+    assert_eq!(exposure.networks.len(), 1);
+    assert!(!exposure.networks[0].node_running);
+    assert!(
+        exposure.sentences().is_empty(),
+        "{:?}",
+        exposure.sentences()
+    );
 }
 
 #[tokio::test]

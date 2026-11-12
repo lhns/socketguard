@@ -54,11 +54,22 @@ struct Envelope {
 
 pub struct AdminClient {
     path: PathBuf,
+    deadline: Duration,
 }
 
 impl AdminClient {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            deadline: DEADLINE,
+        }
+    }
+
+    /// Wait for the node less long than the node itself would wait for us (for callers
+    /// that must not be held up by a node that hangs).
+    pub fn with_deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = deadline;
+        self
     }
 
     pub fn path(&self) -> &Path {
@@ -68,8 +79,8 @@ impl AdminClient {
     /// Send `request` and return the `response` object of the answer as JSON text.
     pub fn request(&self, name: &str) -> Result<String> {
         let mut sock = Socket::new(Domain::UNIX, Type::STREAM, None)?;
-        sock.set_read_timeout(Some(DEADLINE))?;
-        sock.set_write_timeout(Some(DEADLINE))?;
+        sock.set_read_timeout(Some(self.deadline))?;
+        sock.set_write_timeout(Some(self.deadline))?;
         sock.connect(&SockAddr::unix(&self.path)?)
             .with_context(|| format!("cannot connect to {}", self.path.display()))?;
         let request = serde_json::json!({ "request": name });
