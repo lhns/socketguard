@@ -436,6 +436,7 @@ code { font-family: var(--font-mono); font-size: 12px; background: var(--bg-inpu
 .plain-list { list-style: none; }
 .plain-list li { padding: 4px 0; }
 .badge-pending { background: rgba(224, 169, 78, 0.18); color: var(--yellow); }
+.badge-portable { background: rgba(224, 169, 78, 0.18); color: var(--yellow); }
 .badge-kind { background: var(--bg-input); color: var(--text); }
 
 .reach { font-weight: 500; }

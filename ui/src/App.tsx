@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, onEnforcementNotice, toDaemonError, type Enforcement } from "./api";
 import ElevatedAction from "./components/ElevatedAction";
+import PortableClose from "./components/PortableClose";
 import { errorText } from "./lib";
 import { NavContext, type Focus, type FocusMessage, type Page } from "./nav";
 import ActivityPage from "./pages/ActivityPage";
@@ -9,7 +10,7 @@ import AppsPage from "./pages/AppsPage";
 import PeersPage from "./pages/PeersPage";
 import ReservedPage from "./pages/ReservedPage";
 import SettingsPage from "./pages/SettingsPage";
-import { useDaemonEvents, useStatus } from "./queries";
+import { useDaemonEvents, usePortable, useStatus } from "./queries";
 
 const PAGES: { id: Page; label: string }[] = [
   { id: "apps", label: "Apps" },
@@ -20,19 +21,34 @@ const PAGES: { id: Page; label: string }[] = [
 ];
 
 /** What is wrong when the daemon cannot be used, and the one action that fixes it (ADR 0050). */
-function ConnectionBanner({ error }: { error: unknown }) {
+function ConnectionBanner({ error, portable }: { error: unknown; portable: boolean | undefined }) {
   const qc = useQueryClient();
   const err = toDaemonError(error);
   const hint = (err.details as { hint?: string } | undefined)?.hint;
   const cannotUse = err.code === "connection" || err.code === "permission_denied";
-  const service = useQuery({ queryKey: ["service"], queryFn: api.serviceStatus, enabled: cannotUse, refetchInterval: 4_000 });
-  const account = useQuery({ queryKey: ["account"], queryFn: api.currentAccount, enabled: err.code === "permission_denied" });
+  const service = useQuery({ queryKey: ["service"], queryFn: api.serviceStatus, enabled: cannotUse && portable === false, refetchInterval: 4_000 });
+  const account = useQuery({ queryKey: ["account"], queryFn: api.currentAccount, enabled: err.code === "permission_denied" && portable === false });
   const [allowed, setAllowed] = useState(false);
   const s = service.data;
   const recheck = () => {
     void qc.invalidateQueries({ queryKey: ["service"] });
     void qc.invalidateQueries({ queryKey: ["status"] });
   };
+
+  // Portable mode (ADR 0054): there is no service; the window starts the daemon itself.
+  if (cannotUse && portable) {
+    return (
+      <div className="error-banner banner" role="alert">
+        <div>
+          <p>
+            SocketGuard runs from this folder and is not started. Starting it asks for administrator rights. It stops and
+            removes its rules when you close this window.
+          </p>
+          <ElevatedAction label="Start" command="socketguard-daemon --portable ..." run={api.startPortableDaemon} onDone={recheck} />
+        </div>
+      </div>
+    );
+  }
 
   let action: ReactNode = null;
   if (cannotUse && s && !s.installed) {
@@ -86,6 +102,7 @@ function ConnectionBanner({ error }: { error: unknown }) {
 export default function App() {
   useDaemonEvents();
   const status = useStatus();
+  const portable = usePortable();
   const [page, setPage] = useState<Page>("apps");
   // A page stays mounted once it has been opened, so its selection, filters and columns
   // survive following a link and coming back.
@@ -114,6 +131,9 @@ export default function App() {
           <h1>
             <span className="logo" aria-hidden="true">S</span>
             SocketGuard
+            {portable && (
+              <span className="badge badge-portable" title="Portable: protection ends when you close SocketGuard.">portable</span>
+            )}
           </h1>
           <nav className="nav" aria-label="Main">
             {PAGES.map((p) => (
@@ -130,7 +150,7 @@ export default function App() {
         </div>
       </header>
       <main className="content">
-        {status.error && <ConnectionBanner error={status.error} />}
+        {status.error && <ConnectionBanner error={status.error} portable={portable} />}
         {notice && (
           <div className="warn-banner banner" role="status">
             <div>
@@ -158,6 +178,7 @@ export default function App() {
           (p) => visited.has(p.id) && <div key={p.id} hidden={page !== p.id}>{renderPage(p.id, focus)}</div>,
         )}
       </main>
+      {portable && <PortableClose />}
     </NavContext.Provider>
   );
 }

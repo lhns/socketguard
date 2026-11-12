@@ -70,9 +70,24 @@ pub fn load(path: &Path) -> anyhow::Result<Option<DaemonConfig>> {
                 .with_context(|| format!("cannot read config {}; {FIX_HINT}", path.display()))
         }
     };
-    serde_json::from_str(&text)
-        .map(Some)
-        .with_context(|| format!("invalid config {}; {FIX_HINT}", path.display()))
+    let config: DaemonConfig = serde_json::from_str(&text)
+        .with_context(|| format!("invalid config {}; {FIX_HINT}", path.display()))?;
+    if socketguard_core::portable::is_portable() {
+        refuse_for_portable(&config).with_context(|| {
+            format!("config {} cannot be used in portable mode", path.display())
+        })?;
+    }
+    Ok(Some(config))
+}
+
+/// Portable mode takes no network that needs trusted configuration (ADR 0054): an entry the
+/// folder's writer could aim at software outside it fails the load, not just the add.
+pub fn refuse_for_portable(config: &DaemonConfig) -> anyhow::Result<()> {
+    for inst in &config.backends {
+        socketguard_core::portable::allowed_in_portable(&inst.backend)
+            .map_err(|m| anyhow::anyhow!("network '{}': {m}", inst.id))?;
+    }
+    Ok(())
 }
 
 /// Write `config.backends` to the `backends` key of the file at `path`, keeping its other
@@ -134,6 +149,24 @@ mod tests {
         assert_eq!(config.poll_interval_secs, 7);
         persist_backends(&path, &config).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn portable_mode_refuses_configs_with_an_existing_tor_or_yggdrasil() {
+        let ok: DaemonConfig = serde_json::from_str(
+            r#"{"backends":[{"id":"lan","type":"slaac","interface":"Ethernet"}]}"#,
+        )
+        .unwrap();
+        assert!(refuse_for_portable(&ok).is_ok());
+        let bad: DaemonConfig = serde_json::from_str(
+            r#"{"backends":[{"id":"lan","type":"slaac","interface":"Ethernet"},{"id":"tor","type":"tor"}]}"#,
+        )
+        .unwrap();
+        let msg = format!("{:#}", refuse_for_portable(&bad).unwrap_err());
+        assert!(
+            msg.contains("network 'tor'") && msg.contains("portable"),
+            "{msg}"
+        );
     }
 
     #[test]

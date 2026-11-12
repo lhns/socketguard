@@ -243,6 +243,9 @@ fn status() {
         db_path: None,
         socket: None,
         service_installed: None,
+        portable: false,
+        db_protected: true,
+        drop_events: true,
     };
     insta::assert_snapshot!("status", render::status(&s));
     s.disabled = true;

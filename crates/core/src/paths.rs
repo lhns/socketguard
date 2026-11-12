@@ -58,8 +58,22 @@ pub fn locations_for(os: &str, program_data: Option<&str>) -> Locations {
     }
 }
 
-/// The default locations of this system.
+/// The locations of portable mode (ADR 0054): everything in `<exe dir>\data`.
+pub fn portable_locations(exe_dir: &Path) -> Locations {
+    let base = crate::portable::data_dir_in(exe_dir);
+    Locations {
+        config_dir: base.clone(),
+        state_dir: base,
+    }
+}
+
+/// The default locations of this system, or of the program's folder in portable mode.
 pub fn default_locations() -> Locations {
+    if crate::portable::is_portable() {
+        if let Some(dir) = crate::portable::exe_dir() {
+            return portable_locations(&dir);
+        }
+    }
     let pd = std::env::var("ProgramData").ok();
     locations_for(std::env::consts::OS, pd.as_deref())
 }
@@ -72,8 +86,12 @@ pub fn default_db_path() -> PathBuf {
     default_locations().db()
 }
 
-/// The config file in use: `SOCKETGUARD_CONFIG`, else the default location.
+/// The config file in use: `SOCKETGUARD_CONFIG`, else the default location. Portable mode
+/// ignores the variable: nothing is read from outside the folder.
 pub fn config_path() -> PathBuf {
+    if crate::portable::is_portable() {
+        return default_config_path();
+    }
     std::env::var_os("SOCKETGUARD_CONFIG")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
@@ -143,6 +161,15 @@ mod tests {
             PathBuf::from("/Library/Application Support/SocketGuard/socketguard.json")
         );
         assert_eq!(m.dirs().len(), 1);
+    }
+
+    #[test]
+    fn portable_mode_keeps_everything_in_the_data_folder() {
+        let l = portable_locations(Path::new("E:/sg"));
+        assert_eq!(l.config(), Path::new("E:/sg/data").join("socketguard.json"));
+        assert_eq!(l.db(), Path::new("E:/sg/data").join("socketguard.db"));
+        assert_eq!(l.state_dir, l.config_dir);
+        assert_eq!(l.dirs().len(), 1);
     }
 
     #[test]

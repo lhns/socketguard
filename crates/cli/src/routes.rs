@@ -88,4 +88,5 @@ pub const CLI_ROUTES: &[CliRoute] = &[
     r("apply", "apply"),
     r("disable", "disable"),
     r("enable", "enable"),
+    r("shutdown", "shutdown"),
 ];

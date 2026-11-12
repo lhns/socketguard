@@ -107,7 +107,11 @@ pub fn create_firewall() -> Box<dyn Firewall> {
     }
     #[cfg(target_os = "windows")]
     {
-        Box::new(wfp::WfpFirewall::new())
+        if socketguard_core::portable::is_portable() {
+            Box::new(wfp::WfpFirewall::new_dynamic())
+        } else {
+            Box::new(wfp::WfpFirewall::new())
+        }
     }
     #[cfg(target_os = "macos")]
     {

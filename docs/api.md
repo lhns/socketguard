@@ -47,6 +47,17 @@ from a normal account, set `SOCKETGUARD_TRUST_PIPE_SERVER=1` for the client.
 
 The daemon also gives its database file (and -wal/-shm) a protected ACL, SYSTEM and Administrators only, because it holds the onion service keys, and refuses to start if it cannot. Set `SOCKETGUARD_ALLOW_UNPROTECTED_DB=1` for the daemon to continue with a warning; for tests and development only (ADR 0040).
 
+**Portable mode** (ADR 0054) uses the pipe `\\.\pipe\socketguard-portable`, which the CLI and the
+window use by default when a `portable` file sits next to them (or with `--portable`). Its ACL
+admits `SYSTEM`, `Administrators` and the one account named by the daemon's `--allow-user <SID>`
+(the same read and write-data mask as the group, `O:BA` as owner so the client's owner check
+passes). There is no `SocketGuard Users` group in that mode. The database and `data\` are
+protected as above unless the volume has no access control lists (FAT, exFAT): then the daemon
+warns once and `GET /api/status` has `db_protected: false`.
+
+The daemon's portable options: `--portable`, `--owner-pid <pid>` (end, through the teardown, when
+that process ends), `--allow-user <SID>`. `POST /api/shutdown` ends it the same way.
+
 Let a user in:
 
     socketguard-daemon access allow alice        (as Administrator; alice signs out and in again)
@@ -70,7 +81,7 @@ does not cause a 202. Every error has the [error body](#errors).
 
 | Method | Path | Request | Response | Notes |
 |---|---|---|---|---|
-| GET | `/api/status` | | `StatusResponse` | version, networks, protect-host interfaces, `disabled`, `unadopted` (an existing ruleset was found with an empty database and is left alone until `enable` or `disable`), counts, `config_path`, `db_path`, `socket` (where the daemon keeps its state), `service_installed` |
+| GET | `/api/status` | | `StatusResponse` | version, networks, protect-host interfaces, `disabled`, `unadopted` (an existing ruleset was found with an empty database and is left alone until `enable` or `disable`), counts, `config_path`, `db_path`, `socket` (where the daemon keeps its state), `service_installed`, `portable` (ADR 0054), `db_protected` (false only in portable mode on a volume without ACLs), `drop_events` (false when blocked connections cannot be logged; portable mode does not change the system's net-event option) |
 | GET | `/api/events` | | SSE stream | [events](#events) |
 | GET | `/api/apps` | | `App[]` | |
 | GET | `/api/apps/{id}` | | `AppDetail` | app with addresses (the ones serving its rows, each with `up`; none until a grant names a row), ports, grants on it (with reach), `access` (every access with its origin: direct, tag, group or reservation, and what it covers on this app: `scope` and `ports`), its `tags`, the port groups attached to it (`port_groups`) and counters |
@@ -131,6 +142,7 @@ does not cause a 202. Every error has the [error body](#errors).
 | POST | `/api/apply` | `ApplyRequest` | `ApplyResponse` | |
 | POST | `/api/disable` | `DisableRequest` | 204 | needs `"confirm": true`; show `GET /api/exposure` first, because the Yggdrasil block goes with the rest. Sets the persisted `disabled` latch, then removes all rules and addresses. While it is set the daemon (also after a restart) applies no rules and adds no addresses, but keeps tracking apps. `socketguard-daemon --disable` sets it too |
 | POST | `/api/enable` | | 204 | clears the latch and re-applies rules and addresses |
+| POST | `/api/shutdown` | | 204 | portable mode only (404 otherwise, ADR 0054): ends the daemon through the same teardown as `disable`, which runs after the answer is sent. The result is in `data\last-exit.log` (`<unix seconds> clean...` or `LEFT: ...`) and the exit code. `socketguard shutdown` |
 
 ## Credentials and networks
 

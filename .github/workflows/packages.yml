@@ -6,7 +6,7 @@ name: packages
 
 on:
   push:
-    branches: [installers, redesign, main]
+    branches: [installers, redesign, main, portable]
   workflow_dispatch:
   workflow_call:
 
@@ -70,6 +70,48 @@ jobs:
         with:
           name: msi
           path: dist/SocketGuard-*-x64.msi
+          if-no-files-found: error
+
+  # Portable mode on a clean runner (ADR 0054): real firewall, clean exit, kill, coexistence with
+  # the service. Elevated, machine-wide changes, no prompts; the runner is thrown away.
+  portable:
+    # Its own build, in parallel with the msi job: it needs nothing from it.
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install the frontend dependencies
+        run: npm ci
+        working-directory: ui
+      - name: Build (./build.sh)
+        shell: bash
+        run: bash ./build.sh
+      - name: Build the portable zip
+        shell: pwsh
+        run: ./installer/windows/portable.ps1 -BinDir target/release -Out dist/portable/SocketGuard-portable-windows-x64.zip
+      - name: Start, exercise, end, kill, coexist
+        shell: pwsh
+        timeout-minutes: 30
+        run: ./test/portable.ps1 -Zip dist/portable/SocketGuard-portable-windows-x64.zip -Out dist/portable-test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: portable-test-output
+          path: dist/portable-test
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-zip
+          path: dist/portable/SocketGuard-portable-windows-x64.zip
           if-no-files-found: error
 
   linux:
