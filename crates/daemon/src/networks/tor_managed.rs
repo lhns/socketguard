@@ -268,6 +268,8 @@ impl ManagedTor {
             data_dir: paths.dir,
             health: Some(Arc::new(TorHealth(self.clone()))),
             before_start: Some(Arc::new(move || prepare(&prepare_paths, &prepare_as))),
+            on_exit: None,
+            config_tag: String::new(),
         })
     }
 }
@@ -349,7 +351,7 @@ pub fn prepare(paths: &TorPaths, run_as: &RunAs) -> Result<(), String> {
 
 /// Let every account enter `dir` (execute, not list or read) without changing anything else.
 #[cfg(unix)]
-fn allow_traverse(dir: &Path) -> Result<(), String> {
+pub(super) fn allow_traverse(dir: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let meta = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mode = meta.permissions().mode();
@@ -365,7 +367,7 @@ fn allow_traverse(dir: &Path) -> Result<(), String> {
 
 /// `lchown` (never follows a link) `p` to `uid`/`gid`.
 #[cfg(unix)]
-fn chown(p: &Path, uid: u32, gid: u32) -> Result<(), String> {
+pub(super) fn chown(p: &Path, uid: u32, gid: u32) -> Result<(), String> {
     let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes())
         .map_err(|_| format!("bad path {}", p.display()))?;
     // SAFETY: `c` is a valid NUL-terminated path; lchown does not follow links.
@@ -386,7 +388,7 @@ fn chown(p: &Path, uid: u32, gid: u32) -> Result<(), String> {
 /// running as root, must not walk a tree that an unprivileged process controls to change
 /// owners in it: its contents are removed and Tor starts afresh.
 #[cfg(unix)]
-fn hand_over(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
+pub(super) fn hand_over(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
     let owner = std::fs::metadata(dir).map_err(|e| e.to_string())?.uid();
     if owner != uid {
@@ -406,9 +408,16 @@ fn hand_over(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
 /// Create `torrc` fresh and exclusively: the directory belongs to the account Tor runs as,
 /// so a link planted there must not make the daemon write somewhere else.
 fn write_torrc(paths: &TorPaths) -> Result<(), String> {
+    write_fresh(&paths.torrc, &torrc(paths, cfg!(windows)), 0o644)
+}
+
+/// Write `text` to a new file `path` (an old one is removed first), exclusively and never
+/// through a link, with `mode` on Unix. For files the daemon writes into a directory that
+/// belongs to the unprivileged account of a child.
+pub(super) fn write_fresh(path: &Path, text: &str, mode: u32) -> Result<(), String> {
     use std::io::Write;
-    let fail = |e: std::io::Error| format!("cannot write {}: {e}", paths.torrc.display());
-    match std::fs::remove_file(&paths.torrc) {
+    let fail = |e: std::io::Error| format!("cannot write {}: {e}", path.display());
+    match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(fail(e)),
@@ -418,11 +427,12 @@ fn write_torrc(paths: &TorPaths) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        open.mode(0o644).custom_flags(libc::O_NOFOLLOW);
+        open.mode(mode).custom_flags(libc::O_NOFOLLOW);
     }
-    let mut f = open.open(&paths.torrc).map_err(fail)?;
-    f.write_all(torrc(paths, cfg!(windows)).as_bytes())
-        .map_err(fail)
+    #[cfg(not(unix))]
+    let _ = mode;
+    let mut f = open.open(path).map_err(fail)?;
+    f.write_all(text.as_bytes()).map_err(fail)
 }
 
 #[cfg(test)]
