@@ -85,7 +85,7 @@ pub struct EnforcedAddress {
     pub binds: BTreeMap<PortRef, IpAddr>,
     /// The stored secret of the locator (the onion service key).
     pub secret: Option<String>,
-    /// The grants of the app that apply on this network.
+    /// The grants that cover this address on this network (see [`enforcement_for`]).
     pub grants: Vec<EnforcedGrant>,
 }
 

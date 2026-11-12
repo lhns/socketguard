@@ -5,7 +5,8 @@
 //! Ordering rules that carry over from ADR 0026: a ruleset that covers an address is
 //! applied before the address goes on an interface, and an address leaves its interface
 //! before the ruleset stops covering it. A failed apply keeps new addresses off the
-//! interfaces. Stopping the daemon removes nothing; only [`disable_everything`] does.
+//! interfaces. Stopping the daemon removes nothing; only [`disable_everything`] does
+//! (portable mode, ADR 0054, runs that teardown when the daemon ends).
 //!
 //! [`Engine`] is the facade; its methods live in the submodules: `firewall` (ruleset,
 //! counters, drops), `enforce` (networks outside the firewall, adding and removing

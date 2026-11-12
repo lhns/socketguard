@@ -44,7 +44,9 @@ fn brace_list<T: std::fmt::Display>(items: impl IntoIterator<Item = T>) -> Strin
 /// Platform firewall backend (ADR 0029). Implementations hold no per-socket state: every
 /// call to [`Firewall::apply`] replaces SocketGuard's whole ruleset atomically, so a failed
 /// apply leaves the previous ruleset in force. Rules survive daemon exit (the state is
-/// frozen, ADR 0026); only [`Firewall::disable`] removes them.
+/// frozen, ADR 0026); only [`Firewall::disable`] removes them. The exception is portable
+/// mode on Windows (ADR 0054): its WFP objects live in a dynamic session and go with the
+/// process.
 pub trait Firewall: Send + Sync {
     /// Atomically replace all SocketGuard rules with `desired`.
     fn apply(&self, desired: &DesiredRuleset) -> Result<()>;
