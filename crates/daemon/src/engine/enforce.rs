@@ -179,6 +179,25 @@ impl Engine {
             &self.managed,
         )
         .map_err(|e| EngineError::Invalid(format!("cannot create network: {e}")))?;
+        if matches!(
+            inst.backend,
+            BackendConfig::Yggdrasil { managed: false, .. }
+        ) {
+            // SocketGuard does not start software it did not ship, so an existing node is
+            // added only while it answers (ADR 0051). A config file entry for a node that is
+            // down is not checked: the range block applies anyway.
+            let probe = n.clone();
+            let answers = tokio::task::spawn_blocking(move || probe.node().is_some())
+                .await
+                .map_err(|e| EngineError::Internal(e.into()))?;
+            if !answers {
+                return Err(EngineError::Invalid(
+                    "the Yggdrasil node does not answer; start it first, or let SocketGuard run \
+                     its own node (managed)"
+                        .into(),
+                ));
+            }
+        }
         if matches!(inst.backend, BackendConfig::Yggdrasil { managed: true, .. }) {
             // The node's addresses follow from its key: with them remembered, the first
             // ruleset already closes them, before any software runs (ADR 0051).
@@ -229,6 +248,63 @@ impl Engine {
         let activity = NewActivity::new(
             ActivityKind::NetworkChanged,
             format!("Changed the peers of {id} ({count} now)"),
+        )
+        .network(id);
+        self.commit(
+            state,
+            Ok(()),
+            Some(activity),
+            &[DaemonEvent::NetworksChanged],
+        )
+        .await?;
+        self.networks()
+            .into_iter()
+            .find(|n| n.id == id)
+            .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))
+    }
+
+    /// The API's `PUT /api/networks/{id}/bridges`: replace the bridge lines of a managed Tor
+    /// network (ADR 0052). The lines are validated and stored in canonical form, duplicates
+    /// dropped; setting any needs the obfs4 helper of this build. The caller saves the config
+    /// while it holds the write lock.
+    pub async fn set_bridges(
+        &mut self,
+        state: &AppState,
+        id: &str,
+        bridges: Vec<String>,
+    ) -> Result<Network, EngineError> {
+        let Some(active) = self.backends.get_mut(id) else {
+            return Err(EngineError::NotFound(format!("network {id}")));
+        };
+        let bridges =
+            socketguard_core::bridge::normalize_bridges(&bridges).map_err(EngineError::Invalid)?;
+        let mut updated = active.config.backend.clone();
+        match &mut updated {
+            BackendConfig::Tor {
+                managed: true,
+                bridges: current,
+                ..
+            } => *current = bridges,
+            _ => {
+                return Err(EngineError::Invalid(format!(
+                    "network {id} is not a managed Tor network; an existing Tor has its own configuration"
+                )))
+            }
+        }
+        if !updated.bridges().is_empty() {
+            state
+                .bundled
+                .obfs4_helper()
+                .map_err(EngineError::Conflict)?;
+        }
+        updated.validate_managed().map_err(EngineError::Invalid)?;
+        let count = updated.bridges().len();
+        active.config.backend = updated;
+        // The bridge lines are part of the child's spec: a change restarts Tor.
+        self.sync_children(state).await;
+        let activity = NewActivity::new(
+            ActivityKind::NetworkChanged,
+            format!("Changed the bridges of {id} ({count} now)"),
         )
         .network(id);
         self.commit(

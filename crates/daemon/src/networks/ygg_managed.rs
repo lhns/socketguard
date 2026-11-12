@@ -366,6 +366,8 @@ impl ManagedYgg {
             address: self.node().map(|n| n.address.to_string()),
             peers: vec![],
             peers_connected: if no_admin { None } else { peers_connected },
+            bridges: vec![],
+            bridges_unavailable: None,
         }
     }
 

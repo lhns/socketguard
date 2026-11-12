@@ -394,10 +394,10 @@ Assert-Footprint @{ Expect = 'absent' } 'end'
 
 Section '(d) managed Tor and Yggdrasil (ADR 0052) in portable mode'
 # The bundle action must have run before the zip was built (packages.yml, portable job).
-foreach ($f in 'tor\tor.exe', 'yggdrasil\yggdrasil.exe', 'yggdrasil\wintun.dll', 'VERSIONS') {
+foreach ($f in 'tor\tor.exe', 'tor\pluggable_transports\lyrebird.exe', 'yggdrasil\yggdrasil.exe', 'yggdrasil\wintun.dll', 'VERSIONS') {
   if (-not (Test-Path (Join-Path $Dir "third_party\$f"))) { Mn-Fail "third_party\$f is not in the zip: run .github/actions/bundle before installer/windows/portable.ps1" }
 }
-Mn-Ok 'the zip has third_party\ with tor.exe, yggdrasil.exe, wintun.dll and VERSIONS'
+Mn-Ok 'the zip has third_party\ with tor.exe, lyrebird.exe, yggdrasil.exe, wintun.dll and VERSIONS'
 # Asked once, before the first managed Yggdrasil start, like the daemon does: the same pattern as the
 # footprint check, which compares the driver store with this answer after the exit.
 function Wintun-InStore { return [bool]((& pnputil.exe /enum-drivers 2>&1 | Out-String) -match '(?im)^[^:\r\n]+:\s*wintun\.inf\s*$') }

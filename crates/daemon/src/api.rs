@@ -23,8 +23,8 @@ use socketguard_core::api_types::{
     DisableRequest, Enforcement, EnforcementNotice, EnforcementStatus, ExposureQuery,
     LockoutRiskInfo, MemberQuery, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer,
     NewPortGroup, NewReservation, NewTag, NewTagMember, ParseCredentialsRequest,
-    ProtectHostRequest, ProtectHostResponse, ReserveRequest, SetMembers, SetPeers, StatusResponse,
-    UpdateLabel, UpdatePortGroup, UpdateTag,
+    ProtectHostRequest, ProtectHostResponse, ReserveRequest, SetBridges, SetMembers, SetPeers,
+    StatusResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
 use socketguard_core::{ActivityQuery, NewCredential, NewGrant};
@@ -139,6 +139,7 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::POST, "/api/networks"),
     (Method::DELETE, "/api/networks/{id}"),
     (Method::PUT, "/api/networks/{id}/peers"),
+    (Method::PUT, "/api/networks/{id}/bridges"),
     (Method::GET, "/api/exposure"),
     (Method::GET, "/api/settings"),
     (Method::PUT, "/api/settings/protect-host"),
@@ -210,6 +211,7 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("POST", "/api/networks") => post(network_create),
         ("DELETE", "/api/networks/{id}") => delete(network_delete),
         ("PUT", "/api/networks/{id}/peers") => put(network_peers),
+        ("PUT", "/api/networks/{id}/bridges") => put(network_bridges),
         ("GET", "/api/exposure") => get(exposure_get),
         ("GET", "/api/settings") => get(settings_get),
         ("PUT", "/api/settings/protect-host") => put(protect_host_put),
@@ -1009,6 +1011,20 @@ async fn network_peers(
     Ok(Json(network).into_response())
 }
 
+/// Replace the bridge lines of a managed Tor network; Tor restarts. Like the peers, open to
+/// every API caller: the lines are parsed against one fixed form and written to the
+/// `torrc` only in canonical form, so they cannot add a Tor option (ADR 0040).
+async fn network_bridges(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<SetBridges>,
+) -> ApiResult<Response> {
+    let mut engine = state.engine.write().await;
+    let network = engine.set_bridges(&state, &id, req.bridges).await?;
+    persist_networks(&state, &engine).await;
+    Ok(Json(network).into_response())
+}
+
 #[derive(serde::Deserialize, Default)]
 struct NetworkDeleteParams {
     #[serde(default)]
@@ -1064,7 +1080,12 @@ fn check_managed(state: &AppState, backend: &BackendConfig) -> Result<(), ApiErr
         BackendConfig::Tor { .. } => state.bundled.tor().map(|_| ()),
         _ => state.bundled.yggdrasil().map(|_| ()),
     };
-    files.map_err(ApiErr::invalid)
+    files.map_err(ApiErr::invalid)?;
+    // Bridges given when the network is made need the obfs4 helper just like `PUT .../bridges`.
+    if !backend.bridges().is_empty() {
+        state.bundled.obfs4_helper().map_err(ApiErr::invalid)?;
+    }
+    Ok(())
 }
 
 /// The Tor settings the API accepts: the defaults, or exactly what the config file already

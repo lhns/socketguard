@@ -216,7 +216,11 @@ export const api = {
   /** What becomes reachable without the block of one network (or all of them): ADR 0051. */
   exposure: (without: string | null) => call<ExposureResponse>("exposure", { without }),
   /** Replace the peers of a managed Yggdrasil network; its node restarts. */
-  setNetworkPeers: (id: string, peers: string[]) => callSaved<Network>("set_network_peers", { id, peers }),
+  setNetworkPeers: (id: string, peers: string[]) => call<Network>("set_network_peers", { id, peers }),
+  /** Replace the obfs4 bridges of a managed Tor network; Tor restarts. */
+  setNetworkBridges: (id: string, bridges: string[]) => call<Network>("set_network_bridges", { id, bridges }),
+  /** Open one of the allow-listed pages (`links.ts`) in the system browser. */
+  openLink: (url: string) => call<void>("open_link", { url }),
   listAddresses: () => call<Address[]>("list_addresses"),
   listReservations: () => call<ReservationView[]>("list_reservations"),
   getReservation: (id: string) => call<ReservationView>("get_reservation", { id }),

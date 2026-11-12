@@ -555,6 +555,12 @@ export function installMock(kind?: string | null) {
           if (n?.managed) n.managed = { ...n.managed, peers: a.peers as string[], state: "starting", peers_connected: undefined };
           return done(n);
         }
+        case "set_network_bridges": {
+          const n = networks.find((x) => x.id === a.id);
+          if (n?.managed) n.managed = { ...n.managed, bridges: a.bridges as string[], state: "starting" };
+          return n;
+        }
+        case "open_link": return undefined;
         case "add_network": return { id: a.req.type, kind: a.req.type === "slaac" ? "lan" : a.req.type, name: a.req.type, interface: a.req.interface ?? null, grants_apply: true, status: { state: "up" }, ...(a.req.managed ? { managed: { state: "starting", peers: a.req.peers ?? [] } } : {}) };
         case "get_settings": return { protect_host_interfaces: ["eth0"] };
         case "activity": return [];

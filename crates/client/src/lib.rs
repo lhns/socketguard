@@ -24,8 +24,8 @@ use socketguard_core::api_types::{
     DisableRequest, Enforcement, EnforcementNotice, ExportDocument, ExposureResponse, MemberQuery,
     MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation,
     NewTag, NewTagMember, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse,
-    ReserveRequest, SetMembers, SetPeers, ShareResponse, StatusResponse, TorKeyResponse,
-    UpdateLabel, UpdatePortGroup, UpdateTag,
+    ReserveRequest, SetBridges, SetMembers, SetPeers, ShareResponse, StatusResponse,
+    TorKeyResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::setup::NetworkSetup;
 use socketguard_core::{
@@ -636,6 +636,15 @@ impl Client {
             peers: peers.to_vec(),
         };
         self.call(&routes::SET_PEERS, &[id], None, json(&req)).await
+    }
+
+    /// Replace the bridge lines of a managed Tor network (ADR 0052); Tor restarts.
+    pub async fn set_bridges(&self, id: &str, bridges: &[String]) -> Result<Network> {
+        let req = SetBridges {
+            bridges: bridges.to_vec(),
+        };
+        self.call(&routes::SET_BRIDGES, &[id], None, json(&req))
+            .await
     }
 
     /// Remove a network. With `force`, a Tor network goes even if its onion services

@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::firewall::ScopeMatch;
-use crate::ruleset::overlay_addr_scope_id;
+use crate::ruleset::{overlay_addr_scope_id, overlay_range_scope_id};
 use socketguard_core::api_types::{ExposedListener, ExposureResponse, NetworkExposure};
 use socketguard_core::setup::YggdrasilBlock;
 use socketguard_core::{NetworkKind, NetworkStatus};
@@ -26,7 +26,8 @@ impl Engine {
     }
 
     /// Whether the block of the Yggdrasil network is in the ruleset last applied, and that
-    /// apply succeeded. None without a Yggdrasil network.
+    /// apply succeeded: the whole range for an existing node, the node's own address and
+    /// subnet for a managed one. None without a Yggdrasil network.
     pub async fn yggdrasil_block(&self, state: &AppState) -> Option<YggdrasilBlock> {
         let (id, active) = self.yggdrasil_backend()?;
         let iface = Self::interface_in_use(active);
@@ -40,9 +41,15 @@ impl Engine {
             });
         let applied = self.last_applied.lock().unwrap().clone();
         let failed = self.apply_failed.load(Ordering::Relaxed);
+        let existing = !active.config.backend.is_managed();
+        let node_scope = if existing {
+            overlay_range_scope_id(id)
+        } else {
+            overlay_addr_scope_id(id)
+        };
         let (address_blocked, interface_blocked) = match (&applied, failed) {
             (Some(rs), false) => (
-                rs.scopes.iter().any(|s| s.id == overlay_addr_scope_id(id)),
+                rs.scopes.iter().any(|s| s.id == node_scope),
                 adapter_ok
                     && rs.scopes.iter().any(|s| {
                         matches!(&s.matcher, ScopeMatch::Interface { name, .. }
@@ -57,6 +64,8 @@ impl Engine {
             Some("the last attempt to apply the firewall rules failed".to_string())
         } else if applied.is_none() {
             Some("the firewall rules are not applied yet".to_string())
+        } else if existing {
+            None
         } else if !address_blocked && !adapter_ok {
             Some("the node's address is not known yet, and the firewall can only block an adapter that exists".to_string())
         } else if !address_blocked {

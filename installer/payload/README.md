@@ -33,7 +33,7 @@ cached in `.bundle-cache` (`SOCKETGUARD_BUNDLE_CACHE`), keyed on `versions.toml`
 downloads at install time, and nothing is committed here except this file and the `.gitkeep`s
 (everything else under the platform directories is git-ignored).
 
-The result: `tor/` (the `tor` binary and its libraries), `yggdrasil/` (`yggdrasil`, and `wintun.dll`
+The result: `tor/` (the `tor` binary, its libraries, and the obfs4 helper `tor/pluggable_transports/lyrebird`), `yggdrasil/` (`yggdrasil`, and `wintun.dll`
 on Windows), `licenses/<name>.txt`, and `VERSIONS` (what `socketguard status` reports).
 
 ## What the build scripts do with them

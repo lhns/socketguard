@@ -179,6 +179,7 @@ pub fn create(
             cookie_owner,
             allow_remote_control,
             managed: managed_tor,
+            bridges: _,
         } => {
             if *managed_tor {
                 return Ok(Arc::new(tor::TorNetwork::managed(

@@ -80,7 +80,7 @@ mn_bundled() {
         [ -n "$want" ] && [ "$want" = "$got" ] || mn_die "$n: status says '$got', $TP/VERSIONS says '$want'"
         mn_ok "$n $got (as in VERSIONS)"
     done
-    test -f "$TP/licenses/tor.txt" && test -f "$TP/licenses/yggdrasil.txt" || mn_die "the licence texts are missing from $TP/licenses"
+    test -f "$TP/licenses/tor.txt" && test -f "$TP/licenses/lyrebird.txt" && test -f "$TP/licenses/yggdrasil.txt" || mn_die "the licence texts are missing from $TP/licenses"
     mn_ok "licence texts in $TP/licenses"
 
     # The children run as an unprivileged account: it must be able to run what was installed.
@@ -88,6 +88,8 @@ mn_bundled() {
     local out
     out="$(sudo -u socketguard-net env LD_LIBRARY_PATH="$TP/tor" "$TP/tor/tor" --version 2>&1)" || mn_die "tor does not run as socketguard-net: $out"
     mn_ok "socketguard-net runs the installed tor: $(echo "$out" | head -1)"
+    out="$(sudo -u socketguard-net sh -c "cd \"$TP/tor\" && ./pluggable_transports/lyrebird -version" 2>&1)" || mn_die "the obfs4 helper does not run as socketguard-net: $out"
+    mn_ok "socketguard-net runs the installed obfs4 helper: $(echo "$out" | head -1)"
     out="$(sudo -u socketguard-net "$TP/yggdrasil/yggdrasil" -version 2>&1)" || mn_die "yggdrasil does not run as socketguard-net: $out"
     mn_ok "socketguard-net runs the installed yggdrasil: $(echo "$out" | head -1)"
 }

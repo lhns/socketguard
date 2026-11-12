@@ -428,9 +428,17 @@ impl Engine {
                         address: None,
                         peers: vec![],
                         peers_connected: None,
+                        bridges: vec![],
+                        bridges_unavailable: None,
                     });
                 if info.peers.is_empty() {
                     info.peers = active.config.backend.peers().to_vec();
+                }
+                if info.bridges.is_empty() {
+                    // Shown in canonical form, whatever a hand-edited config file holds.
+                    let configured = active.config.backend.bridges();
+                    info.bridges = socketguard_core::bridge::normalize_bridges(configured)
+                        .unwrap_or_else(|_| configured.to_vec());
                 }
                 info
             }),
@@ -477,6 +485,19 @@ impl Engine {
     /// Startup: apply the desired state over whatever the previous run left (never a
     /// flush, ADR 0026), then make sure the addresses are on their interfaces.
     pub async fn startup_reconcile(&self, state: &AppState) {
+        self.startup_reconcile_with(state, |_| {}).await;
+    }
+
+    /// [`Engine::startup_reconcile`], calling `ready` once the first ruleset apply attempt
+    /// has completed (ADR 0051). That is the point where the service manager may let the
+    /// network come up. Everything before it works from stored state and local kernel calls;
+    /// the Tor control port (`enforce_networks`) and the managed children
+    /// (`sync_children`) come after it, so nothing that needs the network can hold it.
+    pub async fn startup_reconcile_with(
+        &self,
+        state: &AppState,
+        ready: impl FnOnce(Option<String>),
+    ) {
         // The API is already up: a `disable` must not interleave with putting addresses back.
         let _pass = self.poll_lock.lock().await;
         if let Err(e) = networks::ledger::adopt_stored_keys(&state.db).await {
@@ -485,7 +506,24 @@ impl Engine {
         // Before the first ruleset: the node's addresses are known from its key.
         self.ensure_managed_keys(state).await;
         self.detect_unadopted(state).await;
-        match self.apply_firewall(state).await {
+        // Like `apply_firewall`, but `ready` fires between the apply and the enforcement
+        // of the networks' services, which talks to Tor.
+        let applied = {
+            let _lock = state.firewall_lock.lock().await;
+            match self.gather_snapshot(state).await {
+                Ok(snapshot) => {
+                    let result = self.apply_locked(state, false, &snapshot).await;
+                    ready(result.as_ref().err().map(|e| format!("{e:#}")));
+                    self.enforce_networks(state, &snapshot).await;
+                    result
+                }
+                Err(e) => {
+                    ready(Some(format!("{e:#}")));
+                    Err(e)
+                }
+            }
+        };
+        match applied {
             Ok(()) => self.purge_states(),
             Err(e) => error!("Startup: could not apply the firewall ruleset: {e}"),
         }

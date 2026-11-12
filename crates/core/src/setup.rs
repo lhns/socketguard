@@ -96,9 +96,10 @@ pub struct LanCandidate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct YggdrasilBlock {
-    /// The ruleset in force denies the node's own addresses on any interface.
+    /// The ruleset in force denies the node by destination on any interface: the whole
+    /// range `200::/7` for an existing node, the node's own addresses for a managed one.
     pub closed: bool,
-    /// The same, by address (needs the node to have been seen once).
+    /// The same as `closed`.
     pub address_blocked: bool,
     /// The ruleset in force denies everything arriving on the network's interface.
     pub interface_blocked: bool,

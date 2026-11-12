@@ -251,3 +251,37 @@ pub(crate) fn golden_ruleset() -> DesiredRuleset {
         ],
     }
 }
+
+/// An existing Yggdrasil node (ADR 0051): the interface scope and the whole range
+/// `200::/7`, with one granted port on a SocketGuard address inside the range.
+#[cfg(test)]
+pub(crate) fn range_ruleset() -> DesiredRuleset {
+    use socketguard_core::{PortRange, PortRef, Protocol};
+    DesiredRuleset {
+        scopes: vec![
+            Scope {
+                id: "overlay:ygg0".into(),
+                kind: ScopeKind::Overlay,
+                matcher: ScopeMatch::Interface {
+                    name: "ygg0".into(),
+                    families: Families::Both,
+                },
+            },
+            Scope {
+                id: "overlay:ygg:range".into(),
+                kind: ScopeKind::Overlay,
+                matcher: ScopeMatch::DestinationNet("200::/7".parse().unwrap()),
+            },
+        ],
+        rules: vec![Rule {
+            id: "a:ay1:8080:tcp:g1:ygg0".into(),
+            iif: Some("ygg0".into()),
+            dst: Dst::Addr("300:1:2:3::100".parse().unwrap()),
+            ports: PortRange::single(PortRef {
+                port: 8080,
+                proto: Protocol::Tcp,
+            }),
+            sources: Sources::Nets(vec!["200:7::1/128".parse().unwrap()]),
+        }],
+    }
+}

@@ -73,4 +73,10 @@ allow_remote_control?: boolean,
  * SocketGuard runs its own Tor as a child process (ADR 0052). The control endpoint
  * and cookie are chosen by the daemon; excludes every external field above.
  */
-managed?: boolean, });
+managed?: boolean, 
+/**
+ * obfs4 bridge lines for the managed Tor, in canonical form (see `bridge`); empty
+ * (the default) connects directly. Only a managed Tor takes them: an existing
+ * Tor has its own configuration.
+ */
+bridges?: Array<string>, });

@@ -49,6 +49,11 @@ db=/var/lib/socketguard/socketguard.db
 
 echo "== install"
 x "dnf install -y /p1.rpm"
+# Type=notify (ADR 0051): the start returned only after the first ruleset, so the table exists
+# now, with no waiting in between.
+[ "$(x "systemctl show socketguard -p Type --value")" = notify ] || fail "the unit is not Type=notify"
+x "systemctl is-active --quiet socketguard" || fail "unit not active right after install"
+x "nft list table inet socketguard >/dev/null" || fail "no nft table at the moment the install returned"
 active || fail "unit not active after install"
 answers || fail "socket does not answer"
 x "nft list table inet socketguard >/dev/null" || fail "no nft table"
@@ -57,6 +62,19 @@ x "grep -q 'ExecStart=/usr/bin/socketguard-daemon' /etc/systemd/system/socketgua
 fp expect-present --require nft-table-inet,socket
 x "socketguard port-groups add 7000-7010/tcp --label upgrade-marker >/dev/null"
 inode=$(x "stat -c %i $db"); pid1=$(mainpid)
+
+echo "== restart ordering"
+# `systemctl restart` must return only after the rules are back: delete the table, restart,
+# list at once (no sleep). A real reboot cannot be simulated in this container (systemd is PID 1
+# of a container sharing the host kernel, whose nftables state survives the daemon), so this
+# stands in for "the network waits for the rules": the same Type=notify readiness gates both.
+x "nft delete table inet socketguard"
+x "! nft list table inet socketguard >/dev/null 2>&1" || fail "the table could not be removed for the restart check"
+x "systemctl restart socketguard"
+x "nft list table inet socketguard >/dev/null" || fail "no nft table at the moment the restart returned"
+active || fail "unit not active after the restart"
+answers || fail "no answer after the restart"
+pid1=$(mainpid)
 
 echo "== upgrade"
 x "dnf install -y /p2.rpm || dnf upgrade -y /p2.rpm"

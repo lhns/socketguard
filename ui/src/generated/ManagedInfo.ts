@@ -33,4 +33,13 @@ peers?: Array<string>,
 /**
  * Yggdrasil: peers connected now; None when unknown (no admin endpoint, node down).
  */
-peers_connected?: number, };
+peers_connected?: number, 
+/**
+ * Tor: the configured bridge lines (canonical form).
+ */
+bridges?: Array<string>, 
+/**
+ * Tor: why bridges cannot be set in this build (the obfs4 helper is not shipped); None
+ * when they can.
+ */
+bridges_unavailable?: string, };

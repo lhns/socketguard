@@ -498,6 +498,20 @@ pub enum NetworksCmd {
         #[arg(long = "rm", value_name = "URI")]
         rm: Vec<String>,
     },
+    /// Show or change the obfs4 bridges of a managed Tor network (for a network where Tor is
+    /// blocked); changing them restarts Tor. Get bridge lines from bridges.torproject.org.
+    Bridges {
+        id: String,
+        /// Add a bridge line, e.g. "obfs4 IP:port FINGERPRINT cert=... iat-mode=0" (repeatable)
+        #[arg(long = "add", value_name = "LINE")]
+        add: Vec<String>,
+        /// Remove a bridge line as shown by this command (repeatable)
+        #[arg(long = "rm", value_name = "LINE")]
+        rm: Vec<String>,
+        /// Remove all bridges: Tor connects directly again
+        #[arg(long, conflicts_with_all = ["add", "rm"])]
+        clear: bool,
+    },
     /// Remove a network; its addresses leave the interfaces
     Rm {
         id: String,
@@ -870,6 +884,24 @@ mod tests {
         };
         assert_eq!((id.as_str(), add.len(), rm.len()), ("yggdrasil", 1, 1));
         assert!(parse(&["networks", "setup", "tor"]).is_err());
+    }
+
+    #[test]
+    fn networks_bridges_takes_lines_or_clear() {
+        let c = parse(&["networks", "bridges", "tor", "--add", "obfs4 1.2.3.4:5 X"]).unwrap();
+        let Command::Networks(NetworksCmd::Bridges {
+            id, add, rm, clear, ..
+        }) = c.command
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (id.as_str(), add.len(), rm.len(), clear),
+            ("tor", 1, 0, false)
+        );
+        assert!(parse(&["networks", "bridges", "tor", "--clear"]).is_ok());
+        assert!(parse(&["networks", "bridges", "tor", "--clear", "--add", "x"]).is_err());
+        assert!(parse(&["networks", "bridges", "tor"]).is_ok());
     }
 
     #[test]

@@ -339,11 +339,11 @@ async fn discovery_creates_a_closed_app_with_an_address_on_every_network() {
         .starts_with("2001:db8:1:2:"));
 
     // The last ruleset denies every address by the managed scope and the Yggdrasil
-    // interface has its overlay scope.
+    // interface has its overlay scope, beside the range of the existing node.
     let fw = applied(&h.fw_calls);
     let fw = [fw.last().unwrap().clone()];
     let scope_ids: Vec<_> = fw[0].scopes.iter().map(|s| s.id.as_str()).collect();
-    assert_eq!(scope_ids, ["managed", "overlay:ygg0"]);
+    assert_eq!(scope_ids, ["managed", "overlay:ygg0", "overlay:ygg:range"]);
     let ScopeMatch::Destinations(dsts) = &fw[0].scopes[0].matcher else {
         panic!("managed scope matches destinations");
     };

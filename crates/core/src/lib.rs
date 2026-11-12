@@ -1,5 +1,6 @@
 pub mod addressing;
 pub mod api_types;
+pub mod bridge;
 pub mod config;
 pub mod credential;
 pub mod identity;

@@ -10,6 +10,9 @@ pub const THIRD_PARTY_ENV: &str = "SOCKETGUARD_THIRD_PARTY";
 
 const EXE: &str = if cfg!(windows) { ".exe" } else { "" };
 
+/// The directory of the obfs4 helper below `third_party/tor` (as in the Tor Expert Bundle).
+const HELPER_DIR: &str = "pluggable_transports";
+
 /// Where packages put the files, when they are not next to the executable (Windows: only
 /// next to it).
 const PACKAGED: Option<&str> = if cfg!(target_os = "linux") {
@@ -114,6 +117,27 @@ impl Bundled {
             binary,
             dir: tor_dir,
         })
+    }
+
+    /// The obfs4 helper (lyrebird) of the Tor Expert Bundle, below the Tor directory. Bridges
+    /// need it; without it they cannot be set.
+    pub fn obfs4_helper(&self) -> Result<PathBuf, String> {
+        let tor = self.tor().map_err(|e| {
+            if e == NOT_INCLUDED {
+                format!("bridges are not available: {NOT_INCLUDED}")
+            } else {
+                e
+            }
+        })?;
+        let helper = tor.dir.join(HELPER_DIR).join(format!("lyrebird{EXE}"));
+        if !helper.is_file() {
+            return Err(
+                "bridges are not available: this build does not include the obfs4 helper \
+                 (lyrebird)"
+                    .into(),
+            );
+        }
+        Ok(helper)
     }
 
     pub fn yggdrasil(&self) -> Result<YggFiles, String> {

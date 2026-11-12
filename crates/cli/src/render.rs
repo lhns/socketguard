@@ -547,6 +547,14 @@ pub fn network_peers(id: &str, peers: &[String]) -> String {
     format!("peers of {id}:\n{}", peers.join("\n"))
 }
 
+/// The bridges of a managed Tor network, one per line.
+pub fn network_bridges(id: &str, bridges: &[String]) -> String {
+    if bridges.is_empty() {
+        return format!("{id} has no bridges (Tor connects directly)");
+    }
+    format!("bridges of {id}:\n{}", bridges.join("\n"))
+}
+
 pub fn settings(s: &Settings) -> String {
     format!(
         "protect-host   {}",
