@@ -365,7 +365,6 @@ function Invoke-TorAndYggdrasil {
 # assertion. The granted-port half also depends on that path (the permit names the adapter as
 # arrival interface, which a local-to-local connection may not carry) and is reported as
 # SKIPPED, not failed, when only that half does not hold.
-# The /7 range block of an existing node is covered by the plan test only (no real-engine proof).
 function Assert-PrefixBlock([string]$NodeAddr) {
   Section 'networks: a prefix block drops a connection (real WFP engine)'
   $ad = Mn-Adapter

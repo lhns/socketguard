@@ -18,10 +18,9 @@ use std::net::IpAddr;
 use tracing::warn;
 
 /// The addresses of a Yggdrasil node: its own `200::/7` address and its routed `300::/64`
-/// subnet. For a managed node SocketGuard denies exactly these as destinations on any
-/// interface (ADR 0051), so a node it does not manage is left alone; an existing node is
-/// blocked by the whole range instead (ADR 0051, amendment). Remembered once known, so the
-/// block outlives the node being stopped or its adapter missing.
+/// subnet. SocketGuard denies exactly these as destinations on any interface (ADR 0051), so
+/// another Yggdrasil node on the host is left alone. Remembered once known, so the block
+/// outlives the node being stopped or its adapter missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OverlayNode {
     pub address: std::net::Ipv6Addr,
@@ -220,9 +219,8 @@ fn host_ipv4_rules(
 /// - Managed scope: every IP locator that is up (see [`Model`]) and every address still on
 ///   an interface (`owned`), so an address is denied from the moment it exists and until
 ///   it is gone.
-/// - Per Yggdrasil network an overlay scope for its interface when that is known, plus
-///   one for the whole range `200::/7` on an existing node, or on a managed node one for
-///   each of its known addresses (its `/128` and its `/64`).
+/// - Per Yggdrasil network an overlay scope for its interface when that is known, plus one
+///   for each of the node's known addresses (its `/128` and its `/64`).
 /// - A whole-host scope per protected interface (both families: IPv4 grants allow the way
 ///   in, see [`host_ipv4_rules`]).
 /// - A grant to Anyone scoped to a LAN or Local network ("everyone on <network>") admits

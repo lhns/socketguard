@@ -342,7 +342,7 @@ $log5 = Start-Portable $Daemon 'networks'
 $script:MnLogBase = $log5
 if (-not (Wait-Api)) { Mn-Fail "the start for the Tor and Yggdrasil networks does not answer`n$(Daemon-Log $log5)" }
 
-# A Tor or Yggdrasil network is SocketGuard's own copy: portable mode allows it (an existing node was refused above).
+# A Tor or Yggdrasil network is SocketGuard's own copy: portable mode allows it.
 $r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor') 'd-add-tor'
 Write-Host $r.Text
 if ($r.Code -ne 0) { Mn-Fail "networks add tor exited $($r.Code) in portable mode" }
