@@ -42,8 +42,9 @@ impersonation only. Remote clients are rejected, and a new server instance is al
 waiting, so many clients can connect at once. The client in turn checks the server: after
 opening the pipe it reads the pipe's owner and refuses unless that is `SYSTEM` or
 `Administrators` ("pipe server is not the SocketGuard service"), so a process that took the
-name while the daemon was down gets no requests. For tests and a daemon started by hand
-from a normal account, set `SOCKETGUARD_TRUST_PIPE_SERVER=1` for the client.
+name while the daemon was down gets no requests. For the daemon's own tests, set
+`SOCKETGUARD_TRUST_PIPE_SERVER=1` for the client; to try SocketGuard without installing it, use
+the portable zip (below) instead.
 
 The daemon also gives its database file (and -wal/-shm) a protected ACL, SYSTEM and Administrators only, because it holds the onion service keys, and refuses to start if it cannot. Set `SOCKETGUARD_ALLOW_UNPROTECTED_DB=1` for the daemon to continue with a warning; for tests and development only (ADR 0040).
 
