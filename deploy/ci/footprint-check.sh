@@ -149,7 +149,6 @@ collect_linux() {
             find /etc/socketguard /var/lib/socketguard -mindepth 1 -maxdepth 1 2>/dev/null
             find /etc/tor -maxdepth 2 -name '*.socketguard.bak' 2>/dev/null)
     rec "$(state_nft_table inet "$(run nft list table inet socketguard)")" nft-table-inet
-    rec "$(state_nft_table ip6 "$(run nft list table ip6 socketguard)")" nft-table-ip6-legacy
     rec "$(state_listed "$paths" 'systemd/system/socketguard\.service$')" systemd-unit
     rec "$(state_group_getent "$(run getent group socketguard)")" group
     rec "$(state_listed "$paths" '^/etc/socketguard$')" config-dir

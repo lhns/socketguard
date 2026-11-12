@@ -453,11 +453,8 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 
 /// Daemon configuration
 ///
-/// Supports two JSON formats:
-/// - Multi-backend: `{ "backends": [{ "id": "ula", "type": "ula" }, ...] }`
-/// - Single backend (object): `{ "backend": { "type": "slaac", "interface": "Ethernet" }, ... }`
-///
-/// With neither, one ULA backend on the loopback interface.
+/// Backends are `{ "backends": [{ "id": "ula", "type": "ula" }, ...] }`. Without them,
+/// one ULA backend on the loopback interface.
 #[derive(Debug, Clone, Serialize)]
 pub struct DaemonConfig {
     /// Unix socket of the local API (ADR 0032). Ignored on Windows.
@@ -592,7 +589,7 @@ pub fn default_loopback() -> String {
     }
 }
 
-/// Custom deserializer: the multi-backend and the single-backend format, validated.
+/// Custom deserializer: validates the backends.
 impl<'de> Deserialize<'de> for DaemonConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -604,12 +601,8 @@ impl<'de> Deserialize<'de> for DaemonConfig {
             api_socket: String,
             #[serde(default = "default_api_pipe")]
             api_pipe: String,
-            // Multi-backend format: array of backend instances
             #[serde(default)]
             backends: Option<Vec<BackendInstanceConfig>>,
-            // Single-backend format
-            #[serde(default)]
-            backend: Option<BackendConfig>,
             #[serde(default = "default_poll_interval")]
             poll_interval_secs: u64,
             #[serde(default = "default_db_path")]
@@ -622,15 +615,9 @@ impl<'de> Deserialize<'de> for DaemonConfig {
 
         let raw = RawConfig::deserialize(deserializer)?;
 
-        let backends = match raw.backends {
-            Some(backends) => backends,
-            None => {
-                // One backend, or none given: the default.
-                let backend = raw.backend.unwrap_or_default();
-                let id = backend.default_id();
-                vec![BackendInstanceConfig { id, backend }]
-            }
-        };
+        let backends = raw
+            .backends
+            .unwrap_or_else(|| DaemonConfig::default().backends);
 
         DaemonConfig::validate_backends(&backends).map_err(serde::de::Error::custom)?;
 
@@ -753,33 +740,6 @@ mod tests {
     }
 
     #[test]
-    fn the_legacy_string_backend_format_is_rejected() {
-        let json = r#"{"backend": "yggdrasil", "interface": "tun0"}"#;
-        assert!(serde_json::from_str::<DaemonConfig>(json).is_err());
-    }
-
-    #[test]
-    fn config_deserialize_single_backend_object() {
-        let json = r#"{
-            "backend": {"type": "slaac", "interface": "Ethernet", "prefix": "2001:db8::/64"}
-        }"#;
-        let config: DaemonConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.backends.len(), 1);
-        assert_eq!(
-            config.backends[0].backend.backend_type(),
-            BackendType::Slaac
-        );
-        assert_eq!(config.backends[0].backend.interface(), Some("Ethernet"));
-        assert_eq!(config.backends[0].id, "slaac-Ethernet");
-        match &config.backends[0].backend {
-            BackendConfig::Slaac { prefix, .. } => {
-                assert_eq!(prefix.as_deref(), Some("2001:db8::/64"));
-            }
-            _ => panic!("expected Slaac"),
-        }
-    }
-
-    #[test]
     fn config_deserialize_multi_backend() {
         let json = r#"{
             "backends": [
@@ -878,7 +838,7 @@ mod tests {
 
     #[test]
     fn config_slaac_auto_prefix() {
-        let json = r#"{"backend": {"type": "slaac", "interface": "eth0"}}"#;
+        let json = r#"{"backends": [{"type": "slaac", "interface": "eth0"}]}"#;
         let config: DaemonConfig = serde_json::from_str(json).unwrap();
         match &config.backends[0].backend {
             BackendConfig::Slaac { prefix, .. } => assert!(prefix.is_none()),
@@ -888,7 +848,7 @@ mod tests {
 
     #[test]
     fn config_deserialize_dhcpv6() {
-        let json = r#"{"backend": {"type": "dhcpv6", "interface": "Ethernet"}}"#;
+        let json = r#"{"backends": [{"type": "dhcpv6", "interface": "Ethernet"}]}"#;
         let config: DaemonConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             config.backends[0].backend.backend_type(),

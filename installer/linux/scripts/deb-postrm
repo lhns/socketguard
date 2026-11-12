@@ -28,7 +28,7 @@ purge)
         /var/lib/socketguard/socketguard.db-shm; do
         rm -f "$f"
     done
-    rm -f /etc/socketguard/socketguard.tmp-* /var/lib/socketguard/socketguard.db.pre-v1*
+    rm -f /etc/socketguard/socketguard.tmp-*
     rmdir /etc/socketguard /var/lib/socketguard 2>/dev/null || true
     for d in /etc/socketguard /var/lib/socketguard; do
         [ -d "$d" ] && echo "socketguard: $d is not empty; left in place." >&2

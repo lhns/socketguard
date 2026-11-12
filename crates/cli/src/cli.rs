@@ -921,7 +921,6 @@ mod tests {
         assert!(parse(&[]).is_err(), "a command is required");
         assert!(parse(&["apps", "split", "x"]).is_err());
         assert!(parse(&["apps", "merge", "x"]).is_err());
-        assert!(parse(&["settings", "address-mode", "per-port"]).is_err());
         assert!(parse(&["apps", "move", "only-one"]).is_err());
         assert!(parse(&["reservations", "bind", "web"]).is_err());
         assert!(parse(&["protect-host", "on"]).is_err());

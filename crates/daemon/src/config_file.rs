@@ -114,7 +114,7 @@ pub fn persist_backends(path: &Path, config: &DaemonConfig) -> anyhow::Result<()
         }
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    // On load `backends` wins over the legacy `backend` and `interface` keys, which stay.
+    // Only `backends` is written; the rest of the file stays as it is.
     doc.as_object_mut().expect("checked above").insert(
         "backends".to_string(),
         serde_json::to_value::<&[BackendInstanceConfig]>(&config.backends)?,

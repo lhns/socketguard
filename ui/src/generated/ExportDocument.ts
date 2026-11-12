@@ -10,8 +10,4 @@ import type { Settings } from "./Settings";
  * The portable form of settings, peers, groups and grants (`GET /api/export`). It names
  * things by label (and apps by id), never by internal id, so it can move between hosts.
  */
-export type ExportDocument = { version: number, settings: Settings, peers: Array<ExportPeer>, groups: Array<ExportGroup>, 
-/**
- * Documents written before the rename call this `socket_groups`.
- */
-port_groups: Array<ExportPortGroup>, grants: Array<ExportGrant>, reservations: Array<ExportReservation>, };
+export type ExportDocument = { version: number, settings: Settings, peers: Array<ExportPeer>, groups: Array<ExportGroup>, port_groups: Array<ExportPortGroup>, grants: Array<ExportGrant>, reservations: Array<ExportReservation>, };

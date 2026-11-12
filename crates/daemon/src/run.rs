@@ -11,29 +11,11 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
-/// Resolve the config for a run: with default locations, first move state left in the
-/// working directory (ADR 0050), then make sure the directories exist.
+/// Resolve the config for a run and make sure the directories exist.
 pub fn resolve_for_run() -> Result<Resolved> {
     let path = config_file::config_path();
     if socketguard_core::portable::is_portable() {
         return resolve_portable(&path);
-    }
-    if config_file::is_default_location(&path) {
-        let db = socketguard_core::paths::default_db_path();
-        if let Ok(cwd) = std::env::current_dir() {
-            if !legacy::plan(&cwd, &path, &db).is_empty() {
-                let record = Record::for_config(&path);
-                install::prepare_dirs(&path, &db, &record)?;
-                let moves = legacy::migrate(&cwd, &path, &db)?;
-                for m in &moves {
-                    eprintln!(
-                        "[socketguard] Moved {} to {}",
-                        m.from.display(),
-                        m.to.display()
-                    );
-                }
-            }
-        }
     }
     let resolved = config_file::resolve_at(&path)?;
     install::prepare_dirs(
@@ -56,7 +38,7 @@ pub fn resolve_for_run() -> Result<Resolved> {
 }
 
 /// Portable mode (ADR 0054): config and database are in `data\` next to the program, the
-/// API is on the portable pipe, no state is moved in and no install record is written.
+/// API is on the portable pipe and no install record is written.
 fn resolve_portable(path: &std::path::Path) -> Result<Resolved> {
     let dir = path
         .parent()
@@ -165,18 +147,6 @@ pub async fn run(
             portable::write_session(dir, None);
         }
         state.engine.read().await.sweep_all_owned(&state).await;
-    }
-
-    // A database migrated from v7 still has every address automatic; now that the networks
-    // are known, the ones a grant covers without naming become reservations (ADR 0047).
-    if let Err(e) = state
-        .engine
-        .read()
-        .await
-        .classify_legacy_addresses(&state)
-        .await
-    {
-        error!("Could not classify the existing addresses: {e:#}");
     }
 
     // Shutdown signal channel

@@ -578,63 +578,6 @@ fn conflicts_of(claims: &[RowClaim], served: &BTreeMap<AppId, ScopePorts>) -> Ve
     out
 }
 
-/// What the v7 -> v8 migration makes of an address that has an app and a scope.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LegacyClass {
-    /// Stays the automatic address of its row (up when named, else dormant).
-    Automatic,
-    /// A grant covers what it serves without naming its row: it becomes the address of a
-    /// new reservation with this label and one binding to the row.
-    Reservation { label: String },
-}
-
-/// Classify the addresses of `w` (all automatic, as the schema migration leaves them).
-pub fn classify_legacy(w: World<'_>) -> Vec<(AddressId, LegacyClass)> {
-    let m = Model::new(w);
-    let mut labels: BTreeSet<String> = w.reservations.iter().map(|r| r.label.clone()).collect();
-    let mut out = Vec::new();
-    for a in w.addresses {
-        let (Some(app_id), Some(network)) = (&a.app_id, m.network(&a.network_id)) else {
-            out.push((a.id.clone(), LegacyClass::Automatic));
-            continue;
-        };
-        let Some(app) = m.apps.get(app_id.as_str()) else {
-            out.push((a.id.clone(), LegacyClass::Automatic));
-            continue;
-        };
-        if !network.grants_apply {
-            out.push((a.id.clone(), LegacyClass::Automatic));
-            continue;
-        }
-        let row = Row {
-            app_id: app_id.clone(),
-            scope: a.scope.clone(),
-        };
-        if m.named_rows(network).contains(&row) {
-            out.push((a.id.clone(), LegacyClass::Automatic));
-            continue;
-        }
-        let served = BTreeMap::from([(
-            app_id.clone(),
-            scope_ports(app, &a.scope, w.port_groups, &m.foreign_of(app_id)),
-        )]);
-        if m.covered_on(network, &served, None) {
-            let base = format!("{} {}", app.name, a.scope.describe(w.port_groups));
-            let mut label = base.clone();
-            let mut n = 2;
-            while labels.contains(&label) {
-                label = format!("{base} ({n})");
-                n += 1;
-            }
-            labels.insert(label.clone());
-            out.push((a.id.clone(), LegacyClass::Reservation { label }));
-        } else {
-            out.push((a.id.clone(), LegacyClass::Automatic));
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -880,44 +823,5 @@ mod tests {
         assert!(info.up);
         assert_eq!(texts(&info.excluded), ["80/tcp"]);
         assert_eq!(texts(&info.served["a"].total()), ["81/tcp"]);
-    }
-
-    #[test]
-    fn legacy_classification_has_three_cases_and_spares_loopback() {
-        let apps = [app_with("a", &[(80, true), (81, true)])];
-        let nets = [
-            net("ygg", NetworkKind::Yggdrasil, true),
-            net("lo", NetworkKind::Local, false),
-        ];
-        let grants = [grant("g", Target::App("a".into()), tcp(80), None)];
-        let named = Address::automatic("a", tcp(80), "ygg", loc());
-        let covered = Address::automatic("a", Scope::All, "ygg", loc());
-        let nothing = Address::automatic("a", tcp(81), "ygg", loc());
-        let local = Address::automatic("a", Scope::All, "lo", loc());
-        let addrs = [
-            named.clone(),
-            covered.clone(),
-            nothing.clone(),
-            local.clone(),
-        ];
-        let w = World {
-            apps: &apps,
-            networks: &nets,
-            grants: &grants,
-            tags: &[],
-            reservations: &[],
-            port_groups: &[],
-            addresses: &addrs,
-        };
-        let c: HashMap<_, _> = classify_legacy(w).into_iter().collect();
-        assert_eq!(c[&named.id], LegacyClass::Automatic);
-        assert_eq!(
-            c[&covered.id],
-            LegacyClass::Reservation {
-                label: "a All ports".into()
-            }
-        );
-        assert_eq!(c[&nothing.id], LegacyClass::Automatic);
-        assert_eq!(c[&local.id], LegacyClass::Automatic);
     }
 }

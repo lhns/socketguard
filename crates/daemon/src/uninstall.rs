@@ -279,10 +279,6 @@ pub fn named_files(paths: &UninstallPaths) -> Vec<PathBuf> {
     for suffix in ["", "-wal", "-shm"] {
         out.push(PathBuf::from(format!("{db}{suffix}")));
     }
-    if let (Some(dir), Some(name)) = (paths.db.parent(), paths.db.file_name()) {
-        let prefix = format!("{}.pre-v1", name.to_string_lossy());
-        out.extend(list_prefixed(dir, &prefix));
-    }
     out.push(paths.config.clone());
     if let Some(dir) = paths.config.parent() {
         out.extend(list_prefixed(dir, "socketguard.tmp-"));
@@ -359,8 +355,6 @@ mod tests {
             &db,
             &state.join("socketguard.db-wal"),
             &state.join("socketguard.db-shm"),
-            &state.join("socketguard.db.pre-v1"),
-            &state.join("socketguard.db.pre-v1.2"),
             &etc.join("socketguard.tmp-1-abc"),
             &etc.join("unrelated.txt"),
             &state.join("unrelated-too.txt"),
@@ -869,7 +863,7 @@ mod tests {
             socket: None,
             state_dir: l.state_dir.clone(),
         };
-        // Files that exist by name; the prefixed ones (temp files, archived databases) are
+        // Files that exist by name; the prefixed ones (temp files) are
         // matched below by their prefix.
         for f in named_files(&p) {
             assert!(
@@ -879,7 +873,6 @@ mod tests {
             );
         }
         assert!(script.contains(&unix(&l.config_dir.join("socketguard.tmp-"))));
-        assert!(script.contains(&format!("{}.pre-v1", unix(&db))));
         for d in l.dirs() {
             assert!(script.contains(&unix(&d)), "postrm leaves {}", d.display());
         }

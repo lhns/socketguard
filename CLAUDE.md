@@ -22,7 +22,7 @@ fine to run directly.
                     portable, install_log, API types
 - crates/daemon/  — The daemon and its admin commands:
     - engine/     reconcile, addresses, enforcement, mutations, reservations, tags, port groups
-    - state/      SQLite schema and migrations, settings, file protection
+    - state/      SQLite schema, settings, file protection
     - networks/   ip/ (Local, LAN, Yggdrasil, DHCPv6), tor, managed children (managed.rs, *_managed.rs)
     - children/   the child processes of managed networks (guard, pidfile)
     - firewall/   nftables, pf, wfp/ (plan + Windows FFI); iface/ (addresses on OS interfaces); monitor/

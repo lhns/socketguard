@@ -337,9 +337,7 @@ upgrades (the name is for humans).
 `reservations` match by label. Each lists its bindings (an app with a `scope`, or a tag by label)
 and its grants (`network?` and `subject`; a grant on a reservation always covers all its rows).
 The addresses of reservations are not part of the document, so applying it elsewhere creates
-new ones. An older document may carry `settings.address_mode` or call `port_groups` by the key
-`socket_groups`: both are still accepted (the first is ignored, the second is read as
-`port_groups`).
+new ones.
 
 `POST /api/apply {"document": ..., "dry_run": bool}` compares the document with the current
 state and returns the diff, then applies it unless `dry_run`:

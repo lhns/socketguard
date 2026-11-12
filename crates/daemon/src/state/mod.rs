@@ -1,12 +1,11 @@
-//! SQLite persistence, schema v4 (ADR 0027, 0037, 0040): apps, ports, addresses, peers, credentials,
+//! SQLite persistence (ADR 0027, 0037, 0040): apps, ports, addresses, peers, credentials,
 //! groups, grants, settings, activity and onion service keys. Versioned with
-//! `PRAGMA user_version`; a database from before schema v1 is renamed out of the way,
-//! never migrated.
+//! `PRAGMA user_version`; a database of another version is refused (ADR 0055).
 //!
 //! The database holds private keys (`onion_keys`), so it is protected at rest: on Unix the
 //! file (and its -wal/-shm) is mode 0600. On Windows the file is created with a protected
 //! DACL (SYSTEM and Administrators only) before SQLite opens it, and the DACL is applied to
-//! the -wal/-shm files and any `.pre-v1` backup too.
+//! the -wal/-shm files too.
 
 mod port_groups;
 mod protect;
@@ -31,7 +30,6 @@ pub use tags::Write;
 pub use winacl::protect_portable_dir;
 
 use protect::{precreate_protected, protect_files};
-use schema::{archive_pre_v1, is_pre_v1};
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
@@ -185,18 +183,8 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 impl Database {
-    /// Open (creating if needed) the database at `path`. A pre-v1 file is renamed first.
-    /// Call [`Database::migrate`] next.
+    /// Open (creating if needed) the database at `path`. Call [`Database::migrate`] next.
     pub async fn new(path: &str) -> Result<Self> {
-        if path != ":memory:" && Path::new(path).exists() && is_pre_v1(Path::new(path)).await {
-            let moved = archive_pre_v1(Path::new(path))?;
-            warn!(
-                "{path} is from before schema v1 and is not migrated; moved to {}",
-                moved.display()
-            );
-            // The rename keeps the ACL; re-apply it (and to the WAL files) to be sure.
-            protect_files(&moved)?;
-        }
         // sqlx maps ":memory:" to a uniquely named shared-cache in-memory DB, so every
         // pooled connection sees the same data (covered by memory_pool_tests).
         if path != ":memory:" {
@@ -222,16 +210,12 @@ impl Database {
         })
     }
 
-    /// Open the database at `path` only if it exists: never creates a file or moves an old
-    /// one (`--disable`, uninstall). Call [`Database::migrate`] next.
+    /// Open the database at `path` only if it exists: never creates a file (`--disable`,
+    /// uninstall). Call [`Database::migrate`] next.
     pub async fn open_existing(path: &str) -> Result<Self> {
         anyhow::ensure!(
             path != ":memory:" && Path::new(path).is_file(),
             "there is no database at {path}"
-        );
-        anyhow::ensure!(
-            !is_pre_v1(Path::new(path)).await,
-            "{path} is from before schema v1 and cannot be read"
         );
         let options = connect_options(path, false)?
             .foreign_keys(true)

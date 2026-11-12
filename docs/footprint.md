@@ -13,7 +13,6 @@ Stopping the daemon removes nothing on purpose: rules and addresses stay so the 
 | WFP provider `{534F434B-4755-4152-4400-000000000001}`, sublayer `…0002`, filters named "SocketGuard …" (persistent) | Windows | yes / yes | `--disable`, `--disable --force` (by name, without the database), `uninstall` | `netsh wfp show filters`, search for `534f434b` |
 | Engine option `FWPM_ENGINE_COLLECT_NET_EVENTS = 1` | Windows | yes / unknown | `uninstall` sets it back to the value the daemon found (recorded once, before it first set it); not reset by a plain disable. `footprint-check.ps1` does not look at it | `netsh wfp show options optionsfor=netevents` |
 | `table inet socketguard` with counters, NFLOG group 7 | Linux | yes / no | `--disable`, `--disable --force`, `uninstall` | `nft list table inet socketguard` |
-| Legacy `table ip6 socketguard` | Linux | yes / no | `--disable` and `--disable --force` (also deleted), `uninstall` | `nft list table ip6 socketguard` |
 | pf anchor `socketguard` | macOS | yes / no | `--disable`, `--disable --force`, `uninstall` (`pfctl -a socketguard -F all`) | `pfctl -a socketguard -sr` |
 | `anchor "socketguard"` in `/etc/pf.conf`, pf enabled | macOS | yes / yes | added by `service install` only if missing and recorded; `uninstall` removes the line only if it added it and disables pf only if it enabled it | `grep socketguard /etc/pf.conf`, `pfctl -s info` |
 
@@ -47,7 +46,6 @@ Default locations (ADR 0050): Windows `%ProgramData%\SocketGuard`, Linux `/etc/s
 | Item | Where | Removed by |
 |---|---|---|
 | Database `socketguard.db` (keys, ledger, settings), `-wal`, `-shm` | `db_path` | `uninstall --purge` |
-| Archived old databases `<db>.pre-v1[.N]` | next to the database | `uninstall --purge` |
 | Config `socketguard.json`, written when a network is added or removed | `SOCKETGUARD_CONFIG` or the config directory | `uninstall --purge` |
 | Temp file `socketguard.tmp-<pid>-<uuid>` | next to the config | removed on error; left after a crash: `uninstall --purge` |
 | Install record and setup log `setup-log.json` | next to the config | `uninstall --purge`; kept (with the entries still to undo) otherwise |

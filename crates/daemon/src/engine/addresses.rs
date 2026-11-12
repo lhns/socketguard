@@ -17,10 +17,8 @@ use crate::state::{Database, OwnedAddress};
 use crate::AppState;
 use chrono::Utc;
 use futures_util::StreamExt;
-use socketguard_core::{
-    classify_legacy, Binding, BindingTarget, LegacyClass, Model, Reservation, Row,
-};
-use socketguard_core::{new_id, Address, Locator, Scope};
+use socketguard_core::Model;
+use socketguard_core::{Address, Locator, Scope};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
@@ -348,68 +346,6 @@ impl Engine {
             scope: scope.clone(),
         };
         tokio::task::spawn_blocking(move || net.ensure_locator(&req)).await?
-    }
-
-    /// The v7 -> v8 migration left every address automatic. Now that the networks are
-    /// known, turn the ones that a grant covers without naming their row into
-    /// reservations with that row bound (ADR 0047), once. Returns how many.
-    pub async fn classify_legacy_addresses(&self, state: &AppState) -> anyhow::Result<usize> {
-        let db = &state.db;
-        if db.get_setting("classify_addresses").await?.as_deref() != Some("pending") {
-            return Ok(0);
-        }
-        let snap = self.gather_snapshot(state).await?;
-        let mut by_row: HashMap<Row, String> = HashMap::new();
-        let mut writes: Vec<crate::state::Write> = Vec::new();
-        let mut moved = 0;
-        for (address_id, class) in classify_legacy(snap.world()) {
-            let LegacyClass::Reservation { label } = class else {
-                continue;
-            };
-            let Some(a) = snap.addresses.iter().find(|a| a.id == address_id) else {
-                continue;
-            };
-            let Some(app_id) = a.app_id.clone() else {
-                continue;
-            };
-            let row = Row {
-                app_id: app_id.clone(),
-                scope: a.scope.clone(),
-            };
-            // One reservation per row, with an address on each network it had one.
-            let reservation_id = match by_row.get(&row) {
-                Some(id) => id.clone(),
-                None => {
-                    let id = new_id();
-                    writes.push(crate::state::Write::InsertReservation(Reservation {
-                        id: id.clone(),
-                        label,
-                        bindings: vec![Binding {
-                            id: new_id(),
-                            reservation_id: id.clone(),
-                            target: BindingTarget::App {
-                                app_id,
-                                scope: a.scope.clone(),
-                            },
-                        }],
-                        created_at: Utc::now(),
-                    }));
-                    by_row.insert(row, id.clone());
-                    id
-                }
-            };
-            writes.push(crate::state::Write::AssignAddress {
-                address_id,
-                reservation_id,
-            });
-            moved += 1;
-        }
-        db.apply_writes(&writes).await?;
-        db.set_setting("classify_addresses", "done").await?;
-        if moved > 0 {
-            info!("Turned {moved} existing address(es) into reservations");
-        }
-        Ok(moved)
     }
 
     /// Re-home stored addresses of prefix-based networks whose /64 changed: keep the
