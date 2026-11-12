@@ -50,7 +50,11 @@ impl TorPaths {
 pub fn resolve_run_as(accounts: &dyn Accounts) -> RunAs {
     let (_, root) = accounts.daemon();
     if cfg!(windows) {
-        return resolve_windows(accounts, root);
+        return if accounts.portable() {
+            RunAs::Portable
+        } else {
+            resolve_windows(accounts, root)
+        };
     }
     match accounts.lookup(account::NAME) {
         Some(ids) if root => RunAs::Account {
@@ -729,6 +733,86 @@ mod tests {
         assert_eq!(opts.cookie_owner, own_sid());
         super::super::tor_control::read_cookie_file(&paths.cookie.display().to_string(), &opts)
             .unwrap();
+    }
+
+    /// Portable mode has no installer and no account of its own: the daemon (an elevated user,
+    /// not SYSTEM) is the account, and LocalService is not even asked.
+    struct PortableAccounts;
+
+    impl Accounts for PortableAccounts {
+        fn lookup(&self, _name: &str) -> Option<account::Ids> {
+            None
+        }
+        fn daemon(&self) -> (u32, bool) {
+            (0, false)
+        }
+        fn local_service_logon(&self) -> Result<(), String> {
+            panic!("portable mode never tries to log LocalService on");
+        }
+        fn portable(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn portable_mode_runs_tor_as_the_daemons_account_without_trying_localservice() {
+        let run_as = resolve_run_as(&PortableAccounts);
+        if cfg!(windows) {
+            assert_eq!(run_as, RunAs::Portable);
+            assert_eq!(
+                run_as.describe(),
+                "the account running portable SocketGuard"
+            );
+            // The cookie is vetted against the daemon's own account, not LocalService's.
+            assert_eq!(
+                cookie_owner(&run_as, Some("S-1-5-21-1".into())).as_deref(),
+                Some("S-1-5-21-1")
+            );
+        }
+        // The same account on the other side of the flag still goes through the logon.
+        let installed = FakeAccounts::present();
+        assert!(!installed.portable);
+        assert_ne!(
+            resolve_run_as(&installed).describe(),
+            "the account running portable SocketGuard"
+        );
+    }
+
+    /// A managed Tor in portable mode: the directory under the data folder is protected
+    /// (not inheriting the allowed user's read access), Tor's cookie is vetted as the
+    /// daemon's own.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn on_windows_portable_tor_has_a_protected_directory_and_vets_its_own_cookie() {
+        use crate::state::winacl::tests::dacl_sddl;
+        let d = state_dir();
+        // Everyone (S-1-1-0) stands in for the account allowed to read `data\`.
+        crate::state::protect_portable_dir(&d, Some("S-1-1-0")).unwrap();
+        let accounts = FakeAccounts {
+            portable: true,
+            // Never consulted in portable mode.
+            local_service_error: Some("must not be asked".into()),
+            ..FakeAccounts::present()
+        };
+        let c = ctx(Some(d.clone()), accounts);
+        let t = ManagedTor::new("tor", &c);
+        let spec = t.spec().unwrap();
+        assert_eq!(spec.run_as, RunAs::Portable);
+        (spec.before_start.unwrap())().unwrap();
+        let paths = TorPaths::new(&d);
+        let sddl = dacl_sddl(&paths.dir);
+        assert!(sddl.starts_with("D:P"), "{sddl}");
+        assert!(
+            !sddl.contains(";;;WD)") && !sddl.contains("FRFX") && !sddl.contains(";;;LS)"),
+            "{sddl}"
+        );
+        std::fs::write(&paths.cookie, [7u8; 32]).unwrap();
+        std::fs::write(&paths.control_port_file, "PORT=127.0.0.1:1\n").unwrap();
+        let (_, opts) = t.connect_params().unwrap();
+        assert_eq!(opts.cookie_owner, own_sid());
+        super::super::tor_control::read_cookie_file(&paths.cookie.display().to_string(), &opts)
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[tokio::test]

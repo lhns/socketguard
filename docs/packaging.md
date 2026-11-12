@@ -61,6 +61,23 @@ service before replacing the file (`ServiceControl`, stop only) and `service ins
 - Unsigned: SmartScreen shows "Windows protected your PC / Unknown publisher"; *More info*, *Run
   anyway*.
 
+## Windows, portable zip (ADR 0054)
+
+- `installer/windows/portable.ps1 -BinDir target/release -Out dist/portable/SocketGuard-portable-windows-x64.zip`
+  builds one folder: the three programs, the `portable` marker, README, LICENSE and NOTICE, and
+  `third_party\` (Tor, Yggdrasil, `wintun.dll`, licences, `VERSIONS`) when `installer/payload/windows/`
+  holds them. The `portable` job of `packages.yml` runs the same `.github/actions/bundle` step as the
+  MSI job before building the zip, so the zip carries them and managed networks work from it.
+- No installer ran, so nothing set up an account for the children: managed Tor and Yggdrasil run as
+  the account of the elevated portable daemon (the card says "the account running portable
+  SocketGuard"), and `data\tor` and `data\yggdrasil` have a protected access list that the read
+  access of the allowed user on `data\` does not reach.
+- Whether the Wintun driver was in the driver store before the first managed Yggdrasil start is kept
+  in `data\session.json`. A clean exit removes the driver (`pnputil /delete-driver`, never `/force`)
+  only if it was absent, after the children have ended; a kill leaves it, and the next clean exit
+  from the same folder removes it.
+- `test/portable.ps1` proves it on the runner (see below). Run it only on a throwaway machine.
+
 ## Linux
 
 - One tool for both formats: **nfpm** (one YAML, per-format scripts and dependencies; a single
@@ -162,6 +179,17 @@ and the Yggdrasil assertions are SKIPPED with that reason, not faked); Tor needs
   database file, same stored state, no `uninstall`); removal (service, filters and group gone, data
   kept); `uninstall --purge` with the daemon copied aside; `footprint-check.ps1` from outside after
   each step.
+- **portable zip** (Windows runner, `test/portable.ps1`): start from the unzipped folder with
+  `--portable`; real WFP filters admit a granted port and block another; a clean exit and a kill
+  (no SocketGuard filter may remain, the next start sweeps the addresses); portable and the
+  installed service refuse to run side by side. Then, with the managed section shared with the MSI
+  test (`test/managed-helpers.ps1`): a managed Tor becomes up (bootstrapped, up to 5 minutes) and
+  `tor.exe` runs as the same account as the portable daemon; a managed Yggdrasil creates the
+  `SocketGuard` adapter (SKIPPED with the exact error in `ygg-adapter-error.txt` when the runner
+  cannot, never faked); `data\tor` and `data\yggdrasil` are not inherited from `data\`; after the
+  clean exit no child, adapter or `third_party` process is left, `session.json` is gone, the Wintun
+  driver is removed if and only if the driver store did not have it before, and `footprint-check`
+  agrees. Not covered: the kill with a managed Yggdrasil (the driver staying after it).
 - **deb** (Ubuntu 22.04 VM with systemd): install, unit active and enabled, socket answers, nft
   table, upgrade restarts onto the new binary and keeps the database inode and state, remove, purge.
 - **rpm**: dependency resolution, file list, scriptlets and library check in a Fedora container

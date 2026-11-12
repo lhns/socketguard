@@ -106,6 +106,9 @@ impl YggPaths {
 /// creating the adapter needs its rights.
 pub fn resolve_run_as(accounts: &dyn Accounts) -> RunAs {
     if cfg!(windows) {
+        if accounts.portable() {
+            return RunAs::Portable;
+        }
         return RunAs::Daemon {
             note: Some("creating the network adapter needs the daemon's rights".into()),
         };
@@ -662,6 +665,52 @@ mod tests {
             );
             assert!(not_root.contains("not running as root"));
         }
+    }
+
+    #[test]
+    fn portable_mode_runs_yggdrasil_as_the_account_running_it() {
+        let portable = FakeAccounts {
+            portable: true,
+            ..FakeAccounts::present()
+        };
+        if cfg!(windows) {
+            let run_as = resolve_run_as(&portable);
+            assert_eq!(run_as, RunAs::Portable);
+            assert_eq!(
+                run_as.describe(),
+                "the account running portable SocketGuard"
+            );
+        }
+    }
+
+    /// The node's key (`yggdrasil.conf`) in portable mode: the directory is protected, so the
+    /// read access the allowed user has on `data\` does not reach it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn on_windows_portable_yggdrasil_keeps_its_key_from_the_allowed_user() {
+        use crate::state::winacl::tests::dacl_sddl;
+        let d = state_dir();
+        // Everyone (S-1-1-0) stands in for the account allowed to read `data\`.
+        crate::state::protect_portable_dir(&d, Some("S-1-1-0")).unwrap();
+        let accounts = FakeAccounts {
+            portable: true,
+            ..FakeAccounts::present()
+        };
+        let c = ctx(Some(d.clone()), accounts);
+        let spec = ygg(&c, &ifaces()).spec(&[]).unwrap();
+        assert_eq!(spec.run_as, RunAs::Portable);
+        (spec.before_start.unwrap())().unwrap();
+        let paths = YggPaths::new(&d);
+        for p in [&paths.dir, &paths.conf, &paths.run_dir] {
+            let sddl = dacl_sddl(p);
+            assert!(
+                !sddl.contains(";;;WD)") && !sddl.contains("FRFX"),
+                "{}: {sddl}",
+                p.display()
+            );
+        }
+        assert!(dacl_sddl(&paths.dir).starts_with("D:P"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[tokio::test]

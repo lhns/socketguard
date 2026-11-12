@@ -242,8 +242,25 @@ pub async fn run(
         // except addresses, which the next start sweeps.
         info!("Removing rules and addresses");
         left = portable::teardown(&state).await;
-        if let Some(dir) = &data_dir {
-            portable::write_last_exit(dir, &left);
+        if let Some(dir) = data_dir.clone() {
+            // The children are gone (the teardown waited for them), so the adapter is too:
+            // the Wintun driver goes if this run put it there. Before the session record,
+            // which holds that fact, is removed with the clean exit.
+            let removal = tokio::task::spawn_blocking({
+                let dir = dir.clone();
+                move || {
+                    portable::remove_wintun_driver(
+                        &mut host::SystemHost,
+                        &dir,
+                        std::time::Duration::from_secs(1),
+                    )
+                }
+            })
+            .await;
+            if let Ok(Some(why)) = removal {
+                left.push(why);
+            }
+            portable::write_last_exit(&dir, &left);
         }
         // Handlers that must not return before the teardown (close, logoff) may now.
         portable::mark_done();

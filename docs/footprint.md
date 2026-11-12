@@ -136,8 +136,12 @@ then open as it was before SocketGuard started, not closed.
 | WFP provider, sublayer and filters, the same names and keys as the installed product | the engine | **dynamic**: added through one engine handle opened with `FWPM_SESSION_FLAG_DYNAMIC`, without the persistent flags. Windows deletes them when the handle is closed or the process ends, however it ends (kill, crash, power loss need no cleanup) |
 | `/128` IPv6 addresses on adapters (`CreateUnicastIpAddressEntry`) | adapters | not persistent by Microsoft's documentation: they end with a reboot or an adapter reset. Removed by the teardown; after a kill they stay until the next start from the same folder (which sweeps its ledger first) or a reboot |
 | Pipe `\\.\pipe\socketguard-portable` | the pipe namespace | the process |
-| Config, database, `session.json`, `last-exit.log`, the data of managed networks | `data\` next to the programs | the folder. `session.json` exists while a daemon runs; one found at start was left by a daemon that did not end cleanly |
+| Config, database, `session.json`, `last-exit.log`, the data of managed networks | `data\` next to the programs | the folder. `session.json` exists while a daemon runs; one found at start was left by a daemon that did not end cleanly. It also holds `wintun_present_before` once a managed Yggdrasil was started (see below) |
 | The window's browser data | `ui-data\` next to the programs | the folder |
+| Managed Tor (`tor.exe`) and Yggdrasil (`yggdrasil.exe`), from `third_party\` in the folder (ADR 0052) | child processes | the process: both end with the daemon (job object) and are stopped by the teardown before it reports done. They run as the account of the elevated portable daemon: no installer made a `LocalService` or other account, and none is tried (`status` says "the account running portable SocketGuard") |
+| `data\tor`, `data\yggdrasil` (`torrc`, Tor's keys and control cookie, the node's key in `yggdrasil.conf`) | `data\` | the folder. Their access list is protected (SYSTEM, Administrators, the daemon's account), so the read access the allowed user has on `data\` does not reach the keys |
+| Adapter `SocketGuard` (managed Yggdrasil) | adapters | the process: it disappears when `yggdrasil.exe` ends |
+| Wintun driver in the driver store (managed Yggdrasil, system-wide) | the driver store | see "What can remain". Whether it was there before the first managed start is kept in `session.json`, not in an install record (portable mode has none) |
 
 **What it does not create:** no service, no `SocketGuard Users` group, nothing in `%ProgramData%`,
 the registry, `PATH` or the Start menu, no install record on the host (`setup-log.json` is not
@@ -150,7 +154,9 @@ not logged and the status says so). The one-time move of old state into `%Progra
 |---|---|---|
 | a clean end (window closed, sign-out, shutdown, `socketguard shutdown`) | nothing on the host; `data\` stays with the folder | |
 | a kill or crash | the IPv6 addresses the daemon had added (see the CI run in `test/portable.ps1`, which records whether Windows removed them with the process) | the next start from the same folder, or a reboot |
-| a kill or crash | the Wintun driver, if managed Yggdrasil installed it (ADR 0052) and it was absent before | removed by the next clean end only if it was absent before the session and nothing else uses it |
+| a clean end with a managed Yggdrasil | the Wintun driver only if it was in the driver store before the first managed start (it is shared with other software then) or Windows refuses to delete it (`pnputil /delete-driver`, never `/force`); otherwise it is removed after the children have ended | |
+| a kill or crash | the Wintun driver, if managed Yggdrasil installed it (ADR 0052) and it was absent before. The network card says so: "Windows keeps the network driver (Wintun) installed if SocketGuard is closed unexpectedly; it is removed on a normal exit" | the next clean end from the same folder (`session.json` of the killed run keeps the "was absent" fact), if nothing else uses it |
+| a kill or crash | `tor.exe` and `yggdrasil.exe` end with the daemon (job object); the adapter goes with `yggdrasil.exe`. `data\tor`, `data\yggdrasil` stay with the folder | |
 | a clean end with something stuck | `data\last-exit.log` says what (`LEFT: ...`) and the exit code is not 0 | |
 
 **Not beside an installed copy:** a portable daemon refuses to start while the `SocketGuard`

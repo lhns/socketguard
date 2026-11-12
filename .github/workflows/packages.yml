@@ -80,11 +80,12 @@ jobs:
           if-no-files-found: error
 
   # Portable mode on a clean runner (ADR 0054): real firewall, clean exit, kill, coexistence with
-  # the service. Elevated, machine-wide changes, no prompts; the runner is thrown away.
+  # the service, and the bundled Tor and Yggdrasil (ADR 0052) from the zip's third_party\. Elevated,
+  # machine-wide changes, no prompts; the runner is thrown away.
   portable:
     # Its own build, in parallel with the msi job: it needs nothing from it.
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -102,12 +103,17 @@ jobs:
       - name: Build (./build.sh)
         shell: bash
         run: bash ./build.sh
+      - name: Bundle Tor, Yggdrasil and wintun.dll (installer/payload/windows, copied to third_party\ in the zip)
+        uses: ./.github/actions/bundle
+        with:
+          target: windows-x86_64
+          outdir: installer/payload/windows
       - name: Build the portable zip
         shell: pwsh
         run: ./installer/windows/portable.ps1 -BinDir target/release -Out dist/portable/SocketGuard-portable-windows-x64.zip
-      - name: Start, exercise, end, kill, coexist
+      - name: Start, exercise, end, kill, coexist, managed Tor and Yggdrasil
         shell: pwsh
-        timeout-minutes: 30
+        timeout-minutes: 45
         run: ./test/portable.ps1 -Zip dist/portable/SocketGuard-portable-windows-x64.zip -Out dist/portable-test
       - uses: actions/upload-artifact@v4
         if: always()

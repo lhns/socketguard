@@ -82,6 +82,20 @@ describe("Configured networks", () => {
     expect((await row("Yggdrasil")).getByText("No peers yet: it only finds nodes on your LAN.")).toBeInTheDocument();
   });
 
+  it("in portable mode, say that a killed SocketGuard leaves the Wintun driver", async () => {
+    const note = /Wintun\) installed if SocketGuard is closed unexpectedly; it is removed on a normal exit/;
+    mockDaemon({ portable_info: () => ({ portable: true }), list_networks: () => [ygg({ state: "up", address: "200:1::1", peers: [] })] });
+    const { unmount } = renderWithProviders(<NetworksSection />);
+    expect(await (await row("Yggdrasil")).findByText(note)).toBeInTheDocument();
+    unmount();
+
+    mockDaemon({ list_networks: () => [ygg({ state: "up", address: "200:1::1", peers: [] })] });
+    renderWithProviders(<NetworksSection />);
+    const y = await row("Yggdrasil");
+    expect(y.getByText("200:1::1")).toBeInTheDocument();
+    expect(y.queryByText(note)).not.toBeInTheDocument();
+  });
+
   it("edit the peers: add, reject an invalid URI, remove, save", async () => {
     const d = mockDaemon({
       list_networks: () => [ygg({ state: "up", peers: ["tls://a.org:443"], peers_connected: 1 })],

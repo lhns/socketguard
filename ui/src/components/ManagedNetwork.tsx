@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ManagedInfo, Network } from "../api";
 import { errorText } from "../lib";
-import { useSetNetworkPeers } from "../queries";
+import { usePortable, useSetNetworkPeers } from "../queries";
 import { useToast } from "./Toast";
 
 /** A managed network's child process, in words. */
@@ -23,6 +23,10 @@ export function childStateText(m: ManagedInfo): string {
       return "Not included in this build";
   }
 }
+
+/** Portable mode (ADR 0054): a killed SocketGuard cannot remove the adapter driver it installed. */
+export const WINTUN_PORTABLE_NOTE =
+  "Windows keeps the network driver (Wintun) installed if SocketGuard is closed unexpectedly; it is removed on a normal exit.";
 
 const PEER_SCHEMES = ["tcp", "tls", "quic", "ws", "wss", "socks", "sockstls"];
 
@@ -57,12 +61,14 @@ export function NetworkOrigin({ network }: { network: Network }) {
 
 /** What is specific to a managed network: Yggdrasil's address and peers. */
 export function ManagedDetails({ network }: { network: Network }) {
+  const portable = usePortable();
   const m = network.managed;
   if (!m || network.kind !== "yggdrasil") return null;
   const peers = m.peers ?? [];
   return (
     <div className="managed-details">
       {m.address && <CopyAddress address={m.address} />}
+      {portable && <p className="hint">{WINTUN_PORTABLE_NOTE}</p>}
       <p className="hint">
         {m.peers_connected
           ? `Connected to ${m.peers_connected} ${m.peers_connected === 1 ? "peer" : "peers"}.`
