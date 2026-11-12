@@ -84,7 +84,7 @@ mn_step "Yggdrasil"
 if [ -e /dev/net/tun ]; then
     mn_ygg_start
     mn_ygg_up
-    ygg_pid=$(mn_pid '/third_party/yggdrasil/yggdrasil')
+    ygg_pid=$(mn_ygg_pid)
     [ -n "$ygg_pid" ] || mn_die "the network is up but no yggdrasil from third_party is running"
     # Yggdrasil creates its adapter as root and then drops to the unprivileged account.
     ygg_dropped() { [ "$(mn_uid "$ygg_pid")" = "$(id -u socketguard-net)" ]; }

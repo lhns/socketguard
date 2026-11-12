@@ -28,7 +28,8 @@ mn_daemon_log() {
 }
 # The node's address on a utun interface (MN_YGG_ADDR is set once the network card shows it).
 mn_adapter_exists() { [ -n "${MN_YGG_ADDR:-}" ] && ifconfig 2>/dev/null | grep -qiF "inet6 $MN_YGG_ADDR "; }
-mn_block_in_force() { sudo pfctl -a socketguard -sr 2>/dev/null | grep -qiF -e "$1" -e "${2%/64}"; }
+# pf rules name tables (`block drop in log quick inet6 from any to <__automatic_xxx>`): look in them too.
+mn_block_in_force() { { sudo pfctl -a socketguard -sr; for t in $(sudo pfctl -a socketguard -sT 2>/dev/null); do sudo pfctl -a socketguard -t "$t" -T show; done; } 2>/dev/null | grep -qiF -e "$1" -e "${2%/64}"; }
 mn_dump_rules() { echo "--- pf rules of the socketguard anchor ---"; sudo pfctl -a socketguard -sr 2>&1 | head -60; echo "--- pf info ---"; sudo pfctl -s info 2>&1 | head -5; ifconfig 2>&1 | grep -B2 -A3 inet6 | head -40; }
 # shellcheck source=test/managed.sh
 . "$here/test/managed.sh"
@@ -89,7 +90,7 @@ mn_tor
 mn_step "Yggdrasil"
 mn_ygg_start
 mn_ygg_up
-ygg_pid=$(mn_pid '/third_party/yggdrasil/yggdrasil')
+ygg_pid=$(mn_ygg_pid)
 [ -n "$ygg_pid" ] || mn_die "the network is up but no yggdrasil from third_party is running"
 mn_note "yggdrasil runs as uid $(mn_uid "$ygg_pid") ($(ps -o user= -p "$ygg_pid" | tr -d ' ')); runs_as: $(mn_field ygg .managed.runs_as)"
 mn_ok "the node address $MN_YGG_ADDR is on a utun interface: $(ifconfig | awk -v a="$MN_YGG_ADDR" '/^[a-z0-9]+:/ { i = $1 } index($0, "inet6 " a " ") { print i; exit }')"
