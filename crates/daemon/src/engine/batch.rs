@@ -318,6 +318,21 @@ impl Engine {
         Ok(response(&plan))
     }
 
+    pub(super) async fn run_one(
+        &self,
+        state: &AppState,
+        op: ChangeOp,
+    ) -> Result<ChangesResponse, EngineError> {
+        self.apply_changes(
+            state,
+            &ChangesRequest {
+                ops: vec![op],
+                dry_run: false,
+            },
+        )
+        .await
+    }
+
     async fn plan_op(
         &self,
         state: &AppState,
