@@ -134,7 +134,7 @@ function Get-LedgerStillPresent([string]$Json, $InterfaceAddresses) {
 
 # ---- items and verdict ---------------------------------------------------------------------
 
-$DataItems = @('config-dir', 'config-json', 'database', 'database-wal', 'database-shm', 'setup-log', 'archived-database', 'temp-file')
+$DataItems = @('config-dir', 'config-json', 'database', 'database-wal', 'database-shm', 'setup-log', 'archived-database', 'temp-file', 'dir-tor', 'dir-yggdrasil', 'wintun-driver')
 $script:KeepData = $false
 $FileItems = @(
     @('config-json', '\\socketguard\.json$'),

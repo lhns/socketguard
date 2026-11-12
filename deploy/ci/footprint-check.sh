@@ -295,7 +295,7 @@ self_test() {
 
 usage() { echo "usage: $0 expect-absent|expect-present [--allow-data] [--require NAME[,NAME]] [--ledger-export FILE] | --self-test" >&2; exit 2; }
 
-DATA_ITEMS=" config-dir data-dir config-json database database-wal database-shm setup-log archived-database temp-file torrc-backup "
+DATA_ITEMS=" config-dir data-dir config-json database database-wal database-shm setup-log archived-database temp-file torrc-backup dir-tor dir-yggdrasil account-socketguard-net "
 ALLOWED=" "
 mode="" ledger="" selftest=0 extra_required=""
 while [ $# -gt 0 ]; do

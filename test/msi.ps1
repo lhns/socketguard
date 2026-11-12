@@ -447,6 +447,9 @@ function Invoke-ManagedNetworks {
   if ($yp.Count -eq 0) { Mn-Fail 'no yggdrasil.exe from third_party is running' }
   Write-Host "  yggdrasil.exe owner: $(Mn-Owner $yp[0]) (Windows cannot drop privileges after the adapter exists); runs_as: '$($n.managed.runs_as)'"
   # Is the admin socket usable? peers_connected is known when it is; otherwise the valve engaged.
+  # The count is cached for a few seconds after the node comes up: poll before judging.
+  $known = Wait-Until { $n = Mn-Net 'ygg'; $null -ne $n.managed.peers_connected } 45 'peers_connected known'
+  $n = Mn-Net 'ygg'
   if ($null -ne $n.managed.peers_connected) {
     Mn-Ok "the admin socket works: peers_connected = $($n.managed.peers_connected) (no peers are configured here)"
   } else {
