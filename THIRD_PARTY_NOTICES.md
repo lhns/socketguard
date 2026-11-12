@@ -2,7 +2,7 @@
 
 SocketGuard releases ship unmodified copies of the programs below, started by SocketGuard as separate processes (ADR 0052). Their licence texts are installed in `third_party/licenses/<name>.txt` next to the programs. The pinned versions and checksums are in `deploy/bundle/versions.toml`; the installed `third_party/VERSIONS` names what a given build contains.
 
-Which programs are present depends on the system: the Tor bundle carries lyrebird (a static Go program) on every system, libevent and OpenSSL everywhere (dynamic libraries on Linux and macOS, built into `tor.exe` on Windows) and uses the system zlib on Linux and macOS; Wintun is Windows only.
+Which programs are present depends on the system: the Tor bundle carries lyrebird (a static Go program) on every system, libevent (a dynamic library on Linux and macOS, built into `tor.exe` on Windows) and OpenSSL (dynamic libraries on Linux, statically linked on macOS and Windows) and uses the system zlib on Linux and macOS; Wintun is Windows only.
 
 | Component | Used for | Copyright | Licence | Licence text |
 |---|---|---|---|---|

@@ -1,7 +1,7 @@
 # CI on GitHub Actions. Forgejo has its own copy in .forgejo/workflows/ci.yml (Forgejo
 # ignores .github/ when .forgejo/ exists). The Tauri crate (socketguard-ui) is excluded
 # from the Rust jobs: it needs webkit2gtk and builds the frontend; the `ui` job covers the
-# frontend. Docker end-to-end tests (deploy/e2e) stay local.
+# frontend. Docker end-to-end tests (deploy/e2e) run in e2e.yml (GitHub, nightly).
 name: ci
 
 on:

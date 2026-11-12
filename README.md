@@ -133,7 +133,7 @@ registration off the host but **keeps** settings and keys. A purge deletes those
   erasing it to purge.
 - macOS: a pkg has no uninstaller. Run `sudo socketguard-daemon uninstall` (`--purge` also deletes
   settings and keys), then delete `/Applications/SocketGuard.app`, `/usr/local/bin/socketguard*` and
-  `/usr/local/lib/socketguard`, and `sudo pkgutil --forget de.lhns.socketguard`.
+  `/usr/local/lib/socketguard`, `/usr/local/share/doc/socketguard`, and `sudo pkgutil --forget de.lhns.socketguard`.
 
 `uninstall` also takes `--keep-data`, `--yes`, `--export <file>` and `--force`. Stopping the daemon
 removes nothing on purpose, so a stopped host stays closed; `socketguard disable` (or
@@ -187,7 +187,7 @@ when it starts and leaves it in place when it stops (portable mode excepted).
 | `installer/` | MSI (WiX), portable zip, deb and rpm (nfpm), macOS pkg; `installer/payload/` receives the bundled Tor and Yggdrasil |
 | `deploy/` | `bundle/` (pinned third-party programs), `ci/`, `e2e/` (Docker tests), `otel/` (telemetry stack), `systemd/` |
 | `test/` | Package tests run by `packages.yml` |
-| `docs/` | API, packaging, footprint, manual checks, `adr/` |
+| `docs/` | API, command line, packaging, footprint, manual checks, `adr/` |
 
 ## Platform support
 
@@ -199,14 +199,15 @@ when it starts and leaves it in place when it stops (portable mode excepted).
 | Portable | zip, x86_64 | no | no |
 | Managed Tor | yes | yes | yes |
 | Managed Yggdrasil | yes (Wintun adapter) | yes (needs `/dev/net/tun`) | yes (`utun`) |
-| CI | Windows runner: unit tests; MSI and portable zip installed and run, real WFP filters | Ubuntu 22.04 VM: deb with systemd, netns tests (real nftables); Fedora containers: rpm, and one with systemd; nightly Docker e2e | arm64 and Intel runners: unit tests, `pfctl` check, pkg installed with launchd; smoke test |
+| CI | Windows runner: unit tests; MSI and portable zip installed and run, real WFP filters | Ubuntu: netns tests (real nftables); Ubuntu 22.04 VM: deb with systemd; Fedora containers: rpm, and one with systemd; nightly Docker e2e | arm64 and Intel runners: unit tests, `pfctl` check, pkg installed with launchd; smoke test |
 
 Only built, never run: no Linux aarch64 or Windows arm64 package exists (the bundle script can fetch
 their Tor and Yggdrasil, but no job builds them). Nothing is signed or notarized. On CI runners the
 managed Yggdrasil adapter depends on the runner (tun device, Wintun driver); the tests then report a
 skip with the reason instead of passing. The Docker tests run on Linux only.
 
-Not verified: Windows 10 (the WebView2 Runtime arriving through Windows Update is unchecked), the
+Not verified: the range block for an existing Yggdrasil node on the real Windows engine (WFP plan
+tests only, see [docs/footprint.md](docs/footprint.md)), Windows 10 (the WebView2 Runtime arriving through Windows Update is unchecked), the
 installer dialogs (CI installs silently; the checklist is [docs/manual-checks.md](docs/manual-checks.md)),
 a standard user elevating with an administrator's credentials, Linux distributions other than
 Ubuntu 22.04 and Fedora, and signing. Details: [docs/packaging.md](docs/packaging.md); the boot gap
@@ -358,7 +359,7 @@ once, then:
 - `SOCKETGUARD_NETNS_TESTS=1 cargo test -p socketguard-daemon --test netns`: real nftables in network
   namespaces (Linux, root).
 - `deploy/e2e/ygg-e2e.sh`, `tor-e2e.sh` and the `managed-*` scripts: Docker end-to-end tests with real
-  Yggdrasil and Tor.
+  Yggdrasil and Tor; `.github/workflows/e2e.yml` runs them every night and on request.
 - The package tests in `test/` run in `.github/workflows/packages.yml`; checklist for the dialogs CI
   cannot click: [docs/manual-checks.md](docs/manual-checks.md).
 
@@ -367,6 +368,7 @@ once, then:
 - [docs/adr/](docs/adr/): architecture decisions; the current design is ADR 0026 onward.
 - [docs/footprint.md](docs/footprint.md): what SocketGuard puts on a host and what removes it.
 - [docs/api.md](docs/api.md): the local API, its endpoint and who may use it.
+- [docs/cli.md](docs/cli.md): every `socketguard` and `socketguard-daemon` command, by task.
 - [docs/packaging.md](docs/packaging.md): packages, install, upgrade and removal per platform.
 - [docs/manual-checks.md](docs/manual-checks.md): manual installer checks per release.
 
