@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: '{msi,linux-packages,macos-pkg}'
+          pattern: '{msi,linux-packages,macos-pkg-*}'
           path: release
           merge-multiple: true
       - name: SHA256SUMS

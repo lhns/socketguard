@@ -116,7 +116,7 @@ restarted onto it. `apt remove socketguard` / `dnf remove socketguard` stops the
 removes the rules and the unit but **keeps** settings and keys; `apt purge socketguard` deletes
 them too. rpm has no purge: run `sudo socketguard-daemon uninstall --purge` before erasing it.
 
-**macOS** (`SocketGuard-<version>-<arch>.pkg`). Installs `socketguard-daemon` and `socketguard` in
+**macOS** (`SocketGuard-<version>-arm64.pkg` for Apple silicon, `-x86_64.pkg` for Intel). Installs `socketguard-daemon` and `socketguard` in
 `/usr/local/bin` and `SocketGuard.app` in `/Applications`, and starts the launchd daemon. *Unsigned:*
 macOS refuses to open a downloaded pkg; use *Open* from its context menu, or *System Settings >
 Privacy & Security > Open Anyway*. Run `sudo socketguard-daemon access allow $USER` (or the app's
