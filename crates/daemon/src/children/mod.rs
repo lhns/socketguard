@@ -206,6 +206,10 @@ pub struct ChildSpec {
     /// `on_deadline`.
     pub start_deadline: Option<Duration>,
     pub on_deadline: Option<OnDeadline>,
+    /// A child that is not up yet and whose bootstrap progress has not advanced for this long
+    /// is restarted (Tor stalls mid-bootstrap now and then). It only covers the start: once
+    /// the child has been up, losing its connectivity later never triggers it.
+    pub stall_limit: Option<Duration>,
     /// What else makes this a different launch although the command line is the same (a
     /// generated configuration file): a changed tag restarts the child.
     pub config_tag: String,
@@ -226,6 +230,7 @@ impl ChildSpec {
             && self.guarded == other.guarded
             && self.quiet_patterns == other.quiet_patterns
             && self.start_deadline == other.start_deadline
+            && self.stall_limit == other.stall_limit
     }
 
     /// "Tor" for `tor`: how messages name the child.
@@ -664,6 +669,10 @@ impl Task {
             .start_deadline
             .filter(|_| !up && spec.on_deadline.is_some())
             .map(|d| started + d);
+        // The highest bootstrap progress seen, and when the stall limit runs out unless it
+        // advances.
+        let mut best: Option<u8> = None;
+        let mut stall_at = spec.stall_limit.filter(|_| !up).map(|l| started + l);
 
         loop {
             tokio::select! {
@@ -725,6 +734,32 @@ impl Task {
                         return End::Exited { ran_for };
                     }
                 }
+                _ = async { tokio::time::sleep_until(stall_at.expect("guarded")).await },
+                    if !up && stall_at.is_some() =>
+                {
+                    let minutes = spec.stall_limit.map_or(0, |l| l.as_secs() / 60);
+                    let last = match best {
+                        Some(p) => format!("last progress {p}%"),
+                        None => "no progress reported".to_string(),
+                    };
+                    warn!(
+                        "{label} made no bootstrap progress for {minutes} min ({last}); \
+                         restarting it"
+                    );
+                    stop(proc.as_ref(), &mut exit, self.timing.stop_grace).await;
+                    relay_flush(&spec.name, &mut limiter);
+                    let ran_for = started.elapsed();
+                    self.status.update(|s| {
+                        s.state = ChildState::Exited;
+                        s.detail = Some(format!(
+                            "{label} made no bootstrap progress for {minutes} min ({last})"
+                        ));
+                        s.pid = None;
+                        s.progress = None;
+                        s.restarts += 1;
+                    });
+                    return End::Exited { ran_for };
+                }
                 _ = tick.tick(), if !up && probe.is_none() => {
                     if let Some(h) = spec.health.clone() {
                         probe = Some(bounded_probe(h, self.timing.probe_timeout));
@@ -763,10 +798,16 @@ impl Task {
                                 s.progress = None;
                             });
                         }
-                        ChildHealth::Bootstrapping(p) => self.status.update(|s| {
-                            s.state = ChildState::Bootstrapping;
-                            s.progress = Some(p);
-                        }),
+                        ChildHealth::Bootstrapping(p) => {
+                            if best.is_none_or(|b| p > b) {
+                                best = Some(p);
+                                stall_at = spec.stall_limit.map(|l| Instant::now() + l);
+                            }
+                            self.status.update(|s| {
+                                s.state = ChildState::Bootstrapping;
+                                s.progress = Some(p);
+                            });
+                        }
                         ChildHealth::Starting | ChildHealth::NotReady(_) => {}
                     }
                 }

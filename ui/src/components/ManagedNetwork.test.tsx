@@ -37,7 +37,7 @@ describe("peer URIs", () => {
 });
 
 describe("Configured networks", () => {
-  it("tell managed from your own, and the child's state", async () => {
+  it("show the child's state", async () => {
     mockDaemon({
       list_networks: () => [
         ygg({ state: "up", runs_as: "socketguard-net", version: "0.5.12", peers: [] }),
@@ -46,22 +46,22 @@ describe("Configured networks", () => {
     });
     renderWithProviders(<NetworksSection />);
     const y = await row("Yggdrasil");
-    expect(y.getByText("managed")).toBeInTheDocument();
+    expect(y.queryByText("managed")).not.toBeInTheDocument();
     expect(y.getByText("Up")).toBeInTheDocument();
     expect(y.getByText("runs as socketguard-net")).toBeInTheDocument();
     expect((await row("Tor")).getByText("Bootstrapping 62%")).toBeInTheDocument();
   });
 
-  it("shows an unmanaged node as your own, with no managed details", async () => {
+  it("shows no node details for a network without a child state", async () => {
     mockDaemon({ list_networks: () => [ygg()] });
     renderWithProviders(<NetworksSection />);
     const y = await row("Yggdrasil");
-    expect(y.getByText("your own")).toBeInTheDocument();
+    expect(y.queryByText("your own")).not.toBeInTheDocument();
     expect(y.queryByRole("group", { name: "Peers" })).not.toBeInTheDocument();
   });
 
   it("explains a waiting node with the daemon's sentence", async () => {
-    const detail = "another Yggdrasil node is running on this host; SocketGuard's own node cannot run next to it yet";
+    const detail = "Another Yggdrasil node is running on this computer. SocketGuard's Yggdrasil cannot run next to it.";
     mockDaemon({ list_networks: () => [ygg({ state: "waiting", detail, peers: [] })] });
     renderWithProviders(<NetworksSection />);
     expect((await row("Yggdrasil")).getByText(detail)).toBeInTheDocument();
@@ -150,7 +150,7 @@ describe("bridge lines", () => {
   });
 });
 
-describe("Bridges of the managed Tor", () => {
+describe("Bridges of Tor", () => {
   it("are off by default, with the help and the link", async () => {
     const d = mockDaemon({ list_networks: () => [tor({ state: "up", peers: [] })], open_link: () => undefined });
     const user = userEvent.setup();
@@ -243,7 +243,7 @@ describe("Bridges of the managed Tor", () => {
     expect(await t.findByText("invalid bridge: nope")).toBeInTheDocument();
   });
 
-  it("are not offered for an existing Tor", async () => {
+  it("are not offered for a Tor network without a child state", async () => {
     mockDaemon({ list_networks: () => [tor()] });
     renderWithProviders(<NetworksSection />);
     await row("Tor");

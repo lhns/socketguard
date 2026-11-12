@@ -21,12 +21,12 @@ export default function NetworkCards() {
           {data.lan
             .filter((l) => !l.already_added)
             .map((l) => <LanCard key={l.interface} lan={l} />)}
-          {data.yggdrasil.existing.state !== "added" && <KindCard kind="yggdrasil" setup={data.yggdrasil} />}
-          {data.tor.existing.state !== "added" && <KindCard kind="tor" setup={data.tor} />}
+          {!data.yggdrasil.added && <KindCard kind="yggdrasil" setup={data.yggdrasil} />}
+          {!data.tor.added && <KindCard kind="tor" setup={data.tor} />}
           {data.local.state !== "added" && <LocalCard interfaceName={data.local.found.interface} />}
           {data.lan.every((l) => l.already_added) &&
-            data.yggdrasil.existing.state === "added" &&
-            data.tor.existing.state === "added" &&
+            data.yggdrasil.added &&
+            data.tor.added &&
             data.local.state === "added" && <p className="hint">Every network this machine offers is added.</p>}
         </div>
       )}
@@ -111,57 +111,40 @@ function LocalCard({ interfaceName }: { interfaceName?: string }) {
 }
 
 const KIND_TEXT = {
-  tor: { title: "Tor", own: "SocketGuard runs its own Tor. Nothing is installed or changed on your system." },
-  yggdrasil: { title: "Yggdrasil", own: "SocketGuard runs its own Yggdrasil node. Nothing is installed or changed on your system." },
+  tor: { title: "Tor", about: "SocketGuard runs its own Tor. Nothing is installed or changed on your system." },
+  yggdrasil: { title: "Yggdrasil", about: "SocketGuard runs its own Yggdrasil node. Nothing is installed or changed on your system." },
 } as const;
 
 function KindCard({ kind, setup }: { kind: "tor" | "yggdrasil"; setup: KindSetup }) {
   const add = useAddNetwork();
   const toast = useToast();
   const [error, setError] = useState<string | null>(null);
-  const { title, own } = KIND_TEXT[kind];
-  const { managed, existing } = setup;
+  const { title, about } = KIND_TEXT[kind];
 
-  const submit = (req: NewNetwork) => {
+  const submit = () => {
     setError(null);
+    const req: NewNetwork = kind === "yggdrasil" ? { type: "yggdrasil", peers: [] } : { type: "tor", bridges: [] };
     add.mutate(req, { onSuccess: (n) => toast.success(`Added ${n.name}`), onError: (e) => setError(errorText(e)) });
   };
-  const addManaged = () => submit(kind === "yggdrasil" ? { type: "yggdrasil", managed: true, peers: [] } : { type: "tor", managed: true } as NewNetwork);
-  const addExisting = () => submit(kind === "yggdrasil" ? { type: "yggdrasil" } : { type: "tor", control: "127.0.0.1:9051", auth: "cookie" });
 
   return (
     <CardShell label={title} title={title}>
-      {managed.available ? (
+      {setup.available ? (
         <>
-          <p>{own}</p>
-          {managed.version && <small className="muted">Version {managed.version}</small>}
+          <p>{about}</p>
+          {setup.version && <small className="muted">Version {setup.version}</small>}
+          {setup.reason && <p className="hint warn">{setup.reason}</p>}
         </>
       ) : (
-        <p>Not included in this build{managed.reason ? `: ${managed.reason}` : ""}</p>
+        <p>Not included in this build{setup.reason ? `: ${setup.reason}` : ""}</p>
       )}
-      {existing.state === "ready" && (
-        <>
-          <p className="hint">
-            {existing.found.address
-              ? `A ${title} node is running at ${existing.found.address}${existing.found.interface ? ` on ${existing.found.interface}` : ""}. `
-              : `A ${title} node was found. `}
-            Using it uses your node&apos;s identity; SocketGuard cannot start or stop it.
-          </p>
-          {existing.exposed && existing.warning && <p className="hint warn" role="alert">{existing.warning}</p>}
-          {kind === "yggdrasil" && (
-            <p className="hint">Once added, everything on the Yggdrasil adapter is blocked except what you open in SocketGuard.</p>
-          )}
-        </>
+      {setup.available && kind === "yggdrasil" && (
+        <p className="hint">Once added, everything on the Yggdrasil adapter is blocked except what you open in SocketGuard.</p>
       )}
       <div className="actions">
-        {managed.available && (
-          <button className="btn btn-primary btn-sm" aria-label={`Add ${title}`} onClick={addManaged} disabled={add.isPending}>
+        {setup.available && (
+          <button className="btn btn-primary btn-sm" aria-label={`Add ${title}`} onClick={submit} disabled={add.isPending}>
             Add
-          </button>
-        )}
-        {existing.state === "ready" && (
-          <button className="btn btn-sm" aria-label={`Use my existing ${title}`} onClick={addExisting} disabled={add.isPending}>
-            Use my existing one
           </button>
         )}
       </div>

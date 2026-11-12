@@ -19,6 +19,7 @@ fn spec(args: &[&str]) -> ChildSpec {
         on_exit: None,
         start_deadline: None,
         on_deadline: None,
+        stall_limit: None,
         config_tag: String::new(),
     }
 }
@@ -419,4 +420,123 @@ async fn a_check_that_never_returns_is_given_up_on_and_named() {
     );
     assert!(started.elapsed() < Duration::from_millis(1500));
     drop(release);
+}
+
+/// Progress `1, 2, ..., cap` (one more per check), then no more: a bootstrap that stalls.
+struct Climbing {
+    cap: u8,
+    calls: std::sync::atomic::AtomicU8,
+}
+
+impl HealthCheck for Climbing {
+    fn check(&self) -> ChildHealth {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ChildHealth::Bootstrapping(n.saturating_add(1).min(self.cap))
+    }
+}
+
+const STALL: Duration = Duration::from_secs(180);
+
+fn stalling(health: Arc<dyn HealthCheck>) -> ChildSpec {
+    let mut s = spec(&[]);
+    s.health = Some(health);
+    s.stall_limit = Some(STALL);
+    s
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_bootstrap_that_stops_advancing_restarts_the_child() {
+    let (sup, fake) = supervisor();
+    // Climbs to 50% in 50 s, then nothing.
+    sup.set(
+        "t",
+        Some(stalling(Arc::new(Climbing {
+            cap: 50,
+            calls: Default::default(),
+        }))),
+    );
+    pass(Duration::from_secs(60)).await;
+    let st = sup.status("t");
+    assert_eq!(
+        (st.state, st.progress),
+        (ChildState::Bootstrapping, Some(50))
+    );
+
+    // Still within the limit, counted from the last advance (about 50 s).
+    pass(Duration::from_secs(160)).await;
+    assert_eq!(
+        fake.started(),
+        1,
+        "220 s in, but only 170 s without progress"
+    );
+    assert_eq!(sup.status("t").restarts, 0);
+
+    // The limit ran out at about 229 s (180 s after the last advance).
+    pass(Duration::from_millis(9500)).await;
+    assert_eq!(fake.proc(0).signals(), ["term"], "stopped");
+    let st = sup.status("t");
+    assert_eq!(st.restarts, 1, "counts as a restart");
+    assert_eq!(st.state, ChildState::Exited);
+    assert_eq!(
+        st.detail.as_deref(),
+        Some("Tor made no bootstrap progress for 3 min (last progress 50%)")
+    );
+
+    // Back after the usual pause, and the new run is watched from its own start.
+    pass(Duration::from_secs(2)).await;
+    assert_eq!(fake.started(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_bootstrap_that_keeps_advancing_is_left_alone() {
+    let (sup, fake) = supervisor();
+    // 1% a second, up to 99%: it never goes 180 s without advancing.
+    sup.set(
+        "t",
+        Some(stalling(Arc::new(Climbing {
+            cap: 99,
+            calls: Default::default(),
+        }))),
+    );
+    pass(Duration::from_secs(150)).await;
+    assert_eq!(fake.started(), 1);
+    assert_eq!(sup.status("t").progress, Some(99));
+    assert_eq!(sup.status("t").restarts, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn once_it_has_been_up_losing_connectivity_never_restarts_it() {
+    let (sup, fake) = supervisor();
+    let steps = [
+        ChildHealth::Bootstrapping(40),
+        ChildHealth::Bootstrapping(80),
+        ChildHealth::Up,
+    ];
+    sup.set(
+        "t",
+        Some(stalling(Arc::new(Scripted(Mutex::new(steps.into()))))),
+    );
+    pass(Duration::from_secs(10)).await;
+    assert_eq!(sup.status("t").state, ChildState::Up);
+    // Hours later the process still runs: the start-up watchdog is over.
+    pass(Duration::from_secs(6 * 3600)).await;
+    assert_eq!(fake.started(), 1);
+    assert_eq!(sup.status("t").state, ChildState::Up);
+    assert_eq!(sup.status("t").restarts, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_child_that_never_reports_progress_is_restarted_too() {
+    let (sup, fake) = supervisor();
+    let steps = [ChildHealth::NotReady("cannot ask Tor".into())];
+    sup.set(
+        "t",
+        Some(stalling(Arc::new(Scripted(Mutex::new(steps.into()))))),
+    );
+    pass(STALL + Duration::from_millis(500)).await;
+    assert_eq!(fake.proc(0).signals(), ["term"]);
+    assert_eq!(
+        sup.status("t").detail.as_deref(),
+        Some("Tor made no bootstrap progress for 3 min (no progress reported)")
+    );
 }

@@ -7,7 +7,7 @@ enforcement   DISABLED (no rules, no addresses; `socketguard enable` to restore)
 protect-host  off
 apps          2, 3 addresses
 peers         1, groups 1, grants 3
-bundled       none (managed networks not included in this build)
+bundled       none (Tor and Yggdrasil are not included in this build)
 
 Networks
   no networks

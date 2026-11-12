@@ -20,6 +20,6 @@ prefix?: string | null,
  */
 vlan_id?: number | null, 
 /**
- * Set when SocketGuard runs this network's software itself (ADR 0052).
+ * Tor and Yggdrasil: how SocketGuard's own copy stands (ADR 0052, 0056).
  */
 managed?: ManagedInfo, };

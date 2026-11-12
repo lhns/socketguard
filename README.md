@@ -89,9 +89,9 @@ named by id, unique id prefix or name. Reach is shown per network as `verified`,
 | Yggdrasil | `/128`s from the node's `300::/64` | verified by key |
 | Tor | one onion service per address | verified by Tor client key |
 
-Tor and Yggdrasil are **managed** by default: SocketGuard runs its own copy as a child process with
-its own data, so nothing on your system is installed or changed, and the copies stop when SocketGuard
-stops (ADR 0052).
+Tor and Yggdrasil are always SocketGuard's own: it runs its own copy as a child process with its own
+data, so nothing on your system is installed or changed, and the copies stop when SocketGuard stops
+(ADR 0052, 0056). There is nothing to configure for them but Yggdrasil's peers and Tor's bridges.
 
 ```bash
 socketguard networks add tor
@@ -105,7 +105,7 @@ public peers" link to the project's list
 ([github.com/yggdrasil-network/public-peers](https://github.com/yggdrasil-network/public-peers));
 SocketGuard ships no list, fetches none and adds no peer on its own.
 
-If Tor is blocked on your network, the managed Tor can connect through obfs4 bridges. Request bridge
+If Tor is blocked on your network, SocketGuard's Tor can connect through obfs4 bridges. Request bridge
 lines from the Tor Project at [bridges.torproject.org](https://bridges.torproject.org/) (the app has a
 "Get bridges from the Tor Project" link) and add them with `socketguard networks bridges tor --add LINE`,
 or paste them in the Tor network's settings in the app. Only `obfs4` lines of the form
@@ -113,12 +113,10 @@ or paste them in the Tor network's settings in the app. Only `obfs4` lines of th
 Bridges are off by default and SocketGuard ships no bridge list. The transport helper (lyrebird, from
 the same Tor Expert Bundle) runs only when bridges are set, as the same account as Tor.
 
-If you already run a node, add it as it is with `--existing` (the app calls it "Use my existing
-one"): `socketguard networks add yggdrasil --existing`, or `socketguard networks add tor --existing`
-(with `--control` and `--password-env` if needed). An existing node keeps its own configuration;
-SocketGuard never installs, starts or reconfigures software it did not ship. `socketguard networks
-detect` and the app's Settings page show what this machine offers. Tor access control is described
-in [ADR 0040](docs/adr/0040-onion-service-lifecycle-consolidated.md).
+`socketguard networks detect` and the app's Settings page show what this machine offers. A host
+that already runs its own Yggdrasil node cannot use Yggdrasil in SocketGuard while that node runs:
+the network is added and waits, and its card says so. Importing the identity of a node you already run is
+not offered.
 
 ## Uninstall and purge
 
@@ -151,7 +149,7 @@ the `data` folder next to the programs; no service, group or installed files. A 
 **The trade-off.** Protection ends with the window: rules and addresses are removed when you close
 SocketGuard, sign out or shut down. A crash or a kill leaves the machine open, as it was before
 SocketGuard started, **not closed**. Use the MSI to protect a computer permanently. Portable mode
-does not start beside the installed service, offers only Local, LAN and the managed Tor and
+does not start beside the installed service, offers Local, LAN, Tor and
 Yggdrasil, and trusts the folder: anything running as you can change what then runs with
 administrator rights, so keep it where only you can write. Delete the folder to remove it. To try
 the UI or CLI against a daemon without installing, use this mode.
@@ -171,7 +169,7 @@ the UI or CLI against a daemon without installing, use this mode.
                                                   |            Yggdrasil, Tor
                                                   v
                   host: firewall rules, addresses, and the child processes of the
-                        managed networks (SocketGuard's own Tor and Yggdrasil)
+                        networks (SocketGuard's own Tor and Yggdrasil)
 ```
 
 The frontends only speak the local API; they hold no state. The daemon applies the stored state
@@ -197,17 +195,16 @@ when it starts and leaves it in place when it stops (portable mode excepted).
 | Service | Windows service | systemd unit | launchd daemon |
 | Installer | MSI, x86_64 | deb and rpm, x86_64 | pkg, arm64 and x86_64 |
 | Portable | zip, x86_64 | no | no |
-| Managed Tor | yes | yes | yes |
-| Managed Yggdrasil | yes (Wintun adapter) | yes (needs `/dev/net/tun`) | yes (`utun`) |
+| Tor | yes | yes | yes |
+| Yggdrasil | yes (Wintun adapter) | yes (needs `/dev/net/tun`) | yes (`utun`) |
 | CI | Windows runner: unit tests; MSI and portable zip installed and run, real WFP filters | Ubuntu: netns tests (real nftables); Ubuntu 22.04 VM: deb with systemd; Fedora containers: rpm, and one with systemd; nightly Docker e2e | arm64 and Intel runners: unit tests, `pfctl` check, pkg installed with launchd; smoke test |
 
 Only built, never run: no Linux aarch64 or Windows arm64 package exists (the bundle script can fetch
 their Tor and Yggdrasil, but no job builds them). Nothing is signed or notarized. On CI runners the
-managed Yggdrasil adapter depends on the runner (tun device, Wintun driver); the tests then report a
+Yggdrasil adapter depends on the runner (tun device, Wintun driver); the tests then report a
 skip with the reason instead of passing. The Docker tests run on Linux only.
 
-Not verified: the range block for an existing Yggdrasil node on the real Windows engine (WFP plan
-tests only, see [docs/footprint.md](docs/footprint.md)), Windows 10 (the WebView2 Runtime arriving through Windows Update is unchecked), the
+Not verified: Windows 10 (the WebView2 Runtime arriving through Windows Update is unchecked), the
 installer dialogs (CI installs silently; the checklist is [docs/manual-checks.md](docs/manual-checks.md)),
 a standard user elevating with an administrator's credentials, Linux distributions other than
 Ubuntu 22.04 and Fedora, and signing. Details: [docs/packaging.md](docs/packaging.md); the boot gap
@@ -235,13 +232,12 @@ socketguard tags add dev --match 'python*' # apps matching join, now and when th
 socketguard port-groups add 21/tcp 50000-51000/tcp -n passive --app ftpd
 socketguard addresses list                 # automatic and reserved addresses
 socketguard reservations add web nginx:80 tag:dev   # bind rows; then grant reservation:web
-socketguard networks add tor | add yggdrasil --peer tls://host:port | add yggdrasil --existing
+socketguard networks add tor | add yggdrasil --peer tls://host:port
 socketguard networks list | detect | peers yggdrasil --add URI --rm URI | rm ID
-socketguard networks bridges tor [--add LINE] [--rm LINE] [--clear]   # obfs4 bridges for the managed Tor
+socketguard networks bridges tor [--add LINE] [--rm LINE] [--clear]   # obfs4 bridges for Tor
 socketguard share nginx                    # connection strings for the peer
 socketguard activity --blocked -f          # what was refused
 socketguard protect-host on eth0           # close the host's other listeners on eth0
-socketguard exposure                       # what Yggdrasil would expose without SocketGuard
 socketguard export -o sg.toml | apply -f sg.toml --dry-run
 socketguard disable | enable | shutdown    # rules off/on; shutdown is portable mode
 socketguard-daemon service install | access allow $USER | uninstall [--purge] | --disable | --portable
@@ -280,23 +276,12 @@ Entries of `backends` (`"type"` selects the kind):
 | `slaac` (LAN) | `interface` | string | required | Interface on the router's LAN |
 | | `prefix` | string | discovered (also `"auto"`) | IPv6 `/64` to use |
 | `dhcpv6` (LAN) | `interface` | string | required | Interface on the DHCPv6 server's LAN |
-| `yggdrasil` | `managed` | bool | `false` | Run SocketGuard's own node; excludes `interface` and `admin_endpoint` |
-| | `peers` | string array | `[]` | Managed only: URIs (`tcp`, `tls`, `quic`, `ws`, `wss`, `socks`, `sockstls`) |
-| | `interface` | string | found at runtime | Existing node: its interface |
-| | `admin_endpoint` | string | `yggdrasilctl`'s default | Existing node: admin socket, e.g. `unix:///var/run/yggdrasil.sock` |
-| `tor` | `managed` | bool | `false` | Run SocketGuard's own Tor; none of the keys below may be set |
-| | `bridges` | string array | `[]` | Managed only: obfs4 bridge lines (`obfs4 IP:port FINGERPRINT cert=... iat-mode=0`), stored in this form; Tor then connects through them |
-| | `control` | string | `127.0.0.1:9051` | Existing Tor: `host:port` or `unix:/path`. Administrator |
-| | `auth` | string or object | `"cookie"` | `"cookie"` (SAFECOOKIE), `"cookie_insecure"`, `{"password": "..."}`, `"none"` (Unix socket only). Administrator |
-| | `cookie_path` | string | none | Cookie file Tor must report. Administrator |
-| | `cookie_dir` | string | folder of `cookie_path` | Folder whose owner may own the cookie. Administrator |
-| | `expect_tor_uid` | number | none | Unix control socket: the uid Tor must run as. Administrator |
-| | `cookie_owner` | string | none | Windows: SID that may own the cookie, besides SYSTEM and Administrators. Administrator |
-| | `allow_remote_control` | bool | `false` | Accept a control address that is not loopback. Administrator |
+| `yggdrasil` | `peers` | string array | `[]` | URIs (`tcp`, `tls`, `quic`, `ws`, `wss`, `socks`, `sockstls`) |
+| `tor` | `bridges` | string array | `[]` | obfs4 bridge lines (`obfs4 IP:port FINGERPRINT cert=... iat-mode=0`), stored in this form; Tor then connects through them |
 
-**Administrator only.** The API is open to every member of the access group, so it accepts a Tor
-network only with default settings or settings already in the file. The Tor control settings above
-(ADR 0040) therefore belong in the file, which only an administrator can write.
+An unknown key, at the top level or in a `backends` entry, makes the daemon refuse the file and name
+the key and the file. The keys of earlier versions (`managed`, `control`, `auth`, `cookie_path`,
+`interface` on Yggdrasil, ...) must be removed.
 
 Environment variables:
 
@@ -322,9 +307,10 @@ Not built, and not promised. Each item is recorded in an ADR.
   access therefore exists on Yggdrasil and Tor only.
 - IPv4 per-app addresses: IPv4 gets whole-host protection only (ADR 0036, 0026). Also not built:
   out-of-process network plugins, mDNS/DNS-SD names, dynamic DNS, pflog capture on macOS.
-- More than one Yggdrasil node per host: SocketGuard's own node and one you already run cannot run
-  at the same time ([ADR 0052](docs/adr/0052-bundled-tor-and-yggdrasil.md),
-  [0051](docs/adr/0051-nothing-socketguard-adds-opens-the-host.md)).
+- More than one Yggdrasil node per host: a host that runs its own Yggdrasil cannot use Yggdrasil in
+  SocketGuard while it runs ([ADR 0052](docs/adr/0052-bundled-tor-and-yggdrasil.md),
+  [0056](docs/adr/0056-only-socketguards-own-tor-and-yggdrasil.md)). Nor can the identity of an
+  a node you already run be imported.
 - Port remapping on a reserved address, and per-client access on one onion address
   ([ADR 0047](docs/adr/0047-addresses-on-demand-reservations-port-groups.md)). Inside a reservation,
   Tor access is all or nothing.
@@ -358,7 +344,7 @@ once, then:
   `deploy/ci/macos-smoke.sh`.
 - `SOCKETGUARD_NETNS_TESTS=1 cargo test -p socketguard-daemon --test netns`: real nftables in network
   namespaces (Linux, root).
-- `deploy/e2e/ygg-e2e.sh`, `tor-e2e.sh` and the `managed-*` scripts: Docker end-to-end tests with real
+- `deploy/e2e/ygg-e2e.sh`, `tor-e2e.sh` and `tor-bridges-e2e.sh`: Docker end-to-end tests with real
   Yggdrasil and Tor; `.github/workflows/e2e.yml` runs them every night and on request.
 - The package tests in `test/` run in `.github/workflows/packages.yml`; checklist for the dialogs CI
   cannot click: [docs/manual-checks.md](docs/manual-checks.md).

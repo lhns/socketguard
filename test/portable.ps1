@@ -239,15 +239,6 @@ $script:addedAddress = @($adapter.ifIndex, $mine)
 $net = Run $Cli @('networks', 'add', 'slaac', '--interface', $alias, '--id', 'lan-test') 'fw-networks-add'
 Write-Host $net.Text
 if ($net.Code -ne 0) { Fail "networks add slaac exited $($net.Code)" }
-# An existing Tor or Yggdrasil node is refused in portable mode (SocketGuard's own, the default of
-# `networks add`, is allowed: section (d)).
-foreach ($kind in 'yggdrasil', 'tor') {
-  $ex = Run $Cli @('networks', 'add', $kind, '--existing') "fw-networks-add-$kind-existing"
-  if ($ex.Code -eq 0) { Fail "networks add $kind --existing was accepted in portable mode" }
-  if ($ex.Text -notmatch '(?i)portable') { Fail "the refusal does not say portable: $($ex.Text)" }
-  Ok "an existing $kind node is refused in portable mode"
-}
-
 function Start-Listener {
   $code = '$a=[Net.Sockets.TcpListener]::new([Net.IPAddress]::IPv6Any,50010);$a.Start();' +
     '$b=[Net.Sockets.TcpListener]::new([Net.IPAddress]::IPv6Any,50030);$b.Start();Start-Sleep 3000'

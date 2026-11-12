@@ -40,11 +40,7 @@ impl Fixture {
     async fn new(helper: bool) -> Self {
         let f = Self::new_empty(helper).await;
         let (s, n) = f
-            .call(
-                Method::POST,
-                "/api/networks",
-                Some(json!({"type": "tor", "managed": true})),
-            )
+            .call(Method::POST, "/api/networks", Some(json!({"type": "tor"})))
             .await;
         assert_eq!(s, StatusCode::CREATED, "{n}");
         f
@@ -172,7 +168,7 @@ async fn without_the_helper_bridges_cannot_be_set_and_the_card_says_why() {
 
 #[tokio::test]
 async fn bridges_in_a_new_network_follow_the_same_rules() {
-    let body = |b: Value| json!({"type": "tor", "managed": true, "bridges": b});
+    let body = |b: Value| json!({"type": "tor", "bridges": b});
     let f = Fixture::new_empty(true).await;
     let (s, e) = f
         .call(

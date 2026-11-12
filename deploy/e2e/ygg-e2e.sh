@@ -1,162 +1,216 @@
 #!/usr/bin/env bash
-# End-to-end test of the Yggdrasil subnet backend with two real Yggdrasil nodes in Docker.
-# Runs from Git Bash on Windows or from Linux. See README.md.
+# End-to-end test of SocketGuard's Yggdrasil network (ADR 0052) with the Yggdrasil that
+# SocketGuard ships, in Docker: the daemon starts the yggdrasil it was given (built from the
+# pinned source by deploy/bundle/fetch.sh --build-yggdrasil) as the unprivileged account
+# socketguard-net, peered over TCP with a plain Yggdrasil node on a second container, and
+# SocketGuard's firewall decides what that node can reach. Runs from Git Bash on Windows or
+# from Linux. See README.md. No internet access is needed after the first build (the source
+# and the Go modules are fetched once into the build cache volume).
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-IMAGE=sg-e2e-node
-NET=sg-e2e-net
-NODE_A=sg-e2e-a
-NODE_B=sg-e2e-b
-NODE_ARGS="--device /dev/net/tun"
-SOCK=unix:///var/run/yggdrasil.sock
+IMAGE=sg-ygg-e2e-node
+NET=sg-ygg-e2e-net
+NODE_A=sg-ygg-e2e-a
+NODE_B=sg-ygg-e2e-b
+GO_IMAGE=${GO_IMAGE:-golang:1.26}      # builds yggdrasil; fetch.sh needs git, curl, bash and Go
 PORT=8080
+OTHER_PORT=8081
+NODE_ARGS="--device /dev/net/tun --init"   # tun for both nodes; pid 1 reaps what the daemon leaves
+STATE=/var/lib/sg                      # the daemon's state directory; Yggdrasil's is $STATE/yggdrasil
+TP=/target/debug/third_party           # beside the daemon binary, where it looks for them
+ADAPTER=sgygg0
 
 . "$HERE/lib.sh"
-extra_logs() { echo "--- node A yggdrasil log ---"; docker exec "$NODE_A" tail -n 15 /var/log/ygg.log 2>/dev/null; }
+
+# lib.sh's cleanup, plus the image this script builds. The build volumes are caches shared
+# with the other e2e scripts and stay (CLEAN_VOLUMES=1 removes them).
+cleanup() {
+  if [ "$failures" -ne 0 ] && [ "$SKIPPED" -eq 0 ]; then
+    echo "--- node A daemon log ---"; docker exec "$NODE_A" tail -n 60 /var/log/sg.log 2>/dev/null
+    echo "--- node A processes ---"; docker exec "$NODE_A" ps -eo pid,user,args 2>/dev/null | grep -E "ygg|socketguard" | grep -v grep
+    echo "--- node A interfaces ---"; docker exec "$NODE_A" ip -br link 2>/dev/null
+    echo "--- node B yggdrasil log ---"; docker exec "$NODE_B" tail -n 15 /var/log/ygg-b.log 2>/dev/null
+  fi
+  docker rm -f "$NODE_A" "$NODE_B" >/dev/null 2>&1
+  docker network rm "$NET" >/dev/null 2>&1
+  docker rmi -f "$IMAGE" >/dev/null 2>&1
+  if [ "${CLEAN_VOLUMES:-0}" = 1 ]; then docker volume rm -f "$TARGET_VOL" sg-cargo-registry >/dev/null 2>&1; fi
+}
 init_e2e
 
-# ── Build and nodes ──────────────────────────────────────────────────────────
+# ── Build, the shipped Yggdrasil, the account ────────────────────────────────
 build_binaries
+
+# The pinned yggdrasil, built from source next to the daemon binary as an installer lays it
+# out (a golang image instead of the node image: the node image has no Go).
+step "build the shipped Yggdrasil (fetch.sh --build-yggdrasil)" \
+  docker run --rm -v "$HOST_ROOT":/work -v ${TARGET_VOL}:/work/target \
+    -e SOCKETGUARD_BUNDLE_CACHE=/work/target/bundle-cache "$GO_IMAGE" \
+    bash /work/deploy/bundle/fetch.sh --build-yggdrasil --skip-tor linux-x86_64 /work/target/debug/third_party || exit 1
+
 start_nodes
 
-# Generate a Yggdrasil config once per node (the key must survive restarts).
-ygg_conf() { # ygg_conf container peer-uri
-  docker exec "$1" sh -c '
-    yggdrasil -genconf -json | jq --arg p "$1" "
-      .Listen=[\"tcp://0.0.0.0:9001\"] | .Peers=(if \$p==\"\" then [] else [\$p] end)
-      | .IfName=\"ygg0\" | .AdminListen=\"'"$SOCK"'\" | .MulticastInterfaces=[]" > /etc/ygg.json
-  ' sh "$2"
+# `socketguard-daemon service install` creates the account too, but needs a service manager
+# that a container does not have; this is the same command it runs (src/account.rs).
+step "create the system account socketguard-net" A useradd --system --user-group --no-create-home \
+  --home-dir /nonexistent --shell /usr/sbin/nologin socketguard-net || exit 1
+step "the shipped yggdrasil runs" A $TP/yggdrasil/yggdrasil -version || exit 1
+
+# ── Node B: a plain Yggdrasil node that listens for SocketGuard's ──────────
+B_CONF=/etc/ygg-b.json
+b_conf() {
+  docker exec "$NODE_B" sh -c '
+    yggdrasil -genconf -json | jq ".Listen=[\"tcp://0.0.0.0:9001\"] | .IfName=\"ygg0\" | .AdminListen=\"unix:///var/run/yggdrasil.sock\" | .MulticastInterfaces=[]" > '"$B_CONF"
 }
-ygg_start() { docker exec -d "$1" sh -c 'yggdrasil -useconffile /etc/ygg.json >>/var/log/ygg.log 2>&1'; }
-ygg_ready() { docker exec "$1" sh -c "yggdrasilctl -json -endpoint $SOCK getSelf >/dev/null && ip link show ygg0 >/dev/null"; }
+step "node B: generate a Yggdrasil config" b_conf || exit 1
+docker exec -d "$NODE_B" sh -c "yggdrasil -useconffile $B_CONF >>/var/log/ygg-b.log 2>&1"
+b_ready() { docker exec "$NODE_B" sh -c "yggdrasilctl -json -endpoint unix:///var/run/yggdrasil.sock getSelf >/dev/null && ip link show ygg0 >/dev/null"; }
+step "node B: Yggdrasil is up" retry 30 b_ready || exit 1
+B_KEY="$(B yggdrasilctl -json -endpoint unix:///var/run/yggdrasil.sock getSelf | jq -r .key)"
 
-ygg_conf "$NODE_A" "" && ygg_conf "$NODE_B" "tcp://$NODE_A:9001" || { fail "generate Yggdrasil configs"; exit 1; }
-ygg_start "$NODE_A"; ygg_start "$NODE_B"
-step "Yggdrasil up on both nodes" retry 30 ygg_ready "$NODE_A" || exit 1
-retry 30 ygg_ready "$NODE_B" || { fail "Yggdrasil up on B"; exit 1; }
-
-get_self() { A yggdrasilctl -json -endpoint "$SOCK" getSelf; }
-SUBNET="$(get_self | jq -r .subnet)"
-NODE_ADDR="$(get_self | jq -r .address)"
-echo "      node A: address $NODE_ADDR, subnet $SUBNET"
-
-# Test listener and daemon on A.
+# ── Daemon with a Yggdrasil network, and listeners ───────────────────
 A sh -c "mkdir -p /srv/www && echo sg-e2e-ok > /srv/www/index.html"
 docker exec -d "$NODE_A" sh -c "cd /srv/www && exec python3 -m http.server $PORT --bind ::"
+docker exec -d "$NODE_A" sh -c "cd /srv/www && exec python3 -m http.server $OTHER_PORT --bind ::"
 docker exec -i "$NODE_A" sh -c 'cat > /etc/sg.json' <<JSON
 {
   "poll_interval_secs": 2,
-  "db_path": "/var/lib/sg.db", "log_level": "debug",
+  "db_path": "$STATE/sg.db", "log_level": "debug",
   "process_filter": {"mode": "allowlist", "patterns": ["python3*"]},
-  "backends": [{"id": "ygg", "type": "yggdrasil", "interface": "ygg0", "admin_endpoint": "$SOCK"}]
+  "backends": [{"id": "ygg", "type": "yggdrasil", "peers": ["tcp://$NODE_B:9001"]}]
 }
 JSON
-
 daemon_start
 
-# ── Allocation ───────────────────────────────────────────────────────────────
-# An address exists only once a grant names the listener's row (ADR 0047): first the app is
-# found and shown to have none, then a grant creates its address on the ygg network.
-sock_addr() { app_address ygg addr; }
+# The pid of the running yggdrasil of the daemon (a zombie has no command line).
+ygg_pid() { docker exec "$NODE_A" pgrep -f "^$TP/yggdrasil/yggdrasil -useconffile" | head -1 | grep .; }
+ygg_gone() { ! ygg_pid >/dev/null; }
+net_json() { docker exec "$NODE_A" $SG networks list --json; }
+net_up() { net_json | jq -e '.[0].kind == "yggdrasil" and .[0].status.state == "up"' >/dev/null; }
+net_reason() { net_json | jq -r '.[0] | (.status.reason // .status.state) + " [" + (.managed.state // "-") + "]"'; }
+wait_up() { # wait_up SECONDS: net_up, printing each distinct reason on the way
+  local end=$((SECONDS + $1)) last="" now
+  while ! net_up 2>/dev/null; do
+    now="$(net_reason 2>/dev/null)"
+    [ "$now" != "$last" ] && { echo "      network: $now"; last="$now"; }
+    [ "$SECONDS" -ge "$end" ] && return 1
+    sleep 2
+  done
+}
+on_adapter() { A ip -6 -j addr show dev $ADAPTER | jq -e --arg a "$1" '[.[].addr_info[].local] | index($a)' >/dev/null; }
 in_subnet() { A python3 -c 'import ipaddress,sys; sys.exit(0 if ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv[2]) else 1)' "$1" "$2"; }
-on_ygg0()   { A ip -6 -j addr show dev ygg0 | jq -e --arg a "$1" '[.[].addr_info[].local] | index($a)' >/dev/null; }
-# No address of the app is up (revoked, or never granted).
-none_up()   { docker exec "$NODE_A" $SG apps show "$APP_ID" --json | jq -e '[.addresses[] | select(.up)] | length == 0' >/dev/null; }
-all_up()    { docker exec "$NODE_A" $SG apps show "$APP_ID" --json | jq -e '[.addresses[] | select(.network_id == "ygg")] | length > 0 and all(.up)' >/dev/null; }
-
-step "daemon detected the listener" retry 40 app_id || exit 1
-APP_ID="$(app_id)"
-B_KEY="$(B yggdrasilctl -json -endpoint "$SOCK" getSelf | jq -r .key)"
-
-# ── Reachability ─────────────────────────────────────────────────────────────
-fetch_from_b() { B curl -fsS --max-time 5 "http://[$ADDR]:$PORT/" | grep -q sg-e2e-ok; }
-fetch_node_addr_from_b() { B curl -fsS --max-time 5 "http://[$NODE_ADDR]:$PORT/" | grep -q sg-e2e-ok; }
-ping_node_from_b() { B ping -6 -c 1 -W 3 "$NODE_ADDR"; }
 table_exists() { A nft list table inet socketguard >/dev/null; }
 
-# The overlay works (control), and the daemon installed its table.
-step "B reaches A over Yggdrasil (ping, always allowed)" retry 90 ping_node_from_b || exit 1
-step "the daemon installed the nftables table" table_exists
+step "the daemon started a yggdrasil of its own" retry 60 ygg_pid || exit 1
+FIRST_YGG="$(ygg_pid)"
+ygg_user() { [ "$(docker exec "$NODE_A" ps -o user= -p "$FIRST_YGG" | tr -d ' ')" = socketguard-net ]; }
+step "yggdrasil dropped to socketguard-net after creating the tun" retry 20 ygg_user
+step "the status names the account and the shipped version" sh -c "docker exec $NODE_A $SG networks list --json | jq -e '.[0].managed.runs_as == \"socketguard-net\" and (.[0].managed.version | length > 0)' >/dev/null"
+step "the install record lists <state>/yggdrasil as an owned directory" sh -c "docker exec $NODE_A cat /etc/setup-log.json | jq -e --arg p '$STATE/yggdrasil' '[.entries[] | select(.type == \"owned_directory\" and .path == \$p)] | length == 1' >/dev/null"
+step "yggdrasil.conf is the daemon's own and private (0600)" sh -c "[ \"\$(docker exec $NODE_A stat -c '%U %a' $STATE/yggdrasil/yggdrasil.conf)\" = 'root 600' ]"
+step "the run directory (admin socket) belongs to socketguard-net" sh -c "[ \"\$(docker exec $NODE_A stat -c '%U %a' $STATE/yggdrasil/run)\" = 'socketguard-net 700' ]"
+step "the conf leaves the multicast default alone" sh -c "! docker exec $NODE_A grep -q Multicast $STATE/yggdrasil/yggdrasil.conf"
 
-# Secure by default: nothing is granted, so the app has no address and the wildcard
-# listener is denied on the node address.
-step "no grant: the app has no address" sh -c "docker exec $NODE_A $SG apps show $APP_ID --json | jq -e '.addresses | length == 0' >/dev/null"
-step "closed by default: B cannot fetch via the node address" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
+echo "      waiting for the node to come up (up to 90s)"
+if ! wait_up 90; then
+  echo "      last network state: $(net_reason)"
+  fail "the network came up"; exit 1
+fi
+pass "the network is up"
+peers_connected() { net_json | jq -e '.[0].managed.peers_connected >= 1' >/dev/null; }
+step "the status shows peers_connected >= 1" retry 40 peers_connected || exit 1
+NODE_ADDR="$(net_json | jq -r '.[0].managed.address')"
+# The /64 of a node: the first 8 bytes of its address with the lowest bit of the first byte set.
+SUBNET="$(A python3 -c 'import ipaddress,sys; b=bytearray(ipaddress.ip_address(sys.argv[1]).packed); b[0]|=1; b[8:]=bytes(8); print(ipaddress.ip_address(bytes(b)).compressed+"/64")' "$NODE_ADDR")"
+step "the adapter $ADAPTER holds the node's address" on_adapter "$NODE_ADDR"
+echo "      node address $NODE_ADDR (subnet $SUBNET)"
+step "node B has a route to the node (ping, always allowed)" retry 90 B ping -6 -c 1 -W 3 "$NODE_ADDR"
+
+# ── Closed by default, then one port for one peer ────────────────────────────
+step "daemon detected the listener" retry 60 app_id || exit 1
+APP_ID="$(app_id)"
+step "the daemon installed the nftables table" table_exists
+fetch_node_addr() { B curl -fsS --max-time 5 "http://[$NODE_ADDR]:$PORT/" | grep -q sg-e2e-ok; }
+step "before the grant: the node's address answers nothing" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
+SUBNET_PREFIX="${SUBNET%%/*}"
+# An address of the /64 that SocketGuard did not give out: the wildcard listener would
+# answer on it, the `overlay:<network>:subnet` scope must not let it.
+step "plant an address of the node's /64 on the adapter" A ip -6 addr add "${SUBNET_PREFIX}1/128" dev $ADAPTER
+step "before the grant: nothing in the node's /64 answers" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[${SUBNET_PREFIX}1]:$PORT/"
 
 step "add a peer holding B's Yggdrasil key" A $SG peers add --label bnode --key "$B_KEY"
 step "grant the listener's port to that peer" A $SG grant "$APP_ID:$PORT" bnode --network ygg
-step "the grant is verified on the overlay" sh -c "docker exec $NODE_A $SG grants --app $APP_ID --json | jq -e '.[0].reach[0].reach == \"verified\"' >/dev/null"
-step "granted: the app got an address" retry 40 sock_addr || exit 1
-ADDR="$(sock_addr)"
+step "granted: the app got an address" retry 40 app_address ygg addr || exit 1
+ADDR="$(app_address ygg addr)"
 echo "      the listener got $ADDR"
-step "address is inside A's 3xx::/64 subnet" in_subnet "$ADDR" "$SUBNET"
-step "address is configured on ygg0" retry 10 on_ygg0 "$ADDR"
-step "the address is reported up" retry 10 all_up
-step "granted: B can fetch from the new address" retry 30 fetch_from_b
+step "the address is inside the node's /64" in_subnet "$ADDR" "$SUBNET"
+step "the address is on $ADAPTER" retry 10 on_adapter "$ADDR"
+fetch_granted() { B curl -fsS --max-time 5 "http://[$ADDR]:$PORT/" | grep -q sg-e2e-ok; }
+step "the granted port answers on SocketGuard's address" retry 40 fetch_granted
+step "another port on that address does not answer" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$OTHER_PORT/"
+step "the node's own address still answers nothing" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
 
-# The listener is bound to ::, so it also answers on A's own node address; the overlay
-# scope denies that because no grant covers it.
-step "wildcard listener is NOT reachable via A's 200: node address" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
-
-# ── Yggdrasil restart: same key, new tun ─────────────────────────────────────
-A pkill -x yggdrasil
-step "ygg0 disappears with Yggdrasil" retry 15 sh -c "! docker exec $NODE_A ip link show ygg0"
-ygg_start "$NODE_A"
-step "Yggdrasil is back on A with the same subnet" retry 30 sh -c "[ \"\$(docker exec $NODE_A yggdrasilctl -json -endpoint $SOCK getSelf | jq -r .subnet)\" = \"$SUBNET\" ]"
-step "address came back on ygg0" retry 40 on_ygg0 "$ADDR"
-step "B can fetch again" retry 90 fetch_from_b
-step "the overlay scope still covers the new tun" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
-
-# ── Daemon stop freezes the state ────────────────────────────────────────────
-step "stop the daemon" daemon_stop
-step "stopped: the table stays" table_exists
-step "stopped: the address stays on ygg0" on_ygg0 "$ADDR"
-step "stopped: the grant stays in force" fetch_from_b
-step "stopped: the node address stays closed" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
-
-# A restart is not an outage and replaces the ruleset instead of flushing it.
-daemon_start
-step "restarted: daemon is up" retry 20 daemon_running
-step "restarted: the grant stays in force" fetch_from_b
-# `disable` removes everything and keeps it off, also against the running daemon's reconcile.
+# ── Turned off and on ────────────────────────────────────────────────────────
 step "socketguard disable succeeds" A $SG disable --yes
-step "disabled: the table is gone" sh -c "! docker exec $NODE_A nft list table inet socketguard >/dev/null 2>&1"
-step "disabled: the address left ygg0" sh -c "! docker exec $NODE_A ip -6 -j addr show dev ygg0 | jq -e --arg a '$ADDR' '[.[].addr_info[].local] | index(\$a)' >/dev/null"
+step "disabled: yggdrasil is gone" retry 30 ygg_gone
+step "disabled: the adapter is gone" retry 15 sh -c "! docker exec $NODE_A ip link show $ADAPTER"
+step "disabled: the network says it is turned off" sh -c "docker exec $NODE_A $SG networks list --json | jq -e '.[0].managed.state == \"stopped\" and .[0].status.state == \"down\"' >/dev/null"
+step "disabled: the key and the configuration are kept" A test -f $STATE/yggdrasil/yggdrasil.conf
 sleep 6
-step "disabled: a reconcile pass did not put the table back" sh -c "! docker exec $NODE_A nft list table inet socketguard >/dev/null 2>&1"
-step "status reports disabled" sh -c "docker exec $NODE_A $SG status --json | jq -e .disabled >/dev/null"
+step "disabled: a reconcile pass did not start yggdrasil again" ygg_gone
 step "socketguard enable succeeds" A $SG enable
-step "enabled: the table is back" retry 20 table_exists
-step "enabled: the address is back on ygg0" retry 20 on_ygg0 "$ADDR"
-step "enabled: the grant is in force again" retry 30 fetch_from_b
-step "enabled: the node address is closed again" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
+step "enabled: yggdrasil is started again and the network comes back" wait_up 90
+step "enabled: it is the same node (same address)" sh -c "[ \"\$(docker exec $NODE_A $SG networks list --json | jq -r '.[0].managed.address')\" = '$NODE_ADDR' ]"
+step "enabled: peers are connected again" retry 40 peers_connected
+step "enabled: the grant is in force again" retry 60 fetch_granted
 
-step "revoke the grant" A $SG revoke "$APP_ID:$PORT" bnode
-step "revoked: B cannot fetch" retry 30 sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$ADDR]:$PORT/"
-# Nothing names the row any more: the address is taken down (dormant, remembered), not kept closed.
-step "revoked: the address left ygg0" retry 30 sh -c "! docker exec $NODE_A ip -6 -j addr show dev ygg0 | jq -e --arg a '$ADDR' '[.[].addr_info[].local] | index(\$a)' >/dev/null"
-step "revoked: no address of the app is up" retry 10 none_up
-# The address is gone, so attempts are blocked on the node address (the wildcard listener).
-step "blocked attempts are listed by 'activity --blocked'" retry 150 sh -c "docker exec $NODE_B curl -s --max-time 2 http://[$NODE_ADDR]:$PORT/ >/dev/null; docker exec $NODE_A $SG activity --blocked --json | jq -e 'length > 0' >/dev/null"
-# A new grant brings the same address back, so the rest of the test (stop, disable) has one up.
-step "grant to the peer again" A $SG grant "$APP_ID:$PORT" bnode --network ygg
-step "granted again: the same address is back on ygg0" retry 30 on_ygg0 "$ADDR"
-step "granted again: B can fetch" retry 30 fetch_from_b
-step "stop the daemon again" daemon_stop
-step "stopped: the table stays" table_exists
-step "stopped: the grant stays in force" fetch_from_b
+# ── The daemon is killed ─────────────────────────────────────────────────────
+# Yggdrasil changes its user id after creating the tun, which clears the parent-death
+# signal; the daemon therefore starts it through `child-guard`, a root parent that holds the
+# node's stdin pipe to the daemon and ends the node when the daemon is gone. The firewall
+# rules stay in force meanwhile.
+step "yggdrasil is started through the child guard" sh -c "docker exec $NODE_A ps -eo args | grep -q 'socketguard-daemon child-guard .*third_party/yggdrasil/yggdrasil'"
+OLD_YGG="$(ygg_pid)"
+# Only the daemon (the oldest process of that name; the guard has the same name).
+A sh -c 'kill -9 "$(pgrep -o -x socketguard-dae)"'
+step "no yggdrasil outlives a killed daemon" retry 20 ygg_gone
+step "no child guard is left either" sh -c "! docker exec $NODE_A pgrep -f 'socketguard-daemon child-guard'"
+step "the table stays while the daemon is gone" table_exists
+step "the node's own address is still closed" sh -c "! docker exec $NODE_B curl -fsS --max-time 4 http://[$NODE_ADDR]:$PORT/"
+step "the daemon starts again" daemon_start
+step "a new yggdrasil runs" retry 60 sh -c "[ -n \"\$(docker exec $NODE_A pgrep -f '^$TP/yggdrasil/yggdrasil -useconffile' | head -1)\" ] && [ \"\$(docker exec $NODE_A pgrep -f '^$TP/yggdrasil/yggdrasil -useconffile' | head -1)\" != '$OLD_YGG' ]"
+step "the network comes back" wait_up 90
+step "the grant is in force again" retry 60 fetch_granted
 
-# ── Disable ──────────────────────────────────────────────────────────────────
-step "daemon --disable succeeds" A sh -c "SOCKETGUARD_CONFIG=/etc/sg.json $DAEMON --disable"
-step "disable removed the table" sh -c "! docker exec $NODE_A nft list table inet socketguard >/dev/null 2>&1"
-step "disable removed the address from ygg0" sh -c "! docker exec $NODE_A ip -6 -j addr show dev ygg0 | jq -e --arg a '$ADDR' '[.[].addr_info[].local] | index(\$a)' >/dev/null"
-step "disabled: the wildcard listener is reachable via the node address" retry 10 fetch_node_addr_from_b
+# ── The daemon stops ─────────────────────────────────────────────────────────
+step "stopping the daemon (SIGTERM) works" daemon_stop
+step "yggdrasil is gone after a normal stop" retry 30 ygg_gone
+step "the adapter is gone after a normal stop" retry 15 sh -c "! docker exec $NODE_A ip link show $ADAPTER"
+step "socketguard-daemon --disable runs without a daemon" docker exec -e SOCKETGUARD_CONFIG=/etc/sg.json "$NODE_A" $DAEMON --disable
 
-# The latch is persistent: a daemon started afterwards leaves the host open until enabled.
+# ── One node per host ────────────────────────────────────────────────────────
+# Another node (the plain Yggdrasil of the image) runs on A: SocketGuard's is held back
+# and says why; when it is gone, SocketGuard's starts.
+docker exec -i "$NODE_A" sh -c 'yggdrasil -genconf -json | jq ".IfName=\"ygg9\" | .AdminListen=\"none\" | .MulticastInterfaces=[]" > /etc/ygg-other.json'
+docker exec -d "$NODE_A" sh -c "yggdrasil -useconffile /etc/ygg-other.json >>/var/log/ygg-other.log 2>&1"
+other_up() { docker exec "$NODE_A" ip -6 addr show dev ygg9 | grep -q "inet6 [23]"; }
+step "another Yggdrasil node runs on A (interface ygg9)" retry 20 other_up
 daemon_start
-step "latch: daemon is up" retry 20 daemon_running
-sleep 6
-step "latch: the restarted daemon did not reinstall the table" sh -c "! docker exec $NODE_A nft list table inet socketguard >/dev/null 2>&1"
-step "latch: enable (CLI, running daemon) restores the table" sh -c "docker exec $NODE_A $SG enable && docker exec $NODE_A nft list table inet socketguard >/dev/null"
+step "the daemon is up" retry 20 daemon_running
+step "socketguard enable succeeds (the latch from --disable)" A $SG enable
+other_reason() { net_json | jq -e '.[0].managed.state == "waiting" and (.[0].managed.detail | startswith("Another Yggdrasil node is running on this computer"))' >/dev/null; }
+step "with another node running, SocketGuard's is held back and says why" retry 40 other_reason
+sleep 4
+step "no yggdrasil of the daemon was started" ygg_gone
+A pkill -f "yggdrasil -useconffile /etc/ygg-other.json"
+step "when the other node is gone, SocketGuard's starts" wait_up 90
+
+# ── Removing the network ─────────────────────────────────────────────────────
+step "removing the network succeeds" A $SG networks rm ygg
+step "removed: yggdrasil is gone" retry 30 ygg_gone
+step "removed: the adapter is gone" retry 15 sh -c "! docker exec $NODE_A ip link show $ADAPTER"
+step "removed: the configuration with the key is gone" sh -c "! docker exec $NODE_A test -e $STATE/yggdrasil"
+step "stop the daemon" daemon_stop
+step "nothing of yggdrasil is left running" ygg_gone
 
 finish

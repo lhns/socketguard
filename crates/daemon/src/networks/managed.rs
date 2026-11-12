@@ -91,7 +91,7 @@ impl ManagedCtx {
 
     pub fn state_dir(&self) -> Result<&Path, String> {
         self.state_dir.as_deref().ok_or_else(|| {
-            "no state directory is known, so a managed network cannot keep its data".to_string()
+            "no state directory is known, so Tor and Yggdrasil cannot keep their data".to_string()
         })
     }
 }
@@ -105,22 +105,18 @@ pub fn child_wish(
     backend: &BackendConfig,
 ) -> Desired {
     match backend {
-        BackendConfig::Tor {
-            managed: true,
-            bridges,
-            ..
-        } => match super::tor_managed::ManagedTor::new(id, ctx).spec_with_bridges(bridges) {
-            Ok(spec) => Desired::Run(Box::new(spec)),
-            Err(why) => Desired::Unavailable(why),
-        },
-        BackendConfig::Yggdrasil {
-            managed: true,
-            peers,
-            ..
-        } => match super::ygg_managed::ManagedYgg::new(id, ctx, ifaces.clone()).spec(peers) {
-            Ok(spec) => Desired::Run(Box::new(spec)),
-            Err(why) => Desired::Unavailable(why),
-        },
+        BackendConfig::Tor { bridges } => {
+            match super::tor_managed::ManagedTor::new(id, ctx).spec_with_bridges(bridges) {
+                Ok(spec) => Desired::Run(Box::new(spec)),
+                Err(why) => Desired::Unavailable(why),
+            }
+        }
+        BackendConfig::Yggdrasil { peers } => {
+            match super::ygg_managed::ManagedYgg::new(id, ctx, ifaces.clone()).spec(peers) {
+                Ok(spec) => Desired::Run(Box::new(spec)),
+                Err(why) => Desired::Unavailable(why),
+            }
+        }
         _ => Desired::Stopped,
     }
 }

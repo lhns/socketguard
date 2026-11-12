@@ -47,9 +47,7 @@ impl Fixture {
     async fn with_managed_ygg(&self, peers: &[&str]) {
         let inst = BackendInstanceConfig {
             id: "ygg".into(),
-            backend: BackendConfig::managed_yggdrasil(
-                peers.iter().map(|p| p.to_string()).collect(),
-            ),
+            backend: BackendConfig::yggdrasil(peers.iter().map(|p| p.to_string()).collect()),
         };
         let mock = MockIpv6Backend::new("300:1:2:3::", 128, "ygg0");
         let mut engine = self.state.engine.write().await;
@@ -68,10 +66,7 @@ fn exe(name: &str) -> String {
 #[tokio::test]
 async fn a_build_without_the_files_refuses_managed_networks_and_says_so() {
     let f = Fixture::new(Bundled::none()).await;
-    for body in [
-        json!({"type": "tor", "managed": true}),
-        json!({"type": "yggdrasil", "managed": true}),
-    ] {
+    for body in [json!({"type": "tor"}), json!({"type": "yggdrasil"})] {
         let (s, e) = f.call(Method::POST, "/api/networks", Some(body)).await;
         assert_eq!(
             (s, e["code"].as_str()),
@@ -83,30 +78,34 @@ async fn a_build_without_the_files_refuses_managed_networks_and_says_so() {
     assert!(status["bundled"].get("dir").is_none());
     assert_eq!(status["bundled"]["versions"], json!([]));
     let (_, setup) = f.call(Method::GET, "/api/networks/setup", None).await;
-    assert_eq!(setup["tor"]["managed"]["available"], false);
-    assert_eq!(setup["yggdrasil"]["existing"]["state"], "absent");
+    assert_eq!(setup["tor"]["available"], false);
+    assert_eq!(setup["tor"]["added"], false);
+    assert_eq!(
+        setup["yggdrasil"]["reason"],
+        socketguard_core::setup::NOT_INCLUDED
+    );
 }
 
 #[tokio::test]
-async fn managed_settings_are_checked_before_anything_else() {
+async fn settings_are_checked_before_anything_else() {
     let f = Fixture::new(Bundled::none()).await;
-    let (s, e) = f
-        .call(
-            Method::POST,
-            "/api/networks",
-            Some(json!({"type": "tor", "managed": true, "control": "10.0.0.1:9051"})),
-        )
-        .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
-    assert!(
-        e["message"].as_str().unwrap().contains("managed Tor"),
-        "{e}"
-    );
+    // The settings of a Tor the user runs are gone, as is the flag that told them apart.
+    for key in ["control", "managed", "auth", "cookie_path"] {
+        let (s, e) = f
+            .call(
+                Method::POST,
+                "/api/networks",
+                Some(json!({"type": "tor", key: "x"})),
+            )
+            .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{key}");
+        assert!(e["message"].as_str().unwrap().contains(key), "{e}");
+    }
     let (s, _) = f
         .call(
             Method::POST,
             "/api/networks",
-            Some(json!({"type": "yggdrasil", "managed": true, "peers": ["nonsense"]})),
+            Some(json!({"type": "yggdrasil", "peers": ["nonsense"]})),
         )
         .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
@@ -124,16 +123,12 @@ async fn complete_files_pass_the_checks_and_status_lists_them() {
     assert_eq!(status["bundled"]["dir"], dir.display().to_string());
     assert_eq!(status["bundled"]["versions"][0]["name"], "tor");
     let (_, setup) = f.call(Method::GET, "/api/networks/setup", None).await;
-    assert_eq!(setup["tor"]["managed"]["available"], true);
-    assert_eq!(setup["tor"]["managed"]["version"], "16.0.1");
+    assert_eq!(setup["tor"]["available"], true);
+    assert_eq!(setup["tor"]["version"], "16.0.1");
     // The network is created; its child is not started by this engine (no state
     // directory), and the card says so instead of failing the request.
     let (s, n) = f
-        .call(
-            Method::POST,
-            "/api/networks",
-            Some(json!({"type": "tor", "managed": true})),
-        )
+        .call(Method::POST, "/api/networks", Some(json!({"type": "tor"})))
         .await;
     assert_eq!(s, StatusCode::CREATED, "{n}");
     assert_eq!(n["kind"], "tor");
@@ -148,11 +143,7 @@ async fn incomplete_files_are_refused_with_a_sentence() {
     let dir = third_party(&[&format!("yggdrasil/{}", exe("yggdrasil"))]);
     let f = Fixture::new(Bundled::from_dir(&dir)).await;
     let (s, e) = f
-        .call(
-            Method::POST,
-            "/api/networks",
-            Some(json!({"type": "tor", "managed": true})),
-        )
+        .call(Method::POST, "/api/networks", Some(json!({"type": "tor"})))
         .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert_eq!(
@@ -209,31 +200,4 @@ async fn peers_are_replaced_validated_and_saved() {
         (s, e["code"].as_str()),
         (StatusCode::NOT_FOUND, Some("not_found"))
     );
-}
-
-#[tokio::test]
-async fn only_a_managed_yggdrasil_takes_peers() {
-    let f = Fixture::new(Bundled::none()).await;
-    let inst = BackendInstanceConfig {
-        id: "ygg".into(),
-        backend: BackendConfig::Yggdrasil {
-            interface: Some("ygg0".into()),
-            admin_endpoint: None,
-            managed: false,
-            peers: vec![],
-        },
-    };
-    {
-        let mut engine = f.state.engine.write().await;
-        let mock = MockIpv6Backend::new("300:1:2:3::", 128, "ygg0");
-        add_ip_network(&mut engine, &f.state, &inst, Box::new(mock)).await;
-    }
-    let (s, _) = f
-        .call(
-            Method::PUT,
-            "/api/networks/ygg/peers",
-            Some(json!({"peers": ["tls://a.example:1"]})),
-        )
-        .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST);
 }

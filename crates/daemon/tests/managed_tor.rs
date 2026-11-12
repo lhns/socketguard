@@ -19,7 +19,7 @@ const ID: &str = "tor";
 fn managed_tor() -> BackendInstanceConfig {
     BackendInstanceConfig {
         id: ID.into(),
-        backend: BackendConfig::managed_tor(),
+        backend: BackendConfig::tor(),
     }
 }
 
@@ -216,6 +216,7 @@ fn scripted_child(health: Option<Arc<dyn HealthCheck>>) -> ChildSpec {
         on_exit: None,
         start_deadline: None,
         on_deadline: None,
+        stall_limit: None,
         config_tag: String::new(),
     }
 }
@@ -240,7 +241,7 @@ async fn the_status_only_moves_forward_through_start_up_and_never_reads_not_conn
     ];
     let health: Arc<dyn HealthCheck> = Arc::new(Script(Mutex::new(steps.into())));
     h.ctx.children.set("t", Some(scripted_child(Some(health))));
-    let net = TorNetwork::managed(ManagedTor::new("t", &h.ctx), Duration::from_secs(60));
+    let net = TorNetwork::new(ManagedTor::new("t", &h.ctx), Duration::from_secs(60));
 
     let mut seen = vec![];
     for _ in 0..8 {
@@ -257,7 +258,7 @@ async fn the_status_only_moves_forward_through_start_up_and_never_reads_not_conn
 async fn one_failed_control_check_keeps_the_last_good_state_and_three_in_a_row_do_not() {
     let h = ManagedHarness::new();
     h.ctx.children.set("t", Some(scripted_child(None)));
-    let net = TorNetwork::managed(ManagedTor::new("t", &h.ctx), Duration::from_secs(60));
+    let net = TorNetwork::new(ManagedTor::new("t", &h.ctx), Duration::from_secs(60));
     tokio::time::sleep(Duration::from_millis(50)).await;
     // The child is up and nothing was checked over the control port yet: not "not connected".
     assert_eq!(net.status().0, NetworkStatus::Up);

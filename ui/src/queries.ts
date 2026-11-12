@@ -224,13 +224,9 @@ export const useSetNetworkPeers = () =>
   useInvalidating((v: { id: string; peers: string[] }) => api.setNetworkPeers(v.id, v.peers), NETWORK_KEYS);
 export const useDeleteNetwork = () =>
   useInvalidating(
-    (v: { id: string; force: boolean; confirmExposed?: boolean }) => api.deleteNetwork(v.id, v.force, v.confirmExposed ?? false),
+    (v: { id: string; force: boolean }) => api.deleteNetwork(v.id, v.force),
     NETWORK_KEYS,
   );
-/** What stays reachable without the block of network `without` ("all": every network); asked
- * afresh each time a confirmation opens, so it is what is true now. */
-export const useExposure = (without: string, enabled = true) =>
-  useQuery({ queryKey: ["exposure", without], queryFn: () => api.exposure(without), enabled, staleTime: 0, gcTime: 0 });
 export const useSetProtectHost = () =>
   useInvalidating((req: ProtectHostRequest) => api.setProtectHost(req), [["settings"], ["status"]]);
 export const useApplyState = () =>

@@ -72,22 +72,7 @@ pub fn load(path: &Path) -> anyhow::Result<Option<DaemonConfig>> {
     };
     let config: DaemonConfig = serde_json::from_str(&text)
         .with_context(|| format!("invalid config {}; {FIX_HINT}", path.display()))?;
-    if socketguard_core::portable::is_portable() {
-        refuse_for_portable(&config).with_context(|| {
-            format!("config {} cannot be used in portable mode", path.display())
-        })?;
-    }
     Ok(Some(config))
-}
-
-/// Portable mode takes no network that needs trusted configuration (ADR 0054): an entry the
-/// folder's writer could aim at software outside it fails the load, not just the add.
-pub fn refuse_for_portable(config: &DaemonConfig) -> anyhow::Result<()> {
-    for inst in &config.backends {
-        socketguard_core::portable::allowed_in_portable(&inst.backend)
-            .map_err(|m| anyhow::anyhow!("network '{}': {m}", inst.id))?;
-    }
-    Ok(())
 }
 
 /// Write `config.backends` to the `backends` key of the file at `path`, keeping its other
@@ -152,24 +137,6 @@ mod tests {
     }
 
     #[test]
-    fn portable_mode_refuses_configs_with_an_existing_tor_or_yggdrasil() {
-        let ok: DaemonConfig = serde_json::from_str(
-            r#"{"backends":[{"id":"lan","type":"slaac","interface":"Ethernet"}]}"#,
-        )
-        .unwrap();
-        assert!(refuse_for_portable(&ok).is_ok());
-        let bad: DaemonConfig = serde_json::from_str(
-            r#"{"backends":[{"id":"lan","type":"slaac","interface":"Ethernet"},{"id":"tor","type":"tor"}]}"#,
-        )
-        .unwrap();
-        let msg = format!("{:#}", refuse_for_portable(&bad).unwrap_err());
-        assert!(
-            msg.contains("network 'tor'") && msg.contains("portable"),
-            "{msg}"
-        );
-    }
-
-    #[test]
     fn a_missing_config_is_none_and_an_invalid_one_an_error() {
         let dir = std::env::temp_dir().join(format!("sg-config-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
@@ -178,6 +145,38 @@ mod tests {
         std::fs::write(&path, "{\"backends\": [{\"type\": \"nope\"}]}").unwrap();
         let err = load(&path).unwrap_err();
         assert!(format!("{err:#}").contains("invalid config"), "{err:#}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_stale_key_fails_the_load_and_names_the_key_and_the_file() {
+        let dir = std::env::temp_dir().join(format!("sg-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("socketguard.json");
+        for (text, key) in [
+            (r#"{"backend": "ula"}"#, "backend"),
+            (
+                r#"{"backends": [{"type": "tor", "managed": true}]}"#,
+                "managed",
+            ),
+            (
+                r#"{"backends": [{"type": "tor", "control": "127.0.0.1:9051"}]}"#,
+                "control",
+            ),
+            (
+                r#"{"backends": [{"type": "yggdrasil", "interface": "ygg0"}]}"#,
+                "interface",
+            ),
+        ] {
+            std::fs::write(&path, text).unwrap();
+            let err = format!("{:#}", load(&path).unwrap_err());
+            assert!(
+                err.contains(key) && err.contains("socketguard.json"),
+                "{key}: {err}"
+            );
+        }
+        std::fs::write(&path, r#"{"backends": [{"type": "tor"}]}"#).unwrap();
+        assert!(load(&path).unwrap().is_some());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

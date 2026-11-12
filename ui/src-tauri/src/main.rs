@@ -14,9 +14,9 @@ use serde::Serialize;
 use socketguard_client::{Client, Error as ClientError, GrantQuery, Saved};
 use socketguard_core::api_types::{
     ApplyRequest, ApplyResponse, AttachPortGroup, ChangesRequest, ChangesResponse, Enforcement,
-    ExportDocument, ExposureResponse, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer,
-    NewPortGroup, NewReservation, NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest,
-    ShareResponse, StatusResponse, TorKeyResponse, UpdatePortGroup, UpdateTag,
+    ExportDocument, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup,
+    NewReservation, NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest, ShareResponse,
+    StatusResponse, TorKeyResponse, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::setup::NetworkSetup;
 use socketguard_core::{
@@ -471,8 +471,8 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn delete_network(id: String, force: bool, confirm_exposed: bool) -> CmdResult<()> {
-    Ok(client().delete_network(&id, force, confirm_exposed).await?)
+async fn delete_network(id: String, force: bool) -> CmdResult<()> {
+    Ok(client().delete_network(&id, force).await?)
 }
 
 #[tauri::command]
@@ -712,12 +712,6 @@ fn internal(message: String) -> UiError {
         message,
         details: None,
     }
-}
-
-/// What becomes reachable over Yggdrasil without SocketGuard's block (ADR 0051).
-#[tauri::command]
-async fn exposure(without: Option<String>) -> CmdResult<ExposureResponse> {
-    Ok(client().exposure(without.as_deref()).await?)
 }
 
 fn setup_run(run: ElevatedRun, command: String) -> SetupRun {
@@ -1084,7 +1078,6 @@ fn main() {
             detach_port_group,
             list_networks,
             network_setup,
-            exposure,
             add_network,
             set_network_peers,
             set_network_bridges,

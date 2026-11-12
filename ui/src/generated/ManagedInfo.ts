@@ -2,7 +2,7 @@
 import type { ChildState } from "./ChildState";
 
 /**
- * A managed network: how its child process is doing.
+ * A Tor or Yggdrasil network: how its child process is doing.
  */
 export type ManagedInfo = { state: ChildState, 
 /**

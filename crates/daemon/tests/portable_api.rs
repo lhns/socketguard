@@ -1,5 +1,6 @@
 //! Portable mode (ADR 0054) at the API and the config file: SocketGuard's own Tor and
-//! Yggdrasil (`managed`, ADR 0052) are accepted, an existing (unmanaged) one is refused.
+//! Yggdrasil (ADR 0052, 0056) are accepted like any network; nothing is refused because
+//! nothing outside the folder is ever used.
 //!
 //! Portable mode is process-wide state, so this is a test binary of its own, and it exists
 //! on Windows only (the one system that has the mode).
@@ -21,7 +22,7 @@ fn portable() {
 }
 
 #[tokio::test]
-async fn the_api_takes_a_managed_tor_and_refuses_an_existing_one_in_portable_mode() {
+async fn the_api_takes_a_tor_network_in_portable_mode() {
     portable();
     let h = ManagedHarness::new();
     let state = h.app_state(DaemonConfig::default()).await;
@@ -31,31 +32,16 @@ async fn the_api_takes_a_managed_tor_and_refuses_an_existing_one_in_portable_mod
         &app,
         Method::POST,
         "/api/networks",
-        Some(json!({"type": "tor", "managed": true})),
+        Some(json!({"type": "tor"})),
     )
     .await;
     assert_eq!(s, StatusCode::CREATED, "{body}");
 
-    // (A managed Yggdrasil is not added here: starting it would ask the real driver store.)
-
-    // An existing node: refused, with the reason.
-    let (s, body) = call(
-        &app,
-        Method::POST,
-        "/api/networks",
-        Some(json!({"id": "mine", "type": "tor"})),
-    )
-    .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["code"], "invalid");
-    assert!(
-        body["message"].as_str().unwrap().contains("portable"),
-        "{body}"
-    );
+    // (A Yggdrasil network is not added here: starting it would ask the real driver store.)
 }
 
 #[test]
-fn the_config_file_takes_a_managed_tor_and_refuses_an_existing_one_in_portable_mode() {
+fn the_config_file_takes_tor_and_yggdrasil_in_portable_mode() {
     portable();
     let dir = std::env::temp_dir().join(format!("sg-pconf-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -63,17 +49,22 @@ fn the_config_file_takes_a_managed_tor_and_refuses_an_existing_one_in_portable_m
 
     std::fs::write(
         &path,
-        r#"{"backends":[{"id":"tor","type":"tor","managed":true},
-            {"id":"ygg","type":"yggdrasil","managed":true,"peers":["tls://a.example:443"]}]}"#,
+        r#"{"backends":[{"id":"tor","type":"tor"},
+            {"id":"ygg","type":"yggdrasil","peers":["tls://a.example:443"]}]}"#,
     )
     .unwrap();
     let config = config_file::load(&path).unwrap().unwrap();
     assert_eq!(config.backends.len(), 2);
 
-    std::fs::write(&path, r#"{"backends":[{"id":"tor","type":"tor"}]}"#).unwrap();
+    // A file of an earlier version names a key that is gone, in portable mode too.
+    std::fs::write(
+        &path,
+        r#"{"backends":[{"id":"tor","type":"tor","managed":true}]}"#,
+    )
+    .unwrap();
     let err = format!("{:#}", config_file::load(&path).unwrap_err());
     assert!(
-        err.contains("portable") && err.contains("network 'tor'"),
+        err.contains("managed") && err.contains("socketguard.json"),
         "{err}"
     );
     let _ = std::fs::remove_dir_all(&dir);

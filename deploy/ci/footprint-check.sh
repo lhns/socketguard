@@ -106,7 +106,6 @@ FILE_ITEMS=(
     "database-wal|/socketguard\.db-wal$"
     "database-shm|/socketguard\.db-shm$"
     "setup-log|/setup-log\.json$"
-    "archived-database|\.pre-v1"
     "temp-file|/socketguard\.tmp-"
     "dir-tor|/tor$"
     "dir-yggdrasil|/yggdrasil$"
@@ -238,12 +237,11 @@ self_test() {
     expect pf-conf-commented ABSENT "$(state_pf_conf_line $'# anchor "socketguard"\nanchor "com.apple/*"')"
     expect pf-conf-absent ABSENT "$(state_pf_conf_line $'anchor "com.apple/*"')"
 
-    local list=$'/etc/socketguard\n/etc/socketguard/socketguard.json\n/var/lib/socketguard/socketguard.db-wal\n/var/lib/socketguard/socketguard.db.pre-v1.2\n/var/lib/socketguard/socketguard.tmp-12-abc\n/etc/systemd/system/socketguard.service'
+    local list=$'/etc/socketguard\n/etc/socketguard/socketguard.json\n/var/lib/socketguard/socketguard.db-wal\n/var/lib/socketguard/socketguard.tmp-12-abc\n/etc/systemd/system/socketguard.service'
     expect list-config PRESENT "$(state_listed "$list" '/socketguard\.json$')"
     expect list-db-not-wal ABSENT "$(state_listed "$list" '/socketguard\.db$')"
     expect list-wal PRESENT "$(state_listed "$list" '/socketguard\.db-wal$')"
     expect list-shm ABSENT "$(state_listed "$list" '/socketguard\.db-shm$')"
-    expect list-prev1 PRESENT "$(state_listed "$list" '\.pre-v1')"
     expect list-tmp PRESENT "$(state_listed "$list" '/socketguard\.tmp-')"
     expect list-unit PRESENT "$(state_listed "$list" 'systemd/system/socketguard\.service$')"
     expect list-dir-exact ABSENT "$(state_listed "$list" '^/var/lib/socketguard$')"
@@ -301,7 +299,7 @@ self_test() {
 
 usage() { echo "usage: $0 expect-absent|expect-present [--allow-data] [--require NAME[,NAME]] [--ledger-export FILE] | --self-test" >&2; exit 2; }
 
-DATA_ITEMS=" config-dir data-dir config-json database database-wal database-shm setup-log archived-database temp-file dir-tor dir-yggdrasil account-socketguard-net "
+DATA_ITEMS=" config-dir data-dir config-json database database-wal database-shm setup-log temp-file dir-tor dir-yggdrasil account-socketguard-net "
 ALLOWED=" "
 mode="" ledger="" selftest=0 extra_required=""
 while [ $# -gt 0 ]; do

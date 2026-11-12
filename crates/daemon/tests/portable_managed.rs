@@ -25,11 +25,11 @@ async fn the_teardown_waits_for_a_managed_tor_and_a_managed_yggdrasil_to_be_gone
     for inst in [
         BackendInstanceConfig {
             id: "tor".into(),
-            backend: BackendConfig::managed_tor(),
+            backend: BackendConfig::tor(),
         },
         BackendInstanceConfig {
             id: "ygg".into(),
-            backend: BackendConfig::managed_yggdrasil(vec![]),
+            backend: BackendConfig::yggdrasil(vec![]),
         },
     ] {
         let (_, applied) = state
@@ -90,7 +90,7 @@ async fn the_teardown_after_the_supervisor_shutdown_returns_with_nothing_left() 
             &state,
             BackendInstanceConfig {
                 id: "tor".into(),
-                backend: BackendConfig::managed_tor(),
+                backend: BackendConfig::tor(),
             },
         )
         .await

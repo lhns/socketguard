@@ -17,15 +17,14 @@ use bytes::Bytes;
 use http::{header, HeaderValue, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{de::DeserializeOwned, Serialize};
 use socketguard_core::api_types::{
     ApiError, ApplyRequest, ApplyResponse, AttachPortGroup, ChangesRequest, ChangesResponse,
-    DisableRequest, Enforcement, EnforcementNotice, ExportDocument, ExposureResponse, MemberQuery,
-    MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation,
-    NewTag, NewTagMember, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse,
-    ReserveRequest, SetBridges, SetMembers, SetPeers, ShareResponse, StatusResponse,
-    TorKeyResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
+    DisableRequest, Enforcement, EnforcementNotice, ExportDocument, MemberQuery, MoveAppRequest,
+    NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation, NewTag, NewTagMember,
+    ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse, ReserveRequest, SetBridges,
+    SetMembers, SetPeers, ShareResponse, StatusResponse, TorKeyResponse, UpdateLabel,
+    UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::setup::NetworkSetup;
 use socketguard_core::{
@@ -638,7 +637,7 @@ impl Client {
         self.call(&routes::SET_PEERS, &[id], None, json(&req)).await
     }
 
-    /// Replace the bridge lines of a managed Tor network (ADR 0052); Tor restarts.
+    /// Replace the bridge lines of a Tor network (ADR 0052); Tor restarts.
     pub async fn set_bridges(&self, id: &str, bridges: &[String]) -> Result<Network> {
         let req = SetBridges {
             bridges: bridges.to_vec(),
@@ -648,29 +647,12 @@ impl Client {
     }
 
     /// Remove a network. With `force`, a Tor network goes even if its onion services
-    /// could not be removed (the daemon otherwise answers 409 `conflict`). A Yggdrasil
-    /// network whose node keeps running needs `confirm_exposed`, else the daemon answers
-    /// 409 `confirmation_required` with the [`ExposureResponse`] in `details`.
-    pub async fn delete_network(&self, id: &str, force: bool, confirm_exposed: bool) -> Result<()> {
-        let query: Vec<&str> = [
-            (force, "force=true"),
-            (confirm_exposed, "confirm_exposed=true"),
-        ]
-        .into_iter()
-        .filter_map(|(on, q)| on.then_some(q))
-        .collect();
-        let query = (!query.is_empty()).then(|| query.join("&"));
+    /// could not be removed (the daemon otherwise answers 409 `conflict`).
+    pub async fn delete_network(&self, id: &str, force: bool) -> Result<()> {
+        let query = force.then(|| "force=true".to_string());
         self.call_raw(&routes::DELETE_NETWORK, &[id], query, None)
             .await
             .map(|_| ())
-    }
-
-    /// What becomes reachable over the networks without SocketGuard's block: of one
-    /// network, or (None) of all of them (ADR 0051).
-    pub async fn exposure(&self, without: Option<&str>) -> Result<ExposureResponse> {
-        let query =
-            without.map(|w| format!("without={}", utf8_percent_encode(w, NON_ALPHANUMERIC)));
-        self.call(&routes::EXPOSURE, &[], query, None).await
     }
 
     // ─── Settings ────────────────────────────────────────────────────────────

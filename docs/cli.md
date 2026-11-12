@@ -18,7 +18,6 @@ activity [--app A] [--peer P] [--kind K] [--blocked] [--limit N] [-f]
                                         --blocked = --kind blocked; -f/--follow keeps printing
 watch                                   every event the daemon pushes, one line each
 settings show                           the settings
-exposure [--without NETWORK]            what becomes reachable over Yggdrasil if SocketGuard stops blocking it
 completions bash|zsh|fish|powershell|elvish
 ```
 
@@ -111,21 +110,20 @@ reservations bind R redis [-y] | unbind R redis         bind asks before opening
 
 ```
 networks list
-networks detect                         what this host offers: LAN interfaces, own Tor/Yggdrasil, existing nodes
-networks add tor                        managed: SocketGuard's own Tor
-networks add yggdrasil --peer tls://host:port           managed; --peer repeats
-networks add yggdrasil --existing [--interface ygg0] [--admin-endpoint unix:///var/run/yggdrasil.sock]
-networks add tor --existing [--control 127.0.0.1:9051|unix:/path] [--password-env VAR | --password-stdin]
+networks detect                         what this host offers: LAN interfaces, Tor and Yggdrasil
+networks add tor                        SocketGuard's own Tor
+networks add yggdrasil --peer tls://host:port           SocketGuard's own Yggdrasil; --peer repeats
 networks add ula|slaac|dhcpv6 [--interface eth0] [--id ID]
-networks peers yggdrasil [--add URI] [--rm URI]         show or change the peers of the managed node
-networks bridges tor [--add LINE] [--rm LINE] [--clear]   show or change the obfs4 bridges of the managed Tor;
+networks peers yggdrasil [--add URI] [--rm URI]         show or change the peers of the Yggdrasil node
+networks bridges tor [--add LINE] [--rm LINE] [--clear]   show or change the obfs4 bridges of Tor;
                                         LINE is `[Bridge ]obfs4 IP:port FINGERPRINT cert=CERT iat-mode=0` (other
                                         transports are refused); changing them restarts Tor; --clear turns them off
-networks rm ID [--force] [-y]           --force: remove a Tor network Tor cannot confirm is clean
+networks rm ID [--force]                --force: remove a Tor network Tor cannot confirm is clean
 ```
 
-`--control` and a Tor password are refused by the daemon unless its config file has the same
-network; edit the file instead (ADR 0040). `--password` exists but is visible in the process list.
+Tor and Yggdrasil are always SocketGuard's own (ADR 0056): they have no settings but the peers and
+the bridges. A host that runs its own Yggdrasil node cannot use Yggdrasil in SocketGuard while that
+node runs; `networks add yggdrasil` still works and the network waits.
 
 ## Whole-host protection
 

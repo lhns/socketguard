@@ -35,12 +35,7 @@ const WORKERS: [&str; 5] = [
 fn ygg() -> BackendInstanceConfig {
     BackendInstanceConfig {
         id: "ygg".into(),
-        backend: BackendConfig::Yggdrasil {
-            interface: Some("ygg0".into()),
-            admin_endpoint: None,
-            managed: false,
-            peers: vec![],
-        },
+        backend: BackendConfig::yggdrasil(vec![]),
     }
 }
 

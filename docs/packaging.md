@@ -70,15 +70,12 @@ service before replacing the file (`ServiceControl`, stop only) and `service ins
   builds one folder: the three programs, the `portable` marker, README, LICENSE and NOTICE, and
   `third_party\` (Tor, Yggdrasil, `wintun.dll`, licences, `VERSIONS`) when `installer/payload/windows/`
   holds them. The `portable` job of `packages.yml` runs the same `.github/actions/bundle` step as the
-  MSI job before building the zip, so the zip carries them and managed networks work from it.
-- No installer ran, so nothing set up an account for the children: managed Tor and Yggdrasil run as
+  MSI job before building the zip, so the zip carries them and Tor and Yggdrasil work from it.
+- No installer ran, so nothing set up an account for the children: Tor and Yggdrasil run as
   the account of the elevated portable daemon (the card says "the account running portable
   SocketGuard"), and `data\tor` and `data\yggdrasil` have a protected access list that the read
   access of the allowed user on `data\` does not reach.
-- An existing (unmanaged) Tor or Yggdrasil node is refused in portable mode: the folder is writable by
-  the user, so a path outside it could steer something that runs with administrator rights.
-  SocketGuard's own Tor and Yggdrasil (`managed`) are allowed.
-- Whether the Wintun driver was in the driver store before the first managed Yggdrasil start is kept
+- Whether the Wintun driver was in the driver store before the first Yggdrasil start is kept
   in `data\session.json`. A clean exit removes the driver (`pnputil /delete-driver`, never `/force`)
   only if it was absent, after the children have ended; a kill leaves it, and the next clean exit
   from the same folder removes it.
@@ -149,10 +146,10 @@ Provide these repository secrets and add the marked steps (`SIGN` comments in
 ## What CI proves, and what it does not
 
 `packages.yml` on every push to `installers`, `redesign`, `main`, `portable` and `bundled`, on
-request, and for each release. The MSI, portable, deb and pkg jobs also have the **managed networks
+request, and for each release. The MSI, portable, deb and pkg jobs also have the **Tor and Yggdrasil
 section** (`test/managed.sh` for the deb and the pkg, `test/managed-helpers.ps1` shared by
 `test/msi.ps1` and `test/portable.ps1` on Windows), summarised in a line
-`managed networks: N checks passed, M skipped`; the rpm jobs check the bundled files only (below):
+`managed networks: N checks passed, M skipped` (the label the scripts print); the rpm jobs check the bundled files only (below):
 
 - after the install: `status --json` names the bundled `tor` and `yggdrasil` with the versions of
   `third_party/VERSIONS` and the directory the daemon found; the licence texts and notices are
@@ -177,7 +174,7 @@ adapter appears, the status detail is written to `ygg-adapter-error.txt` in `msi
 and the Yggdrasil assertions are SKIPPED with that reason, not faked); Tor needs the Tor network.
 
 `.github/workflows/e2e.yml` (nightly and on request, not on push) runs the Docker tests of
-`deploy/e2e/`: `managed-ygg-e2e.sh`, `managed-tor-e2e.sh`, `ygg-e2e.sh`, `tor-e2e.sh`.
+`deploy/e2e/`: `ygg-e2e.sh`, `tor-e2e.sh`, `tor-bridges-e2e.sh`.
 
 - **MSI** (Windows runner): silent install with `ALLOWUSER`; service running; the pipe answers; the
   group has the account; WFP provider, sublayer and filters present; a LAN network on a ULA /64
@@ -185,8 +182,8 @@ and the Yggdrasil assertions are SKIPPED with that reason, not faked); Tor needs
   looked for and reported, not required) and a connection from a second local address to a granted
   port succeeds while a port outside the range is refused (`-StrictFirewall` in CI makes that a
   failure; `netsh wfp` dumps and net events are uploaded as `msi-test-output`); after the upgrade
-  and the managed networks, a prefix block on the real engine: a connection to an address inside
-  the managed Yggdrasil node's /64 that SocketGuard did not assign is dropped. That does not prove
+  and Yggdrasil, a prefix block on the real engine: a connection to an address inside
+  the Yggdrasil node's /64 that SocketGuard did not assign is dropped. That does not prove
   the /64 filter alone (the interface scope of the same adapter drops it too), and the granted-port
   half is SKIPPED when a local-to-local connection does not reach the permit; upgrade (restarted daemon, same
   database file, same stored state, no `uninstall`); removal (service, filters and group gone, data
@@ -195,29 +192,27 @@ and the Yggdrasil assertions are SKIPPED with that reason, not faked); Tor needs
 - **portable zip** (Windows runner, `test/portable.ps1`): start from the unzipped folder with
   `--portable`; real WFP filters admit a granted port and block another; a clean exit and a kill
   (no SocketGuard filter may remain, the next start sweeps the addresses); portable and the
-  installed service refuse to run side by side. Then, with the managed section shared with the MSI
-  test (`test/managed-helpers.ps1`): a managed Tor becomes up (bootstrapped, up to 10 minutes) and
-  `tor.exe` runs as the same account as the portable daemon; a managed Yggdrasil creates the
+  installed service refuse to run side by side. Then, with the Tor and Yggdrasil section shared with the MSI
+  test (`test/managed-helpers.ps1`): a Tor becomes up (bootstrapped, up to 10 minutes) and
+  `tor.exe` runs as the same account as the portable daemon; a Yggdrasil creates the
   `SocketGuard` adapter (SKIPPED with the exact error in `ygg-adapter-error.txt` when the runner
   cannot, never faked); `data\tor` and `data\yggdrasil` are not inherited from `data\`; after the
   clean exit no child, adapter or `third_party` process is left, `session.json` is gone, the Wintun
   driver is removed if and only if the driver store did not have it before, and `footprint-check`
-  agrees. Not covered: the kill with a managed Yggdrasil (the driver staying after it).
+  agrees. Not covered: the kill with a Yggdrasil (the driver staying after it).
 - **deb** (Ubuntu 22.04 VM with systemd): install, unit active and enabled, socket answers, nft
-  table, upgrade restarts onto the new binary and keeps the database inode and state, managed Tor
+  table, upgrade restarts onto the new binary and keeps the database inode and state, Tor
   (as `socketguard-net`) and Yggdrasil (skipped without `/dev/net/tun`), remove, purge.
 - **rpm** (`test/rpm.sh`): dependency resolution, file list, scriptlets and library check in a Fedora
   container without systemd (the service is not started or removed there). It also checks that the
   bundled `tor`, `yggdrasil` and the obfs4 helper are in the package, run as an unprivileged user
-  (`setpriv`) and find their libraries. No managed network runs from an rpm.
+  (`setpriv`) and find their libraries. No Tor or Yggdrasil network runs from an rpm.
 - **rpm on systemd** (`rpm-systemd` job, Fedora container with systemd as PID 1 on the Ubuntu VM, `test/rpm-systemd.sh`): install, `Type=notify` unit active with the nft table present at once, socket, a restart that brings the table back before it returns, upgrade restart onto the same database and state, `dnf remove`, then purge by command and erase.
 - **pkg** (macOS runners `macos-latest` = arm64 and `macos-15-intel` = x86_64, per GitHub's runner table; same test on both): install, launchd daemon answering, pf anchor line, upgrade restart,
-  managed Tor and Yggdrasil, `uninstall --keep-data`, `uninstall --purge` restores `/etc/pf.conf`,
+  Tor and Yggdrasil, `uninstall --keep-data`, `uninstall --purge` restores `/etc/pf.conf`,
   then the manual removal.
 
-Not covered: the range block (`200::/7`) of an existing Yggdrasil node on the real Windows engine
-(it needs an existing node there; the plan test, the nftables and pf renderings and the Linux netns
-test cover it, see `docs/footprint.md`), the installer dialogs (CI installs silently; the access dialog, the WebView2 note and
+Not covered: the installer dialogs (CI installs silently; the access dialog, the WebView2 note and
 the `FORCEREMOVE` path are built but never clicked or run), a standard user elevating with an
 administrator's credentials, Windows 10, Linux distributions other than Ubuntu 22.04 and Fedora,
 signing, and every dialog (see docs/manual-checks.md for the checklist a person runs once).

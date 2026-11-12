@@ -2,31 +2,20 @@ use crate::types::BackendType;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-/// Per-backend configuration
+/// Per-backend configuration. An unknown key is an error, so a stale config fails loudly.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum BackendConfig {
     Ula {
         /// Network interface (defaults to loopback)
         #[serde(default = "default_loopback")]
         interface: String,
     },
+    /// SocketGuard's own Yggdrasil node (ADR 0052, 0056). Its interface is found at
+    /// runtime (ADR 0048).
     Yggdrasil {
-        /// Network interface (e.g. Yggdrasil TUN). None = the interface that holds the
-        /// node's address, found at runtime (ADR 0048).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "ts", ts(optional))]
-        interface: Option<String>,
-        /// Yggdrasil admin socket endpoint (e.g. `unix:///var/run/yggdrasil.sock`).
-        /// None = yggdrasilctl's default.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        admin_endpoint: Option<String>,
-        /// SocketGuard runs its own Yggdrasil node as a child process (ADR 0052). Excludes
-        /// `interface` and `admin_endpoint`.
-        #[serde(default, skip_serializing_if = "is_false")]
-        managed: bool,
-        /// Managed only: peers to connect to, as URIs (`tls://host:port`).
+        /// Peers to connect to, as URIs (`tls://host:port`).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         peers: Vec<String>,
     },
@@ -41,190 +30,61 @@ pub enum BackendConfig {
         /// Physical network interface connected to the router with DHCPv6 server
         interface: String,
     },
-    /// Onion services through a Tor control port (ADR 0037). No interface.
+    /// Onion services through SocketGuard's own Tor (ADR 0037, 0052, 0056). The control
+    /// endpoint and cookie are chosen by the daemon.
     Tor {
-        /// Control port: `host:port` or `unix:/path/to/socket`.
-        #[serde(default = "default_tor_control")]
-        control: String,
-        #[serde(default)]
-        auth: TorAuth,
-        /// With cookie auth: the cookie file PROTOCOLINFO must report. A control port
-        /// naming any other file is refused.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cookie_path: Option<String>,
-        /// With cookie auth: the directory (Tor's data dir) whose owner may own the cookie
-        /// file. Default: the directory of `cookie_path`; without either, only root.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cookie_dir: Option<String>,
-        /// On a Unix control socket: the uid Tor must run as (checked on the peer).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expect_tor_uid: Option<u32>,
-        /// Windows: the SID (`S-1-5-80-...` for a service) of the account Tor runs as,
-        /// besides SYSTEM and Administrators, that may own the cookie file.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cookie_owner: Option<String>,
-        /// Accept a control address that is not loopback (cookie auth only). Off by
-        /// default: whoever is on that path sees the control traffic.
-        #[serde(default, skip_serializing_if = "is_false")]
-        allow_remote_control: bool,
-        /// SocketGuard runs its own Tor as a child process (ADR 0052). The control endpoint
-        /// and cookie are chosen by the daemon; excludes every external field above.
-        #[serde(default, skip_serializing_if = "is_false")]
-        managed: bool,
-        /// obfs4 bridge lines for the managed Tor, in canonical form (see `bridge`); empty
-        /// (the default) connects directly. Only a managed Tor takes them: an existing
-        /// Tor has its own configuration.
+        /// obfs4 bridge lines, in canonical form (see `bridge`); empty (the default)
+        /// connects directly.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         bridges: Vec<String>,
     },
 }
 
-fn is_false(b: &bool) -> bool {
-    !*b
-}
-
-/// How the daemon authenticates to the Tor control port.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TorAuth {
-    /// SAFECOOKIE: the cookie file named by PROTOCOLINFO proves who we talk to and is
-    /// never sent. Plain COOKIE is refused.
-    #[default]
-    Cookie,
-    /// SAFECOOKIE if offered, else plain COOKIE, which hands the cookie to whoever
-    /// answers on the control address. Opt-in for a Tor too old for SAFECOOKIE.
-    #[serde(rename = "cookie_insecure")]
-    CookieInsecure,
-    Password(String),
-    /// No authentication; accepted on a Unix control socket only.
-    None,
-}
-
-/// `Debug` hides the password, so a config in a log line or a panic message never leaks it.
-impl std::fmt::Debug for TorAuth {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TorAuth::Cookie => f.write_str("Cookie"),
-            TorAuth::CookieInsecure => f.write_str("CookieInsecure"),
-            TorAuth::Password(_) => f.write_str("Password(<redacted>)"),
-            TorAuth::None => f.write_str("None"),
-        }
-    }
-}
-
 impl BackendConfig {
-    /// The Tor network `socketguard networks add tor` makes: default control port, cookie
-    /// authentication, nothing else set.
-    pub fn default_tor() -> Self {
-        BackendConfig::Tor {
-            control: default_tor_control(),
-            auth: TorAuth::default(),
-            cookie_path: None,
-            cookie_dir: None,
-            expect_tor_uid: None,
-            cookie_owner: None,
-            allow_remote_control: false,
-            managed: false,
-            bridges: vec![],
-        }
+    /// The Tor network (ADR 0052): nothing to configure.
+    pub fn tor() -> Self {
+        BackendConfig::Tor { bridges: vec![] }
     }
 
-    /// The managed Tor network (ADR 0052): nothing to configure.
-    pub fn managed_tor() -> Self {
-        let mut c = Self::default_tor();
-        if let BackendConfig::Tor { managed, .. } = &mut c {
-            *managed = true;
-        }
-        c
+    /// The Yggdrasil network (ADR 0052) with `peers`.
+    pub fn yggdrasil(peers: Vec<String>) -> Self {
+        BackendConfig::Yggdrasil { peers }
     }
 
-    /// The managed Yggdrasil network (ADR 0052) with `peers`.
-    pub fn managed_yggdrasil(peers: Vec<String>) -> Self {
-        BackendConfig::Yggdrasil {
-            interface: None,
-            admin_endpoint: None,
-            managed: true,
-            peers,
-        }
-    }
-
-    /// SocketGuard runs this network's software itself.
-    pub fn is_managed(&self) -> bool {
+    /// SocketGuard runs this network's software itself as a child process (Tor, Yggdrasil).
+    pub fn runs_child(&self) -> bool {
         matches!(
             self,
-            BackendConfig::Tor { managed: true, .. }
-                | BackendConfig::Yggdrasil { managed: true, .. }
+            BackendConfig::Tor { .. } | BackendConfig::Yggdrasil { .. }
         )
     }
 
-    /// The bridge lines of a managed Tor network; empty otherwise.
+    /// The bridge lines of a Tor network; empty otherwise.
     pub fn bridges(&self) -> &[String] {
         match self {
-            BackendConfig::Tor { bridges, .. } => bridges,
+            BackendConfig::Tor { bridges } => bridges,
             _ => &[],
         }
     }
 
-    /// The peers of a managed Yggdrasil network; empty otherwise.
+    /// The peers of a Yggdrasil network; empty otherwise.
     pub fn peers(&self) -> &[String] {
         match self {
-            BackendConfig::Yggdrasil { peers, .. } => peers,
+            BackendConfig::Yggdrasil { peers } => peers,
             _ => &[],
         }
     }
 
-    /// Whether the settings are consistent: a managed network carries none of the external
-    /// fields, peers only make sense on a managed Yggdrasil, and every peer is a URI.
-    pub fn validate_managed(&self) -> Result<(), String> {
+    /// Whether the settings are consistent: every Tor bridge is a valid line and every
+    /// Yggdrasil peer a URI, none twice.
+    pub fn validate(&self) -> Result<(), String> {
         match self {
-            BackendConfig::Tor {
-                control,
-                auth,
-                cookie_path,
-                cookie_dir,
-                expect_tor_uid,
-                cookie_owner,
-                allow_remote_control,
-                managed: true,
-                bridges,
-            } => {
-                let external = control != DEFAULT_TOR_CONTROL
-                    || *auth != TorAuth::default()
-                    || cookie_path.is_some()
-                    || cookie_dir.is_some()
-                    || expect_tor_uid.is_some()
-                    || cookie_owner.is_some()
-                    || *allow_remote_control;
-                if external {
-                    return Err("a managed Tor network takes no control, auth or cookie \
-                         settings; SocketGuard chooses them"
-                        .into());
-                }
+            BackendConfig::Tor { bridges } => {
                 // The torrc is written from the canonical form, whatever the file holds.
                 crate::bridge::normalize_bridges(bridges)?;
                 Ok(())
             }
-            BackendConfig::Tor { bridges, .. } if !bridges.is_empty() => Err(
-                "bridges can only be set on a managed Tor network (an existing Tor has its own configuration)"
-                    .into(),
-            ),
-            BackendConfig::Yggdrasil {
-                interface,
-                admin_endpoint,
-                managed,
-                peers,
-            } => {
-                if *managed && (interface.is_some() || admin_endpoint.is_some()) {
-                    return Err("a managed Yggdrasil network takes no interface or admin \
-                         endpoint; SocketGuard chooses them"
-                        .into());
-                }
-                if !*managed && !peers.is_empty() {
-                    return Err("peers can only be set on a managed Yggdrasil network (an \
-                         existing node has its own configuration)"
-                        .into());
-                }
+            BackendConfig::Yggdrasil { peers } => {
                 let mut seen = HashSet::new();
                 for p in peers {
                     valid_peer_uri(p)?;
@@ -304,14 +164,13 @@ impl BackendConfig {
         }
     }
 
-    /// The network interface; None for networks without one (Tor).
+    /// The network interface; None for networks without one (Tor, Yggdrasil: found at runtime).
     pub fn interface(&self) -> Option<&str> {
         match self {
             BackendConfig::Ula { interface } => Some(interface),
-            BackendConfig::Yggdrasil { interface, .. } => interface.as_deref(),
             BackendConfig::Slaac { interface, .. } => Some(interface),
             BackendConfig::Dhcpv6 { interface } => Some(interface),
-            BackendConfig::Tor { .. } => None,
+            BackendConfig::Yggdrasil { .. } | BackendConfig::Tor { .. } => None,
         }
     }
 
@@ -338,33 +197,37 @@ impl BackendConfig {
 }
 
 /// A backend instance with a stable ID. On input the `id` is optional and defaults to
-/// [`BackendConfig::default_id`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "RawBackendInstance")]
+/// [`BackendConfig::default_id`]; an unknown key is an error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BackendInstanceConfig {
     pub id: String,
     #[serde(flatten)]
     pub backend: BackendConfig,
 }
 
-#[derive(Deserialize)]
-struct RawBackendInstance {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(flatten)]
-    backend: BackendConfig,
-}
-
-impl From<RawBackendInstance> for BackendInstanceConfig {
-    fn from(raw: RawBackendInstance) -> Self {
-        let id = raw
-            .id
+/// Read through a generic value: `deny_unknown_fields` (on [`BackendConfig`], which owns the
+/// other keys) cannot be combined with a flattened `id`.
+impl<'de> Deserialize<'de> for BackendInstanceConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let serde_json::Value::Object(mut map) = serde_json::Value::deserialize(deserializer)?
+        else {
+            return Err(D::Error::custom("a backend must be an object"));
+        };
+        let id = match map.remove("id") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) => Some(s),
+            Some(_) => return Err(D::Error::custom("a backend's id must be a string")),
+        };
+        let backend =
+            BackendConfig::deserialize(serde_json::Value::Object(map)).map_err(D::Error::custom)?;
+        let id = id
             .filter(|id| !id.is_empty())
-            .unwrap_or_else(|| raw.backend.default_id());
-        Self {
-            id,
-            backend: raw.backend,
-        }
+            .unwrap_or_else(|| backend.default_id());
+        Ok(Self { id, backend })
     }
 }
 
@@ -379,6 +242,7 @@ pub enum FilterMode {
 
 /// Process filter: controls which processes get IPv6 addresses assigned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessFilter {
     #[serde(default)]
     pub mode: FilterMode,
@@ -534,7 +398,7 @@ impl DaemonConfig {
                 _ => {}
             }
             inst.backend
-                .validate_managed()
+                .validate()
                 .map_err(|e| format!("backend '{}': {e}", inst.id))?;
             if let Some(iface) = inst.backend.interface() {
                 if iface.is_empty() {
@@ -570,14 +434,6 @@ pub fn valid_interface_name(name: &str) -> bool {
         })
 }
 
-/// Default Tor control port.
-/// Where `socketguard networks add tor` expects Tor.
-pub const DEFAULT_TOR_CONTROL: &str = "127.0.0.1:9051";
-
-fn default_tor_control() -> String {
-    DEFAULT_TOR_CONTROL.to_string()
-}
-
 /// The loopback interface of this platform.
 pub fn default_loopback() -> String {
     if cfg!(target_os = "linux") {
@@ -596,6 +452,7 @@ impl<'de> Deserialize<'de> for DaemonConfig {
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct RawConfig {
             #[serde(default = "default_api_socket")]
             api_socket: String,
@@ -703,7 +560,7 @@ mod tests {
 
     #[test]
     fn hostile_interface_is_rejected_on_load() {
-        let json = r#"{"backends":[{"type":"yggdrasil","interface":"ygg0\"\n flush ruleset"}]}"#;
+        let json = r#"{"backends":[{"type":"slaac","interface":"eth0\"\n flush ruleset"}]}"#;
         assert!(serde_json::from_str::<DaemonConfig>(json).is_err());
     }
 
@@ -721,8 +578,7 @@ mod tests {
         assert_eq!(config.backends[0].id, "slaac-eth0");
         assert_eq!(config.backends[1].id, "mine");
 
-        let inst: BackendInstanceConfig =
-            serde_json::from_str(r#"{"type":"yggdrasil","interface":"ygg0"}"#).unwrap();
+        let inst: BackendInstanceConfig = serde_json::from_str(r#"{"type":"yggdrasil"}"#).unwrap();
         assert_eq!(inst.id, "yggdrasil");
     }
 
@@ -864,13 +720,8 @@ mod tests {
         };
         assert_eq!(ula.interface(), Some("lo"));
 
-        let ygg = BackendConfig::Yggdrasil {
-            interface: Some("tun0".to_string()),
-            admin_endpoint: None,
-            managed: false,
-            peers: vec![],
-        };
-        assert_eq!(ygg.interface(), Some("tun0"));
+        let ygg = BackendConfig::yggdrasil(vec![]);
+        assert_eq!(ygg.interface(), None);
 
         let slaac = BackendConfig::Slaac {
             interface: "eth0".to_string(),
@@ -878,17 +729,7 @@ mod tests {
         };
         assert_eq!(slaac.interface(), Some("eth0"));
 
-        let tor = BackendConfig::Tor {
-            control: DEFAULT_TOR_CONTROL.to_string(),
-            auth: TorAuth::Cookie,
-            cookie_path: None,
-            cookie_dir: None,
-            expect_tor_uid: None,
-            cookie_owner: None,
-            allow_remote_control: false,
-            managed: false,
-            bridges: vec![],
-        };
+        let tor = BackendConfig::tor();
         assert_eq!(tor.interface(), None);
         assert!(tor.is_singleton());
         assert_eq!(tor.default_id(), "tor");
@@ -898,99 +739,24 @@ mod tests {
     fn tor_backend_config_roundtrip() {
         let defaults: BackendInstanceConfig = serde_json::from_str(r#"{"type":"tor"}"#).unwrap();
         assert_eq!(defaults.id, "tor");
-        assert_eq!(
-            defaults.backend,
-            BackendConfig::Tor {
-                control: "127.0.0.1:9051".into(),
-                auth: TorAuth::Cookie,
-                cookie_path: None,
-                cookie_dir: None,
-                expect_tor_uid: None,
-                cookie_owner: None,
-                allow_remote_control: false,
-                managed: false,
-                bridges: vec![],
-            }
-        );
-        for auth in [
-            TorAuth::Cookie,
-            TorAuth::CookieInsecure,
-            TorAuth::None,
-            TorAuth::Password("pw".into()),
-        ] {
-            let inst = BackendInstanceConfig {
-                id: "tor".into(),
-                backend: BackendConfig::Tor {
-                    control: "unix:/run/tor/control".into(),
-                    auth,
-                    cookie_path: Some("/var/lib/tor/control_auth_cookie".into()),
-                    cookie_dir: None,
-                    expect_tor_uid: Some(110),
-                    cookie_owner: None,
-                    allow_remote_control: false,
-                    managed: false,
-                    bridges: vec![],
-                },
-            };
-            let json = serde_json::to_string(&inst).unwrap();
-            assert_eq!(
-                serde_json::from_str::<BackendInstanceConfig>(&json).unwrap(),
-                inst
-            );
-        }
-        let json = r#"{"type":"tor","auth":{"password":"pw"}}"#;
-        let inst: BackendInstanceConfig = serde_json::from_str(json).unwrap();
-        assert!(matches!(
-            inst.backend,
-            BackendConfig::Tor { auth: TorAuth::Password(ref p), .. } if p == "pw"
-        ));
-        let json = r#"{"type":"tor","auth":"cookie_insecure"}"#;
-        let inst: BackendInstanceConfig = serde_json::from_str(json).unwrap();
-        assert!(matches!(
-            inst.backend,
-            BackendConfig::Tor {
-                auth: TorAuth::CookieInsecure,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn the_tor_password_is_not_debug_printed() {
-        let auth = TorAuth::Password("hunter2".into());
-        assert!(!format!("{auth:?}").contains("hunter2"));
+        assert_eq!(defaults.backend, BackendConfig::tor());
         let inst = BackendInstanceConfig {
             id: "tor".into(),
-            backend: BackendConfig::Tor {
-                control: DEFAULT_TOR_CONTROL.into(),
-                auth,
-                cookie_path: None,
-                cookie_dir: None,
-                expect_tor_uid: None,
-                cookie_owner: None,
-                allow_remote_control: false,
-                managed: false,
-                bridges: vec![],
-            },
+            backend: BackendConfig::tor(),
         };
-        assert!(!format!("{inst:?}").contains("hunter2"));
+        let json = serde_json::to_string(&inst).unwrap();
+        assert_eq!(json, r#"{"id":"tor","type":"tor"}"#);
+        assert_eq!(
+            serde_json::from_str::<BackendInstanceConfig>(&json).unwrap(),
+            inst
+        );
     }
 
     #[test]
     fn at_most_one_tor_backend() {
         let tor = |id: &str| BackendInstanceConfig {
             id: id.into(),
-            backend: BackendConfig::Tor {
-                control: DEFAULT_TOR_CONTROL.into(),
-                auth: TorAuth::Cookie,
-                cookie_path: None,
-                cookie_dir: None,
-                expect_tor_uid: None,
-                cookie_owner: None,
-                allow_remote_control: false,
-                managed: false,
-                bridges: vec![],
-            },
+            backend: BackendConfig::tor(),
         };
         assert!(DaemonConfig::validate_backends(&[tor("tor")]).is_ok());
         let err = DaemonConfig::validate_backends(&[tor("a"), tor("b")]).unwrap_err();
@@ -1095,16 +861,7 @@ mod tests {
             .default_id(),
             "ula"
         );
-        assert_eq!(
-            BackendConfig::Yggdrasil {
-                interface: Some("tun0".into()),
-                admin_endpoint: None,
-                managed: false,
-                peers: vec![],
-            }
-            .default_id(),
-            "yggdrasil"
-        );
+        assert_eq!(BackendConfig::yggdrasil(vec![]).default_id(), "yggdrasil");
         assert_eq!(
             BackendConfig::Slaac {
                 interface: "Ethernet".into(),
@@ -1123,51 +880,39 @@ mod tests {
     }
 
     #[test]
-    fn managed_networks_take_no_external_settings() {
+    fn peers_are_checked() {
         let ok: BackendInstanceConfig = serde_json::from_str(
-            r#"{"type":"yggdrasil","managed":true,"peers":["tls://example.org:1234","tcp://[2001:db8::1]:9"]}"#,
+            r#"{"type":"yggdrasil","peers":["tls://example.org:1234","tcp://[2001:db8::1]:9"]}"#,
         )
         .unwrap();
         assert_eq!(ok.id, "yggdrasil");
-        assert!(ok.backend.is_managed());
-        assert_eq!(ok.backend.validate_managed(), Ok(()));
-        assert!(BackendConfig::managed_tor().validate_managed().is_ok());
-        assert!(BackendConfig::managed_tor().is_managed());
-        assert!(!BackendConfig::default_tor().is_managed());
+        assert_eq!(ok.backend.validate(), Ok(()));
+        assert!(BackendConfig::tor().validate().is_ok());
 
         let bad = |json: &str| {
             let inst: BackendInstanceConfig = serde_json::from_str(json).unwrap();
             DaemonConfig::validate_backends(&[inst]).unwrap_err()
         };
-        bad(r#"{"type":"tor","managed":true,"control":"127.0.0.1:9999"}"#);
-        bad(r#"{"type":"tor","managed":true,"cookie_path":"/x"}"#);
-        bad(r#"{"type":"tor","managed":true,"auth":"none"}"#);
-        bad(r#"{"type":"yggdrasil","managed":true,"interface":"tun0"}"#);
-        bad(r#"{"type":"yggdrasil","managed":true,"admin_endpoint":"tcp://x:1"}"#);
-        // Peers belong to a managed node only.
-        bad(r#"{"type":"yggdrasil","peers":["tls://a.b:1"]}"#);
-        bad(r#"{"type":"yggdrasil","managed":true,"peers":["tls://a.b:1","tls://a.b:1"]}"#);
+        bad(r#"{"type":"yggdrasil","peers":["tls://a.b:1","tls://a.b:1"]}"#);
+        bad(r#"{"type":"yggdrasil","peers":["http://a.b:1"]}"#);
     }
 
     #[test]
-    fn bridges_belong_to_a_managed_tor_and_must_be_bridge_lines() {
+    fn bridges_must_be_bridge_lines() {
         let line = "obfs4 192.0.2.10:443 0123456789ABCDEF0123456789ABCDEF01234567 cert=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA iat-mode=0";
-        let json = |managed: bool, b: &str| {
-            format!(r#"{{"type":"tor","managed":{managed},"bridges":[{b}]}}"#)
-        };
-        let check = |j: String| {
-            let inst: BackendInstanceConfig = serde_json::from_str(&j).unwrap();
+        let check = |b: &str| {
+            let inst: BackendInstanceConfig =
+                serde_json::from_str(&format!(r#"{{"type":"tor","bridges":[{b}]}}"#)).unwrap();
             DaemonConfig::validate_backends(&[inst])
         };
-        assert!(check(json(true, &format!("{line:?}"))).is_ok());
+        assert!(check(&format!("{line:?}")).is_ok());
         // Empty is the default and is not written.
-        assert!(BackendConfig::managed_tor().bridges().is_empty());
-        assert!(!serde_json::to_string(&BackendConfig::managed_tor())
+        assert!(BackendConfig::tor().bridges().is_empty());
+        assert!(!serde_json::to_string(&BackendConfig::tor())
             .unwrap()
             .contains("bridges"));
-        assert!(check(json(false, &format!("{line:?}"))).is_err());
-        assert!(check(json(true, r#""snowflake 192.0.2.3:80""#)).is_err());
-        assert!(check(json(true, r#""obfs4 1.2.3.4:5\nSocksPort 1""#)).is_err());
+        assert!(check(r#""snowflake 192.0.2.3:80""#).is_err());
+        assert!(check(r#""obfs4 1.2.3.4:5\nSocksPort 1""#).is_err());
     }
 
     #[test]
@@ -1199,10 +944,37 @@ mod tests {
     }
 
     #[test]
-    fn a_config_without_managed_stays_external() {
-        let inst: BackendInstanceConfig = serde_json::from_str(r#"{"type":"tor"}"#).unwrap();
-        assert!(!inst.backend.is_managed());
-        let text = serde_json::to_string(&inst).unwrap();
-        assert!(!text.contains("managed"));
+    fn unknown_keys_are_refused_and_named() {
+        let err = |json: &str| {
+            serde_json::from_str::<DaemonConfig>(json)
+                .unwrap_err()
+                .to_string()
+        };
+        // Top level.
+        let e = err(r#"{"backend":"ula"}"#);
+        assert!(e.contains("backend"), "{e}");
+        // A backend: the keys of the removed own/existing distinction and of existing nodes.
+        for key in [
+            "managed",
+            "control",
+            "auth",
+            "cookie_path",
+            "interface",
+            "admin_endpoint",
+        ] {
+            let tor = format!(r#"{{"backends":[{{"type":"tor","{key}":"x"}}]}}"#);
+            let e = err(&tor);
+            assert!(e.contains(key), "{key}: {e}");
+        }
+        let e = err(r#"{"backends":[{"type":"yggdrasil","managed":true}]}"#);
+        assert!(e.contains("managed"), "{e}");
+        // The process filter.
+        let e = err(r#"{"process_filter":{"mode":"denylist","pattern":[]}}"#);
+        assert!(e.contains("pattern"), "{e}");
+        // The same keys are fine where they belong.
+        serde_json::from_str::<DaemonConfig>(
+            r#"{"backends":[{"type":"slaac","interface":"eth0","prefix":"auto"}],"log_level":"debug"}"#,
+        )
+        .unwrap();
     }
 }

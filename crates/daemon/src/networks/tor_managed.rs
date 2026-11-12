@@ -1,11 +1,11 @@
-//! The managed Tor network (ADR 0052): SocketGuard runs its own `tor` as a child process.
+//! SocketGuard's own Tor (ADR 0052, 0056): it runs `tor` as a child process.
 //!
-//! The existing Tor backend (`tor.rs`, `tor_control.rs`) does the work over the control
-//! port; this module is what is specific to a Tor the daemon started itself: where its
-//! files live, the `torrc` it is started with, who it runs as, and how to reach and trust
-//! its control port. The control address and the cookie path are built here from the state
-//! directory, never from what Tor says about itself (ADR 0040), and the cookie is vetted
-//! against the account Tor runs as.
+//! The Tor network (`tor.rs`, `tor_control.rs`) does the work over the control port; this
+//! module is what is specific to a Tor the daemon started itself: where its files live, the
+//! `torrc` it is started with, who it runs as, and how to reach and trust its control port.
+//! The control address and the cookie path are built here from the state directory, never
+//! from what Tor says about itself (ADR 0040), and the cookie is vetted against the account
+//! Tor runs as.
 
 use super::managed::ManagedCtx;
 use super::tor_control::{AuthOptions, Control, Endpoint};
@@ -13,13 +13,19 @@ use crate::account::{self, Accounts};
 use crate::children::{ChildHealth, ChildSpec, ChildStatus, HealthCheck, RunAs, StatusHandle};
 use anyhow::{anyhow, Context, Result};
 use socketguard_core::bridge;
-use socketguard_core::config::TorAuth;
 use socketguard_core::{ChildState, ManagedInfo};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-/// The directory of the managed Tor under the state directory.
+/// The directory of Tor under the state directory.
 pub const DIR: &str = "tor";
+
+/// Tor is restarted when its bootstrap has made no progress for this long (it sometimes stalls
+/// for good, e.g. while loading relay descriptors). Only the start is watched.
+pub const BOOTSTRAP_STALL: Duration = Duration::from_secs(3 * 60);
+/// The same through bridges, whose bootstrap is slower.
+pub const BOOTSTRAP_STALL_BRIDGES: Duration = Duration::from_secs(10 * 60);
 
 /// Where the managed Tor keeps its files.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +199,8 @@ pub struct ManagedTor {
     ctx: ManagedCtx,
     status: StatusHandle,
     paths: Result<TorPaths, String>,
+    /// Tests: a control port to use instead of the child's, and a child that is up.
+    fixed: Option<(Endpoint, AuthOptions)>,
 }
 
 impl ManagedTor {
@@ -202,6 +210,17 @@ impl ManagedTor {
             status: ctx.children.handle(id),
             paths: ctx.state_dir().map(TorPaths::new),
             ctx: ctx.clone(),
+            fixed: None,
+        }
+    }
+
+    /// A Tor that is up and reached at `control` (`host:port`), trusting the cookie file
+    /// that `opts` names; for tests that script the control port.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_control(control: String, opts: AuthOptions) -> Self {
+        Self {
+            fixed: Some((Endpoint::Tcp(control), opts)),
+            ..Self::new("tor", &ManagedCtx::inert())
         }
     }
 
@@ -210,7 +229,7 @@ impl ManagedTor {
     }
 
     pub fn is_up(&self) -> bool {
-        self.child().state == ChildState::Up
+        self.fixed.is_some() || self.child().state == ChildState::Up
     }
 
     /// Why the network is down while the child is not `Up`; empty when it is. `detailed`
@@ -275,6 +294,9 @@ impl ManagedTor {
     /// The control endpoint and how to vet and authenticate it, built from our own paths and
     /// the account Tor runs as.
     pub fn connect_params(&self) -> Result<(Endpoint, AuthOptions)> {
+        if let Some(fixed) = &self.fixed {
+            return Ok(fixed.clone());
+        }
         let paths = self.paths()?;
         let endpoint = if cfg!(windows) {
             let text = std::fs::read_to_string(&paths.control_port_file)
@@ -285,7 +307,6 @@ impl ManagedTor {
         };
         let run_as = resolve_run_as(self.ctx.accounts.as_ref());
         let mut opts = AuthOptions {
-            auth: TorAuth::Cookie,
             cookie_path: Some(paths.cookie.display().to_string()),
             cookie_dir: Some(paths.dir.display().to_string()),
             ..AuthOptions::default()
@@ -370,6 +391,11 @@ impl ManagedTor {
             on_exit: None,
             start_deadline: None,
             on_deadline: None,
+            stall_limit: Some(if bridges.is_empty() {
+                BOOTSTRAP_STALL
+            } else {
+                BOOTSTRAP_STALL_BRIDGES
+            }),
             // The torrc differs with the bridges: a change restarts Tor.
             config_tag: bridges.join("\n"),
         })
@@ -664,6 +690,9 @@ mod tests {
         assert!(t.info().bridges_unavailable.is_none());
         let plain = t.spec().unwrap();
         let spec = t.spec_with_bridges(&[format!("Bridge {BRIDGE}")]).unwrap();
+        // Bridges bootstrap more slowly: the stall watchdog waits longer.
+        assert_eq!(spec.stall_limit, Some(BOOTSTRAP_STALL_BRIDGES));
+        assert_eq!(t.spec().unwrap().stall_limit, Some(BOOTSTRAP_STALL));
         assert!(!spec.same_launch(&plain), "a bridge change restarts Tor");
         assert_eq!(spec.config_tag, BRIDGE, "stored canonical");
         assert_eq!(spec.cwd.as_deref(), Some(third.as_path()));
@@ -838,12 +867,10 @@ mod tests {
             }
         }
         let (_, o) = t.connect_params().unwrap();
-        assert_eq!(o.auth, TorAuth::Cookie);
         assert_eq!(
             o.cookie_path.as_deref(),
             Some(d.join("tor").join("control_auth_cookie").to_str().unwrap())
         );
-        assert!(!o.allow_remote_control);
     }
 
     /// A daemon that is not SYSTEM runs Tor as itself: the directory is protected without

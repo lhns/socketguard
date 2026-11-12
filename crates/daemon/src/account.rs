@@ -267,7 +267,7 @@ pub fn ensure(host: &mut dyn Host, record: &Record) -> Result<()> {
         bail!("the account {NAME} does not exist after creating it");
     }
     host.say(&format!(
-        "Created the system account {NAME} for the managed networks."
+        "Created the system account {NAME} for Tor and Yggdrasil."
     ));
     Ok(())
 }

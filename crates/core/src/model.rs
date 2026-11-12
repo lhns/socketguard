@@ -278,13 +278,13 @@ pub struct Network {
     /// show the adapter as a plain interface).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vlan_id: Option<u16>,
-    /// Set when SocketGuard runs this network's software itself (ADR 0052).
+    /// Tor and Yggdrasil: how SocketGuard's own copy stands (ADR 0052, 0056).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub managed: Option<ManagedInfo>,
 }
 
-/// Where the child process of a managed network stands.
+/// Where the child process of a Tor or Yggdrasil network stands.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -304,7 +304,7 @@ pub enum ChildState {
     Unavailable,
 }
 
-/// A managed network: how its child process is doing.
+/// A Tor or Yggdrasil network: how its child process is doing.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedInfo {
@@ -586,7 +586,7 @@ pub enum ActivityKind {
     ProtectHostChanged,
     Blocked,
     RemoteAdminExposed,
-    /// A network's settings changed (a managed Yggdrasil's peers).
+    /// A network's settings changed (a Yggdrasil's peers).
     NetworkChanged,
 }
 

@@ -2,19 +2,10 @@
 import type { SetupStatus } from "./SetupStatus";
 
 /**
- * An existing, system-wide node of one kind.
+ * The Local network on this host.
  */
 export type SetupState = { state: SetupStatus, 
 /**
- * What was detected: `interface`, `address`, `version`, `control`, `cookie_path`, ...
+ * What was detected: `interface`.
  */
-found: { [key in string]?: string }, 
-/**
- * A node runs that SocketGuard does not manage (ADR 0051): the host may be reachable
- * over it. Only set for Yggdrasil.
- */
-exposed: boolean, 
-/**
- * A plain sentence to show above the Add button.
- */
-warning?: string, };
+found: { [key in string]?: string }, };

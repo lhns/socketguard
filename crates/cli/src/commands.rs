@@ -20,7 +20,6 @@ use socketguard_core::api_types::{
     MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation,
     NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest, UpdatePortGroup, UpdateTag,
 };
-use socketguard_core::config::TorAuth;
 use socketguard_core::{
     ActivityKind, ActivityQuery, ActivityRecord, App, BackendConfig, BindingTarget, CredentialKind,
     GrantView, NewCredential, NewGrant, Peer, PeerGroup, PortGroup, ReservationView, Scope,
@@ -69,17 +68,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Init => flows::init(&c, &mut prompt::Stdin).await,
         Command::Export(a) => export(&c, a).await,
         Command::Apply(a) => apply(&c, a).await,
-        Command::Exposure { without } => {
-            let e = c.client.exposure(without.as_deref()).await?;
-            c.print(&e, || {
-                let text = render::exposure(&e);
-                if text.is_empty() {
-                    "nothing becomes reachable: no Yggdrasil node keeps running".to_string()
-                } else {
-                    text
-                }
-            })
-        }
         Command::Disable(a) => disable(&c, a).await,
         Command::Enable => enable(&c).await,
         Command::Shutdown => shutdown(&c).await,
@@ -272,31 +260,11 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
         }
         NetworksCmd::Add {
             r#type,
-            existing,
             peers,
             interface,
             id,
-            admin_endpoint,
-            control,
-            password,
-            password_env,
-            password_stdin,
         } => {
-            let flags = NetworkFlags {
-                existing,
-                peers,
-                interface,
-                admin_endpoint,
-                control,
-                password_given: password.is_some() || password_env.is_some() || password_stdin,
-            };
-            flags.check(r#type)?;
-            let backend = if flags.existing && r#type == NetworkType::Tor {
-                let password = tor_password(password, password_env, password_stdin)?;
-                tor_config(flags.control, password)
-            } else {
-                network_config(r#type, flags)?
-            };
+            let backend = network_config(r#type, interface, peers)?;
             let saved = c.client.add_network(&NewNetwork { id, backend }).await?;
             c.warn_pending(&saved.enforcement);
             let n = saved.value;
@@ -313,10 +281,12 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
             let Some(network) = networks.iter().find(|n| n.id == id) else {
                 bail!("no network {id}");
             };
-            let Some(managed) = &network.managed else {
-                bail!(
-                    "{id} is not a managed Yggdrasil network; an existing node has its own peers"
-                );
+            let Some(managed) = network
+                .managed
+                .as_ref()
+                .filter(|_| network.kind == socketguard_core::NetworkKind::Yggdrasil)
+            else {
+                bail!("{id} is not a Yggdrasil network");
             };
             if add.is_empty() && rm.is_empty() {
                 return c.print(&managed.peers, || {
@@ -338,9 +308,7 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
                 .as_ref()
                 .filter(|_| network.kind == socketguard_core::NetworkKind::Tor)
             else {
-                bail!(
-                    "{id} is not a managed Tor network; an existing Tor has its own configuration"
-                );
+                bail!("{id} is not a Tor network");
             };
             if add.is_empty() && rm.is_empty() && !clear {
                 return c.print(&managed.bridges, || {
@@ -356,123 +324,25 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
             let now = n.managed.map(|m| m.bridges).unwrap_or(bridges);
             c.print(&now, || render::network_bridges(&id, &now))
         }
-        NetworksCmd::Rm { id, force, yes } => {
-            // Removing the network removes its block: say what that leaves reachable.
-            let exposure = c.client.exposure(Some(&id)).await?;
-            let text = render::exposure(&exposure);
-            if !text.is_empty() {
-                eprintln!("{text}");
-                prompt::Stdin.confirm_or_yes(
-                    yes,
-                    "Remove the network anyway?",
-                    "removing this network leaves the host reachable over it; repeat with --yes to confirm",
-                )?;
-            }
-            c.client.delete_network(&id, force, true).await?;
+        NetworksCmd::Rm { id, force } => {
+            c.client.delete_network(&id, force).await?;
             c.done(format!("removed network {id}"))
         }
     }
 }
 
-/// The Tor control password from the option that gave it: the command line, an
-/// environment variable, or the first line of stdin. Empty is an error.
-fn tor_password(
-    password: Option<String>,
-    env: Option<String>,
-    stdin: bool,
-) -> Result<Option<String>> {
-    let password = match (password, env, stdin) {
-        (Some(p), _, _) => p,
-        (None, Some(var), _) => std::env::var(&var)
-            .map_err(|_| anyhow!("--password-env: {var} is not set to a text value"))?,
-        (None, None, true) => read_password_line(std::io::stdin().lock())?,
-        (None, None, false) => return Ok(None),
-    };
-    if password.is_empty() {
-        bail!("the Tor control password is empty");
+/// The backend config of `networks add`: Tor and Yggdrasil are SocketGuard's own.
+pub fn network_config(
+    kind: NetworkType,
+    interface: Option<String>,
+    peers: Vec<String>,
+) -> Result<BackendConfig> {
+    if !peers.is_empty() && kind != NetworkType::Yggdrasil {
+        bail!("--peer only applies to yggdrasil");
     }
-    Ok(Some(password))
-}
-
-/// The first line of `input`, without its line ending.
-fn read_password_line(mut input: impl std::io::BufRead) -> Result<String> {
-    let mut line = String::new();
-    input
-        .read_line(&mut line)
-        .context("reading the password from stdin")?;
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
-}
-
-/// `tor [--control X] [--password P]` as the daemon's backend config.
-pub fn tor_config(control: Option<String>, password: Option<String>) -> BackendConfig {
-    let mut config = BackendConfig::default_tor();
-    if let BackendConfig::Tor {
-        control: c, auth, ..
-    } = &mut config
-    {
-        if let Some(control) = control {
-            *c = control;
-        }
-        if let Some(password) = password {
-            *auth = TorAuth::Password(password);
-        }
+    if interface.is_some() && matches!(kind, NetworkType::Tor | NetworkType::Yggdrasil) {
+        bail!("{kind} has no --interface: SocketGuard runs its own and chooses it");
     }
-    config
-}
-
-/// The flags of `networks add`, to check against the kind of network.
-pub struct NetworkFlags {
-    pub existing: bool,
-    pub peers: Vec<String>,
-    pub interface: Option<String>,
-    pub admin_endpoint: Option<String>,
-    pub control: Option<String>,
-    pub password_given: bool,
-}
-
-impl NetworkFlags {
-    /// Refuse a flag that does not belong to the kind and form (managed or `--existing`).
-    pub fn check(&self, kind: NetworkType) -> Result<()> {
-        let tor_or_ygg = matches!(kind, NetworkType::Tor | NetworkType::Yggdrasil);
-        if self.existing && !tor_or_ygg {
-            bail!("--existing only applies to tor and yggdrasil");
-        }
-        if !self.peers.is_empty() && (kind != NetworkType::Yggdrasil || self.existing) {
-            bail!("--peer only applies to a managed yggdrasil (without --existing)");
-        }
-        let external = self.control.is_some() || self.password_given;
-        match kind {
-            NetworkType::Tor => {
-                if self.interface.is_some() || self.admin_endpoint.is_some() {
-                    bail!("tor has no --interface or --admin-endpoint");
-                }
-                if !self.existing && external {
-                    bail!("--control and the --password options need --existing: SocketGuard's own Tor takes no settings");
-                }
-            }
-            _ => {
-                if external {
-                    bail!("--control and the --password options only apply to tor");
-                }
-                if kind == NetworkType::Yggdrasil
-                    && !self.existing
-                    && (self.interface.is_some() || self.admin_endpoint.is_some())
-                {
-                    bail!("--interface and --admin-endpoint need --existing: SocketGuard's own Yggdrasil takes no settings");
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-/// The backend config of `networks add` for every kind but an existing Tor. Tor and
-/// Yggdrasil are SocketGuard's own copies unless `existing`.
-pub fn network_config(kind: NetworkType, f: NetworkFlags) -> Result<BackendConfig> {
-    if f.admin_endpoint.is_some() && kind != NetworkType::Yggdrasil {
-        bail!("--admin-endpoint only applies to yggdrasil");
-    }
-    let interface = f.interface;
     let required = || {
         interface
             .clone()
@@ -493,15 +363,8 @@ pub fn network_config(kind: NetworkType, f: NetworkFlags) -> Result<BackendConfi
         NetworkType::Dhcpv6 => BackendConfig::Dhcpv6 {
             interface: required()?,
         },
-        NetworkType::Yggdrasil if f.existing => BackendConfig::Yggdrasil {
-            interface,
-            admin_endpoint: f.admin_endpoint,
-            managed: false,
-            peers: vec![],
-        },
-        NetworkType::Yggdrasil => BackendConfig::managed_yggdrasil(f.peers),
-        // An existing Tor is built by `tor_config`, which also takes the password.
-        NetworkType::Tor => BackendConfig::managed_tor(),
+        NetworkType::Yggdrasil => BackendConfig::yggdrasil(peers),
+        NetworkType::Tor => BackendConfig::tor(),
     })
 }
 
@@ -1936,10 +1799,6 @@ async fn apply(c: &Ctx, a: ApplyArgs) -> Result<()> {
 // ─── Disable and enable ──────────────────────────────────────────────────────
 
 async fn disable(c: &Ctx, a: DisableArgs) -> Result<()> {
-    let text = render::exposure(&c.client.exposure(None).await?);
-    if !text.is_empty() {
-        eprintln!("{text}");
-    }
     prompt::Stdin.confirm_or_yes(
         a.yes,
         "Remove all SocketGuard rules and addresses, opening the host?",
@@ -1982,109 +1841,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_password_comes_from_the_option_given() {
-        assert_eq!(tor_password(None, None, false).unwrap(), None);
-        assert_eq!(
-            tor_password(Some("pw".into()), None, false)
-                .unwrap()
-                .as_deref(),
-            Some("pw")
-        );
-        std::env::set_var("SOCKETGUARD_TEST_TOR_PW", "from env");
-        assert_eq!(
-            tor_password(None, Some("SOCKETGUARD_TEST_TOR_PW".into()), false)
-                .unwrap()
-                .as_deref(),
-            Some("from env")
-        );
-        std::env::remove_var("SOCKETGUARD_TEST_TOR_PW");
-        let err = tor_password(None, Some("SOCKETGUARD_TEST_TOR_PW".into()), false)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("SOCKETGUARD_TEST_TOR_PW"), "{err}");
-        assert!(tor_password(Some(String::new()), None, false).is_err());
-    }
-
-    #[test]
-    fn the_password_is_the_first_line_of_stdin() {
-        assert_eq!(
-            read_password_line(&b"s3cret\r\nmore\n"[..]).unwrap(),
-            "s3cret"
-        );
-        assert_eq!(
-            read_password_line(&b"no newline"[..]).unwrap(),
-            "no newline"
-        );
-        assert_eq!(read_password_line(&b""[..]).unwrap(), "");
-    }
-
-    fn flags() -> NetworkFlags {
-        NetworkFlags {
-            existing: false,
-            peers: vec![],
-            interface: None,
-            admin_endpoint: None,
-            control: None,
-            password_given: false,
-        }
-    }
-
-    fn config(kind: NetworkType, f: NetworkFlags) -> Result<BackendConfig> {
-        f.check(kind)?;
-        network_config(kind, f)
-    }
-
-    #[test]
     fn network_configs_are_built_from_the_flags() {
+        let config = network_config;
         assert_eq!(
-            config(NetworkType::Ula, flags()).unwrap(),
+            config(NetworkType::Ula, None, vec![]).unwrap(),
             BackendConfig::default()
         );
         assert_eq!(
-            config(
-                NetworkType::Yggdrasil,
-                NetworkFlags {
-                    existing: true,
-                    interface: Some("ygg0".into()),
-                    admin_endpoint: Some("unix:///y".into()),
-                    ..flags()
-                }
-            )
-            .unwrap(),
-            BackendConfig::Yggdrasil {
-                interface: Some("ygg0".into()),
-                admin_endpoint: Some("unix:///y".into()),
-                managed: false,
-                peers: vec![],
-            }
-        );
-        assert_eq!(
-            config(
-                NetworkType::Slaac,
-                NetworkFlags {
-                    interface: Some("eth0".into()),
-                    ..flags()
-                }
-            )
-            .unwrap(),
+            config(NetworkType::Slaac, Some("eth0".into()), vec![]).unwrap(),
             BackendConfig::Slaac {
                 interface: "eth0".into(),
                 prefix: None,
             }
         );
-        let err = config(NetworkType::Dhcpv6, flags())
+        let err = config(NetworkType::Dhcpv6, None, vec![])
             .unwrap_err()
             .to_string();
         assert!(err.contains("--interface is required for dhcpv6"), "{err}");
-        assert!(config(
-            NetworkType::Slaac,
-            NetworkFlags {
-                interface: Some("eth0".into()),
-                admin_endpoint: Some("x".into()),
-                ..flags()
-            }
-        )
-        .is_err());
     }
 
     #[test]
@@ -2104,88 +1877,26 @@ mod tests {
     }
 
     #[test]
-    fn tor_and_yggdrasil_are_managed_unless_existing() {
+    fn tor_and_yggdrasil_are_always_socketguards_own() {
         assert_eq!(
-            config(NetworkType::Tor, flags()).unwrap(),
-            BackendConfig::managed_tor()
+            network_config(NetworkType::Tor, None, vec![]).unwrap(),
+            BackendConfig::tor()
         );
         assert_eq!(
-            config(
+            network_config(
                 NetworkType::Yggdrasil,
-                NetworkFlags {
-                    peers: vec!["tls://a.example:1".into()],
-                    ..flags()
-                }
+                None,
+                vec!["tls://a.example:1".into()]
             )
             .unwrap(),
-            BackendConfig::managed_yggdrasil(vec!["tls://a.example:1".into()])
+            BackendConfig::yggdrasil(vec!["tls://a.example:1".into()])
         );
-        // Settings of an existing node mean nothing for SocketGuard's own copy.
+        // They have no interface to choose, and peers are for Yggdrasil.
         let peer = vec!["tls://a.example:1".to_string()];
-        for (kind, f) in [
-            (
-                NetworkType::Tor,
-                NetworkFlags {
-                    control: Some("127.0.0.1:9999".into()),
-                    ..flags()
-                },
-            ),
-            (
-                NetworkType::Tor,
-                NetworkFlags {
-                    password_given: true,
-                    ..flags()
-                },
-            ),
-            (
-                NetworkType::Yggdrasil,
-                NetworkFlags {
-                    interface: Some("ygg0".into()),
-                    ..flags()
-                },
-            ),
-            (
-                NetworkType::Yggdrasil,
-                NetworkFlags {
-                    admin_endpoint: Some("unix:///y".into()),
-                    ..flags()
-                },
-            ),
-            // Peers are for the managed node; --existing is for tor and yggdrasil.
-            (
-                NetworkType::Yggdrasil,
-                NetworkFlags {
-                    existing: true,
-                    peers: peer.clone(),
-                    ..flags()
-                },
-            ),
-            (
-                NetworkType::Tor,
-                NetworkFlags {
-                    peers: peer,
-                    ..flags()
-                },
-            ),
-            (
-                NetworkType::Slaac,
-                NetworkFlags {
-                    existing: true,
-                    interface: Some("eth0".into()),
-                    ..flags()
-                },
-            ),
-        ] {
-            assert!(f.check(kind).is_err(), "{kind}");
-        }
-        // The existing form takes them.
-        let existing = NetworkFlags {
-            existing: true,
-            control: Some("127.0.0.1:9999".into()),
-            password_given: true,
-            ..flags()
-        };
-        assert!(existing.check(NetworkType::Tor).is_ok());
+        assert!(network_config(NetworkType::Tor, Some("eth0".into()), vec![]).is_err());
+        assert!(network_config(NetworkType::Yggdrasil, Some("ygg0".into()), vec![]).is_err());
+        assert!(network_config(NetworkType::Tor, None, peer.clone()).is_err());
+        assert!(network_config(NetworkType::Slaac, Some("eth0".into()), peer).is_err());
     }
 
     #[test]

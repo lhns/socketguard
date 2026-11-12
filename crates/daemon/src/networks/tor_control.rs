@@ -1,20 +1,17 @@
-//! A minimal blocking Tor control-port client (control-spec): connect over TCP or a Unix
-//! socket, PROTOCOLINFO, AUTHENTICATE (SAFECOOKIE, password or none), GETINFO, ADD_ONION
-//! and DEL_ONION. Replies are parsed per the spec's reply syntax, including multi-line and
-//! data replies.
+//! A minimal blocking Tor control-port client (control-spec) for the Tor SocketGuard runs:
+//! connect over TCP or a Unix socket, PROTOCOLINFO, AUTHENTICATE (SAFECOOKIE), GETINFO,
+//! ADD_ONION and DEL_ONION. Replies are parsed per the spec's reply syntax, including
+//! multi-line and data replies.
 //!
-//! Whoever answers on the control address is trusted with our onion keys, and the default
-//! TCP address can be bound by any local user while Tor is down (ADR 0039). So a `Control`
-//! only exists once the server has proved itself (SAFECOOKIE) or was configured to be
-//! trusted (password, `none` on a Unix socket, explicit `cookie_insecure`), and the cookie
-//! file is checked before it is read: on Unix its owner, on Windows its owner and DACL,
-//! against a configured `cookie_path`. A TCP control address must be loopback unless the
-//! configuration allows a remote one, and then only cookie authentication is accepted.
+//! Whoever answers on the control address is trusted with our onion keys, and a TCP control
+//! address can be bound by any local user while Tor is down (ADR 0039). So a `Control` only
+//! exists once the server has proved it knows the cookie (SAFECOOKIE), and the cookie file
+//! is checked before it is read: on Unix its owner, on Windows its owner and DACL, against
+//! the `cookie_path` the daemon chose (ADR 0040, ADR 0056).
 
 use anyhow::{anyhow, bail, Context, Result};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use socketguard_core::config::TorAuth;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
@@ -28,51 +25,6 @@ pub enum Endpoint {
     Tcp(String),
     #[cfg_attr(not(unix), allow(dead_code))]
     Unix(String),
-}
-
-impl Endpoint {
-    /// `host:port`, or `unix:/path`.
-    pub fn parse(s: &str) -> Self {
-        match s.strip_prefix("unix:") {
-            Some(path) => Endpoint::Unix(path.trim_start_matches("//").to_string()),
-            None => Endpoint::Tcp(s.to_string()),
-        }
-    }
-}
-
-/// Whether the host of `host:port` is loopback, judged from the text (no lookup).
-fn host_is_loopback(addr: &str) -> bool {
-    let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
-}
-
-/// Refuse a control address and authentication that put the onion keys at risk before any
-/// connection is made: a non-loopback TCP address needs `allow_remote_control`, and then
-/// only cookie authentication (password and `none` would cross the network in the clear).
-pub fn check_endpoint(endpoint: &Endpoint, opts: &AuthOptions) -> Result<()> {
-    let Endpoint::Tcp(addr) = endpoint else {
-        return Ok(());
-    };
-    if host_is_loopback(addr) {
-        return Ok(());
-    }
-    if !opts.allow_remote_control {
-        bail!(
-            "the Tor control address {addr} is not loopback; set allow_remote_control to use it \
-             (cookie authentication only)"
-        );
-    }
-    if matches!(opts.auth, TorAuth::None | TorAuth::Password(_)) {
-        bail!(
-            "auth \"none\" and passwords are not accepted over the non-loopback Tor control \
-             address {addr}"
-        );
-    }
-    Ok(())
 }
 
 /// One control-port reply: the final status code and the text of every line, in order
@@ -161,35 +113,6 @@ pub struct ProtocolInfo {
     pub methods: Vec<String>,
     pub cookie_file: Option<String>,
     pub version: Option<String>,
-}
-
-/// Ask the Tor control port at the loopback address `addr` for PROTOCOLINFO, which Tor
-/// answers before authentication. Detection only: nothing secret is sent or read.
-pub fn probe_protocolinfo(addr: &str, timeout: Duration) -> Result<ProtocolInfo> {
-    #[cfg(unix)]
-    if let Some(path) = addr.strip_prefix("unix:") {
-        let s = std::os::unix::net::UnixStream::connect(path)
-            .with_context(|| format!("cannot reach the Tor control socket {path}"))?;
-        s.set_read_timeout(Some(timeout))?;
-        s.set_write_timeout(Some(timeout))?;
-        let mut writer = s.try_clone()?;
-        writer.write_all(b"PROTOCOLINFO 1\r\n")?;
-        let reply = read_reply(&mut BufReader::new(s))?.ok()?;
-        return Ok(parse_protocolinfo(&reply));
-    }
-    let sock = addr
-        .to_socket_addrs()
-        .with_context(|| format!("bad Tor control address {addr}"))?
-        .find(|a| a.ip().is_loopback())
-        .with_context(|| format!("{addr} is not a loopback address"))?;
-    let s = TcpStream::connect_timeout(&sock, timeout)
-        .with_context(|| format!("cannot reach the Tor control port at {addr}"))?;
-    s.set_read_timeout(Some(timeout))?;
-    s.set_write_timeout(Some(timeout))?;
-    let mut writer = s.try_clone()?;
-    writer.write_all(b"PROTOCOLINFO 1\r\n")?;
-    let reply = read_reply(&mut BufReader::new(s))?.ok()?;
-    Ok(parse_protocolinfo(&reply))
 }
 
 /// Parse the lines of a PROTOCOLINFO reply.
@@ -307,10 +230,10 @@ pub fn safecookie_hash(key: &[u8], cookie: &[u8], client: &[u8], server: &[u8]) 
         .to_vec()
 }
 
-/// How to authenticate to the control port and how far to trust what answers.
+/// How far to trust what answers on the control port: the cookie file it must name and who
+/// may own it. All of it comes from paths SocketGuard chose for its own Tor.
 #[derive(Debug, Clone, Default)]
 pub struct AuthOptions {
-    pub auth: TorAuth,
     /// The cookie file PROTOCOLINFO must report.
     pub cookie_path: Option<String>,
     /// The directory whose owner may own the cookie file (default: the directory of
@@ -321,17 +244,6 @@ pub struct AuthOptions {
     /// Windows: the SID of the account Tor runs as, besides SYSTEM and Administrators,
     /// that may own the cookie file and write to it.
     pub cookie_owner: Option<String>,
-    /// Accept a TCP control address that is not loopback (cookie auth only).
-    pub allow_remote_control: bool,
-}
-
-impl AuthOptions {
-    pub fn new(auth: TorAuth) -> Self {
-        Self {
-            auth,
-            ..Self::default()
-        }
-    }
 }
 
 /// Read the cookie file PROTOCOLINFO named, after checking that it is what Tor writes: a
@@ -403,7 +315,7 @@ fn check_cookie_owner(path: &str, meta: &std::fs::Metadata, opts: &AuthOptions) 
     } else {
         bail!(
             "the Tor cookie file {path} is owned by uid {uid}, who is neither root nor the owner \
-             of the Tor data directory; set cookie_path (or cookie_dir) to trust it"
+             of the Tor data directory"
         )
     }
 }
@@ -599,36 +511,6 @@ pub(crate) mod winacl {
     }
 }
 
-/// A control-spec quoted string.
-fn quote(s: &str) -> String {
-    let mut out = String::from("\"");
-    for c in s.chars() {
-        match c {
-            '"' | '\\' => {
-                out.push('\\');
-                out.push(c);
-            }
-            '\r' => out.push_str("\\r"),
-            '\n' => out.push_str("\\n"),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// The AUTHENTICATE command for `auth`. Plain cookie auth sends the cookie file's contents.
-pub fn authenticate_command(auth: &TorAuth, cookie: Option<&[u8]>) -> Result<String> {
-    Ok(match auth {
-        TorAuth::None => "AUTHENTICATE".to_string(),
-        TorAuth::Password(pw) => format!("AUTHENTICATE {}", quote(pw)),
-        TorAuth::Cookie | TorAuth::CookieInsecure => {
-            let cookie = cookie.context("no cookie to authenticate with")?;
-            format!("AUTHENTICATE {}", hex(cookie))
-        }
-    })
-}
-
 /// RFC 4648 base32, uppercase, no padding (Tor's encoding for x25519 client keys).
 pub fn base32(bytes: &[u8]) -> String {
     data_encoding::BASE32_NOPAD.encode(bytes)
@@ -717,17 +599,12 @@ pub struct Control {
 impl Control {
     /// Connect and authenticate.
     pub fn connect(endpoint: &Endpoint, opts: &AuthOptions) -> Result<Self> {
-        check_endpoint(endpoint, opts)?;
         let (reader, writer): (Box<dyn Read + Send>, Box<dyn Write + Send>) = match endpoint {
             Endpoint::Tcp(addr) => {
                 let socks: Vec<_> = addr
                     .to_socket_addrs()
                     .with_context(|| format!("bad Tor control address {addr}"))?
                     .collect();
-                // A name that resolves to a routable address is as remote as one that is.
-                if !opts.allow_remote_control && socks.iter().any(|a| !a.ip().is_loopback()) {
-                    bail!("the Tor control address {addr} resolves to a non-loopback address");
-                }
                 let sock = *socks
                     .first()
                     .with_context(|| format!("no address for {addr}"))?;
@@ -761,70 +638,32 @@ impl Control {
             #[cfg(not(unix))]
             Endpoint::Unix(_) => bail!("Unix sockets are not available on this platform"),
         };
-        Self::over(reader, writer, opts, matches!(endpoint, Endpoint::Unix(_)))
-    }
-
-    /// Authenticate over an already open stream. `unix`: it is a local Unix socket, which
-    /// no other user can have bound at Tor's path.
-    pub fn over(
-        reader: Box<dyn Read + Send>,
-        writer: Box<dyn Write + Send>,
-        opts: &AuthOptions,
-        unix: bool,
-    ) -> Result<Self> {
         let mut c = Self {
             reader: BufReader::new(reader),
             writer,
             authenticated: false,
         };
-        match &opts.auth {
-            TorAuth::None if !unix => bail!(
-                "auth \"none\" is only accepted on a Unix control socket (unix:/path): anyone \
-                 can listen on a TCP control address while Tor is down"
-            ),
-            TorAuth::None | TorAuth::Password(_) => c.send_authenticate(&opts.auth, None)?,
-            TorAuth::Cookie | TorAuth::CookieInsecure => c.cookie_auth(opts)?,
-        }
+        c.cookie_auth(opts)?;
         Ok(c)
     }
 
-    fn send_authenticate(&mut self, auth: &TorAuth, cookie: Option<&[u8]>) -> Result<()> {
-        self.command(&authenticate_command(auth, cookie)?)?
-            .ok()
-            .context("Tor refused the control authentication")?;
-        self.authenticated = true;
-        Ok(())
-    }
-
-    /// SAFECOOKIE (or, only if configured, plain COOKIE) with the cookie file checked
-    /// before it is read.
+    /// SAFECOOKIE with the cookie file checked before it is read.
     fn cookie_auth(&mut self, opts: &AuthOptions) -> Result<()> {
         // Nothing is sent before this: without a pinned file any local user who binds the
         // control port while Tor is down chooses the cookie file.
         if cfg!(not(unix)) && opts.cookie_path.is_none() {
             bail!(
-                "on this platform cookie authentication needs cookie_path (the file is vetted by \
-                 its owner and ACL, and only that file is accepted)"
+                "on this platform the cookie file must be pinned (the file is vetted by its owner \
+                 and ACL, and only that file is accepted)"
             );
         }
         let info = parse_protocolinfo(&self.command("PROTOCOLINFO 1")?.ok()?);
-        let offers = |m: &str| info.methods.iter().any(|x| x == m);
-        let safe = offers("SAFECOOKIE");
-        if !safe {
-            if !matches!(opts.auth, TorAuth::CookieInsecure) {
-                bail!(
-                    "the Tor control port does not offer SAFECOOKIE (methods: {}); plain COOKIE \
-                     would hand the cookie to whatever answers there, set auth \"cookie_insecure\" \
-                     to accept that",
-                    info.methods.join(",")
-                );
-            }
-            if !offers("COOKIE") {
-                bail!(
-                    "the Tor control port offers no cookie authentication (methods: {})",
-                    info.methods.join(",")
-                );
-            }
+        if !info.methods.iter().any(|m| m == "SAFECOOKIE") {
+            bail!(
+                "the Tor control port does not offer SAFECOOKIE (methods: {}); plain COOKIE \
+                 would hand the cookie to whatever answers there",
+                info.methods.join(",")
+            );
         }
         let path = info
             .cookie_file
@@ -835,13 +674,13 @@ impl Control {
             }
         }
         let cookie = read_cookie_file(&path, opts)?;
-        // Plain COOKIE sends the cookie; SAFECOOKIE a hash after the server proved itself.
-        let proof = if safe {
-            self.safecookie_proof(&cookie)?
-        } else {
-            cookie
-        };
-        self.send_authenticate(&opts.auth, Some(&proof))
+        // A hash, sent only after the server proved it knows the cookie.
+        let proof = self.safecookie_proof(&cookie)?;
+        self.command(&format!("AUTHENTICATE {}", hex(&proof)))?
+            .ok()
+            .context("Tor refused the control authentication")?;
+        self.authenticated = true;
+        Ok(())
     }
 
     /// The SAFECOOKIE challenge exchange: the client hash to authenticate with.
@@ -1040,35 +879,6 @@ mod tests {
     }
 
     #[test]
-    fn authenticate_commands() {
-        assert_eq!(
-            authenticate_command(&TorAuth::None, None).unwrap(),
-            "AUTHENTICATE"
-        );
-        assert_eq!(
-            authenticate_command(&TorAuth::Password("pa\"ss\\".into()), None).unwrap(),
-            r#"AUTHENTICATE "pa\"ss\\""#
-        );
-        assert_eq!(
-            authenticate_command(&TorAuth::Cookie, Some(&[0x00, 0xab, 0xff])).unwrap(),
-            "AUTHENTICATE 00ABFF"
-        );
-        assert!(authenticate_command(&TorAuth::Cookie, None).is_err());
-    }
-
-    #[test]
-    fn endpoints() {
-        assert_eq!(
-            Endpoint::parse("127.0.0.1:9051"),
-            Endpoint::Tcp("127.0.0.1:9051".into())
-        );
-        assert_eq!(
-            Endpoint::parse("unix:/run/tor/control"),
-            Endpoint::Unix("/run/tor/control".into())
-        );
-    }
-
-    #[test]
     fn base32_matches_rfc4648() {
         assert_eq!(base32(b""), "");
         assert_eq!(base32(b"f"), "MY");
@@ -1178,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_cookie_is_refused_unless_configured() {
+    fn plain_cookie_is_refused() {
         let (dir, path) = cookie_file(&COOKIE);
         let mock = MockTorControl::start_with(MockAuth::CookieOnly {
             cookie: COOKIE,
@@ -1187,15 +997,6 @@ mod tests {
         let err = connect(&mock, &mock.auth_options()).err().unwrap();
         assert!(err.to_string().contains("SAFECOOKIE"), "{err:#}");
         assert_eq!(mock.commands(), ["PROTOCOLINFO 1"], "nothing was sent");
-
-        let opts = AuthOptions {
-            auth: TorAuth::CookieInsecure,
-            ..mock.auth_options()
-        };
-        connect(&mock, &opts).unwrap();
-        assert!(mock
-            .commands()
-            .contains(&format!("AUTHENTICATE {}", hex(&COOKIE))));
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1286,59 +1087,13 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    #[test]
-    fn a_non_loopback_control_address_needs_allow_remote_control() {
-        // Refused before any connection, so the unroutable address is never contacted.
-        let addr = Endpoint::Tcp("192.0.2.1:9051".into());
-        let cookie = AuthOptions::new(TorAuth::Cookie);
-        let err = Control::connect(&addr, &cookie).err().unwrap();
-        assert!(err.to_string().contains("allow_remote_control"), "{err:#}");
-        assert!(check_endpoint(&addr, &cookie).is_err());
-        // Allowed with the flag, but only with cookie authentication.
-        let remote = |auth| AuthOptions {
-            allow_remote_control: true,
-            ..AuthOptions::new(auth)
-        };
-        assert!(check_endpoint(&addr, &remote(TorAuth::Cookie)).is_ok());
-        assert!(check_endpoint(&addr, &remote(TorAuth::CookieInsecure)).is_ok());
-        for auth in [TorAuth::None, TorAuth::Password("pw".into())] {
-            let err = check_endpoint(&addr, &remote(auth)).err().unwrap();
-            assert!(err.to_string().contains("non-loopback"), "{err:#}");
-        }
-        // Loopback in every spelling, and a Unix socket, need nothing.
-        for ok in [
-            "127.0.0.1:9051",
-            "[::1]:9051",
-            "localhost:9051",
-            "127.1.2.3:1",
-        ] {
-            assert!(
-                check_endpoint(&Endpoint::Tcp(ok.into()), &cookie).is_ok(),
-                "{ok}"
-            );
-        }
-        assert!(check_endpoint(&Endpoint::Unix("/run/tor/control".into()), &cookie).is_ok());
-        for bad in [
-            "10.0.0.1:9051",
-            "[2001:db8::1]:9051",
-            "tor.example:9051",
-            "0.0.0.0:9051",
-        ] {
-            assert!(
-                check_endpoint(&Endpoint::Tcp(bad.into()), &cookie).is_err(),
-                "{bad}"
-            );
-        }
-    }
-
     #[cfg(not(unix))]
     #[test]
     fn without_cookie_path_cookie_auth_sends_nothing_off_unix() {
         let (dir, path) = cookie_file(&COOKIE);
         let mock = safecookie_mock(&path, false);
-        let opts = AuthOptions::new(TorAuth::Cookie);
-        let err = connect(&mock, &opts).err().unwrap();
-        assert!(err.to_string().contains("cookie_path"), "{err:#}");
+        let err = connect(&mock, &AuthOptions::default()).err().unwrap();
+        assert!(err.to_string().contains("pinned"), "{err:#}");
         assert!(mock.commands().is_empty(), "nothing was sent");
         std::fs::remove_dir_all(dir).ok();
     }
@@ -1395,17 +1150,6 @@ mod tests {
     }
 
     #[test]
-    fn no_authentication_is_refused_over_tcp() {
-        let mock = MockTorControl::start();
-        let opts = AuthOptions::new(TorAuth::None);
-        let err = connect(&mock, &opts).err().unwrap();
-        assert!(err.to_string().contains("Unix control socket"), "{err:#}");
-        assert!(mock.commands().is_empty(), "nothing was sent");
-        // A password is fine over TCP (the mock accepts any).
-        connect(&mock, &mock.auth_options()).unwrap();
-    }
-
-    #[test]
     fn a_wrong_cookie_is_not_authenticated_and_gets_no_keys() {
         // The mock expects another cookie than the file holds: AUTHENTICATE fails, so no
         // Control exists to send ADD_ONION on.
@@ -1428,7 +1172,7 @@ mod tests {
         let me = unsafe { libc::geteuid() };
         let opts = AuthOptions {
             expect_tor_uid: Some(me + 1),
-            ..AuthOptions::new(TorAuth::None)
+            ..AuthOptions::default()
         };
         let handle = std::thread::spawn(move || {
             let _ = listener.accept();

@@ -339,11 +339,11 @@ async fn discovery_creates_a_closed_app_with_an_address_on_every_network() {
         .starts_with("2001:db8:1:2:"));
 
     // The last ruleset denies every address by the managed scope and the Yggdrasil
-    // interface has its overlay scope, beside the range of the existing node.
+    // interface has its overlay scope.
     let fw = applied(&h.fw_calls);
     let fw = [fw.last().unwrap().clone()];
     let scope_ids: Vec<_> = fw[0].scopes.iter().map(|s| s.id.as_str()).collect();
-    assert_eq!(scope_ids, ["managed", "overlay:ygg0", "overlay:ygg:range"]);
+    assert_eq!(scope_ids, ["managed", "overlay:ygg0"]);
     let ScopeMatch::Destinations(dsts) = &fw[0].scopes[0].matcher else {
         panic!("managed scope matches destinations");
     };
@@ -1255,14 +1255,9 @@ async fn adding_and_removing_a_network() {
 
     let inst = BackendInstanceConfig {
         id: "ygg".into(),
-        backend: BackendConfig::Yggdrasil {
-            interface: Some("ygg0".into()),
-            admin_endpoint: None,
-            managed: false,
-            peers: vec![],
-        },
+        backend: BackendConfig::yggdrasil(vec![]),
     };
-    // The new network brings its own allocator (a mock stands in for yggdrasilctl).
+    // The new network brings its own allocator (a mock stands in for the node).
     {
         let mut engine = h.state.engine.write().await;
         let mock = ygg_net().mock;

@@ -22,7 +22,7 @@ const ADAPTER: &str = if cfg!(windows) {
 fn managed_ygg(peers: &[&str]) -> BackendInstanceConfig {
     BackendInstanceConfig {
         id: ID.into(),
-        backend: BackendConfig::managed_yggdrasil(peers.iter().map(|p| p.to_string()).collect()),
+        backend: BackendConfig::yggdrasil(peers.iter().map(|p| p.to_string()).collect()),
     }
 }
 
@@ -239,7 +239,7 @@ async fn another_node_on_the_host_holds_it_back_until_it_is_gone() {
     assert_eq!(m.detail.as_deref(), Some(OTHER_NODE));
     assert_eq!(
         OTHER_NODE,
-        "another Yggdrasil node is running on this host; SocketGuard's own node cannot run next to it yet"
+        "Another Yggdrasil node is running on this computer. SocketGuard's Yggdrasil cannot run next to it."
     );
     assert_eq!(
         n.status,
@@ -371,32 +371,6 @@ async fn turning_socketguard_off_stops_the_child_and_on_starts_it_again() {
 
     state.engine.read().await.enable(&state).await.unwrap();
     wait_until("the child to start again", || h.spawner.started() == 2).await;
-}
-
-#[tokio::test]
-async fn a_managed_node_leaves_nothing_reachable_when_its_network_goes() {
-    let h = ManagedHarness::new();
-    let (state, applied) = add(&h, &[]).await;
-    applied.unwrap();
-    wait_until("the child to start", || h.spawner.started() == 1).await;
-    // Even with the node up (its adapter has the address and the child counts as up),
-    // removing the network or turning SocketGuard off stops it: no confirmation needed.
-    h.ifaces.add_interface(ADAPTER);
-    h.ifaces.plant_address(ADAPTER, key(&h).node().address);
-    let exposure = state
-        .engine
-        .read()
-        .await
-        .exposure(&state, Some(ID))
-        .await
-        .unwrap();
-    assert_eq!(exposure.networks.len(), 1);
-    assert!(!exposure.networks[0].node_running);
-    assert!(
-        exposure.sentences().is_empty(),
-        "{:?}",
-        exposure.sentences()
-    );
 }
 
 #[tokio::test]

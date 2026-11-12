@@ -58,19 +58,6 @@ async fn grant_to(c: &Ctx, app: &App, port: PortRef, subject: Subject) -> Result
     Ok(())
 }
 
-/// The node's address if `yggdrasilctl` answers.
-fn yggdrasil_node() -> Option<String> {
-    let out = std::process::Command::new("yggdrasilctl")
-        .args(["-json", "getSelf"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    v.get("address")?.as_str().map(str::to_string)
-}
-
 /// The remote-administration port of `app`: its TCP port 22 or 3389, else the port of the
 /// activity record that flagged it.
 fn admin_port(app: &App, exposed: &[ActivityRecord]) -> Option<PortRef> {
@@ -91,7 +78,7 @@ fn admin_port(app: &App, exposed: &[ActivityRecord]) -> Option<PortRef> {
         })
 }
 
-/// First-run setup: a Yggdrasil network, remote-admin listeners, protect-host.
+/// First-run setup: Yggdrasil and Tor networks, remote-admin listeners, protect-host.
 pub async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
     if c.json {
         bail!("init is interactive and has no --json mode");
@@ -100,34 +87,33 @@ pub async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
     let status = c.client.status().await?;
     socketguard_core::outln!("{}\n", render::networks(&status.networks));
 
-    // 1. A Yggdrasil network, if the node is running and none is configured.
-    if !status
-        .networks
-        .iter()
-        .any(|n| n.kind == NetworkKind::Yggdrasil)
-    {
-        if let Some(addr) = yggdrasil_node() {
-            socketguard_core::outln!(
-                "A Yggdrasil node is running (address {addr}) but has no network here."
-            );
-            if interactive && p.confirm("Add a Yggdrasil network?") {
-                let n = c
-                    .client
-                    .add_network(&NewNetwork {
-                        id: None,
-                        backend: BackendConfig::Yggdrasil {
-                            interface: None,
-                            admin_endpoint: None,
-                            managed: false,
-                            peers: vec![],
-                        },
-                    })
-                    .await?;
-                c.warn_pending(&n.enforcement);
-                socketguard_core::outln!("added network {}", n.value.id);
-            } else if !interactive {
-                socketguard_core::outln!("Add it with: socketguard networks add yggdrasil");
-            }
+    // 1. Yggdrasil and Tor: SocketGuard's own, when this build includes them and they are
+    //    not added yet.
+    let setup = c.client.network_setup().await?;
+    for (label, kind, offer, backend) in [
+        (
+            "Yggdrasil",
+            "yggdrasil",
+            &setup.yggdrasil,
+            BackendConfig::yggdrasil(vec![]),
+        ),
+        ("Tor", "tor", &setup.tor, BackendConfig::tor()),
+    ] {
+        if offer.added || !offer.available {
+            continue;
+        }
+        if let Some(note) = &offer.reason {
+            socketguard_core::outln!("{note}");
+        }
+        if interactive && p.confirm(&format!("Add a {label} network?")) {
+            let n = c
+                .client
+                .add_network(&NewNetwork { id: None, backend })
+                .await?;
+            c.warn_pending(&n.enforcement);
+            socketguard_core::outln!("added network {}", n.value.id);
+        } else if !interactive {
+            socketguard_core::outln!("Add it with: socketguard networks add {kind}");
         }
     }
 

@@ -23,8 +23,8 @@ fine to run directly.
 - crates/daemon/  — The daemon and its admin commands:
     - engine/     reconcile, addresses, enforcement, mutations, reservations, tags, port groups
     - state/      SQLite schema, settings, file protection
-    - networks/   ip/ (Local, LAN, Yggdrasil, DHCPv6), tor, managed children (managed.rs, *_managed.rs)
-    - children/   the child processes of managed networks (guard, pidfile)
+    - networks/   ip/ (Local, LAN, Yggdrasil, DHCPv6), tor, SocketGuard's own Tor and Yggdrasil children (managed.rs, *_managed.rs)
+    - children/   the child processes of Tor and Yggdrasil (guard, pidfile)
     - firewall/   nftables, pf, wfp/ (plan + Windows FFI); iface/ (addresses on OS interfaces); monitor/
     - service, install, uninstall, access, account, disable, portable (ADR 0050, 0054); ruleset,
       local API (api.rs), telemetry
@@ -47,7 +47,7 @@ fine to run directly.
     cd ui && npm run lint && npm run typecheck && npm test
     cargo clippy --workspace --all-targets -- -D warnings; cargo fmt --all --check
     SOCKETGUARD_NETNS_TESTS=1 cargo test -p socketguard-daemon --test netns   # Linux, root
-    deploy/e2e/ygg-e2e.sh; deploy/e2e/tor-e2e.sh                              # Docker (also managed-*-e2e.sh)
+    deploy/e2e/ygg-e2e.sh; deploy/e2e/tor-e2e.sh                              # Docker (also tor-bridges-e2e.sh)
     deploy/ci/macos-smoke.sh                                                  # macOS, sudo; run by GitHub CI
     cargo test -p socketguard-daemon --test perf -- --ignored --nocapture     # performance harness
     cargo test -p socketguard-daemon --test locks                             # lock-order stress test

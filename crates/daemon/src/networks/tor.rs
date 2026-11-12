@@ -8,7 +8,7 @@
 //! (ADR 0026). The service key is stored with the address, so the `.onion` name is stable.
 
 use super::onion_key;
-use super::tor_control::{AuthOptions, Control, Endpoint, ServiceSpec};
+use super::tor_control::{Control, ServiceSpec};
 use super::tor_managed::ManagedTor;
 use super::{
     Capabilities, EnforcedAddress, EnforcedSubject, LocatorRequest, Network, NetworkEnforcement,
@@ -166,7 +166,7 @@ struct State {
     /// or are non-empty exactly while a change is pending ([`Network::pending`]).
     desired: BTreeMap<String, ServiceSpec>,
     unremoved: BTreeSet<String>,
-    /// Managed: the control checks that failed in a row, and when the first of them did.
+    /// The control checks that failed in a row, and when the first of them did.
     failures: u32,
     failing_since: Option<Instant>,
     /// A failure was stored without being announced (it is still tolerated).
@@ -175,7 +175,7 @@ struct State {
 
 const NOT_CONNECTED: &str = "not connected to Tor yet";
 
-/// A managed Tor whose child is up is reported as up through fewer than this many failed
+/// A Tor whose child is up is reported as up through fewer than this many failed
 /// control checks in a row, and for less than [`DOWN_AFTER`] since the first of them, so
 /// one hiccup is not a flicker.
 const FAILURES_BEFORE_DOWN: u32 = 3;
@@ -199,13 +199,13 @@ impl State {
         }
     }
 
-    /// A failed check. With `tolerant` (a child that is up) the first ones are stored
-    /// without being announced; the status shows them only once they are no longer tolerated.
-    fn record_down(&mut self, reason: String, tolerant: bool) {
+    /// A failed check. The first ones are stored without being announced (the child is
+    /// up); the status shows them only once they are no longer tolerated.
+    fn record_down(&mut self, reason: String) {
         self.failures += 1;
         let since = *self.failing_since.get_or_insert_with(Instant::now);
         let down = NetworkStatus::Down { reason };
-        if tolerant && tolerated(self.failures, Some(since.elapsed())) {
+        if tolerated(self.failures, Some(since.elapsed())) {
             self.quiet_down = true;
             self.status = down;
         } else {
@@ -241,11 +241,9 @@ fn in_sync(
 }
 
 pub struct TorNetwork {
-    endpoint: Endpoint,
-    opts: AuthOptions,
-    /// Set for a Tor SocketGuard runs itself (ADR 0052): its child's state decides whether
-    /// there is anything to talk to, and the endpoint and trust come from there.
-    managed: Option<ManagedTor>,
+    /// The Tor SocketGuard runs (ADR 0052, 0056): its child's state decides whether there is
+    /// anything to talk to, and the endpoint and trust come from there.
+    tor: ManagedTor,
     check_every: Duration,
     state: Mutex<State>,
     /// Serializes control-port work, without holding `state` across I/O.
@@ -253,30 +251,9 @@ pub struct TorNetwork {
 }
 
 impl TorNetwork {
-    pub fn with_options(control: &str, opts: AuthOptions, check_every: Duration) -> Self {
-        Self::build(Endpoint::parse(control), opts, None, check_every)
-    }
-
-    /// The network of a Tor that SocketGuard runs.
-    pub fn managed(managed: ManagedTor, check_every: Duration) -> Self {
-        Self::build(
-            Endpoint::Tcp(String::new()),
-            AuthOptions::default(),
-            Some(managed),
-            check_every,
-        )
-    }
-
-    fn build(
-        endpoint: Endpoint,
-        opts: AuthOptions,
-        managed: Option<ManagedTor>,
-        check_every: Duration,
-    ) -> Self {
+    pub fn new(tor: ManagedTor, check_every: Duration) -> Self {
         Self {
-            endpoint,
-            opts,
-            managed,
+            tor,
             check_every,
             state: Mutex::new(State {
                 applied: HashMap::new(),
@@ -294,28 +271,20 @@ impl TorNetwork {
         }
     }
 
-    /// Managed: the child is not up, so there is nothing to connect to (and, since the
-    /// services die with it, nothing published).
+    /// The child is not up, so there is nothing to connect to (and, since the services die
+    /// with it, nothing published).
     fn child_down(&self) -> Option<&ManagedTor> {
-        self.managed.as_ref().filter(|m| !m.is_up())
+        Some(&self.tor).filter(|m| !m.is_up())
     }
 
     fn connect(&self) -> Result<Control> {
         if let Some(m) = self.child_down() {
             return Err(anyhow!(m.reason(false)));
         }
-        let attempt = match &self.managed {
-            Some(m) => m.connect(),
-            None => Control::connect(&self.endpoint, &self.opts),
-        };
-        match attempt {
+        match self.tor.connect() {
             Ok(c) => Ok(c),
             Err(e) => {
-                let tolerant = self.managed.is_some();
-                self.state
-                    .lock()
-                    .unwrap()
-                    .record_down(format!("{e:#}"), tolerant);
+                self.state.lock().unwrap().record_down(format!("{e:#}"));
                 Err(e)
             }
         }
@@ -350,7 +319,7 @@ impl Network for TorNetwork {
                 None,
             );
         }
-        if self.managed.is_some() && matches!(st.status, NetworkStatus::Down { .. }) {
+        if matches!(st.status, NetworkStatus::Down { .. }) {
             // The child is up (it answered the bootstrap check): a failed control check or
             // two, or none made yet, is not yet a reason to say down.
             if tolerated(st.failures, st.failing_since.map(|t| t.elapsed())) {
@@ -361,7 +330,7 @@ impl Network for TorNetwork {
     }
 
     fn managed(&self) -> Option<socketguard_core::ManagedInfo> {
-        self.managed.as_ref().map(ManagedTor::info)
+        Some(self.tor.info())
     }
 
     /// Generate the service key and name here. Nothing reaches Tor until the first grant
@@ -738,7 +707,10 @@ mod tests {
     }
 
     fn net(mock: &MockTorControl, every: Duration) -> TorNetwork {
-        TorNetwork::with_options(&mock.addr(), mock.auth_options(), every)
+        TorNetwork::new(
+            ManagedTor::with_control(mock.addr(), mock.auth_options()),
+            every,
+        )
     }
 
     #[test]
@@ -919,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn a_managed_tor_that_is_up_tolerates_a_short_streak_of_failed_checks() {
+    fn a_tor_that_is_up_tolerates_a_short_streak_of_failed_checks() {
         let s = Duration::from_secs;
         // Nothing failed yet, however long it has been up: the streak starts at a failure.
         assert!(tolerated(0, None));
@@ -940,28 +912,15 @@ mod tests {
             failing_since: None,
             quiet_down: false,
         };
-        st.record_down("x".into(), true);
+        st.record_down("x".into());
         assert!(st.quiet_down && st.failures == 1);
         st.record_up();
         assert!(!st.quiet_down && st.failures == 0 && st.failing_since.is_none());
         assert_eq!(st.status, NetworkStatus::Up);
         for _ in 0..3 {
-            st.record_down("x".into(), true);
+            st.record_down("x".into());
         }
         assert!(!st.quiet_down, "announced");
-        // Unmanaged: never tolerated.
-        let mut st2 = State {
-            failures: 0,
-            failing_since: None,
-            quiet_down: false,
-            status: NetworkStatus::Up,
-            applied: HashMap::new(),
-            checked: None,
-            desired: BTreeMap::new(),
-            unremoved: BTreeSet::new(),
-        };
-        st2.record_down("x".into(), false);
-        assert!(!st2.quiet_down);
     }
 
     #[test]
@@ -971,6 +930,11 @@ mod tests {
         mock.set_down(true);
         let a = address(&[8080], vec![grant(None, EnforcedSubject::Anyone)]);
         assert!(n.enforce(&enforcement(vec![a.clone()])).is_err());
+        // A child that is up gets a few failed checks before the network says down.
+        assert_eq!(n.status().0, NetworkStatus::Up);
+        for _ in 0..FAILURES_BEFORE_DOWN {
+            assert!(n.enforce(&enforcement(vec![a.clone()])).is_err());
+        }
         assert!(matches!(n.status().0, NetworkStatus::Down { .. }));
         mock.set_down(false);
         n.enforce(&enforcement(vec![a])).unwrap();

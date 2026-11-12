@@ -16,20 +16,17 @@ export const networks: Network[] = [
   { id: "n-lan", kind: "lan", name: "LAN", interface: "eth0", grants_apply: true, status: { state: "up" } },
 ];
 
-const state = (state: SetupState["state"], over: Partial<SetupState> = {}): SetupState => ({ state, found: {}, exposed: false, ...over });
-const kindSetup = (existing: SetupState, managed: Partial<KindSetup["managed"]> = {}): KindSetup => ({
-  managed: { available: true, version: "1.0.0", ...managed },
-  existing,
-});
+const state = (state: SetupState["state"], over: Partial<SetupState> = {}): SetupState => ({ state, found: {}, ...over });
+const kindSetup = (over: Partial<KindSetup> = {}): KindSetup => ({ available: true, version: "1.0.0", added: false, ...over });
 
-/** What `network_setup` answers by default: one LAN interface, a bundled Tor and Yggdrasil, no existing node. */
+/** What `network_setup` answers by default: one LAN interface, SocketGuard's Tor and Yggdrasil to add. */
 export const networkSetup: NetworkSetup = {
   lan: [
     { interface: "Ethernet 2", description: "Red Hat VirtIO Ethernet Adapter", has_ipv6_prefix: true, is_default_route: true, already_added: false },
     { interface: "Ethernet 3", has_ipv6_prefix: false, is_default_route: false, already_added: false },
   ],
-  yggdrasil: kindSetup(state("absent"), { version: "0.5.12" }),
-  tor: kindSetup(state("absent"), { version: "0.4.8.12" }),
+  yggdrasil: kindSetup({ version: "0.5.12" }),
+  tor: kindSetup({ version: "0.4.8.12" }),
   local: state("ready"),
   config_path: "C:\\ProgramData\\SocketGuard\\socketguard.json",
 };
@@ -153,7 +150,6 @@ export function mockDaemon(handlers: Handlers = {}) {
     share_app: () => ({ tor: [] }),
     list_networks: () => networks,
     network_setup: () => networkSetup,
-    exposure: () => ({ networks: [] }),
     list_reservations: () => [],
     list_addresses: () => [],
     get_settings: () => settings,

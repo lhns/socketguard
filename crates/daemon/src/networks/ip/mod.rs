@@ -6,7 +6,6 @@ mod network;
 pub mod slaac;
 pub mod ula;
 pub mod ygg_admin;
-pub mod yggdrasil;
 pub mod yggdrasil_managed;
 
 pub use network::IpNetwork;
