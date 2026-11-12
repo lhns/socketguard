@@ -696,6 +696,12 @@ impl Client {
     pub async fn enable(&self) -> Result<()> {
         self.call_unit(&routes::ENABLE, &[], None).await
     }
+
+    /// Portable mode only (ADR 0054): end the daemon through its teardown (rules and
+    /// addresses removed). The daemon answers first and exits a moment later.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.call_unit(&routes::SHUTDOWN, &[], None).await
+    }
 }
 
 fn json<T: Serialize>(v: &T) -> Option<Vec<u8>> {
@@ -736,9 +742,11 @@ fn api_error(status: StatusCode, body: &[u8]) -> Error {
 }
 
 /// The platform's default endpoint (the daemon's default socket or pipe), whatever the
-/// environment says.
+/// environment says. Portable mode has a pipe of its own.
 pub fn default_endpoint() -> String {
-    if cfg!(windows) {
+    if socketguard_core::portable::is_portable() {
+        socketguard_core::portable::API_PIPE.to_string()
+    } else if cfg!(windows) {
         socketguard_core::config::DEFAULT_API_PIPE.to_string()
     } else {
         socketguard_core::config::DEFAULT_API_SOCKET.to_string()

@@ -2,6 +2,7 @@
 // daemon's Rust types via ts-rs (see ./generated).
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { ActivityKind } from "./generated/ActivityKind";
 import type { ActivityQuery } from "./generated/ActivityQuery";
 import type { ActivityRecord } from "./generated/ActivityRecord";
@@ -84,6 +85,12 @@ export interface SetupRun {
 export interface ServiceStatus {
   installed: boolean;
   running: boolean;
+}
+/** Portable mode (ADR 0054): `portable_last_exit`, written by the daemon at the end of its teardown;
+ * `left` lists what could not be removed (empty: everything was). */
+export interface PortableExit {
+  at: number;
+  left: string[];
 }
 export type { PortRange }from "./generated/PortRange";
 export type { AddrFamily } from "./generated/AddrFamily";
@@ -244,6 +251,11 @@ export const api = {
   allowMyAccount: () => call<SetupRun>("allow_my_account"),
   removeSocketguard: (purge: boolean) => call<SetupRun>("remove_socketguard", { purge }),
   clearLocalUiSettings: () => call<void>("clear_local_ui_settings"),
+  /** Answers without the daemon: whether this copy runs from a folder (ADR 0054). */
+  portableInfo: () => call<{ portable: boolean }>("portable_info"),
+  startPortableDaemon: () => call<SetupRun>("start_portable_daemon"),
+  shutdown: () => call<void>("shutdown"),
+  portableLastExit: () => call<PortableExit | null>("portable_last_exit"),
   quitApp: () => call<void>("quit_app"),
   subscribeEvents: () => call<void>("subscribe_events"),
 };
@@ -252,4 +264,12 @@ export const api = {
  * the UI-local `daemon_connected` / `daemon_disconnected`). */
 export function onDaemonEvent(name: string, cb: () => void): Promise<UnlistenFn> {
   return listen(name, () => cb());
+}
+
+/** Be told when the user closes the window; `e.preventDefault()` keeps it open. Does nothing
+ * outside Tauri (tests, vite dev). */
+export async function onCloseRequested(cb: (e: { preventDefault: () => void }) => void | Promise<void>): Promise<UnlistenFn> {
+  const internals = typeof window === "undefined" ? undefined : (window as { __TAURI_INTERNALS__?: { metadata?: unknown } }).__TAURI_INTERNALS__;
+  if (!internals?.metadata) return () => {};
+  return getCurrentWindow().onCloseRequested(cb);
 }

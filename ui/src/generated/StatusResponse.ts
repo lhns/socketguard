@@ -34,4 +34,19 @@ socket?: string,
 /**
  * Whether SocketGuard is registered as a system service (None: could not be told).
  */
-service_installed?: boolean, };
+service_installed?: boolean, 
+/**
+ * Portable mode (ADR 0054): everything is in the program's folder and the rules and
+ * addresses end with the daemon's process.
+ */
+portable: boolean, 
+/**
+ * The database file is restricted to SYSTEM and Administrators. False only in portable
+ * mode on a volume without access control lists.
+ */
+db_protected: boolean, 
+/**
+ * Blocked connections are being logged. False in portable mode when the system's
+ * net-event option is off (portable mode does not change it).
+ */
+drop_events: boolean, };

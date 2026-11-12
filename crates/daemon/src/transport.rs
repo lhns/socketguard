@@ -33,6 +33,9 @@ pub fn bind(config: &DaemonConfig) -> anyhow::Result<Server> {
     }
     #[cfg(windows)]
     {
+        if socketguard_core::portable::is_portable() {
+            return bind_portable(&config.api_pipe, crate::portable::allowed_sid());
+        }
         let group = platform::group_sid(WINDOWS_GROUP);
         if group.is_none() {
             warn!(
@@ -166,6 +169,42 @@ pub fn bind_pipe(name: &str, sddl: &str) -> anyhow::Result<Server> {
     info!("API pipe {name}");
     Ok(Server { listener })
 }
+
+/// The portable pipe (ADR 0054): SYSTEM, Administrators and the one account the window
+/// runs as. The owner is set to Administrators explicitly, because the client refuses a
+/// pipe that SYSTEM or Administrators do not own; if the token may not assign it, the
+/// creator's default owner (Administrators for an elevated token) stands.
+#[cfg(windows)]
+fn bind_portable(name: &str, user: Option<&str>) -> anyhow::Result<Server> {
+    match bind_pipe(name, &portable_pipe_sddl(user, true)) {
+        Ok(s) => Ok(s),
+        Err(first) => {
+            warn!("Cannot create the pipe with an explicit owner ({first:#}); trying without");
+            bind_pipe(name, &portable_pipe_sddl(user, false)).map_err(|e| {
+                e.context(
+                    "cannot create the portable API pipe (is another portable SocketGuard running?)",
+                )
+            })
+        }
+    }
+}
+
+/// The security descriptor of the portable pipe. `user` is a validated SID string.
+pub fn portable_pipe_sddl(user: Option<&str>, with_owner: bool) -> String {
+    let mut s = String::new();
+    if with_owner {
+        s.push_str("O:BA");
+    }
+    s.push_str("D:P(A;;GA;;;SY)(A;;GA;;;BA)");
+    if let Some(sid) = user {
+        s.push_str(&format!("(A;;0x{:X};;;{sid})", PIPE_USER_MASK));
+    }
+    s
+}
+
+/// What the account may do on the pipe: read and write data, not create instances (see
+/// `platform::GROUP_PIPE_MASK`, which this equals).
+pub const PIPE_USER_MASK: u32 = 0x0012_0089 | 0x2;
 
 #[cfg(windows)]
 pub use platform::pipe_sddl;
@@ -526,6 +565,21 @@ mod tests {
     }
 
     /// GENERIC_WRITE would carry FILE_APPEND_DATA (0x4) = FILE_CREATE_PIPE_INSTANCE.
+    #[test]
+    fn the_portable_pipe_admits_system_administrators_and_one_account() {
+        assert_eq!(
+            portable_pipe_sddl(Some("S-1-5-21-1-2-3-1001"), true),
+            "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12008B;;;S-1-5-21-1-2-3-1001)"
+        );
+        assert_eq!(
+            portable_pipe_sddl(None, false),
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+        );
+        // The account's mask is the group's: no way to create a rogue server instance.
+        assert_eq!(PIPE_USER_MASK, platform::GROUP_PIPE_MASK);
+        assert_eq!(PIPE_USER_MASK & 0x4, 0);
+    }
+
     #[test]
     fn the_group_cannot_create_pipe_instances() {
         let mask = platform::GROUP_PIPE_MASK;

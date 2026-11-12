@@ -432,6 +432,12 @@ async fn disable(confirm: bool) -> CmdResult<()> {
     Ok(client().disable(confirm).await?)
 }
 
+/// Portable mode only (ADR 0054): end the daemon through its teardown.
+#[tauri::command]
+async fn shutdown() -> CmdResult<()> {
+    Ok(client().shutdown().await?)
+}
+
 #[tauri::command]
 async fn subscribe_events(app: tauri::AppHandle) -> Result<(), String> {
     // One bridge per process: a frontend reload calls this again.
@@ -761,9 +767,34 @@ enum ElevatedRun {
 /// or hidden.
 #[cfg(windows)]
 fn elevated_run(cli: &std::path::Path, args: &[String], visible: bool) -> ElevatedRun {
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+    let process = match shell_execute_runas(cli, args, visible) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let mut code = None;
+    unsafe {
+        if WaitForSingleObject(process, INFINITE) == WAIT_OBJECT_0 {
+            let mut c = 0u32;
+            if GetExitCodeProcess(process, &mut c).is_ok() {
+                code = Some(c as i32);
+            }
+        }
+        let _ = CloseHandle(process);
+    }
+    ElevatedRun::Done(code)
+}
+
+/// Start `cli args` elevated through UAC and return its process handle. The error is the
+/// outcome to report: declined, or no way to ask.
+#[cfg(windows)]
+fn shell_execute_runas(
+    cli: &std::path::Path,
+    args: &[String],
+    visible: bool,
+) -> Result<windows::Win32::Foundation::HANDLE, ElevatedRun> {
+    use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
     use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 
@@ -788,24 +819,15 @@ fn elevated_run(cli: &std::path::Path, args: &[String], visible: bool) -> Elevat
     };
     if unsafe { ShellExecuteExW(&mut info) }.is_err() {
         // ERROR_CANCELLED (1223): the UAC prompt was declined.
-        return if std::io::Error::last_os_error().raw_os_error() == Some(1223) {
-            ElevatedRun::Cancelled
-        } else {
-            ElevatedRun::Unavailable
-        };
+        return Err(
+            if std::io::Error::last_os_error().raw_os_error() == Some(1223) {
+                ElevatedRun::Cancelled
+            } else {
+                ElevatedRun::Unavailable
+            },
+        );
     }
-    let process = info.hProcess;
-    let mut code = None;
-    unsafe {
-        if WaitForSingleObject(process, INFINITE) == WAIT_OBJECT_0 {
-            let mut c = 0u32;
-            if GetExitCodeProcess(process, &mut c).is_ok() {
-                code = Some(c as i32);
-            }
-        }
-        let _ = CloseHandle(process);
-    }
-    ElevatedRun::Done(code)
+    Ok(info.hProcess)
 }
 
 /// Single-quote for a POSIX shell.
@@ -842,6 +864,174 @@ fn elevated_run(cli: &std::path::Path, args: &[String], _visible: bool) -> Eleva
     }
 }
 
+// ─── Portable mode (ADR 0054) ────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct PortableInfo {
+    /// This window runs from a folder (a `portable` file next to it, or `--portable`).
+    portable: bool,
+}
+
+/// Known without the daemon: the window decides what to show when the daemon is not there.
+#[tauri::command]
+async fn portable_info() -> PortableInfo {
+    PortableInfo {
+        portable: socketguard_core::portable::is_portable(),
+    }
+}
+
+/// What the last portable run left (`data\last-exit.log`), if there is a record.
+#[derive(Debug, Serialize)]
+struct PortableExit {
+    /// Unix seconds.
+    at: u64,
+    /// Empty: everything was removed.
+    left: Vec<String>,
+}
+
+#[tauri::command]
+async fn portable_last_exit() -> CmdResult<Option<PortableExit>> {
+    let Some(dir) = socketguard_core::portable::data_dir() else {
+        return Ok(None);
+    };
+    let file = dir.join(socketguard_core::portable::LAST_EXIT_FILE);
+    Ok(std::fs::read_to_string(file)
+        .ok()
+        .and_then(|t| socketguard_core::portable::parse_last_exit(&t))
+        .map(|(at, left)| PortableExit { at, left }))
+}
+
+/// The SID of the account this window runs as (its own token, not the elevated one a
+/// credentials prompt may start the daemon with).
+#[cfg(windows)]
+fn current_user_sid() -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    // SAFETY: token queries on the current process; the buffer is sized by the first call.
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+        let mut len = 0u32;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+        let mut buf = vec![0u8; len as usize];
+        let sid = if len > 0
+            && GetTokenInformation(
+                token,
+                TokenUser,
+                Some(buf.as_mut_ptr().cast()),
+                len,
+                &mut len,
+            )
+            .is_ok()
+        {
+            let user = (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+            let mut out = PWSTR::null();
+            ConvertSidToStringSidW(user, &mut out).ok().and_then(|()| {
+                let s = out.to_string().ok();
+                let _ = LocalFree(Some(HLOCAL(out.0.cast())));
+                s
+            })
+        } else {
+            None
+        };
+        let _ = CloseHandle(token);
+        sid
+    }
+}
+
+/// Start `socketguard-daemon --portable --owner-pid <this window> --allow-user <this account>`
+/// with administrator rights, hidden, and wait until its pipe answers. The daemon ends when
+/// this process does. Reported like the other elevated runs: `exit_code` 0 is a daemon that
+/// answers, another number a daemon that stopped, none one that never answered.
+#[tauri::command]
+async fn start_portable_daemon() -> CmdResult<SetupRun> {
+    let daemon = sibling("socketguard-daemon")?;
+    let installed = service_status().await.map(|s| s.installed).unwrap_or(false);
+    if installed {
+        return Err(UiError {
+            code: "service_installed".into(),
+            message: "The SocketGuard service is installed on this computer. Portable mode does \
+                      not run beside it: remove the service first."
+                .into(),
+            details: None,
+        });
+    }
+    #[cfg(windows)]
+    {
+        let Some(sid) = current_user_sid() else {
+            return Err(internal("cannot tell which account this is".into()));
+        };
+        let args: Vec<String> = [
+            "--portable",
+            "--owner-pid",
+            &std::process::id().to_string(),
+            "--allow-user",
+            &sid,
+        ]
+        .map(String::from)
+        .to_vec();
+        let command = format!("socketguard-daemon {}", args.join(" "));
+        let launched = {
+            let (d, a) = (daemon.clone(), args.clone());
+            tokio::task::spawn_blocking(move || {
+                shell_execute_runas(&d, &a, false).map(|h| h.0 as isize)
+            })
+            .await
+            .map_err(|e| internal(e.to_string()))?
+        };
+        let process = match launched {
+            Ok(p) => p,
+            Err(other) => return Ok(setup_run(other, command)),
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(40);
+        let code = loop {
+            if client().status().await.is_ok() {
+                break Some(0);
+            }
+            if let Some(code) = process_exit_code(process) {
+                break Some(code);
+            }
+            if std::time::Instant::now() > deadline {
+                break None;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+        close_process(process);
+        Ok(setup_run(ElevatedRun::Done(code), command))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = daemon;
+        Err(UiError {
+            code: "invalid".into(),
+            message: "portable mode exists on Windows only".into(),
+            details: None,
+        })
+    }
+}
+
+/// The exit code of a process started above, if it has ended.
+#[cfg(windows)]
+fn process_exit_code(process: isize) -> Option<i32> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Threading::GetExitCodeProcess;
+    const STILL_ACTIVE: u32 = 259;
+    let mut code = 0u32;
+    // SAFETY: the handle came from ShellExecuteEx and is open until `close_process`.
+    let got = unsafe { GetExitCodeProcess(HANDLE(process as *mut _), &mut code) }.is_ok();
+    (got && code != STILL_ACTIVE).then_some(code as i32)
+}
+
+#[cfg(windows)]
+fn close_process(process: isize) {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    // SAFETY: closes the handle once.
+    let _ = unsafe { CloseHandle(HANDLE(process as *mut _)) };
+}
+
 /// Open one of the two download pages in the system browser. Only those: the page asks
 /// for a link it got from the daemon, which is not trusted with any other.
 #[tauri::command]
@@ -872,6 +1062,16 @@ async fn open_download_page(url: String) -> CmdResult<()> {
 }
 
 fn main() {
+    // Portable mode (ADR 0054): a `portable` file next to this program, or `--portable`. The
+    // window's browser data then stays in the folder too, not under the user's profile.
+    if std::env::args().any(|a| a == socketguard_core::portable::FLAG) {
+        socketguard_core::portable::request();
+    }
+    if socketguard_core::portable::is_portable() {
+        if let Some(dir) = socketguard_core::portable::exe_dir() {
+            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join("ui-data"));
+        }
+    }
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             status,
@@ -937,6 +1137,10 @@ fn main() {
             apply_state,
             enable,
             disable,
+            shutdown,
+            portable_info,
+            portable_last_exit,
+            start_portable_daemon,
             subscribe_events,
             start_daemon,
             install_service,

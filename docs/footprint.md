@@ -112,6 +112,40 @@ The invariant: a network SocketGuard adds, installs or manages never makes the h
 | Tor, LAN, SLAAC, DHCPv6 | nothing to close | Tor adds a control port on loopback with cookie authentication only and exposes nothing inbound before SocketGuard publishes a service. SocketGuard's own LAN addresses are denied before they are added (the ruleset covers an address before it goes on an interface). |
 | Windows: node first seen, adapter appears before the next pass | **open, short** | WFP binds filters to an adapter's LUID, so no filter exists for an adapter that does not exist. The address block covers the node once its address is known; until then (and for non-Yggdrasil traffic on that adapter) the window lasts from the adapter's creation to the next reconcile and `interfaces_changed` re-apply. `yggdrasil_block.interface_blocked` is therefore false on Windows for a missing adapter, and setup refuses to start the service on that basis. |
 
+## Portable mode (ADR 0054)
+
+Windows only, selected by a file named `portable` next to the programs or `--portable`. It is an
+exception to "stopping removes nothing": its protection ends with the process, and the machine is
+then open as it was before SocketGuard started, not closed.
+
+**While it runs**
+
+| Item | Where | Lifetime |
+|---|---|---|
+| WFP provider, sublayer and filters, the same names and keys as the installed product | the engine | **dynamic**: added through one engine handle opened with `FWPM_SESSION_FLAG_DYNAMIC`, without the persistent flags. Windows deletes them when the handle is closed or the process ends, however it ends (kill, crash, power loss need no cleanup) |
+| `/128` IPv6 addresses on adapters (`CreateUnicastIpAddressEntry`) | adapters | not persistent by Microsoft's documentation: they end with a reboot or an adapter reset. Removed by the teardown; after a kill they stay until the next start from the same folder (which sweeps its ledger first) or a reboot |
+| Pipe `\\.\pipe\socketguard-portable` | the pipe namespace | the process |
+| Config, database, `session.json`, `last-exit.log`, the data of managed networks | `data\` next to the programs | the folder. `session.json` exists while a daemon runs; one found at start was left by a daemon that did not end cleanly |
+| The window's browser data | `ui-data\` next to the programs | the folder |
+
+**What it does not create:** no service, no `SocketGuard Users` group, nothing in `%ProgramData%`,
+the registry, `PATH` or the Start menu, no install record on the host (`setup-log.json` is not
+written), no change to `FWPM_ENGINE_COLLECT_NET_EVENTS` (it is read; if it is off, drop events are
+not logged and the status says so). The one-time move of old state into `%ProgramData%` is off.
+
+**What can remain**
+
+| After | What | Until |
+|---|---|---|
+| a clean end (window closed, sign-out, shutdown, `socketguard shutdown`) | nothing on the host; `data\` stays with the folder | |
+| a kill or crash | the IPv6 addresses the daemon had added (see the CI run in `test/portable.ps1`, which records whether Windows removed them with the process) | the next start from the same folder, or a reboot |
+| a kill or crash | the Wintun driver, if managed Yggdrasil installed it (ADR 0052) and it was absent before | removed by the next clean end only if it was absent before the session and nothing else uses it |
+| a clean end with something stuck | `data\last-exit.log` says what (`LEFT: ...`) and the exit code is not 0 | |
+
+**Not beside an installed copy:** a portable daemon refuses to start while the `SocketGuard`
+service is installed, and the service refuses to run while `\\.\pipe\socketguard-portable` exists.
+`footprint-check.ps1 -Expect absent` also checks that pipe.
+
 ## Failures of the removal paths themselves
 
 - **`--disable` from the wrong directory** can no longer happen: config and database have fixed locations. If the database is not at the resolved location, `--disable` refuses, names the paths it looked at, exits non-zero and changes nothing.

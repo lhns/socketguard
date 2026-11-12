@@ -60,6 +60,34 @@ impl Engine {
         }
     }
 
+    /// Portable start (ADR 0054): take every address in the ledger off its interface, wanted
+    /// or not. A killed portable daemon leaves them behind with no rules, and `sweep_owned`
+    /// keeps what is still wanted. The first reconcile puts the wanted ones back, with rules.
+    /// Returns how many could not be removed.
+    pub async fn sweep_all_owned(&self, state: &AppState) -> usize {
+        let owned = match state.db.list_owned_addresses().await {
+            Ok(o) => o,
+            Err(e) => {
+                warn!("Cannot sweep the addresses of an earlier run: {e}");
+                return 0;
+            }
+        };
+        if owned.is_empty() {
+            return 0;
+        }
+        let total = owned.len();
+        let failures = release_owned(&state.db, &self.ifaces, owned).await;
+        for (o, e) in &failures {
+            warn!("Cannot remove {} from {}: {e}", o.addr, o.interface);
+        }
+        info!(
+            "Swept {} address(es) an earlier run left on adapters ({} could not be removed)",
+            total - failures.len(),
+            failures.len()
+        );
+        failures.len()
+    }
+
     /// [`Engine::sweep_owned`] for a `referenced` set the caller already worked out.
     async fn sweep_owned_except(&self, state: &AppState, referenced: &HashSet<Ipv6Addr>) {
         let db = &state.db;

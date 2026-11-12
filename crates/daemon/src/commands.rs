@@ -116,6 +116,12 @@ pub fn service_cmd(cmd: ServiceCmd) -> i32 {
                 Ok(0)
             }
             ServiceCmd::Install { no_start } => {
+                if crate::portable::portable_daemon_running() {
+                    eprintln!(
+                        "warning: a portable SocketGuard is running. The installed service does not \
+                         run beside it: close the portable one, or the service will refuse to start."
+                    );
+                }
                 let r = resolved()?;
                 let exe = std::env::current_exe().context("cannot find this executable")?;
                 let plan = InstallPlan {

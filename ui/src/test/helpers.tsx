@@ -60,7 +60,7 @@ export const noTags: Tag[] = [];
 export const saved = <T,>(value: T, enforcement: Enforcement | null = null) => ({ value, enforcement });
 export const settings: Settings = { protect_host_interfaces: [] };
 export const status: StatusResponse = {
-  version: "0.1.0", networks, protect_host_interfaces: [], disabled: false, unadopted: false,
+  version: "0.1.0", networks, protect_host_interfaces: [], disabled: false, unadopted: false, portable: false, db_protected: true, drop_events: true,
   counts: { apps: 1, addresses: 1, peers: 1, groups: 0, grants: 0 },
 };
 
@@ -159,6 +159,7 @@ export function mockDaemon(handlers: Handlers = {}) {
     get_settings: () => settings,
     activity: () => [],
     subscribe_events: () => undefined,
+    portable_info: () => ({ portable: false }),
   };
   mockIPC(
     (cmd, args) => {

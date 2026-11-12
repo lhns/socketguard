@@ -307,6 +307,14 @@ fn host_lines(s: &StatusResponse) -> String {
         .service_installed
         .map(|i| if i { "installed" } else { "not installed" });
     [
+        (
+            "mode",
+            s.portable.then_some("portable (rules end with the daemon)"),
+        ),
+        (
+            "warning",
+            (!s.db_protected).then_some("NOT protected: this volume has no access control"),
+        ),
         ("config", s.config_path.as_deref()),
         ("database", s.db_path.as_deref()),
         ("socket", s.socket.as_deref()),

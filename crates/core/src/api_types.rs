@@ -120,6 +120,22 @@ pub struct StatusResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub service_installed: Option<bool>,
+    /// Portable mode (ADR 0054): everything is in the program's folder and the rules and
+    /// addresses end with the daemon's process.
+    #[serde(default)]
+    pub portable: bool,
+    /// The database file is restricted to SYSTEM and Administrators. False only in portable
+    /// mode on a volume without access control lists.
+    #[serde(default = "yes")]
+    pub db_protected: bool,
+    /// Blocked connections are being logged. False in portable mode when the system's
+    /// net-event option is off (portable mode does not change it).
+    #[serde(default = "yes")]
+    pub drop_events: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 // ─── Apps ────────────────────────────────────────────────────────────────────
