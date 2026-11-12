@@ -1,4 +1,4 @@
-//! The unprivileged account the managed networks' children run as (ADR 0052): a system
+//! The unprivileged account the Tor and Yggdrasil networks' children run as (ADR 0052): a system
 //! account `socketguard-net` that `service install` creates on Linux and macOS (Windows
 //! uses LocalService, which exists), and uninstall removes again when it created it.
 //!
@@ -80,8 +80,7 @@ impl Accounts for SystemAccounts {
     /// as LocalService (a daemon started by hand from a user account may not).
     #[cfg(windows)]
     fn daemon(&self) -> (u32, bool) {
-        let system = crate::networks::tor_control::winacl::current_user_sid()
-            .is_ok_and(|sid| sid == "S-1-5-18");
+        let system = socketguard_core::winsid::current_user_sid().is_some_and(|sid| sid == "S-1-5-18");
         (0, system)
     }
 

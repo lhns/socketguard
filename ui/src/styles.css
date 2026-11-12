@@ -542,7 +542,7 @@ code { font-family: var(--font-mono); font-size: 12px; background: var(--bg-inpu
 .net-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--bg-input); display: flex; flex-direction: column; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
 .net-card .actions { margin: auto 0 0; padding-top: 4px; }
 .net-card .hint { margin: 0; }
-.managed-details { margin: 4px 0 8px 12px; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
-.managed-details p { margin: 0; }
+.child-details { margin: 4px 0 8px 12px; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+.child-details p { margin: 0; }
 .hint.warn { color: var(--yellow); }
 .advanced > summary { cursor: pointer; font-weight: 600; }

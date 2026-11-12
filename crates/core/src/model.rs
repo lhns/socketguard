@@ -281,7 +281,7 @@ pub struct Network {
     /// Tor and Yggdrasil: how SocketGuard's own copy stands (ADR 0052, 0056).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
-    pub managed: Option<ManagedInfo>,
+    pub child: Option<ChildInfo>,
 }
 
 /// Where the child process of a Tor or Yggdrasil network stands.
@@ -307,7 +307,7 @@ pub enum ChildState {
 /// A Tor or Yggdrasil network: how its child process is doing.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManagedInfo {
+pub struct ChildInfo {
     pub state: ChildState,
     /// Tor: bootstrap progress in percent while `bootstrapping`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -710,7 +710,7 @@ pub(crate) mod fixtures {
             status: NetworkStatus::Up,
             prefix: prefix.map(|p| p.parse().unwrap()),
             vlan_id: None,
-            managed: None,
+            child: None,
         }
     }
 

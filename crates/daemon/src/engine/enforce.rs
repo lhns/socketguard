@@ -176,13 +176,13 @@ impl Engine {
             &inst.backend,
             self.ula_global_id,
             self.ifaces.clone(),
-            &self.managed,
+            &self.child_ctx,
         )
         .map_err(|e| EngineError::Invalid(format!("cannot create network: {e}")))?;
         if matches!(inst.backend, BackendConfig::Yggdrasil { .. }) {
             // The node's addresses follow from its key: with them remembered, the first
             // ruleset already closes them, before any software runs (ADR 0051).
-            self.ensure_managed_key(state, &inst.id, true)
+            self.ensure_child_key(state, &inst.id, true)
                 .await
                 .map_err(EngineError::Internal)?;
         }
@@ -220,7 +220,7 @@ impl Engine {
         let count = updated.peers().len();
         active.config.backend = updated;
         // A changed spec restarts the child so that it connects to the new peers: the
-        // Yggdrasil worker puts the peers into the spec (`networks::managed::child_wish`).
+        // Yggdrasil worker puts the peers into the spec (`networks::child::child_wish`).
         self.sync_children(state).await;
         let activity = NewActivity::new(
             ActivityKind::NetworkChanged,
@@ -382,7 +382,7 @@ impl Engine {
         };
         // The network is live either way; a failed apply is retried by the next pass.
         let applied = self.apply_and_ensure(state).await;
-        // A managed network's child starts once its network exists and the ruleset is in.
+        // A Tor or Yggdrasil network's child starts once its network exists and the ruleset is in.
         self.sync_children(state).await;
         let result = self
             .commit(
@@ -423,16 +423,16 @@ impl Engine {
         };
         self.remove_locators(state, backend_id, &deleted).await;
         // The child ends before its network disappears, so nothing of it outlives the
-        // network (a managed Tor takes its onion services with it).
+        // network (a Tor takes its onion services with it).
         self.stop_child(backend_id).await;
-        let managed_ygg = self
+        let ygg_network = self
             .backends
             .get(backend_id)
             .is_some_and(|b| super::children::is_yggdrasil(&b.config.backend));
         self.backends.remove(backend_id);
-        if managed_ygg {
+        if ygg_network {
             // The node's key goes with the network, like the keys of its addresses.
-            self.forget_managed_key(state, backend_id).await;
+            self.forget_child_key(state, backend_id).await;
         }
         // A network added again later must not inherit this one's remembered node.
         if let Err(e) = state

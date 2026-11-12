@@ -536,7 +536,7 @@ pub async fn test_app_state_with(
     db.migrate().await.unwrap();
 
     let (events_tx, _) = tokio::sync::broadcast::channel(64);
-    // The engine builds managed networks from the same files the API checks.
+    // The engine builds Tor and Yggdrasil networks from the same files the API checks.
     let bundled = Arc::new(bundled);
     engine.set_bundled(bundled.clone());
 
@@ -551,19 +551,19 @@ pub async fn test_app_state_with(
     })
 }
 
-/// The pieces of a managed-network test: the fake processes, a state directory in a temp
+/// The pieces of a Tor or Yggdrasil network test: the fake processes, a state directory in a temp
 /// directory and the accounts, with the supervisor's pauses shortened to milliseconds.
-pub struct ManagedHarness {
+pub struct ChildHarness {
     pub spawner: crate::children::fake::FakeSpawner,
     pub state_dir: std::path::PathBuf,
-    pub ctx: crate::networks::ManagedCtx,
+    pub ctx: crate::networks::ChildCtx,
     /// The firewall and the interfaces of the engines it builds.
     pub fw: Arc<MockFirewall>,
     pub fw_calls: Arc<Mutex<Vec<FirewallCall>>>,
     pub ifaces: MockInterfaceManager,
 }
 
-impl ManagedHarness {
+impl ChildHarness {
     /// `third_party` has a Tor and a Yggdrasil; the account `socketguard-net` exists (with
     /// the ids of the test process, so preparing the directories works without root).
     pub fn new() -> Self {
@@ -597,7 +597,7 @@ impl ManagedHarness {
         let state_dir = root.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
         let spawner = crate::children::fake::FakeSpawner::default();
-        let ctx = crate::networks::ManagedCtx::new(
+        let ctx = crate::networks::ChildCtx::new(
             Arc::new(crate::bundled::Bundled::from_dir(third)),
             Some(state_dir.clone()),
             Arc::new(crate::children::Supervisor::new(Arc::new(spawner.clone()))),
@@ -614,7 +614,7 @@ impl ManagedHarness {
         }
     }
 
-    /// An engine over mocks with no networks that runs managed networks on this harness.
+    /// An engine over mocks with no networks that runs Tor and Yggdrasil networks on this harness.
     pub fn engine(&self) -> crate::engine::Engine {
         let mut engine = crate::engine::Engine::new_injectable(
             Box::new(MockSocketMonitor::new(vec![])),
@@ -622,17 +622,17 @@ impl ManagedHarness {
             Arc::new(self.ifaces.clone()),
             HashMap::new(),
         );
-        engine.set_managed_ctx(self.ctx.clone());
+        engine.set_child_ctx(self.ctx.clone());
         engine
     }
 
-    /// A daemon state over [`ManagedHarness::engine`] that knows the same shipped files.
+    /// A daemon state over [`ChildHarness::engine`] that knows the same shipped files.
     pub async fn app_state(&self, config: DaemonConfig) -> Arc<AppState> {
         test_app_state_with(self.engine(), config, None, (*self.ctx.bundled).clone()).await
     }
 }
 
-impl Default for ManagedHarness {
+impl Default for ChildHarness {
     fn default() -> Self {
         Self::new()
     }
@@ -903,7 +903,7 @@ impl MockTorControl {
             cookie_path: Some(cookie_path.clone()),
             // The test's cookie file belongs to the account running the test.
             #[cfg(windows)]
-            cookie_owner: crate::networks::tor_control::winacl::current_user_sid().ok(),
+            cookie_owner: socketguard_core::winsid::current_user_sid(),
             ..AuthOptions::default()
         }
     }

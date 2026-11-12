@@ -87,7 +87,7 @@ ygg_pid() { docker exec "$NODE_A" pgrep -f "^$TP/yggdrasil/yggdrasil -useconffil
 ygg_gone() { ! ygg_pid >/dev/null; }
 net_json() { docker exec "$NODE_A" $SG networks list --json; }
 net_up() { net_json | jq -e '.[0].kind == "yggdrasil" and .[0].status.state == "up"' >/dev/null; }
-net_reason() { net_json | jq -r '.[0] | (.status.reason // .status.state) + " [" + (.managed.state // "-") + "]"'; }
+net_reason() { net_json | jq -r '.[0] | (.status.reason // .status.state) + " [" + (.child.state // "-") + "]"'; }
 wait_up() { # wait_up SECONDS: net_up, printing each distinct reason on the way
   local end=$((SECONDS + $1)) last="" now
   while ! net_up 2>/dev/null; do
@@ -105,7 +105,7 @@ step "the daemon started a yggdrasil of its own" retry 60 ygg_pid || exit 1
 FIRST_YGG="$(ygg_pid)"
 ygg_user() { [ "$(docker exec "$NODE_A" ps -o user= -p "$FIRST_YGG" | tr -d ' ')" = socketguard-net ]; }
 step "yggdrasil dropped to socketguard-net after creating the tun" retry 20 ygg_user
-step "the status names the account and the shipped version" sh -c "docker exec $NODE_A $SG networks list --json | jq -e '.[0].managed.runs_as == \"socketguard-net\" and (.[0].managed.version | length > 0)' >/dev/null"
+step "the status names the account and the shipped version" sh -c "docker exec $NODE_A $SG networks list --json | jq -e '.[0].child.runs_as == \"socketguard-net\" and (.[0].child.version | length > 0)' >/dev/null"
 step "the install record lists <state>/yggdrasil as an owned directory" sh -c "docker exec $NODE_A cat /etc/setup-log.json | jq -e --arg p '$STATE/yggdrasil' '[.entries[] | select(.type == \"owned_directory\" and .path == \$p)] | length == 1' >/dev/null"
 step "yggdrasil.conf is the daemon's own and private (0600)" sh -c "[ \"\$(docker exec $NODE_A stat -c '%U %a' $STATE/yggdrasil/yggdrasil.conf)\" = 'root 600' ]"
 step "the run directory (admin socket) belongs to socketguard-net" sh -c "[ \"\$(docker exec $NODE_A stat -c '%U %a' $STATE/yggdrasil/run)\" = 'socketguard-net 700' ]"
@@ -117,9 +117,9 @@ if ! wait_up 90; then
   fail "the network came up"; exit 1
 fi
 pass "the network is up"
-peers_connected() { net_json | jq -e '.[0].managed.peers_connected >= 1' >/dev/null; }
+peers_connected() { net_json | jq -e '.[0].child.peers_connected >= 1' >/dev/null; }
 step "the status shows peers_connected >= 1" retry 40 peers_connected || exit 1
-NODE_ADDR="$(net_json | jq -r '.[0].managed.address')"
+NODE_ADDR="$(net_json | jq -r '.[0].child.address')"
 # The /64 of a node: the first 8 bytes of its address with the lowest bit of the first byte set.
 SUBNET="$(A python3 -c 'import ipaddress,sys; b=bytearray(ipaddress.ip_address(sys.argv[1]).packed); b[0]|=1; b[8:]=bytes(8); print(ipaddress.ip_address(bytes(b)).compressed+"/64")' "$NODE_ADDR")"
 step "the adapter $ADAPTER holds the node's address" on_adapter "$NODE_ADDR"
@@ -154,13 +154,13 @@ step "the node's own address still answers nothing" sh -c "! docker exec $NODE_B
 step "socketguard disable succeeds" A $SG disable --yes
 step "disabled: yggdrasil is gone" retry 30 ygg_gone
 step "disabled: the adapter is gone" retry 15 sh -c "! docker exec $NODE_A ip link show $ADAPTER"
-step "disabled: the network says it is turned off" sh -c "docker exec $NODE_A $SG networks list --json | jq -e '.[0].managed.state == \"stopped\" and .[0].status.state == \"down\"' >/dev/null"
+step "disabled: the network says it is turned off" sh -c "docker exec $NODE_A $SG networks list --json | jq -e '.[0].child.state == \"stopped\" and .[0].status.state == \"down\"' >/dev/null"
 step "disabled: the key and the configuration are kept" A test -f $STATE/yggdrasil/yggdrasil.conf
 sleep 6
 step "disabled: a reconcile pass did not start yggdrasil again" ygg_gone
 step "socketguard enable succeeds" A $SG enable
 step "enabled: yggdrasil is started again and the network comes back" wait_up 90
-step "enabled: it is the same node (same address)" sh -c "[ \"\$(docker exec $NODE_A $SG networks list --json | jq -r '.[0].managed.address')\" = '$NODE_ADDR' ]"
+step "enabled: it is the same node (same address)" sh -c "[ \"\$(docker exec $NODE_A $SG networks list --json | jq -r '.[0].child.address')\" = '$NODE_ADDR' ]"
 step "enabled: peers are connected again" retry 40 peers_connected
 step "enabled: the grant is in force again" retry 60 fetch_granted
 
@@ -198,7 +198,7 @@ step "another Yggdrasil node runs on A (interface ygg9)" retry 20 other_up
 daemon_start
 step "the daemon is up" retry 20 daemon_running
 step "socketguard enable succeeds (the latch from --disable)" A $SG enable
-other_reason() { net_json | jq -e '.[0].managed.state == "waiting" and (.[0].managed.detail | startswith("Another Yggdrasil node is running on this computer"))' >/dev/null; }
+other_reason() { net_json | jq -e '.[0].child.state == "waiting" and (.[0].child.detail | startswith("Another Yggdrasil node is running on this computer"))' >/dev/null; }
 step "with another node running, SocketGuard's is held back and says why" retry 40 other_reason
 sleep 4
 step "no yggdrasil of the daemon was started" ygg_gone

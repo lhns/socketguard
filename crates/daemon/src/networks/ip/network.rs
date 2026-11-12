@@ -172,8 +172,8 @@ impl Network for IpNetwork {
         self.backend.node()
     }
 
-    fn managed(&self) -> Option<socketguard_core::ManagedInfo> {
-        self.backend.managed()
+    fn child_info(&self) -> Option<socketguard_core::ChildInfo> {
+        self.backend.child_info()
     }
 
     fn ensure_locator(&self, _req: &LocatorRequest) -> Result<NewLocator> {

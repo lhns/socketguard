@@ -1,6 +1,6 @@
 //! Windows: the Wintun driver that Yggdrasil's adapter needs (ADR 0052). `wintun.dll` (shipped
 //! beside `yggdrasil.exe`) installs the driver into the driver store the first time it
-//! creates an adapter. SocketGuard records once, before the first managed start, whether
+//! creates an adapter. SocketGuard records once, before the first Yggdrasil start, whether
 //! the driver was already in the store, and `uninstall --purge` removes it only if it was
 //! not and nothing else holds it.
 //!
@@ -125,7 +125,7 @@ pub fn record_present_before(host: &mut dyn Host, log: &dyn PresenceLog) -> Resu
     log.record(installed(host)?.is_some())
 }
 
-/// Before the first managed Yggdrasil start on Windows: into the session record when portable,
+/// Before the first Yggdrasil start on Windows: into the session record when portable,
 /// else the install record. A daemon without either (tests) does nothing.
 pub fn record_before_first_start() {
     let result = if let Some(log) = crate::portable::session_log() {

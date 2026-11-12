@@ -40,7 +40,7 @@ mn_wait_up() {
     local id=$1 end=$((SECONDS + $2)) last="" now
     while :; do
         mn_netjson 2>/dev/null | jq -e --arg id "$id" '.[] | select(.id == $id) | .status.state == "up"' >/dev/null 2>&1 && return 0
-        now="$(mn_netjson 2>/dev/null | jq -r --arg id "$id" '.[] | select(.id == $id) | "\(.status.state) \(.status.reason // "") [\(.managed.state // "-")\(if .managed.progress then " " + (.managed.progress | tostring) + "%" else "" end)] \(.managed.detail // "")"' 2>/dev/null)" || now=""
+        now="$(mn_netjson 2>/dev/null | jq -r --arg id "$id" '.[] | select(.id == $id) | "\(.status.state) \(.status.reason // "") [\(.child.state // "-")\(if .child.progress then " " + (.child.progress | tostring) + "%" else "" end)] \(.child.detail // "")"' 2>/dev/null)" || now=""
         [ "$now" != "$last" ] && { note "$id: $now"; last=$now; }
         [ "$SECONDS" -ge "$end" ] && return 1
         sleep 2
@@ -91,11 +91,11 @@ mn_tor() {
     pid="$(mn_pid '/third_party/tor/tor')"
     [ -n "$pid" ] || mn_die "the network is up but no tor from third_party is running"
     uid="$(mn_uid "$pid")"; want="$(id -u socketguard-net)"
-    [ "$uid" = "$want" ] || mn_die "tor (pid $pid) runs as uid $uid ($(ps -o user= -p "$pid" | tr -d ' ')), expected socketguard-net ($want); runs_as: $(mn_field tor .managed.runs_as)"
+    [ "$uid" = "$want" ] || mn_die "tor (pid $pid) runs as uid $uid ($(ps -o user= -p "$pid" | tr -d ' ')), expected socketguard-net ($want); runs_as: $(mn_field tor .child.runs_as)"
     ok "tor runs as socketguard-net (pid $pid)"
-    runs="$(mn_field tor .managed.runs_as)"
+    runs="$(mn_field tor .child.runs_as)"
     [ "$runs" = socketguard-net ] || mn_die "runs_as is '$runs'"
-    ok "the network card says it runs as $runs, version $(mn_field tor .managed.version)"
+    ok "the network card says it runs as $runs, version $(mn_field tor .child.version)"
     wait_until 20 test -d "$STATE/tor" || mn_die "no $STATE/tor"
 
     $SG networks rm tor || mn_die "networks rm tor failed"
@@ -133,7 +133,7 @@ mn_ygg_start() {
         # The adapter first, then the ruleset: an adapter seen at poll N with the block seen
         # at poll N or earlier proves the block was in force when the adapter was there.
         if mn_adapter_exists; then adapter=1; else adapter=0; fi
-        [ -n "$addr" ] || addr="$(mn_field ygg .managed.address)"
+        [ -n "$addr" ] || addr="$(mn_field ygg .child.address)"
         if [ -n "$addr" ] && [ -z "$block_at" ]; then
             if [ -z "${MN_YGG_SUBNET:-}" ]; then
                 { read -r MN_YGG_ADDR; read -r MN_YGG_SUBNET; } < <(mn_ygg_addresses "$addr")
@@ -149,7 +149,7 @@ mn_ygg_start() {
         [ -n "$adapter_at" ] && [ -n "$block_at" ] && break
         sleep 0.2
     done
-    [ -n "$adapter_at" ] || mn_die "no adapter after about 2 minutes; network: $(mn_field ygg '"\(.status.state) \(.status.reason // "") [\(.managed.state // "-")] \(.managed.detail // "")"')"
+    [ -n "$adapter_at" ] || mn_die "no adapter after about 2 minutes; network: $(mn_field ygg '"\(.status.state) \(.status.reason // "") [\(.child.state // "-")] \(.child.detail // "")"')"
     ok "the node address $MN_YGG_ADDR is known and its block ($MN_YGG_SUBNET) was in the ruleset at poll $block_at, the adapter appeared at poll $adapter_at (0.2 s apart)"
 }
 
@@ -157,8 +157,8 @@ mn_ygg_up() {
     note "waiting for the Yggdrasil network to be up (up to 2 minutes)"
     mn_wait_up ygg 120 || mn_die "the Yggdrasil network is not up after 2 minutes"
     ok "the Yggdrasil network is up"
-    note "peers connected: $(mn_field ygg '.managed.peers_connected // "unknown"') (no peers are configured on the runner)"
-    note "runs as: $(mn_field ygg .managed.runs_as), version $(mn_field ygg .managed.version)"
+    note "peers connected: $(mn_field ygg '.child.peers_connected // "unknown"') (no peers are configured on the runner)"
+    note "runs as: $(mn_field ygg .child.runs_as), version $(mn_field ygg .child.version)"
 }
 
 # --- after the uninstall steps -------------------------------------------------------------

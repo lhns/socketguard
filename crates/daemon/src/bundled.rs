@@ -47,7 +47,7 @@ pub struct YggFiles {
     pub dir: PathBuf,
 }
 
-/// The located `third_party` directory, or none: then managed networks are not included.
+/// The located `third_party` directory, or none: then Tor and Yggdrasil networks are not included.
 #[derive(Debug, Clone, Default)]
 pub struct Bundled {
     dir: Option<PathBuf>,

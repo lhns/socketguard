@@ -1,12 +1,12 @@
 import { useState, type ReactNode } from "react";
-import { api, type ManagedInfo, type Network } from "../api";
+import { api, type ChildInfo, type Network } from "../api";
 import { errorText } from "../lib";
 import { TOR_BRIDGES_URL, YGG_PUBLIC_PEERS_URL } from "../links";
 import { usePortable, useSetNetworkBridges, useSetNetworkPeers } from "../queries";
 import { useToast } from "./Toast";
 
 /** The child process of a Tor or Yggdrasil network, in words. */
-export function childStateText(m: ManagedInfo): string {
+export function childStateText(m: ChildInfo): string {
   switch (m.state) {
     case "starting":
       return "Starting";
@@ -95,8 +95,8 @@ function ExternalLink({ url, children }: { url: string; children: ReactNode }) {
 }
 
 /** The state of the network's own Tor or Yggdrasil process, and what runs it. */
-export function NetworkOrigin({ network }: { network: Network }) {
-  const m = network.managed;
+export function ChildStatus({ network }: { network: Network }) {
+  const m = network.child;
   if (!m) return null;
   return (
     <>
@@ -110,12 +110,12 @@ export function NetworkOrigin({ network }: { network: Network }) {
 }
 
 /** What is specific to Tor and Yggdrasil: Yggdrasil's address and peers, Tor's bridges. */
-export function ManagedDetails({ network }: { network: Network }) {
+export function ChildDetails({ network }: { network: Network }) {
   const portable = usePortable();
-  const m = network.managed;
+  const m = network.child;
   if (m && network.kind === "tor") {
     return (
-      <div className="managed-details">
+      <div className="child-details">
         {/* Remounts when the saved bridges change, so the draft follows the daemon. */}
         <BridgesEditor key={JSON.stringify(m.bridges ?? [])} id={network.id} saved={m.bridges ?? []} unavailable={m.bridges_unavailable} />
       </div>
@@ -124,7 +124,7 @@ export function ManagedDetails({ network }: { network: Network }) {
   if (!m || network.kind !== "yggdrasil") return null;
   const peers = m.peers ?? [];
   return (
-    <div className="managed-details">
+    <div className="child-details">
       {m.address && <CopyAddress address={m.address} />}
       {portable && <p className="hint">{WINTUN_PORTABLE_NOTE}</p>}
       <p className="hint">

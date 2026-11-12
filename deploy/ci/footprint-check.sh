@@ -25,7 +25,7 @@
 # string in the file is compared (lower-cased, textual) with the host's addresses; if it is still
 # configured, the item `ledger-addresses` is PRESENT. Never required.
 #
-# Managed networks (ADR 0052) add: the programs `tor` and `yggdrasil` running from a
+# Tor and Yggdrasil (ADR 0052) add: the programs `tor` and `yggdrasil` running from a
 # `third_party` directory, the directories <state dir>/tor and <state dir>/yggdrasil, the
 # account `socketguard-net`, the Linux adapter `sgygg0` (a macOS utun goes with its process)
 # and the `third_party` directory of the shipped programs (SOCKETGUARD_THIRD_PARTY, else the
@@ -128,7 +128,7 @@ add_ledger_item() { # ledger text, interface output
 run() { command -v "$1" >/dev/null 2>&1 && "$@" 2>&1 || true; }
 
 # The processes and the shipped files, the same on both systems.
-add_managed_items() { # third_party candidate directories...
+add_network_items() { # third_party candidate directories...
     local ps_out; ps_out=$(run ps -eo args)
     rec "$(state_child_ps tor "$ps_out")" child-tor
     rec "$(state_child_ps yggdrasil "$ps_out")" child-yggdrasil
@@ -155,7 +155,7 @@ collect_linux() {
     rec "$(state_listed "$paths" '^/run/socketguard\.sock$')" socket
     rec "$(state_account_getent "$(run getent passwd socketguard-net)")" account-socketguard-net
     rec "$(state_link_ip "$(run ip -o link show sgygg0)")" adapter-sgygg0
-    add_managed_items /usr/bin/third_party /usr/local/bin/third_party /usr/lib/socketguard/third_party /opt/socketguard/third_party
+    add_network_items /usr/bin/third_party /usr/local/bin/third_party /usr/lib/socketguard/third_party /opt/socketguard/third_party
     LIVE_ADDRS=$(run ip -6 addr)
     REQUIRED=" systemd-unit group config-dir "
 }
@@ -172,7 +172,7 @@ collect_macos() {
     add_file_items "$paths"
     rec "$(state_listed "$paths" '^/var/run/socketguard\.sock$')" socket
     rec "$(state_account_dscl "$(run dscl . -read /Users/socketguard-net)")" account-socketguard-net
-    add_managed_items /usr/local/bin/third_party /usr/local/lib/socketguard/third_party "$d/third_party"
+    add_network_items /usr/local/bin/third_party /usr/local/lib/socketguard/third_party "$d/third_party"
     LIVE_ADDRS=$(run ifconfig)
     REQUIRED=" launchd-plist group config-dir "
 }

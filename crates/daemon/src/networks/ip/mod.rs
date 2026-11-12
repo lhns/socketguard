@@ -6,7 +6,7 @@ mod network;
 pub mod slaac;
 pub mod ula;
 pub mod ygg_admin;
-pub mod yggdrasil_managed;
+pub mod yggdrasil_child;
 
 pub use network::IpNetwork;
 
@@ -71,8 +71,8 @@ pub trait Ipv6Backend: Send + Sync {
     fn problem(&self) -> Option<String> {
         None
     }
-    /// How the child process behind a managed network stands (ADR 0052).
-    fn managed(&self) -> Option<socketguard_core::ManagedInfo> {
+    /// How the child process behind a Tor or Yggdrasil network stands (ADR 0052).
+    fn child_info(&self) -> Option<socketguard_core::ChildInfo> {
         None
     }
     /// Release an address (cleanup). Most backends hold no state per address.

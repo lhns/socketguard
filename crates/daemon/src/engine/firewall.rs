@@ -69,7 +69,7 @@ impl Engine {
         })
     }
 
-    /// The node addresses of the managed Yggdrasil networks: what the node reports now,
+    /// The node addresses of the Yggdrasil networks: what the node reports now,
     /// else what was remembered. A new answer is stored, so the block outlives the node
     /// (ADR 0051).
     async fn known_nodes(&self, state: &AppState) -> BTreeMap<String, ruleset::OverlayNode> {

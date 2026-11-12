@@ -629,7 +629,7 @@ impl Client {
         self.call_saved(&routes::ADD_NETWORK, &[], json(req)).await
     }
 
-    /// Replace the peers of a managed Yggdrasil network (ADR 0052).
+    /// Replace the peers of a Yggdrasil network (ADR 0052).
     pub async fn set_peers(&self, id: &str, peers: &[String]) -> Result<Network> {
         let req = SetPeers {
             peers: peers.to_vec(),

@@ -275,11 +275,11 @@ pub fn service_install(
     let record = Record::for_config(plan.config);
     prepare_dirs(plan.config, plan.db, &record)?;
     ensure_group(host, groups, &record)?;
-    // The managed networks' children run as this account; without it they run as the
+    // The Tor and Yggdrasil networks' children run as this account; without it they run as the
     // daemon's own and say so, so a failure here is not fatal.
     if let Err(e) = crate::account::ensure(host, &record) {
         host.say(&format!(
-            "Could not create the account {}: {e:#}. Managed networks will run as the daemon's account.",
+            "Could not create the account {}: {e:#}. Tor and Yggdrasil will run as the daemon's account.",
             crate::account::NAME
         ));
     }

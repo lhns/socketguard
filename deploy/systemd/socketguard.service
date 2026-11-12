@@ -34,7 +34,7 @@ ReadWritePaths=/run /etc/socketguard
 # nftables, interface addresses and the NFLOG netlink socket need CAP_NET_ADMIN (nothing
 # opens a raw or packet socket: DHCPv6 is a plain UDP socket). CAP_SYS_PTRACE reads other
 # users' /proc entries to identify listening processes; CAP_CHOWN/CAP_FOWNER set the API
-# socket's group and mode. The managed Tor and Yggdrasil (ADR 0052) run as the account
+# socket's group and mode. Tor and Yggdrasil (ADR 0052) run as the account
 # `socketguard-net`: CAP_SETUID/CAP_SETGID let the daemon start them as that user,
 # CAP_DAC_OVERRIDE lets it write their generated configuration into the directories that
 # account owns (mode 0700), CAP_KILL lets it stop them. Found by the first run under systemd.
@@ -47,7 +47,7 @@ ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
-# The managed Yggdrasil creates its adapter through /dev/net/tun; the device sandbox that
+# Yggdrasil creates its adapter through /dev/net/tun; the device sandbox that
 # comes with the Protect* options above would answer "operation not permitted" (found by the
 # first run of the Linux package test under systemd).
 DeviceAllow=/dev/net/tun rw

@@ -1,4 +1,4 @@
-//! The install record (ADR 0050, ADR 0052): what the service installer and the managed
+//! The install record (ADR 0050, ADR 0052): what the service installer and the Tor and Yggdrasil
 //! networks found and created on the host, with what is needed to reverse each change.
 //! One file, `setup-log.json` next to the config file, shared by the daemon binary and the
 //! CLI. Removal reverses exactly this record, newest first, and nothing else.
@@ -34,11 +34,11 @@ pub enum Change {
     /// first set it. `prior` is None when it could not be read (then it is not restored).
     WfpEngineOption { option: String, prior: Option<u32> },
 
-    // ── managed networks (ADR 0052) ──
+    // ── Tor and Yggdrasil networks (ADR 0052) ──
     /// Unix: the unprivileged system account the children run as. Removed only when
     /// `created`.
     UnprivilegedAccount { name: String, created: bool },
-    /// Windows: whether the Wintun driver was in the driver store before the first managed
+    /// Windows: whether the Wintun driver was in the driver store before the first
     /// Yggdrasil start. Purge removes it only if it was not (and nothing else uses it).
     WintunDriver { present_before: bool },
 }

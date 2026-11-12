@@ -210,7 +210,7 @@ pub async fn run(
     // Wait for reconciliation loop to finish
     let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), recon_handle).await;
 
-    // The children of managed networks end with the daemon (gracefully, then by force).
+    // The children of Tor and Yggdrasil networks end with the daemon (gracefully, then by force).
     // Their onion services end with them; the ruleset does not.
     {
         let children = state.engine.read().await.children().clone();

@@ -9,8 +9,8 @@ use socketguard_core::api_types::{
     ShareResponse, StatusResponse, TorKeyResponse,
 };
 use socketguard_core::{
-    ranges_text, AccessOrigin, ActivityRecord, Address, App, AppDetail, BindingTarget, ChildState,
-    Credential, GrantView, Locator, ManagedInfo, Network, NetworkKind, NetworkStatus,
+    ranges_text, AccessOrigin, ActivityRecord, Address, App, AppDetail, BindingTarget, ChildInfo,
+    ChildState, Credential, GrantView, Locator, Network, NetworkKind, NetworkStatus,
     ParsedCredential, Peer, PeerGroup, PortGroup, Reach, ReservationView, Scope, Settings, Subject,
     Tag, Target,
 };
@@ -437,7 +437,7 @@ Local: {local}",
 }
 
 /// How a network's child process is doing, in a few words.
-fn managed_status(kind: NetworkKind, m: &ManagedInfo) -> String {
+fn child_status(kind: NetworkKind, m: &ChildInfo) -> String {
     let detail = |what: &str| match &m.detail {
         Some(d) => format!("{what}: {d}"),
         None => what.to_string(),
@@ -471,7 +471,7 @@ pub fn networks(nets: &[Network]) -> String {
         nets.iter()
             .map(|n| {
                 let mut notes: Vec<String> = vec![];
-                let status = match (&n.managed, &n.status) {
+                let status = match (&n.child, &n.status) {
                     (Some(m), status) => {
                         if let NetworkStatus::Down { reason } = status {
                             notes.push(format!("down: {reason}"));
@@ -479,7 +479,7 @@ pub fn networks(nets: &[Network]) -> String {
                         if let Some(a) = &m.address {
                             notes.push(a.clone());
                         }
-                        managed_status(n.kind, m)
+                        child_status(n.kind, m)
                     }
                     (None, NetworkStatus::Up) => "up".to_string(),
                     (None, NetworkStatus::Down { reason }) => format!("down: {reason}"),

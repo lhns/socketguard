@@ -62,7 +62,7 @@ export type {
 };
 export type { NetworkSetup };
 export type { KindSetup } from "./generated/KindSetup";
-export type { ManagedInfo } from "./generated/ManagedInfo";
+export type { ChildInfo } from "./generated/ChildInfo";
 export type { YggdrasilBlock } from "./generated/YggdrasilBlock";
 export type { LanCandidate } from "./generated/LanCandidate";
 export type { SetupState } from "./generated/SetupState";

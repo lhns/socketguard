@@ -18,7 +18,7 @@ use socketguard_core::{ListeningSocket, Protocol};
 use socketguard_daemon::api;
 use socketguard_daemon::engine::{ActiveBackend, Engine};
 use socketguard_daemon::networks::tor::TorNetwork;
-use socketguard_daemon::networks::tor_managed::ManagedTor;
+use socketguard_daemon::networks::tor_child::TorChild;
 use socketguard_daemon::test_support::*;
 use socketguard_daemon::AppState;
 use std::collections::HashMap;
@@ -117,7 +117,7 @@ impl Rig {
             ActiveBackend {
                 config: tor_cfg.clone(),
                 network: Arc::new(TorNetwork::new(
-                    ManagedTor::with_control(tor.addr(), tor.auth_options()),
+                    TorChild::with_control(tor.addr(), tor.auth_options()),
                     Duration::ZERO,
                 )),
             },

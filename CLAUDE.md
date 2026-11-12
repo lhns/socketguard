@@ -24,7 +24,7 @@ fine to run directly.
 - crates/daemon/  — The daemon and its admin commands:
     - engine/     reconcile, addresses, enforcement, mutations, reservations, tags, port groups
     - state/      SQLite schema, settings, file protection
-    - networks/   ip/ (Local, LAN, Yggdrasil, DHCPv6), tor, SocketGuard's own Tor and Yggdrasil children (managed.rs, *_managed.rs)
+    - networks/   ip/ (Local, LAN, Yggdrasil, DHCPv6), tor, SocketGuard's own Tor and Yggdrasil children (child.rs, *_child.rs)
     - children/   the child processes of Tor and Yggdrasil (guard, pidfile)
     - firewall/   nftables, pf, wfp/ (plan + Windows FFI); iface/ (addresses on OS interfaces); monitor/
     - service, install, uninstall, footprint (the list `--purge` deletes, ADR 0057), access, account,

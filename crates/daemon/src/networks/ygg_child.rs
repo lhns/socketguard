@@ -1,15 +1,15 @@
-//! The managed Yggdrasil node (ADR 0052): SocketGuard runs its own `yggdrasil` as a child
+//! The Yggdrasil node (ADR 0052): SocketGuard runs its own `yggdrasil` as a child
 //! process. What is specific to it lives here: where its files are, the configuration file
 //! it is started with, who it runs as, how to tell that it works, and the one-node-per-host
-//! rule. The network around it is `ip::yggdrasil_managed`; when it may start (after its
+//! rule. The network around it is `ip::yggdrasil_child`; when it may start (after its
 //! block is in force) is the engine's gate.
 //!
 //! The node's key is the daemon's (`ygg_key`): the address and the /64 are known before
 //! anything runs, and the configuration file is rewritten from it at every start.
 
+use super::child::ChildCtx;
 use super::ip::ygg_admin::{self, AdminClient, PeerInfo};
-use super::managed::ManagedCtx;
-use super::tor_managed::write_fresh;
+use super::tor_child::write_fresh;
 use super::ygg_key::YggKey;
 use crate::account::{self, Accounts};
 use crate::children::{
@@ -17,7 +17,7 @@ use crate::children::{
 };
 use crate::iface::InterfaceManager;
 use crate::ruleset::OverlayNode;
-use socketguard_core::{ChildState, ManagedInfo};
+use socketguard_core::{ChildInfo, ChildState};
 use std::collections::HashMap;
 use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::warn;
 
-/// The directory of the managed Yggdrasil under the state directory.
+/// The directory of the Yggdrasil under the state directory.
 pub const DIR: &str = "yggdrasil";
 
 /// The reason shown while another Yggdrasil node runs on the host (one node per host).
@@ -55,7 +55,7 @@ pub fn adapter_name() -> Option<&'static str> {
     }
 }
 
-/// Where the managed Yggdrasil keeps its files.
+/// Where the Yggdrasil keeps its files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YggPaths {
     /// Holds the configuration (with the key) and the pid file; the daemon's own.
@@ -100,7 +100,7 @@ impl YggPaths {
     }
 }
 
-/// Who the managed Yggdrasil runs as. Unix: it starts as the daemon's account (root, which
+/// Who the Yggdrasil runs as. Unix: it starts as the daemon's account (root, which
 /// the tun needs) and drops to `socketguard-net` itself when that account exists and the
 /// daemon may; else it stays the daemon's, saying why. Windows: the daemon's account, since
 /// creating the adapter needs its rights.
@@ -191,7 +191,7 @@ impl AdminValve {
     }
 }
 
-/// The admin valves of the managed networks by network id.
+/// The admin valves of the Tor and Yggdrasil networks by network id.
 pub type Valves = Arc<Mutex<HashMap<String, AdminValve>>>;
 
 pub fn in_yggdrasil_range(a: &Ipv6Addr) -> bool {
@@ -220,18 +220,18 @@ pub fn another_node_running(
     })
 }
 
-/// The managed Yggdrasil of one network.
+/// The Yggdrasil of one network.
 #[derive(Clone)]
-pub struct ManagedYgg {
+pub struct YggChild {
     id: String,
-    ctx: ManagedCtx,
+    ctx: ChildCtx,
     ifaces: Arc<dyn InterfaceManager>,
     status: StatusHandle,
     paths: Result<YggPaths, String>,
 }
 
-impl ManagedYgg {
-    pub fn new(id: &str, ctx: &ManagedCtx, ifaces: Arc<dyn InterfaceManager>) -> Self {
+impl YggChild {
+    pub fn new(id: &str, ctx: &ChildCtx, ifaces: Arc<dyn InterfaceManager>) -> Self {
         Self {
             id: id.to_string(),
             status: ctx.children.handle(id),
@@ -353,10 +353,10 @@ impl ManagedYgg {
 
     /// The card of the network (the configured peers are added by the engine). Without a
     /// working admin socket there is nothing to count: it says so.
-    pub fn info(&self, peers_connected: Option<u32>) -> ManagedInfo {
+    pub fn info(&self, peers_connected: Option<u32>) -> ChildInfo {
         let s = self.child();
         let no_admin = !self.admin_on();
-        ManagedInfo {
+        ChildInfo {
             state: s.state,
             progress: None,
             detail: s
@@ -379,7 +379,7 @@ impl ManagedYgg {
         self.spec_with(peers, cfg!(windows))
     }
 
-    /// [`ManagedYgg::spec`], with the admin valve armed or not (tests arm it everywhere).
+    /// [`YggChild::spec`], with the admin valve armed or not (tests arm it everywhere).
     pub fn spec_with(&self, peers: &[String], valve_armed: bool) -> Result<ChildSpec, String> {
         let files = self.ctx.bundled.yggdrasil()?;
         let paths = self.paths.clone()?;
@@ -445,7 +445,7 @@ impl ManagedYgg {
 
 /// Up when the node answers on its admin socket (when it has one) as the node of our key
 /// and its adapter holds the node's address.
-struct YggHealth(ManagedYgg);
+struct YggHealth(YggChild);
 
 impl HealthCheck for YggHealth {
     fn check(&self) -> ChildHealth {
@@ -481,7 +481,7 @@ struct Prepare {
     owner: Option<(u32, u32)>,
     key: YggKey,
     peers: Vec<String>,
-    ygg: ManagedYgg,
+    ygg: YggChild,
 }
 
 impl Prepare {
@@ -529,9 +529,9 @@ pub fn prepare(paths: &YggPaths, owner: Option<(u32, u32)>, conf: &str) -> Resul
     }
     #[cfg(unix)]
     if let Some((uid, gid)) = owner {
-        super::tor_managed::hand_over(&paths.run_dir, uid, gid)?;
+        super::tor_child::hand_over(&paths.run_dir, uid, gid)?;
         if let Some(parent) = paths.dir.parent() {
-            super::tor_managed::allow_traverse(parent)?;
+            super::tor_child::allow_traverse(parent)?;
         }
     }
     #[cfg(not(unix))]
@@ -581,7 +581,7 @@ mod tests {
         MockInterfaceManager::new(Default::default())
     }
 
-    pub(crate) fn ctx(dir: Option<PathBuf>, accounts: FakeAccounts) -> ManagedCtx {
+    pub(crate) fn ctx(dir: Option<PathBuf>, accounts: FakeAccounts) -> ChildCtx {
         let third = std::env::temp_dir().join(format!("sg-ygg3p-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(third.join("yggdrasil")).unwrap();
         let exe = if cfg!(windows) {
@@ -591,7 +591,7 @@ mod tests {
         };
         std::fs::write(third.join("yggdrasil").join(exe), b"x").unwrap();
         std::fs::write(third.join("yggdrasil").join("wintun.dll"), b"x").unwrap();
-        let ctx = ManagedCtx::new(
+        let ctx = ChildCtx::new(
             Arc::new(Bundled::from_dir(third)),
             dir,
             Arc::new(Supervisor::system()),
@@ -601,8 +601,8 @@ mod tests {
         ctx
     }
 
-    fn ygg(ctx: &ManagedCtx, net: &MockInterfaceManager) -> ManagedYgg {
-        ManagedYgg::new("ygg", ctx, Arc::new(net.clone()))
+    fn ygg(ctx: &ChildCtx, net: &MockInterfaceManager) -> YggChild {
+        YggChild::new("ygg", ctx, Arc::new(net.clone()))
     }
 
     #[test]
@@ -771,10 +771,10 @@ mod tests {
 
     #[tokio::test]
     async fn without_files_key_or_state_directory_the_spec_says_why() {
-        let none = ManagedCtx::inert();
+        let none = ChildCtx::inert();
         none.keys.insert("ygg", key());
         assert_eq!(
-            ManagedYgg::new("ygg", &none, Arc::new(ifaces()))
+            YggChild::new("ygg", &none, Arc::new(ifaces()))
                 .spec(&[])
                 .unwrap_err(),
             socketguard_core::setup::NOT_INCLUDED

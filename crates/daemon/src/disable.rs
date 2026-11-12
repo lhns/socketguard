@@ -153,7 +153,7 @@ fn remove_confirmed(
     if let Ok(false) = present {
         return Ok(false);
     }
-    // An interface that is gone took its addresses with it: the adapter of a managed
+    // An interface that is gone took its addresses with it: the adapter of a Yggdrasil
     // node disappears when the node ends (a stopped daemon leaves the record behind).
     if present.is_err()
         && net

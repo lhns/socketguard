@@ -8,8 +8,8 @@
 //! (ADR 0026). The service key is stored with the address, so the `.onion` name is stable.
 
 use super::onion_key;
+use super::tor_child::TorChild;
 use super::tor_control::{Control, ServiceSpec};
-use super::tor_managed::ManagedTor;
 use super::{
     Capabilities, EnforcedAddress, EnforcedSubject, LocatorRequest, Network, NetworkEnforcement,
     NewLocator,
@@ -243,7 +243,7 @@ fn in_sync(
 pub struct TorNetwork {
     /// The Tor SocketGuard runs (ADR 0052, 0056): its child's state decides whether there is
     /// anything to talk to, and the endpoint and trust come from there.
-    tor: ManagedTor,
+    tor: TorChild,
     check_every: Duration,
     state: Mutex<State>,
     /// Serializes control-port work, without holding `state` across I/O.
@@ -251,7 +251,7 @@ pub struct TorNetwork {
 }
 
 impl TorNetwork {
-    pub fn new(tor: ManagedTor, check_every: Duration) -> Self {
+    pub fn new(tor: TorChild, check_every: Duration) -> Self {
         Self {
             tor,
             check_every,
@@ -273,7 +273,7 @@ impl TorNetwork {
 
     /// The child is not up, so there is nothing to connect to (and, since the services die
     /// with it, nothing published).
-    fn child_down(&self) -> Option<&ManagedTor> {
+    fn child_down(&self) -> Option<&TorChild> {
         Some(&self.tor).filter(|m| !m.is_up())
     }
 
@@ -329,7 +329,7 @@ impl Network for TorNetwork {
         (st.status.clone(), None)
     }
 
-    fn managed(&self) -> Option<socketguard_core::ManagedInfo> {
+    fn child_info(&self) -> Option<socketguard_core::ChildInfo> {
         Some(self.tor.info())
     }
 
@@ -708,7 +708,7 @@ mod tests {
 
     fn net(mock: &MockTorControl, every: Duration) -> TorNetwork {
         TorNetwork::new(
-            ManagedTor::with_control(mock.addr(), mock.auth_options()),
+            TorChild::with_control(mock.addr(), mock.auth_options()),
             every,
         )
     }

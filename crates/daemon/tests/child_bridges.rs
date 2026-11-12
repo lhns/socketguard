@@ -1,4 +1,4 @@
-//! ADR 0052 at the API: `PUT /api/networks/{id}/bridges` of a managed Tor network validates
+//! ADR 0052 at the API: `PUT /api/networks/{id}/bridges` of a Tor network validates
 //! every line against the one supported form, stores it in canonical form, and needs the
 //! obfs4 helper of the build.
 
@@ -35,7 +35,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// A daemon whose build ships Tor, and the obfs4 helper when `helper`, with a managed
+    /// A daemon whose build ships Tor, and the obfs4 helper when `helper`, with a
     /// Tor network `tor`.
     async fn new(helper: bool) -> Self {
         let f = Self::new_empty(helper).await;
@@ -100,8 +100,8 @@ async fn bridges_are_validated_normalised_deduplicated_and_saved() {
     );
     let (s, n) = f.put(json!([lower, bridge(1), bridge(2)])).await;
     assert_eq!(s, StatusCode::OK, "{n}");
-    assert_eq!(n["managed"]["bridges"], json!([bridge(1), bridge(2)]));
-    assert!(n["managed"].get("bridges_unavailable").is_none());
+    assert_eq!(n["child"]["bridges"], json!([bridge(1), bridge(2)]));
+    assert!(n["child"].get("bridges_unavailable").is_none());
     assert_eq!(f.configured().await, [bridge(1), bridge(2)]);
 
     for hostile in [
@@ -127,7 +127,7 @@ async fn bridges_are_validated_normalised_deduplicated_and_saved() {
 
     let (s, n) = f.put(json!([])).await;
     assert_eq!(s, StatusCode::OK, "{n}");
-    assert!(n["managed"].get("bridges").is_none());
+    assert!(n["child"].get("bridges").is_none());
     assert!(f.configured().await.is_empty());
 
     let (s, e) = f
@@ -160,7 +160,7 @@ async fn without_the_helper_bridges_cannot_be_set_and_the_card_says_why() {
     // Turning bridges off is always possible.
     let (s, n) = f.put(json!([])).await;
     assert_eq!(s, StatusCode::OK, "{n}");
-    assert!(n["managed"]["bridges_unavailable"]
+    assert!(n["child"]["bridges_unavailable"]
         .as_str()
         .unwrap()
         .contains("obfs4 helper"));
@@ -186,7 +186,7 @@ async fn bridges_in_a_new_network_follow_the_same_rules() {
         )
         .await;
     assert_eq!(s, StatusCode::CREATED, "{n}");
-    assert_eq!(n["managed"]["bridges"], json!([bridge(1)]));
+    assert_eq!(n["child"]["bridges"], json!([bridge(1)]));
 
     let f = Fixture::new_empty(false).await;
     let (s, e) = f

@@ -24,7 +24,7 @@ fn portable() {
 #[tokio::test]
 async fn the_api_takes_a_tor_network_in_portable_mode() {
     portable();
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let state = h.app_state(DaemonConfig::default()).await;
     let app = api::router(state);
 

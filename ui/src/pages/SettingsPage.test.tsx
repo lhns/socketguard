@@ -14,7 +14,7 @@ const risk = {
 
 describe("Leaving a Tor or Yggdrasil network", () => {
   it("removing the network says its own node stops and asks nothing else", async () => {
-    const withNode = { ...networks[1], managed: { state: "up" as const, peers: [] } };
+    const withNode = { ...networks[1], child: { state: "up" as const, peers: [] } };
     const d = mockDaemon({ list_networks: () => [withNode], delete_network: () => undefined });
     const user = userEvent.setup();
     renderWithProviders(<SettingsPage />);

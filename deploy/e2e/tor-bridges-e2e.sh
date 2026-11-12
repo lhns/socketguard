@@ -81,7 +81,7 @@ net_reason() { net_json | jq -r '.[0] | (.status.reason // .status.state)'; }
 torrc_tail() { docker exec "$NODE_A" sh -c "sed -n '/^Log notice stdout\$/,\$p' '$TORRC' | tail -n +2"; }
 torrc_is() { [ "$(torrc_tail)" = "$1" ]; }
 reason_says_bridges() { net_reason | grep -q "connecting through bridges"; }
-bridges_json() { net_json | jq -c '.[0].managed.bridges // []'; }
+bridges_json() { net_json | jq -c '.[0].child.bridges // []'; }
 bridges_cli() { docker exec "$NODE_A" $SG networks bridges tor --json | jq -c .; }
 is() { [ "$1" = "$2" ]; }                       # is ACTUAL EXPECTED
 tor_changed_from() { [ "$(tor_pid)" != "$1" ]; }

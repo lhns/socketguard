@@ -114,7 +114,7 @@ tor_pid() { docker exec "$NODE_A" sh -c "ps -eo pid=,stat=,comm= | awk '\$3 == \
 tor_gone() { ! tor_pid >/dev/null; }
 net_json() { docker exec "$NODE_A" $SG networks list --json; }
 net_up() { net_json | jq -e '.[0].kind == "tor" and .[0].status.state == "up"' >/dev/null; }
-net_reason() { net_json | jq -r '.[0] | (.status.reason // .status.state) + " [" + (.managed.state // "-") + "]"'; }
+net_reason() { net_json | jq -r '.[0] | (.status.reason // .status.state) + " [" + (.child.state // "-") + "]"'; }
 wait_up() { # wait_up SECONDS: net_up, printing each distinct reason on the way
   local end=$((SECONDS + $1)) last="" now
   while ! net_up 2>/dev/null; do
@@ -127,7 +127,7 @@ wait_up() { # wait_up SECONDS: net_up, printing each distinct reason on the way
 
 step "the daemon started a tor of its own" retry 60 tor_pid || exit 1
 step "tor runs as socketguard-net" sh -c "[ \"\$(docker exec $NODE_A ps -o user= -p $(tor_pid) | tr -d ' ')\" = socketguard-net ]"
-step "the status names the account and the shipped version" sh -c "docker exec $NODE_A $SG networks list --json | jq -e '.[0].managed.runs_as == \"socketguard-net\" and (.[0].managed.version | length > 0)' >/dev/null"
+step "the status names the account and the shipped version" sh -c "docker exec $NODE_A $SG networks list --json | jq -e '.[0].child.runs_as == \"socketguard-net\" and (.[0].child.version | length > 0)' >/dev/null"
 FIRST_TOR="$(tor_pid)"
 setup_log_has_tor_dir() {
   docker exec "$NODE_A" cat /etc/setup-log.json | jq -e --arg p "$STATE/tor" '[.entries[] | select(.type == "owned_directory" and .path == $p)] | length == 1' >/dev/null
@@ -237,7 +237,7 @@ step "with the same onion name" service_is_local_name
 # ── Turned off and on ────────────────────────────────────────────────────────
 step "socketguard disable succeeds" A $SG disable --yes
 step "disabled: tor is gone" retry 30 tor_gone
-step "disabled: the network says it is turned off" sh -c "docker exec $NODE_A $SG networks list --json | jq -e '.[0].managed.state == \"stopped\" and .[0].status.state == \"down\"' >/dev/null"
+step "disabled: the network says it is turned off" sh -c "docker exec $NODE_A $SG networks list --json | jq -e '.[0].child.state == \"stopped\" and .[0].status.state == \"down\"' >/dev/null"
 step "disabled: Tor's data directory is kept" A sh -c "test -d $STATE/tor && test -f $STATE/tor/torrc"
 sleep 6
 step "disabled: a reconcile pass did not start tor again" tor_gone

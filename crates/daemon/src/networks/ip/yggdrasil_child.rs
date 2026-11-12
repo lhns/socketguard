@@ -1,26 +1,26 @@
-//! The allocator of the managed Yggdrasil network (ADR 0052). Unlike the one for an existing
+//! The allocator of the Yggdrasil network (ADR 0052). Unlike the one for an existing
 //! node it never asks the node: the addresses follow from the key SocketGuard generated, so
 //! they are known before the node runs and while it is down. What the node is doing is the
 //! child's state.
 
 use super::{with_prefix64, AllocatedAddress, Ipv6Backend, Prefix};
-use crate::networks::ygg_managed::ManagedYgg;
+use crate::networks::ygg_child::YggChild;
 use crate::ruleset::OverlayNode;
 use anyhow::{anyhow, Result};
-use socketguard_core::{BackendType, ChildState, ManagedInfo};
+use socketguard_core::{BackendType, ChildInfo, ChildState};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// How long the number of connected peers is reused: counting asks the node.
 const PEERS_REFRESH: Duration = Duration::from_secs(5);
 
-pub struct ManagedYggBackend {
-    ygg: ManagedYgg,
+pub struct YggChildBackend {
+    ygg: YggChild,
     peers: Mutex<Option<(Instant, Option<u32>)>>,
 }
 
-impl ManagedYggBackend {
-    pub fn new(ygg: ManagedYgg) -> Self {
+impl YggChildBackend {
+    pub fn new(ygg: YggChild) -> Self {
         Self {
             ygg,
             peers: Mutex::new(None),
@@ -44,13 +44,13 @@ impl ManagedYggBackend {
         let n = self
             .ygg
             .peers()
-            .map(|p| crate::networks::ygg_managed::connected_count(&p));
+            .map(|p| crate::networks::ygg_child::connected_count(&p));
         *cache = Some((Instant::now(), n));
         n
     }
 }
 
-impl Ipv6Backend for ManagedYggBackend {
+impl Ipv6Backend for YggChildBackend {
     fn current_prefix(&self) -> Result<Option<Prefix>> {
         let subnet = self.node_or_err()?.subnet;
         Ok(Some(Prefix::new(subnet.network(), subnet.prefix_len())))
@@ -77,7 +77,7 @@ impl Ipv6Backend for ManagedYggBackend {
         (self.ygg.child().state != ChildState::Up).then(|| self.ygg.reason())
     }
 
-    fn managed(&self) -> Option<ManagedInfo> {
+    fn child_info(&self) -> Option<ChildInfo> {
         let up = self.ygg.child().state == ChildState::Up;
         Some(
             self.ygg

@@ -55,10 +55,10 @@ pub fn purge_items(paths: &UninstallPaths, os: &str) -> Vec<Item> {
     // The data of the networks' child processes (ADR 0052): Tor, Yggdrasil and, on Unix, the
     // pid files.
     out.push(Item::Tree(
-        paths.state_dir.join(crate::networks::tor_managed::DIR),
+        paths.state_dir.join(crate::networks::tor_child::DIR),
     ));
     out.push(Item::Tree(
-        paths.state_dir.join(crate::networks::ygg_managed::DIR),
+        paths.state_dir.join(crate::networks::ygg_child::DIR),
     ));
     if os != "windows" {
         out.push(Item::Tree(paths.state_dir.join(crate::children::RUN_DIR)));

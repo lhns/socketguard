@@ -643,7 +643,7 @@ mod tests {
             status: NetworkStatus::Up,
             prefix: prefix.map(|p| p.parse().unwrap()),
             vlan_id: None,
-            managed: None,
+            child: None,
         }
     }
 

@@ -1,4 +1,4 @@
-//! The engine's side of managed networks (ADR 0052): which children should run, declared
+//! The engine's side of Tor and Yggdrasil networks (ADR 0052): which children should run, declared
 //! to the supervisor. The engine never starts a process itself; it states what it wants
 //! and the supervisor's tasks do it, so a slow or failing start never holds up a pass.
 
@@ -6,8 +6,8 @@ use super::firewall::NODE_KEY_PREFIX;
 use super::*;
 use crate::children::Desired;
 use crate::firewall::ScopeMatch;
+use crate::networks::ygg_child;
 use crate::networks::ygg_key::{YggKey, KEY_PREFIX};
-use crate::networks::ygg_managed;
 use crate::ruleset::overlay_addr_scope_id;
 use anyhow::Context;
 use socketguard_core::config::BackendConfig;
@@ -15,12 +15,12 @@ use socketguard_core::setup::YggdrasilBlock;
 use socketguard_core::NetworkKind;
 use std::sync::atomic::Ordering;
 
-/// Whether a managed network's child may start now.
+/// Whether a Tor or Yggdrasil network's child may start now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Gate {
     Open,
     /// Held back; the sentence says until what (shown on the network's card). Tor is never
-    /// held; managed Yggdrasil is, until its block is in force.
+    /// held; Yggdrasil is, until its block is in force.
     Held(String),
 }
 
@@ -86,7 +86,7 @@ impl Engine {
     }
 
     /// The condition, beyond "SocketGuard is on, the network exists and is not unadopted",
-    /// under which the child of `id` runs. Tor needs none. Managed Yggdrasil adds its own:
+    /// under which the child of `id` runs. Tor needs none. Yggdrasil adds its own:
     /// the ruleset that blocks its address range must be applied and verified first (ADR
     /// 0051), and no other node may run on the host (the node's name and interface would
     /// clash, and the block is written for one node).
@@ -95,11 +95,11 @@ impl Engine {
     /// ruleset before it in force, which already closes the node), and the other-node
     /// check is meant for the moment before our own adapter exists.
     async fn child_gate(&self, state: &AppState, id: &str, backend: &BackendConfig) -> Gate {
-        if !is_yggdrasil(backend) || self.managed.children.status(id).alive() {
+        if !is_yggdrasil(backend) || self.child_ctx.children.status(id).alive() {
             return Gate::Open;
         }
         // Without a key there is no node to close; the spec says so.
-        let Some(key) = self.managed.keys.get(id) else {
+        let Some(key) = self.child_ctx.keys.get(id) else {
             return Gate::Open;
         };
         match self.yggdrasil_block(state).await {
@@ -116,21 +116,21 @@ impl Engine {
         let ifaces = self.ifaces.clone();
         let node = key.node();
         let other = tokio::task::spawn_blocking(move || {
-            ygg_managed::another_node_running(ifaces.as_ref(), &node, ygg_managed::adapter_name())
+            ygg_child::another_node_running(ifaces.as_ref(), &node, ygg_child::adapter_name())
         })
         .await
         .unwrap_or(false);
         if other {
-            return Gate::Held(ygg_managed::OTHER_NODE.into());
+            return Gate::Held(ygg_child::OTHER_NODE.into());
         }
         Gate::Open
     }
 
-    /// The key of the managed Yggdrasil node `id`, from the database or (a new network,
+    /// The key of the Yggdrasil node `id`, from the database or (a new network,
     /// `fresh`) generated and stored now, and its addresses remembered as the network's
     /// node (ADR 0051), so the first ruleset already closes them. The networks read the key
-    /// from `self.managed.keys`.
-    pub(super) async fn ensure_managed_key(
+    /// from `self.child_ctx.keys`.
+    pub(super) async fn ensure_child_key(
         &self,
         state: &AppState,
         id: &str,
@@ -157,33 +157,33 @@ impl Engine {
                 &serde_json::to_string(&key.node())?,
             )
             .await?;
-        self.managed.keys.insert(id, key);
+        self.child_ctx.keys.insert(id, key);
         Ok(())
     }
 
-    /// [`Engine::ensure_managed_key`] for every managed Yggdrasil network (startup). A key
+    /// [`Engine::ensure_child_key`] for every Yggdrasil network (startup). A key
     /// that cannot be read leaves its network down and says so; it is never replaced.
-    pub(super) async fn ensure_managed_keys(&self, state: &AppState) {
+    pub(super) async fn ensure_child_keys(&self, state: &AppState) {
         for id in self.sorted_backend_ids() {
             if !is_yggdrasil(&self.backends[id].config.backend) {
                 continue;
             }
-            if let Err(e) = self.ensure_managed_key(state, id, false).await {
+            if let Err(e) = self.ensure_child_key(state, id, false).await {
                 error!("Network '{id}': the Yggdrasil key is not usable: {e:#}");
             }
         }
     }
 
-    /// Forget the key of a managed Yggdrasil network that is being removed, and the
+    /// Forget the key of a Yggdrasil network that is being removed, and the
     /// directory with the configuration that holds it (the child has ended).
-    pub(super) async fn forget_managed_key(&self, state: &AppState, id: &str) {
-        self.managed.keys.remove(id);
+    pub(super) async fn forget_child_key(&self, state: &AppState, id: &str) {
+        self.child_ctx.keys.remove(id);
         self.valves_forget(id);
         if let Err(e) = state.db.delete_setting(&format!("{KEY_PREFIX}{id}")).await {
             warn!("Could not delete the Yggdrasil key of '{id}': {e:#}");
         }
-        if let Ok(state_dir) = self.managed.state_dir() {
-            let dir = state_dir.join(ygg_managed::DIR);
+        if let Ok(state_dir) = self.child_ctx.state_dir() {
+            let dir = state_dir.join(ygg_child::DIR);
             match std::fs::remove_dir_all(&dir) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -193,10 +193,10 @@ impl Engine {
     }
 
     fn valves_forget(&self, id: &str) {
-        self.managed.valves.lock().unwrap().remove(id);
+        self.child_ctx.valves.lock().unwrap().remove(id);
     }
 
-    /// Declare to the supervisor which managed children should run. Idempotent and quick:
+    /// Declare to the supervisor which children should run. Idempotent and quick:
     /// the supervisor only acts on a change. Called at the end of a pass and after every
     /// change that can alter the answer (a network added, removed, enabled, disabled, its
     /// settings changed). Takes no lock of the engine's order; reads the latches only.
@@ -214,15 +214,15 @@ impl Engine {
             } else {
                 match self.child_gate(state, id, backend).await {
                     Gate::Held(why) => Desired::Waiting(why),
-                    Gate::Open => crate::networks::managed::child_wish(
-                        &self.managed,
+                    Gate::Open => crate::networks::child::child_wish(
+                        &self.child_ctx,
                         &self.ifaces,
                         id,
                         backend,
                     ),
                 }
             };
-            self.managed.children.set_desired(id, wish);
+            self.child_ctx.children.set_desired(id, wish);
         }
         off
     }
@@ -233,7 +233,7 @@ impl Engine {
         if self.sync_children(state).await {
             for id in self.sorted_backend_ids() {
                 if self.backends[id].config.backend.runs_child() {
-                    self.managed.children.wait_stopped(id).await;
+                    self.child_ctx.children.wait_stopped(id).await;
                 }
             }
         }
@@ -246,7 +246,7 @@ impl Engine {
             .get(id)
             .is_some_and(|b| b.config.backend.runs_child())
         {
-            self.managed.children.remove(id).await;
+            self.child_ctx.children.remove(id).await;
         }
     }
 }

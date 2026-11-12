@@ -3,7 +3,7 @@ import { toDaemonError, type Network, type NewNetwork } from "../api";
 import { errorText } from "../lib";
 import { useAddNetwork, useDeleteNetwork, useNetworks, useNetworkSetup } from "../queries";
 import ConfirmDialog from "./ConfirmDialog";
-import { ManagedDetails, NetworkOrigin } from "./ManagedNetwork";
+import { ChildDetails, ChildStatus } from "./NetworkChild";
 import NetworkCards from "./NetworkCards";
 import { useToast } from "./Toast";
 
@@ -55,7 +55,7 @@ export default function NetworksSection() {
                 {n.interface ? ` · ${n.interface}` : ""}
                 {n.vlan_id != null ? ` · VLAN ${n.vlan_id}` : ""}
               </span>
-              {(n.kind === "tor" || n.kind === "yggdrasil") && <NetworkOrigin network={n} />}
+              {(n.kind === "tor" || n.kind === "yggdrasil") && <ChildStatus network={n} />}
               {n.status.state === "up" ? (
                 <span className="badge reach reach-ok">up</span>
               ) : (
@@ -74,7 +74,7 @@ export default function NetworksSection() {
                 Remove
               </button>
             </div>
-            <ManagedDetails network={n} />
+            <ChildDetails network={n} />
           </li>
         ))}
       </ul>

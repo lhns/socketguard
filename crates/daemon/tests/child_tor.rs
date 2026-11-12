@@ -1,4 +1,4 @@
-//! The managed Tor network (ADR 0052) in the engine, over the fake supervisor: the child is
+//! The Tor network (ADR 0052) in the engine, over the fake supervisor: the child is
 //! declared when the network exists and SocketGuard is on, stopped when it is turned off or
 //! the network goes, and its state is what the network card shows.
 
@@ -6,7 +6,7 @@ use socketguard_core::config::{BackendConfig, BackendInstanceConfig, DaemonConfi
 use socketguard_core::{ChildState, Network, NetworkStatus};
 use socketguard_daemon::children::{ChildHealth, ChildSpec, HealthCheck, RunAs};
 use socketguard_daemon::networks::tor::TorNetwork;
-use socketguard_daemon::networks::tor_managed::ManagedTor;
+use socketguard_daemon::networks::tor_child::TorChild;
 use socketguard_daemon::networks::Network as _;
 use socketguard_daemon::test_support::*;
 use socketguard_daemon::AppState;
@@ -16,7 +16,7 @@ use std::time::Duration;
 
 const ID: &str = "tor";
 
-fn managed_tor() -> BackendInstanceConfig {
+fn tor_instance() -> BackendInstanceConfig {
     BackendInstanceConfig {
         id: ID.into(),
         backend: BackendConfig::tor(),
@@ -42,13 +42,13 @@ async fn network(state: &AppState) -> Network {
         .expect("the network")
 }
 
-async fn add(h: &ManagedHarness) -> Arc<AppState> {
+async fn add(h: &ChildHarness) -> Arc<AppState> {
     let state = h.app_state(DaemonConfig::default()).await;
     let (_, applied) = state
         .engine
         .write()
         .await
-        .add_network(&state, managed_tor())
+        .add_network(&state, tor_instance())
         .await
         .unwrap();
     applied.unwrap();
@@ -56,8 +56,8 @@ async fn add(h: &ManagedHarness) -> Arc<AppState> {
 }
 
 #[tokio::test]
-async fn adding_a_managed_tor_network_starts_its_child_with_the_adr_command_line() {
-    let h = ManagedHarness::new();
+async fn adding_a_tor_network_starts_its_child_with_the_adr_command_line() {
+    let h = ChildHarness::new();
     let state = add(&h).await;
     wait_until("the child to start", || h.spawner.started() == 1).await;
 
@@ -77,7 +77,7 @@ async fn adding_a_managed_tor_network_starts_its_child_with_the_adr_command_line
             reason: "Tor is starting".into()
         }
     );
-    let m = n.managed.expect("managed info");
+    let m = n.child.expect("child info");
     assert_eq!(m.state, ChildState::Starting);
     let account = if cfg!(windows) {
         "LocalService"
@@ -91,10 +91,10 @@ async fn adding_a_managed_tor_network_starts_its_child_with_the_adr_command_line
 #[cfg(unix)]
 #[tokio::test]
 async fn without_the_account_it_runs_as_the_daemon_and_says_so() {
-    let h = ManagedHarness::with(socketguard_daemon::account::FakeAccounts::absent());
+    let h = ChildHarness::with(socketguard_daemon::account::FakeAccounts::absent());
     let state = add(&h).await;
     wait_until("the child to start", || h.spawner.started() == 1).await;
-    let m = network(&state).await.managed.unwrap();
+    let m = network(&state).await.child.unwrap();
     assert_eq!(
         m.runs_as.as_deref(),
         Some("the daemon's account (socketguard-net does not exist)")
@@ -103,7 +103,7 @@ async fn without_the_account_it_runs_as_the_daemon_and_says_so() {
 
 #[tokio::test]
 async fn the_last_log_line_is_the_reason_when_tor_exits() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let state = add(&h).await;
     wait_until("the child to start", || h.spawner.started() == 1).await;
     h.spawner
@@ -121,12 +121,12 @@ async fn the_last_log_line_is_the_reason_when_tor_exits() {
             reason: "Tor exited: [warn] Could not bind to the control socket".into()
         }
     );
-    assert_eq!(n.managed.unwrap().state, ChildState::Exited);
+    assert_eq!(n.child.unwrap().state, ChildState::Exited);
 }
 
 #[tokio::test]
 async fn turning_socketguard_off_stops_the_child_and_on_starts_it_again() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let state = add(&h).await;
     wait_until("the child to start", || h.spawner.started() == 1).await;
 
@@ -137,7 +137,7 @@ async fn turning_socketguard_off_stops_the_child_and_on_starts_it_again() {
     );
     assert_eq!(h.spawner.proc(0).signals(), ["term"]);
     let n = network(&state).await;
-    assert_eq!(n.managed.as_ref().unwrap().state, ChildState::Stopped);
+    assert_eq!(n.child.as_ref().unwrap().state, ChildState::Stopped);
     assert_eq!(
         n.status,
         NetworkStatus::Down {
@@ -157,7 +157,7 @@ async fn turning_socketguard_off_stops_the_child_and_on_starts_it_again() {
 
 #[tokio::test]
 async fn removing_the_network_stops_the_child_before_it_disappears() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let state = add(&h).await;
     wait_until("the child to start", || h.spawner.started() == 1).await;
 
@@ -176,7 +176,7 @@ async fn removing_the_network_stops_the_child_before_it_disappears() {
 
 #[tokio::test]
 async fn a_pass_with_an_unchanged_wish_restarts_nothing() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let state = add(&h).await;
     wait_until("the child to start", || h.spawner.started() == 1).await;
     for _ in 0..3 {
@@ -233,7 +233,7 @@ fn rank(s: &NetworkStatus) -> u8 {
 
 #[tokio::test(start_paused = true)]
 async fn the_status_only_moves_forward_through_start_up_and_never_reads_not_connected() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     let steps = [
         ChildHealth::Starting,
         ChildHealth::Bootstrapping(10),
@@ -241,7 +241,7 @@ async fn the_status_only_moves_forward_through_start_up_and_never_reads_not_conn
     ];
     let health: Arc<dyn HealthCheck> = Arc::new(Script(Mutex::new(steps.into())));
     h.ctx.children.set("t", Some(scripted_child(Some(health))));
-    let net = TorNetwork::new(ManagedTor::new("t", &h.ctx), Duration::from_secs(60));
+    let net = TorNetwork::new(TorChild::new("t", &h.ctx), Duration::from_secs(60));
 
     let mut seen = vec![];
     for _ in 0..8 {
@@ -256,9 +256,9 @@ async fn the_status_only_moves_forward_through_start_up_and_never_reads_not_conn
 
 #[tokio::test(start_paused = true)]
 async fn one_failed_control_check_keeps_the_last_good_state_and_three_in_a_row_do_not() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     h.ctx.children.set("t", Some(scripted_child(None)));
-    let net = TorNetwork::new(ManagedTor::new("t", &h.ctx), Duration::from_secs(60));
+    let net = TorNetwork::new(TorChild::new("t", &h.ctx), Duration::from_secs(60));
     tokio::time::sleep(Duration::from_millis(50)).await;
     // The child is up and nothing was checked over the control port yet: not "not connected".
     assert_eq!(net.status().0, NetworkStatus::Up);
@@ -282,7 +282,7 @@ async fn one_failed_control_check_keeps_the_last_good_state_and_three_in_a_row_d
 
 #[tokio::test]
 async fn a_build_without_the_files_shows_the_network_as_unavailable() {
-    let h = ManagedHarness::new();
+    let h = ChildHarness::new();
     // The engine knows files that are then removed from disk.
     let state = h.app_state(DaemonConfig::default()).await;
     std::fs::remove_dir_all(h.ctx.bundled.dir().unwrap().join("tor")).unwrap();
@@ -290,12 +290,12 @@ async fn a_build_without_the_files_shows_the_network_as_unavailable() {
         .engine
         .write()
         .await
-        .add_network(&state, managed_tor())
+        .add_network(&state, tor_instance())
         .await
         .unwrap();
     applied.unwrap();
     assert_eq!(h.spawner.started(), 0);
     let n = network(&state).await;
-    assert_eq!(n.managed.unwrap().state, ChildState::Unavailable);
+    assert_eq!(n.child.unwrap().state, ChildState::Unavailable);
     assert!(matches!(n.status, NetworkStatus::Down { .. }));
 }

@@ -32,15 +32,15 @@ pub fn network_slots(
     ula: [u8; 5],
 ) -> Vec<NetworkSlot> {
     let ifaces: Arc<dyn iface::InterfaceManager> = Arc::from(iface::create());
-    // No daemon runs here, so no child does either: a managed Tor's services ended with it.
-    let managed = networks::ManagedCtx::inert();
+    // No daemon runs here, so no child does either: a Tor's services ended with it.
+    let ctx = networks::ChildCtx::inert();
     config
         .backends
         .iter()
         .map(|b| NetworkSlot {
             id: b.id.clone(),
             is_tor: matches!(b.backend, socketguard_core::BackendConfig::Tor { .. }),
-            network: networks::create(&b.id, &b.backend, ula, ifaces.clone(), &managed)
+            network: networks::create(&b.id, &b.backend, ula, ifaces.clone(), &ctx)
                 .map_err(|e| format!("{e:#}")),
         })
         .collect()

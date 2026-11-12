@@ -61,7 +61,7 @@ pub fn write_session(data_dir: &Path, owner_pid: Option<u32>) {
 // ─── The Wintun driver ───────────────────────────────────────────────────────
 
 /// The key of the session record that says whether Wintun was in the driver store before the
-/// first managed Yggdrasil start of this run (or of a killed run it carries over from).
+/// first Yggdrasil start of this run (or of a killed run it carries over from).
 const WINTUN_KEY: &str = "wintun_present_before";
 
 /// How often a refused driver removal is tried again at the end of a run.
@@ -214,7 +214,7 @@ mod tests {
         );
     }
 
-    /// The first managed Yggdrasil start asks the driver store once and keeps the answer in
+    /// The first Yggdrasil start asks the driver store once and keeps the answer in
     /// the session record, not in an install record.
     #[test]
     fn the_wintun_fact_goes_into_the_session_record_once() {
