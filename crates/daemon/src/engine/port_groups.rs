@@ -6,12 +6,14 @@
 //! several on its own copy of the catalog. So both check the same things: names, the
 //! refusal while a group is used, and the confirmation when a change opens an app to Anyone.
 
+use super::batch::Plan;
 use super::mutations::Catalog;
 use super::*;
 use crate::api::DaemonEvent;
 use crate::state::{NewActivity, Write};
 use crate::AppState;
 use chrono::Utc;
+use socketguard_core::api_types::ChangeKind;
 use socketguard_core::{
     covered_ports, new_id, normalize_ranges, ActivityKind, Address, AppId, Grant, PortGroup,
     PortRange, PortRangeSet, Scope, Subject, Target,
@@ -575,5 +577,148 @@ impl Engine {
         .app(app_id);
         self.run_group_plan(state, plan, activity).await?;
         self.get_port_group(state, group_id).await
+    }
+}
+
+impl Engine {
+    // Batch planning: one method per operation of `ChangeOp` (see `batch`).
+    pub(super) fn plan_op_create_port_group(
+        &self,
+        plan: &mut Plan,
+        ref_: &Option<String>,
+        label: &Option<String>,
+        ports: &[PortRange],
+        apps: &[AppId],
+        confirm_open: bool,
+    ) -> Result<(), EngineError> {
+        let (group, gp) = self.plan_create_group(
+            &mut plan.cat,
+            new_id(),
+            label.as_deref(),
+            ports,
+            apps,
+            confirm_open,
+        )?;
+        plan.define_ref(ref_, &group.id)?;
+        let activity = NewActivity::new(
+            ActivityKind::PortGroupAdded,
+            format!("Added port group {}", group.label),
+        );
+        plan.push_group_plan(
+            gp,
+            ChangeKind::Create,
+            group.label.clone(),
+            &group,
+            activity,
+        );
+        Ok(())
+    }
+
+    pub(super) fn plan_op_update_port_group(
+        &self,
+        plan: &mut Plan,
+        group_id: &str,
+        label: &Option<String>,
+        ports: &Option<Vec<PortRange>>,
+        confirm_open: bool,
+    ) -> Result<(), EngineError> {
+        let id = plan.resolve(group_id)?;
+        let (group, gp) = self.plan_update_group(
+            &mut plan.cat,
+            &id,
+            label.as_deref(),
+            ports.as_deref(),
+            confirm_open,
+        )?;
+        let activity = NewActivity::new(
+            ActivityKind::PortGroupChanged,
+            format!("Changed port group {}", group.label),
+        );
+        plan.push_group_plan(
+            gp,
+            ChangeKind::Update,
+            group.label.clone(),
+            &group,
+            activity,
+        );
+        Ok(())
+    }
+
+    pub(super) fn plan_op_delete_port_group(
+        &self,
+        plan: &mut Plan,
+        group_id: &str,
+    ) -> Result<(), EngineError> {
+        let id = plan.resolve(group_id)?;
+        let (group, gp) = self.plan_delete_group(&mut plan.cat, &id)?;
+        let activity = NewActivity::new(
+            ActivityKind::PortGroupRemoved,
+            format!("Removed port group {}", group.label),
+        );
+        plan.push_group_plan(
+            gp,
+            ChangeKind::Delete,
+            group.label.clone(),
+            &group,
+            activity,
+        );
+        Ok(())
+    }
+
+    pub(super) fn plan_op_attach_port_group(
+        &self,
+        plan: &mut Plan,
+        group_id: &str,
+        app_id: &str,
+        confirm_open: bool,
+    ) -> Result<(), EngineError> {
+        let id = plan.resolve(group_id)?;
+        let (group, gp) = self.plan_attach_group(&mut plan.cat, &id, app_id, confirm_open)?;
+        if !gp.writes.is_empty() {
+            let app = plan
+                .cat
+                .app(app_id)
+                .map_or(app_id.to_string(), |a| a.name.clone());
+            let activity = NewActivity::new(
+                ActivityKind::PortGroupChanged,
+                format!("Attached port group {} to {app}", group.label),
+            )
+            .app(app_id);
+            plan.push_group_plan(
+                gp,
+                ChangeKind::Update,
+                format!("{} attached to {app}", group.label),
+                &group,
+                activity,
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn plan_op_detach_port_group(
+        &self,
+        plan: &mut Plan,
+        group_id: &str,
+        app_id: &str,
+    ) -> Result<(), EngineError> {
+        let id = plan.resolve(group_id)?;
+        let (group, gp) = self.plan_detach_group(&mut plan.cat, &id, app_id)?;
+        let app = plan
+            .cat
+            .app(app_id)
+            .map_or(app_id.to_string(), |a| a.name.clone());
+        let activity = NewActivity::new(
+            ActivityKind::PortGroupChanged,
+            format!("Detached port group {} from {app}", group.label),
+        )
+        .app(app_id);
+        plan.push_group_plan(
+            gp,
+            ChangeKind::Update,
+            format!("{} detached from {app}", group.label),
+            &group,
+            activity,
+        );
+        Ok(())
     }
 }

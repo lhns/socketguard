@@ -1,15 +1,17 @@
 //! Mutations: apps, peers, groups and grants. Each saves, applies the firewall, and
 //! records and announces the change.
 
+use super::batch::{lets_in, Plan};
 use super::*;
 use crate::api::DaemonEvent;
-use crate::state::{self, NewActivity};
+use crate::state::{self, NewActivity, Write};
 use crate::AppState;
 use chrono::Utc;
+use socketguard_core::api_types::{BatchChange, Change, ChangeItem, ChangeKind};
 use socketguard_core::{
     new_id, normalize_credential, ActivityKind, Address, App, Credential, CredentialKind, Grant,
-    GrantView, NewCredential, NewGrant, Peer, PeerGroup, PortGroup, Reservation, Subject, Tag,
-    Target,
+    GrantView, NewCredential, NewGrant, Peer, PeerGroup, PortGroup, Reservation, Scope, Subject,
+    Tag, Target,
 };
 use std::collections::{BTreeSet, HashSet};
 
@@ -625,6 +627,222 @@ impl Engine {
         }
         act.network_id = grant.network_id.clone();
         act
+    }
+}
+
+impl Engine {
+    // Batch planning: one method per operation of `ChangeOp` (see `batch`).
+    pub(super) async fn plan_op_create_peer(
+        &self,
+        state: &AppState,
+        plan: &mut Plan,
+        ref_: &Option<String>,
+        label: &Option<String>,
+        credentials: &[NewCredential],
+    ) -> Result<(), EngineError> {
+        let mut creds: Vec<Credential> = Vec::new();
+        for input in credentials {
+            let c = self.new_credential(state, input).await?;
+            let taken = plan
+                .cat
+                .peers
+                .iter()
+                .flat_map(|p| p.credentials.iter().map(move |x| (&p.label, x)))
+                .find(|(_, x)| x.kind == c.kind && x.value == c.value);
+            if let Some((owner, _)) = taken {
+                return Err(EngineError::Conflict(format!(
+                    "{} {} already belongs to peer {owner}",
+                    c.kind, c.value
+                )));
+            }
+            if creds.iter().any(|x| x.kind == c.kind && x.value == c.value) {
+                return Err(EngineError::Invalid(format!(
+                    "{} {} is listed twice",
+                    c.kind, c.value
+                )));
+            }
+            creds.push(c);
+        }
+        let label = match label.as_deref().map(str::trim) {
+            None | Some("") => Self::default_peer_label(creds.first(), |n| {
+                plan.cat.peers.iter().any(|p| p.label == n)
+            })?,
+            Some(l) => {
+                let l = Self::clean_label(l, "peer")?;
+                if plan.cat.peers.iter().any(|p| p.label == l) {
+                    return Err(EngineError::Conflict(format!("peer {l} already exists")));
+                }
+                l
+            }
+        };
+        let peer = Peer {
+            id: new_id(),
+            label: label.clone(),
+            credentials: creds,
+            groups: vec![],
+            created_at: Utc::now(),
+        };
+        plan.define_ref(ref_, &peer.id)?;
+        plan.activities.push(
+            NewActivity::new(ActivityKind::PeerAdded, format!("Added peer {label}")).peer(&peer.id),
+        );
+        plan.change(
+            ChangeKind::Create,
+            ChangeItem::Peer,
+            label,
+            Some(peer.id.clone()),
+        );
+        plan.cat.peers.push(peer.clone());
+        plan.writes.push(Write::InsertPeer(peer));
+        plan.event(DaemonEvent::PeersChanged);
+        Ok(())
+    }
+
+    pub(super) fn plan_op_create_peer_group(
+        &self,
+        plan: &mut Plan,
+        ref_: &Option<String>,
+        label: &str,
+        members: &[String],
+    ) -> Result<(), EngineError> {
+        let label = Self::clean_label(label, "group")?;
+        if plan.cat.groups.iter().any(|g| g.label == label) {
+            return Err(EngineError::Conflict(format!(
+                "group {label} already exists"
+            )));
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for m in members {
+            let id = plan.resolve(m)?;
+            if plan.cat.peer(&id).is_none() {
+                return Err(EngineError::NotFound(format!("peer {id}")));
+            }
+            ids.insert(id);
+        }
+        let group = PeerGroup {
+            id: new_id(),
+            label: label.clone(),
+            members: ids.into_iter().collect(),
+            created_at: Utc::now(),
+        };
+        plan.define_ref(ref_, &group.id)?;
+        for p in &mut plan.cat.peers {
+            if group.members.contains(&p.id) {
+                p.groups.push(group.id.clone());
+            }
+        }
+        plan.activities.push(NewActivity::new(
+            ActivityKind::GroupAdded,
+            format!("Added group {label}"),
+        ));
+        plan.change(
+            ChangeKind::Create,
+            ChangeItem::Group,
+            label,
+            Some(group.id.clone()),
+        );
+        plan.cat.groups.push(group.clone());
+        plan.writes.push(Write::InsertGroup(group));
+        plan.event(DaemonEvent::PeersChanged);
+        Ok(())
+    }
+
+    pub(super) fn plan_op_add_grant(
+        &self,
+        plan: &mut Plan,
+        target: &Target,
+        scope: &Scope,
+        network_id: &Option<String>,
+        subject: &Subject,
+        confirm_open: bool,
+    ) -> Result<(), EngineError> {
+        let target = match target {
+            Target::App(id) => Target::App(id.clone()),
+            Target::Tag(id) => Target::Tag(plan.resolve(id)?),
+            Target::Reservation(id) => Target::Reservation(plan.resolve(id)?),
+        };
+        let subject = match subject {
+            Subject::Peer(id) => Subject::Peer(plan.resolve(id)?),
+            Subject::Group(id) => Subject::Group(plan.resolve(id)?),
+            Subject::Anyone => Subject::Anyone,
+        };
+        let req = NewGrant {
+            target,
+            scope: plan.resolve_scope(scope)?,
+            network_id: network_id.clone(),
+            subject,
+            confirm_open,
+        };
+        let info = self.check_new_grant(&plan.cat, &req)?;
+        let grant = Grant {
+            id: new_id(),
+            target: req.target,
+            scope: req.scope,
+            network_id: req.network_id,
+            subject: req.subject,
+            created_at: Utc::now(),
+        };
+        plan.activities
+            .push(Self::grant_added_activity(&grant, &info));
+        let reach = plan.grant_reach(&grant);
+        plan.changes_reach |= lets_in(&reach);
+        plan.changes.push(BatchChange {
+            change: Change {
+                kind: ChangeKind::Create,
+                item: ChangeItem::Grant,
+                name: format!(
+                    "{} to {}{}",
+                    info.subject_label,
+                    info.target_name,
+                    if grant.scope.is_all() {
+                        String::new()
+                    } else {
+                        format!(" {}", grant.scope.describe(&plan.cat.port_groups))
+                    }
+                ),
+                detail: grant.network_id.as_ref().map(|n| format!("on {n}")),
+                opens_to_anyone: grant.subject == Subject::Anyone,
+            },
+            id: Some(grant.id.clone()),
+            reach,
+        });
+        plan.cat.grants.push(grant.clone());
+        plan.writes.push(Write::InsertGrant(grant));
+        plan.event(DaemonEvent::GrantsChanged);
+        Ok(())
+    }
+
+    pub(super) async fn plan_op_remove_grant(
+        &self,
+        state: &AppState,
+        plan: &mut Plan,
+        grant_id: &str,
+    ) -> Result<(), EngineError> {
+        let id = plan.resolve(grant_id)?;
+        let at = plan
+            .cat
+            .grants
+            .iter()
+            .position(|g| g.id == id)
+            .ok_or_else(|| EngineError::NotFound(format!("grant {id}")))?;
+        let grant = plan.cat.grants.remove(at);
+        let reach = plan.grant_reach(&grant);
+        plan.activities
+            .push(self.grant_removed_activity(state, &grant).await);
+        plan.changes.push(BatchChange {
+            change: Change {
+                kind: ChangeKind::Delete,
+                item: ChangeItem::Grant,
+                name: format!("grant {}", &id[..id.len().min(8)]),
+                detail: None,
+                opens_to_anyone: false,
+            },
+            id: Some(id.clone()),
+            reach,
+        });
+        plan.writes.push(Write::DeleteGrant(id));
+        plan.event(DaemonEvent::GrantsChanged);
+        Ok(())
     }
 }
 

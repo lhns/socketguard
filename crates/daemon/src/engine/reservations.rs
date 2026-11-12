@@ -5,16 +5,19 @@
 //! check and apply the same things. A reservation needs no locator when it is created: its
 //! addresses are created by [`Engine::ensure_addresses`] once a grant covers it.
 
+use super::batch::Plan;
 use super::mutations::Catalog;
 use super::*;
 use crate::networks;
-use crate::state::Write;
+use crate::state::{NewActivity, Write};
 use crate::AppState;
 use chrono::Utc;
-use socketguard_core::api_types::{ChangeOp, ChangesRequest, ChangesResponse};
+use socketguard_core::api_types::{
+    ChangeItem, ChangeKind, ChangeOp, ChangesRequest, ChangesResponse,
+};
 use socketguard_core::{
-    new_id, reservation_members, Address, Binding, BindingTarget, Grant, Model, Reservation,
-    ReservationView, Row, Scope, Subject, Target,
+    new_id, reservation_members, ActivityKind, Address, Binding, BindingTarget, Grant, Model,
+    Reservation, ReservationView, Row, Scope, Subject, Target,
 };
 use std::collections::HashSet;
 
@@ -802,6 +805,184 @@ impl Engine {
             },
         )
         .await?;
+        Ok(())
+    }
+}
+
+impl Engine {
+    // Batch planning: one method per operation of `ChangeOp` (see `batch`).
+    pub(super) fn plan_op_create_reservation(
+        &self,
+        plan: &mut Plan,
+        ref_: &Option<String>,
+        label: &str,
+        bindings: &[BindingTarget],
+        confirm_open: bool,
+    ) -> Result<(), EngineError> {
+        let bindings: Vec<BindingTarget> = bindings
+            .iter()
+            .map(|b| plan.resolve_binding(b))
+            .collect::<Result<_, _>>()?;
+        let (res, rp) =
+            self.plan_create_reservation(&mut plan.cat, new_id(), label, &bindings, confirm_open)?;
+        plan.define_ref(ref_, &res.id)?;
+        let activity = NewActivity::new(
+            ActivityKind::ReservationAdded,
+            format!("Added reservation {}", res.label),
+        );
+        plan.push_res_plan(
+            rp,
+            (ChangeKind::Create, ChangeItem::Reservation),
+            res.label.clone(),
+            Some(res.id.clone()),
+            activity,
+        );
+        Ok(())
+    }
+
+    pub(super) fn plan_op_reserve_address(
+        &self,
+        plan: &mut Plan,
+        ref_: &Option<String>,
+        address_id: &str,
+        label: &str,
+    ) -> Result<(), EngineError> {
+        let address_id = plan.resolve(address_id)?;
+        let (res, rp) = self.plan_reserve_address(&mut plan.cat, &address_id, label)?;
+        plan.define_ref(ref_, &res.id)?;
+        let activity = NewActivity::new(
+            ActivityKind::ReservationAdded,
+            format!("Reserved an address as {}", res.label),
+        );
+        plan.push_res_plan(
+            rp,
+            (ChangeKind::Create, ChangeItem::Reservation),
+            res.label.clone(),
+            Some(res.id.clone()),
+            activity,
+        );
+        Ok(())
+    }
+
+    pub(super) fn plan_op_rename_reservation(
+        &self,
+        plan: &mut Plan,
+        reservation_id: &str,
+        label: &str,
+    ) -> Result<(), EngineError> {
+        let id = plan.resolve(reservation_id)?;
+        let (res, rp) = self.plan_rename_reservation(&mut plan.cat, &id, label)?;
+        let activity = NewActivity::new(
+            ActivityKind::ReservationChanged,
+            format!("Renamed a reservation to {}", res.label),
+        );
+        plan.push_res_plan(
+            rp,
+            (ChangeKind::Update, ChangeItem::Reservation),
+            res.label.clone(),
+            Some(res.id.clone()),
+            activity,
+        );
+        Ok(())
+    }
+
+    pub(super) fn plan_op_add_binding(
+        &self,
+        plan: &mut Plan,
+        reservation_id: &str,
+        target: &BindingTarget,
+        confirm_open: bool,
+    ) -> Result<(), EngineError> {
+        let id = plan.resolve(reservation_id)?;
+        let target = plan.resolve_binding(target)?;
+        let (binding, rp) = self.plan_add_binding(&mut plan.cat, &id, &target, confirm_open)?;
+        let label = plan
+            .cat
+            .reservation(&id)
+            .map_or(id.clone(), |r| r.label.clone());
+        let activity = NewActivity::new(
+            ActivityKind::ReservationChanged,
+            format!("Bound something to reservation {label}"),
+        );
+        plan.push_res_plan(
+            rp,
+            (ChangeKind::Create, ChangeItem::Binding),
+            format!("binding of reservation {label}"),
+            Some(binding.id),
+            activity,
+        );
+        Ok(())
+    }
+
+    pub(super) fn plan_op_remove_binding(
+        &self,
+        plan: &mut Plan,
+        reservation_id: &str,
+        binding_id: &str,
+    ) -> Result<(), EngineError> {
+        let id = plan.resolve(reservation_id)?;
+        let (binding, rp) = self.plan_remove_binding(&mut plan.cat, &id, binding_id)?;
+        let label = plan
+            .cat
+            .reservation(&id)
+            .map_or(id.clone(), |r| r.label.clone());
+        let activity = NewActivity::new(
+            ActivityKind::ReservationChanged,
+            format!("Unbound something from reservation {label}"),
+        );
+        plan.push_res_plan(
+            rp,
+            (ChangeKind::Delete, ChangeItem::Binding),
+            format!("binding of reservation {label}"),
+            Some(binding.id),
+            activity,
+        );
+        Ok(())
+    }
+
+    pub(super) fn plan_op_release_reservation(
+        &self,
+        plan: &mut Plan,
+        reservation_id: &str,
+    ) -> Result<(), EngineError> {
+        let id = plan.resolve(reservation_id)?;
+        let (res, rp) = self.plan_release_reservation(&mut plan.cat, &id)?;
+        let activity = NewActivity::new(
+            ActivityKind::ReservationRemoved,
+            format!("Released reservation {}", res.label),
+        );
+        plan.push_res_plan(
+            rp,
+            (ChangeKind::Delete, ChangeItem::Reservation),
+            res.label.clone(),
+            Some(res.id.clone()),
+            activity,
+        );
+        Ok(())
+    }
+
+    pub(super) fn plan_op_move_app(
+        &self,
+        plan: &mut Plan,
+        from: &str,
+        to: &str,
+        confirm_open: bool,
+    ) -> Result<(), EngineError> {
+        let rp = self.plan_move_app(&mut plan.cat, from, to, confirm_open)?;
+        let name = |id: &str| plan.cat.app(id).map_or(id.to_string(), |a| a.name.clone());
+        let (a, b) = (name(from), name(to));
+        let activity = NewActivity::new(
+            ActivityKind::AppMoved,
+            format!("Moved the grants, tags and addresses of {a} to {b}"),
+        )
+        .app(to);
+        plan.push_res_plan(
+            rp,
+            (ChangeKind::Update, ChangeItem::App),
+            format!("{a} moved to {b}"),
+            Some(to.to_string()),
+            activity,
+        );
         Ok(())
     }
 }
