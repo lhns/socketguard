@@ -66,7 +66,7 @@ about ten minutes with a warm build cache, longer for the first Rust build):
 
 It removes its containers, network and image on exit. The build volumes (`sg-target`, `sg-cargo-registry`) are
 caches shared with the other scripts; `CLEAN_VOLUMES=1` removes them. Exit code 2 (a `SKIP` line) means Tor
-could not bootstrap from this Docker network. It is not part of CI (the other Docker tests are not either).
+could not bootstrap from this Docker network. It runs nightly and on request in `.github/workflows/e2e.yml` (not on push). The fetch of the page over Tor waits up to 600 s (`PUBLISH_SECS`) and restarts B's Tor client once after 300 s (`RESTART_AFTER_SECS`) to get new circuits.
 
 # Managed Yggdrasil end-to-end test
 
@@ -89,4 +89,4 @@ are in the build cache volume):
 7. with another Yggdrasil node running on A, the managed one is held back with the reason; when the other is
    gone it starts; removing the network ends it and deletes its configuration.
 
-Like the other Docker tests it is not part of CI.
+It runs nightly and on request in `.github/workflows/e2e.yml` (not on push).

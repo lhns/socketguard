@@ -15,7 +15,8 @@ NODE_B=sg-mtor-e2e-b
 DOCKERFILE=Dockerfile.tor
 PORT=8080
 BOOTSTRAP_SECS=${BOOTSTRAP_SECS:-240}
-PUBLISH_SECS=${PUBLISH_SECS:-420}
+PUBLISH_SECS=${PUBLISH_SECS:-600}      # onion service publication + descriptor fetch window
+RESTART_AFTER_SECS=${RESTART_AFTER_SECS:-300} # B's tor client is restarted once if the fetch still fails by then
 FETCH_RETRY_SECS=${FETCH_RETRY_SECS:-10}
 NODE_ARGS="--init"                     # pid 1 reaps what the daemon leaves behind when killed
 STATE=/var/lib/sg                      # the daemon's state directory; Tor's is $STATE/tor
@@ -193,9 +194,32 @@ step "Tor's ServiceID equals the locally computed name" service_is_local_name
 echo "      waiting for B's tor to bootstrap and for the onion service to publish (up to ${PUBLISH_SECS}s)"
 retry "$BOOTSTRAP_SECS" bootstrapped "$NODE_B" /var/log/tor-b.log || { fail "tor bootstrapped on B"; exit 1; }
 retry "$BOOTSTRAP_SECS" bootstrapped "$NODE_B" /var/log/tor-c.log || { fail "tor bootstrapped on the third client"; exit 1; }
-fetch_retry() { RETRY_EVERY=$FETCH_RETRY_SECS retry "$@"; }
 fetch_b() { B curl -fsS --max-time 60 --socks5-hostname 127.0.0.1:9050 "http://$ONION:$PORT/" | grep -q sg-e2e-ok; }
-step "B (holding the client key) fetches the page over Tor" fetch_retry "$PUBLISH_SECS" fetch_b || exit 1
+# A client tor can be stuck with circuits that do not reach the service's introduction points
+# or hidden-service directories; a new one builds new circuits.
+b_tor_restart() {
+  docker exec "$NODE_B" pkill -f "tor -f /etc/torrc-b"
+  retry 30 sh -c "! docker exec $NODE_B pgrep -f 'tor -f /etc/torrc-b'"
+  docker exec "$NODE_B" sh -c ': > /var/log/tor-b.log'
+  tor_start "$NODE_B" /var/lib/tor-b /etc/torrc-b /var/log/tor-b.log
+  retry "$BOOTSTRAP_SECS" bootstrapped "$NODE_B" /var/log/tor-b.log || echo "      B's tor did not bootstrap again"
+}
+# Fetch until PUBLISH_SECS are over; once, after RESTART_AFTER_SECS without a page, restart B's tor.
+fetch_with_restart() {
+  local end=$((SECONDS + PUBLISH_SECS)) restart_at=$((SECONDS + RESTART_AFTER_SECS)) restarted=0
+  while [ "$SECONDS" -lt "$end" ]; do
+    fetch_b >/dev/null 2>&1 && return 0
+    if [ "$restarted" = 0 ] && [ "$SECONDS" -ge "$restart_at" ]; then
+      echo "      no page after ${RESTART_AFTER_SECS}s: restarting B's tor client (new circuits)"
+      b_tor_restart
+      restarted=1
+    fi
+    sleep "$FETCH_RETRY_SECS"
+  done
+  echo "--- node B tor log (tail) ---"; B tail -n 40 /var/log/tor-b.log
+  return 1
+}
+step "B (holding the client key) fetches the page over Tor" fetch_with_restart || exit 1
 step "a third client without the key cannot fetch it" sh -c "! docker exec $NODE_B curl -fsS --max-time 60 --socks5-hostname 127.0.0.1:9060 http://$ONION:$PORT/"
 
 # ── The daemon is killed: Tor goes with it ───────────────────────────────────
