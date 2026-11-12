@@ -262,6 +262,16 @@ mod tests {
     }
 
     #[test]
+    fn the_range_scope_blocks_200_7_after_the_granted_rule() {
+        let out = render(&crate::firewall::range_ruleset());
+        let pass = out.find("to 300:1:2:3::100").expect("the granted rule");
+        let block = out
+            .find("block drop in log quick inet6 from any to 200::/7")
+            .expect("the range block");
+        assert!(pass < block, "rules come before scopes");
+    }
+
+    #[test]
     fn golden_render() {
         insta::assert_snapshot!(render(&golden_ruleset()));
     }

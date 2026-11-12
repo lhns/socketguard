@@ -448,6 +448,19 @@ mod tests {
     }
 
     #[test]
+    fn the_range_scope_drops_200_7_after_the_granted_rule() {
+        let out = render(&crate::firewall::range_ruleset());
+        let permit = out
+            .find("ip6 daddr 300:1:2:3::100 tcp dport 8080 counter name")
+            .expect("the granted rule");
+        let drop = out
+            .find("ip6 daddr 200::/7 counter name")
+            .expect("the range drop");
+        assert!(permit < drop, "rules come before scopes");
+        assert!(out.contains("ip6 daddr 200::/7 limit rate 10/second burst 20 packets log group 7 prefix \"sg:overlay:ygg:range\""));
+    }
+
+    #[test]
     fn golden_render() {
         insta::assert_snapshot!(render(&golden_ruleset()));
     }

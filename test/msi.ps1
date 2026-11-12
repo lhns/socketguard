@@ -396,6 +396,107 @@ function Invoke-ManagedNetworks {
     Write-Host '::warning::managed networks: Yggdrasil admin socket: peer information unavailable on this runner'
     $script:mnSkipped.Add("Yggdrasil admin socket: peers_connected unknown (detail: '$($n.managed.detail)')")
   }
+  Assert-PrefixBlock $addr
+}
+
+# A PREFIX block drops a connection on the real WFP engine (ADR 0051). The managed node's own
+# 300::/64 subnet is denied by the scope `overlay:ygg:subnet`, a LocalNet (address + mask)
+# condition. The runner adds an address inside that subnet by hand (nothing SocketGuard
+# assigned, so only the prefix can deny it), listens on it and connects from a second address of
+# the subnet. The block must drop it; a port granted on an address SocketGuard assigned inside
+# the same subnet must stay reachable (a hard permit outweighs the block).
+#
+# NOT YET VALIDATED ON A RUNNER. Open question: whether traffic between two local addresses of
+# one host reaches the ALE receive layer where the filters sit (the loopback path). If this
+# check fails with "the connection succeeded", look at wfp-netevents-prefix.xml and
+# wfp-filters-prefix.xml first: if no event for the connect exists, the packet never met a
+# filter, and the check has to move to a second machine or network namespace-like setup (a
+# peer on the same Yggdrasil network connecting to the subnet address); do not weaken the
+# assertion. The granted-port half also depends on that path (the permit names the adapter as
+# arrival interface, which a local-to-local connection may not carry) and is reported as
+# SKIPPED, not failed, when only that half does not hold.
+# The /7 range block of an existing node is covered by the plan test only (no real-engine proof).
+function Assert-PrefixBlock([string]$NodeAddr) {
+  Section 'managed networks: a prefix block drops a connection (real WFP engine)'
+  $ad = Mn-Adapter
+  if (-not $ad) { Mn-Skip 'prefix block: the adapter is gone'; return }
+  $bytes = [System.Net.IPAddress]::Parse($NodeAddr).GetAddressBytes()
+  $bytes[0] = 0x03                       # the node's subnet: 0300:<next 48 bits>::/64
+  for ($i = 8; $i -lt 16; $i++) { $bytes[$i] = 0 }
+  $pfx = [System.Net.IPAddress]::new($bytes)
+  $mk = { param([int]$Last) $b = $bytes.Clone(); $b[15] = $Last; ([System.Net.IPAddress]::new($b)).ToString() }
+  $listenAddr = & $mk 0x57
+  $fromAddr = & $mk 0x58
+  Write-Host "  node subnet $pfx/64; extra addresses $listenAddr (listens) and $fromAddr (connects), on $($ad.Name)"
+  foreach ($a in $listenAddr, $fromAddr) {
+    try { New-NetIPAddress -InterfaceIndex $ad.ifIndex -IPAddress $a -PrefixLength 128 -ErrorAction Stop | Out-Null } catch { Mn-Skip "prefix block: cannot add $a to $($ad.Name): $_"; return }
+  }
+  $listener = $null; $granted = $null
+  try {
+    & netsh wfp set options netevents=on 2>&1 | Out-Null
+    # The extra address must be usable (not tentative) before binding to it.
+    if (-not (Wait-Until { (Get-NetIPAddress -IPAddress $listenAddr -ErrorAction SilentlyContinue).AddressState -eq 'Preferred' } 30 'preferred')) {
+      Mn-Skip "prefix block: $listenAddr never became preferred"; return
+    }
+    # 50041 on the extra address; 50042 and 50043 on every address (one will be granted).
+    $code = "`$a=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse('$listenAddr'),50041);`$a.Start();" +
+      '$b=[Net.Sockets.TcpListener]::new([Net.IPAddress]::IPv6Any,50042);$b.Start();' +
+      '$c=[Net.Sockets.TcpListener]::new([Net.IPAddress]::IPv6Any,50043);$c.Start();Start-Sleep 600'
+    $listener = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile', '-Command', $code -PassThru -WindowStyle Hidden
+    # Control from the loopback path of the same kind of connection: the listener itself works.
+    if (-not (Wait-Until { Try-Connect '::1' 50042 $null } 30 'listener up')) { Mn-Skip 'prefix block: the test listener never answered on ::1'; return }
+    Mn-Ok 'control: the test listener answers on ::1 (loopback is always allowed)'
+
+    $app = $null
+    $found = Wait-Until {
+      $r = Run $Cli @('apps', 'list', '--json') $null
+      if ($r.Code -ne 0) { return $false }
+      try { $list = $r.Text | ConvertFrom-Json } catch { return $false }
+      $script:pbApp = @($list) | Where-Object { ($_.ports | ConvertTo-Json -Compress) -match '50042' } | Select-Object -First 1
+      return [bool]$script:pbApp
+    } 90 'prefix listener app'
+    $app = $script:pbApp
+    $assigned = $null
+    if ($found) {
+      $g = Run $Cli @('grant', "$($app.id):50042/tcp", 'anyone', '--network', 'ygg', '--yes') 'pb-grant'
+      Write-Host $g.Text
+      if ($g.Code -eq 0) {
+        $re = [regex]::Escape(($pfx.ToString() -replace '::$', ':')) + '[0-9a-f:]+'
+        $got = Wait-Until {
+          $show = Run $Cli @('apps', 'show', "$($app.id)", '--json') 'pb-apps-show'
+          foreach ($m in [regex]::Matches($show.Text, $re)) { if ($m.Value -ne $listenAddr -and $m.Value -ne $fromAddr) { $script:pbAddr = $m.Value; return $true } }
+          return $false
+        } 40 'assigned address'
+        if ($got) { $assigned = $script:pbAddr }
+      }
+    }
+    Start-Sleep -Seconds 3   # the ruleset with the grant is applied by now (the reconcile pass)
+
+    $reach = Try-Connect $listenAddr 50041 $fromAddr
+    Write-Host "  $fromAddr -> ${listenAddr}:50041 (inside the node's /64, no grant, not assigned by SocketGuard): reachable=$reach"
+    & netsh wfp show netevents file=(Join-Path $Out 'wfp-netevents-prefix.xml') 2>&1 | Out-Null
+    & netsh wfp show filters file=(Join-Path $Out 'wfp-filters-prefix.xml') 2>&1 | Out-Null
+    if ($reach) { Mn-Fail "the connection to $listenAddr (inside the node's /64) succeeded: the prefix block did not drop it. See wfp-netevents-prefix.xml and the comment above Assert-PrefixBlock" }
+    Mn-Ok "the connection to $listenAddr inside the node's /64 was dropped"
+    $ev = Join-Path $Out 'wfp-netevents-prefix.xml'
+    if ((Test-Path $ev) -and ([IO.File]::ReadAllText($ev) -match 'overlay:ygg:subnet')) {
+      Mn-Ok 'the WFP net events attribute a drop to the scope overlay:ygg:subnet'
+    } else {
+      Write-Host '  note: no net event names overlay:ygg:subnet (events carry a filter id; compare wfp-netevents-prefix.xml with wfp-filters-prefix.xml)' -ForegroundColor Yellow
+    }
+
+    if (-not $assigned) { Mn-Skip "prefix block: SocketGuard assigned the listener no address in $pfx/64 (grant or app discovery failed), so the granted-port half did not run"; return }
+    $reachIn = Try-Connect $assigned 50042 $fromAddr
+    $reachOut = Try-Connect $assigned 50043 $fromAddr
+    Write-Host "  $fromAddr -> ${assigned}: granted port 50042 reachable=$reachIn; port 50043 (not granted) reachable=$reachOut"
+    if ($reachOut) { Mn-Fail "port 50043 on $assigned (not granted) was reachable inside the node's /64" }
+    if ($reachIn) { Mn-Ok "the granted port 50042 on $assigned (SocketGuard's address in the same /64) is reachable, the ungranted one is not" }
+    else { Mn-Skip "prefix block: the granted port 50042 on $assigned was not reachable from $fromAddr; the permit names the adapter as arrival interface, which a local-to-local connection may not carry (see the comment above Assert-PrefixBlock)" }
+  } finally {
+    if ($listener -and -not $listener.HasExited) { Stop-Process -Id $listener.Id -Force -ErrorAction SilentlyContinue }
+    foreach ($a in $listenAddr, $fromAddr) { Remove-NetIPAddress -IPAddress $a -Confirm:$false -ErrorAction SilentlyContinue }
+    & netsh wfp set options netevents=off 2>&1 | Out-Null
+  }
 }
 
 # ---- the run ---------------------------------------------------------------------------------

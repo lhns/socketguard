@@ -82,118 +82,77 @@ fn with_ygg() -> Vec<Net> {
     vec![local_net(), lan_net(), ygg_net()]
 }
 
+fn range_scope() -> Vec<(String, String)> {
+    vec![("overlay:ygg:range".to_string(), "200::/7".to_string())]
+}
+
 #[tokio::test]
-async fn the_node_addresses_stay_blocked_when_the_node_stops_and_across_a_restart() {
+async fn an_existing_node_is_closed_by_the_whole_range_whatever_it_does() {
     let f = Fixture::new(with_ygg(), None).await;
-    // Never seen: only the configured interface is closed, and the setup answer says why
-    // the network is not closed by address.
-    assert!(f.net_scopes().is_empty());
+    // Never seen: the range is there already, beside the configured interface.
+    assert_eq!(f.net_scopes(), range_scope());
     assert!(f.has_interface_scope("ygg0"));
     let (_, setup) = f.get("/api/networks/setup").await;
     let block = &setup["yggdrasil_block"];
-    assert_eq!(block["closed"], false);
+    assert_eq!(block["closed"], true);
+    assert_eq!(block["address_blocked"], true);
     assert_eq!(block["interface_blocked"], true);
-    assert_eq!(block["reason"], "the node's address is not known yet");
+    assert!(block.get("reason").is_none(), "{block}");
 
-    // The node answers once.
+    // The node answers: the same scope, and nothing is remembered about it.
     f.d.nets["ygg"].set_node(ADDR, SUBNET);
     f.reconcile().await;
+    assert_eq!(f.net_scopes(), range_scope());
     assert_eq!(
-        f.net_scopes(),
-        [
-            ("overlay:ygg:addr".to_string(), format!("{ADDR}/128")),
-            ("overlay:ygg:subnet".to_string(), SUBNET.to_string()),
-        ]
+        f.d.state.db.get_setting("ygg_node:ygg").await.unwrap(),
+        None
     );
-    let (_, setup) = f.get("/api/networks/setup").await;
-    assert_eq!(setup["yggdrasil_block"]["closed"], true);
-    assert_eq!(setup["yggdrasil_block"]["address_blocked"], true);
 
-    // It stops, and its adapter is gone: the block is the one remembered.
+    // It stops, and its adapter is gone: still closed.
     f.d.nets["ygg"].clear_node();
     f.d.nets["ygg"].set_problem(Some(NOT_RUNNING));
     f.d.net.set_interface_missing("ygg0", true);
     f.reconcile().await;
-    assert_eq!(f.net_scopes().len(), 2, "{:?}", f.net_scopes());
+    assert_eq!(f.net_scopes(), range_scope());
+    let (_, setup) = f.get("/api/networks/setup").await;
+    assert_eq!(setup["yggdrasil_block"]["closed"], true);
 }
 
 #[tokio::test]
-async fn a_remembered_address_is_loaded_when_the_daemon_restarts_with_the_node_down() {
+async fn an_address_of_another_node_on_the_host_is_inside_the_range() {
     let f = Fixture::new(with_ygg(), None).await;
-    f.d.nets["ygg"].set_node(ADDR, SUBNET);
-    f.reconcile().await;
-    // The same database, a new process: the node is down and no interface is known.
-    let db_value =
-        f.d.state
-            .db
-            .get_setting("ygg_node:ygg")
-            .await
+    let theirs: std::net::IpAddr = "200:9:9:9::7".parse().unwrap();
+    let range = f
+        .last()
+        .scopes
+        .into_iter()
+        .find_map(|s| match s.matcher {
+            ScopeMatch::DestinationNet(n) if s.id == "overlay:ygg:range" => Some(n),
+            _ => None,
+        })
+        .expect("the range scope");
+    assert!(range.contains(&theirs));
+}
+
+#[tokio::test]
+async fn an_existing_node_that_does_not_answer_cannot_be_added() {
+    // No Yggdrasil yet; the one named answers nothing.
+    let f = Fixture::new(vec![local_net(), lan_net()], None).await;
+    let (s, body) = f
+        .post(
+            "/api/networks",
+            json!({"type": "yggdrasil", "interface": "Yggdrasil", "admin_endpoint": "tcp://127.0.0.1:1"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["message"]
+            .as_str()
             .unwrap()
-            .expect("the node's addresses are stored");
-    assert!(db_value.contains(ADDR), "{db_value}");
-    f.d.nets["ygg"].clear_node();
-    f.reconcile().await;
-    assert_eq!(f.net_scopes().len(), 2);
-}
-
-#[tokio::test]
-async fn an_address_of_a_node_socketguard_does_not_manage_matches_no_scope() {
-    let f = Fixture::new(with_ygg(), None).await;
-    f.d.nets["ygg"].set_node(ADDR, SUBNET);
-    f.reconcile().await;
-    let theirs = ["200:9:9:9::7", "300:9:9:9::1"];
-    for sc in f.last().scopes {
-        if let ScopeMatch::DestinationNet(n) = sc.matcher {
-            for t in theirs {
-                assert!(
-                    !n.contains(&t.parse::<std::net::IpAddr>().unwrap()),
-                    "{}",
-                    sc.id
-                );
-            }
-        }
-    }
-}
-
-#[tokio::test]
-async fn a_pending_network_is_closed_before_the_request_returns() {
-    // No Yggdrasil yet; it is added while its software is absent (the endpoint answers
-    // nothing), with its interface named.
-    let f = Fixture::new(vec![local_net(), lan_net()], None).await;
-    let (s, net) = f
-        .post(
-            "/api/networks",
-            json!({"type": "yggdrasil", "interface": "Yggdrasil", "admin_endpoint": "tcp://127.0.0.1:1"}),
-        )
-        .await;
-    assert_eq!(s, StatusCode::CREATED, "{net}");
-    assert_eq!(net["status"]["state"], "down");
-    // The ruleset with the block was applied before the answer.
-    assert!(f.has_interface_scope("Yggdrasil"));
-    let (_, setup) = f.get("/api/networks/setup").await;
-    assert_eq!(setup["yggdrasil_block"]["interface_blocked"], true);
-    assert_eq!(setup["yggdrasil_block"]["closed"], false);
-}
-
-#[tokio::test]
-async fn an_apply_that_failed_is_said_in_the_response() {
-    let f = Fixture::new(vec![local_net(), lan_net()], None).await;
-    f.d.fw.set_failing(true);
-    let (s, net) = f
-        .post(
-            "/api/networks",
-            json!({"type": "yggdrasil", "interface": "Yggdrasil", "admin_endpoint": "tcp://127.0.0.1:1"}),
-        )
-        .await;
-    assert_eq!(s, StatusCode::ACCEPTED, "{net}");
-    assert_eq!(net["enforcement"]["status"], "failed");
-    assert_eq!(net["id"], "yggdrasil");
-    let (_, setup) = f.get("/api/networks/setup").await;
-    assert_eq!(setup["yggdrasil_block"]["interface_blocked"], false);
-    assert_eq!(
-        setup["yggdrasil_block"]["reason"],
-        "the last attempt to apply the firewall rules failed"
+            .contains("does not answer"),
+        "{body}"
     );
+    assert_eq!(f.get("/api/networks").await.1.as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -262,11 +221,9 @@ async fn removing_a_network_whose_node_is_down_needs_no_confirmation() {
 }
 
 #[tokio::test]
-async fn removing_the_network_removes_its_address_scopes() {
+async fn removing_the_network_removes_its_range_scope() {
     let f = Fixture::new(with_ygg(), None).await;
-    f.d.nets["ygg"].set_node(ADDR, SUBNET);
-    f.reconcile().await;
-    assert_eq!(f.net_scopes().len(), 2);
+    assert_eq!(f.net_scopes(), range_scope());
     let (s, _) = f.delete("/api/networks/ygg?confirm_exposed=true").await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     assert!(f.net_scopes().is_empty());
@@ -281,13 +238,8 @@ async fn where_an_interface_rule_needs_the_adapter_it_is_not_counted_until_the_a
     let (_, setup) = f.get("/api/networks/setup").await;
     let block = &setup["yggdrasil_block"];
     assert_eq!(block["interface_blocked"], false, "{block}");
-    assert!(
-        block["reason"]
-            .as_str()
-            .unwrap()
-            .contains("only block an adapter that exists"),
-        "{block}"
-    );
+    // The range scope closes the node without the adapter.
+    assert_eq!(block["closed"], true, "{block}");
 
     f.d.net.add_interface("ygg0");
     let (_, setup) = f.get("/api/networks/setup").await;
@@ -315,29 +267,4 @@ async fn a_port_also_bound_on_loopback_is_still_listed_as_exposed() {
             {"app": "nginx", "port": 80, "proto": "tcp"}
         ])
     );
-}
-
-#[tokio::test]
-async fn removing_the_network_forgets_the_remembered_node() {
-    let f = Fixture::new(with_ygg(), None).await;
-    f.d.nets["ygg"].set_node(ADDR, SUBNET);
-    f.reconcile().await;
-    assert!(f
-        .d
-        .state
-        .db
-        .get_setting("ygg_node:ygg")
-        .await
-        .unwrap()
-        .is_some());
-    let (s, _) = f.delete("/api/networks/ygg?confirm_exposed=true").await;
-    assert_eq!(s, StatusCode::NO_CONTENT);
-    assert!(f
-        .d
-        .state
-        .db
-        .get_setting("ygg_node:ygg")
-        .await
-        .unwrap()
-        .is_none());
 }

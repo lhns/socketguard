@@ -36,6 +36,17 @@ pub fn overlay_subnet_scope_id(network_id: &str) -> String {
     format!("overlay:{network_id}:subnet")
 }
 
+/// The id of the scope denying the whole Yggdrasil range (`200::/7`) for the network
+/// `network_id`, an existing node (ADR 0051, amendment).
+pub fn overlay_range_scope_id(network_id: &str) -> String {
+    format!("overlay:{network_id}:range")
+}
+
+/// The Yggdrasil address range, `200::/7`.
+pub fn yggdrasil_range() -> Ipv6Net {
+    Ipv6Net::new(std::net::Ipv6Addr::new(0x200, 0, 0, 0, 0, 0, 0, 0), 7).expect("valid prefix")
+}
+
 /// Everything the producer needs, gathered from the DB and the active networks.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
@@ -55,6 +66,9 @@ pub struct Snapshot {
     /// The known node addresses of the Yggdrasil networks, by network id (live, else the
     /// last ones remembered).
     pub ygg_nodes: BTreeMap<String, OverlayNode>,
+    /// Yggdrasil networks on a node the user runs (not managed): blocked by the whole
+    /// range `200::/7`, whether or not their node's address is known.
+    pub ygg_existing: BTreeSet<String>,
     /// Interfaces under whole-host protection.
     pub protect_host: Vec<String>,
     /// The IPv4 subnets of the protected interfaces that carry IPv4 (others are absent).
@@ -388,16 +402,25 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
             },
         });
     }
-    // The managed node's own addresses are closed whatever happens to its adapter (ADR
-    // 0051): an interface rule cannot exist while the adapter does not, so a node that
-    // restarts or a renamed adapter would leave the host open. Rules still admit granted
-    // peers, as they do for the interface scope. A node that was never seen has no
-    // addresses to name yet; SocketGuard has put nothing on it either.
+    // Closed whatever happens to the adapter (ADR 0051): an interface rule cannot exist
+    // while the adapter does not, so a node that restarts or a renamed adapter would leave
+    // the host open. Rules still admit granted peers, as they do for the interface scope.
+    // An existing node is closed by the whole range, known address or not. SocketGuard's
+    // own node keeps the narrow block of its address and subnet, which leaves a node it
+    // does not manage alone; a node that was never seen has no addresses to name yet.
     for network in snap
         .networks
         .iter()
         .filter(|n| n.kind == NetworkKind::Yggdrasil)
     {
+        if snap.ygg_existing.contains(&network.id) {
+            scopes.push(Scope {
+                id: overlay_range_scope_id(&network.id),
+                kind: ScopeKind::Overlay,
+                matcher: ScopeMatch::DestinationNet(IpNet::V6(yggdrasil_range())),
+            });
+            continue;
+        }
         let Some(node) = snap.ygg_nodes.get(&network.id) else {
             continue;
         };
@@ -1294,6 +1317,90 @@ mod tests {
             }
         }
         assert!(rs.rules.is_empty());
+    }
+
+    fn existing() -> BTreeSet<String> {
+        ["ygg".to_string()].into()
+    }
+
+    #[test]
+    fn an_existing_node_is_denied_by_the_whole_range_whatever_is_known() {
+        let mut no_iface = ygg();
+        no_iface.interface = None;
+        no_iface.status = NetworkStatus::Down {
+            reason: "the Yggdrasil node is not running".into(),
+        };
+        // Node never seen, seen once, and adapter missing: the same single range scope.
+        for (networks, nodes) in [
+            (vec![ygg()], BTreeMap::new()),
+            (vec![ygg()], [("ygg".to_string(), node())].into()),
+            (vec![no_iface], BTreeMap::new()),
+        ] {
+            let s = Snapshot {
+                networks,
+                ygg_nodes: nodes,
+                ygg_existing: existing(),
+                ..Snapshot::default()
+            };
+            let rs = build(&s);
+            assert_eq!(
+                net_scopes(&rs),
+                [("overlay:ygg:range", "200::/7".to_string())]
+            );
+            assert!(rs.scopes.iter().all(|s| s.kind == ScopeKind::Overlay));
+        }
+    }
+
+    #[test]
+    fn an_existing_node_keeps_its_interface_scope_beside_the_range() {
+        let s = Snapshot {
+            networks: vec![ygg()],
+            ygg_existing: existing(),
+            ..Snapshot::default()
+        };
+        let ids: Vec<_> = build(&s).scopes.into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, ["overlay:ygg0", "overlay:ygg:range"]);
+    }
+
+    #[test]
+    fn a_managed_node_keeps_the_narrow_scopes_and_a_foreign_address_is_untouched() {
+        // Not in `ygg_existing`: managed. Another node's 200::/7 address matches nothing.
+        let s = Snapshot {
+            networks: vec![ygg()],
+            ygg_nodes: [("ygg".to_string(), node())].into(),
+            ..Snapshot::default()
+        };
+        let rs = build(&s);
+        assert!(!rs.scopes.iter().any(|s| s.id.ends_with(":range")));
+        let foreign: IpAddr = "200:9:9:9::7".parse().unwrap();
+        for sc in &rs.scopes {
+            if let ScopeMatch::DestinationNet(n) = &sc.matcher {
+                assert!(!n.contains(&foreign), "{}", sc.id);
+            }
+        }
+        // Whereas the range covers it, and the SocketGuard addresses in 300::/64.
+        let range = IpNet::V6(yggdrasil_range());
+        assert!(range.contains(&foreign));
+        assert!(range.contains(&"300:1:2:3::100".parse::<IpAddr>().unwrap()));
+        assert!(!range.contains(&"fd00::1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn a_granted_port_is_admitted_beside_the_range_scope() {
+        let mut s = base();
+        s.ygg_existing = existing();
+        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        let rs = build(&s);
+        // The SocketGuard address 300:1:2:3::100 lies inside the range; the rule for it
+        // is emitted, and backends place rules before scope drops.
+        let rule = rs
+            .rules
+            .iter()
+            .find(|r| r.id == "a:ay:8080:tcp:g:ygg0")
+            .expect("the granted port has a rule");
+        let Dst::Addr(a) = rule.dst else { panic!() };
+        assert!(IpNet::V6(yggdrasil_range()).contains(&a));
+        assert!(rs.scopes.iter().any(|s| s.id == "overlay:ygg:range"));
     }
 
     #[test]

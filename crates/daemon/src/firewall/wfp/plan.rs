@@ -366,6 +366,29 @@ mod tests {
     }
 
     #[test]
+    fn the_range_scope_is_a_slash_7_local_net_block_below_the_granted_permit() {
+        let p = plan(&crate::firewall::range_ruleset());
+        let range = p
+            .iter()
+            .find(|s| s.scope_id.as_deref() == Some("overlay:ygg:range"))
+            .expect("the range block");
+        assert_eq!(range.action, Action::Block);
+        assert_eq!(range.layer, Layer::V6);
+        assert_eq!(range.weight, W_BLOCK);
+        assert_eq!(range.conds, vec![Cond::LocalNet(net("200::/7"))]);
+        // The permit for a SocketGuard address inside the range outweighs it.
+        let permit = p
+            .iter()
+            .find(|s| s.name == "SocketGuard a:ay1:8080:tcp:g1:ygg0")
+            .expect("the granted rule");
+        assert_eq!(permit.action, Action::Permit);
+        assert!(permit.weight > range.weight);
+        assert!(permit
+            .conds
+            .contains(&Cond::LocalAddr(ip("300:1:2:3::100"))));
+    }
+
+    #[test]
     fn empty_ruleset_plans_nothing() {
         assert!(plan(&DesiredRuleset::default()).is_empty());
     }
