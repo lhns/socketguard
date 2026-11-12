@@ -9,10 +9,16 @@
 
 pub mod ip;
 pub mod ledger;
+pub mod managed;
 pub mod onion_key;
 pub mod tor;
 pub mod tor_client_key;
 pub mod tor_control;
+pub mod tor_managed;
+pub mod ygg_key;
+pub mod ygg_managed;
+
+pub use managed::ManagedCtx;
 
 use crate::iface::InterfaceManager;
 use crate::ruleset::{subject_credentials, Snapshot};
@@ -112,6 +118,11 @@ pub trait Network: Send + Sync {
     fn node(&self) -> Option<crate::ruleset::OverlayNode> {
         None
     }
+    /// How the child process of a managed network stands (ADR 0052); None for networks
+    /// that SocketGuard does not run itself.
+    fn managed(&self) -> Option<socketguard_core::ManagedInfo> {
+        None
+    }
     /// The /64 this network allocates from, for re-homing addresses; None if it has none.
     fn current_prefix(&self) -> Result<Option<Prefix>> {
         Ok(None)
@@ -143,15 +154,20 @@ pub trait Network: Send + Sync {
 }
 
 /// Create the network for `config`.
-/// `ula_global_id` is the installation's persisted ULA global ID.
+/// `id` is the network's id (the child process of a managed network is named after it),
+/// `ula_global_id` the installation's persisted ULA global ID, `managed` what managed
+/// networks need from the daemon.
 ///
 /// Only an invalid configuration is an error. What depends on the system (a missing
-/// prefix, no DHCPv6 server, Yggdrasil or Tor not running) is not: the network is
-/// created, reports `Down` and recovers when the system does.
+/// prefix, no DHCPv6 server, Yggdrasil or Tor not running, a build without the files of a
+/// managed network) is not: the network is created, reports `Down` and recovers when the
+/// system does.
 pub fn create(
+    id: &str,
     config: &BackendConfig,
     ula_global_id: [u8; 5],
     net: Arc<dyn InterfaceManager>,
+    managed: &ManagedCtx,
 ) -> Result<Arc<dyn Network>> {
     match config {
         BackendConfig::Tor {
@@ -162,7 +178,14 @@ pub fn create(
             expect_tor_uid,
             cookie_owner,
             allow_remote_control,
+            managed: managed_tor,
         } => {
+            if *managed_tor {
+                return Ok(Arc::new(tor::TorNetwork::managed(
+                    tor_managed::ManagedTor::new(id, managed),
+                    tor::CHECK_INTERVAL,
+                )));
+            }
             let opts = tor_control::AuthOptions {
                 auth: auth.clone(),
                 cookie_path: cookie_path.clone(),
@@ -186,14 +209,36 @@ pub fn create(
         BackendConfig::Yggdrasil {
             admin_endpoint,
             interface,
-        } => Ok(ip_network(
-            config,
-            ip::yggdrasil::YggdrasilBackend::new(Box::new(ip::yggdrasil::YggdrasilctlNode::new(
-                admin_endpoint.clone(),
-            )))
-            .with_host(net.clone(), interface.clone()),
-            net,
-        )),
+            managed: managed_ygg,
+            peers: _,
+        } => {
+            if *managed_ygg {
+                return Ok(ip_network(
+                    config,
+                    ip::yggdrasil_managed::ManagedYggBackend::new(ygg_managed::ManagedYgg::new(
+                        id,
+                        managed,
+                        net.clone(),
+                    )),
+                    net,
+                ));
+            }
+            // A Unix socket endpoint is spoken to directly; a TCP one, and a node without
+            // an endpoint, go through `yggdrasilctl`.
+            let node: Box<dyn ip::yggdrasil::YggdrasilNode> = match admin_endpoint
+                .as_deref()
+                .and_then(ip::ygg_admin::unix_endpoint)
+            {
+                Some(path) => Box::new(ip::ygg_admin::AdminNode::new(path)),
+                None => Box::new(ip::yggdrasil::YggdrasilctlNode::new(admin_endpoint.clone())),
+            };
+            Ok(ip_network(
+                config,
+                ip::yggdrasil::YggdrasilBackend::new(node)
+                    .with_host(net.clone(), interface.clone()),
+                net,
+            ))
+        }
         BackendConfig::Slaac { interface, prefix } => Ok(ip_network(
             config,
             ip::slaac::SlaacBackend::new(interface, prefix.as_deref(), net.clone())?,
@@ -335,6 +380,7 @@ mod tests {
             status: NetworkStatus::Up,
             prefix: None,
             vlan_id: None,
+            managed: None,
         }
     }
 

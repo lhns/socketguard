@@ -363,6 +363,41 @@ async fn errors_status_and_everything_else() {
     let e = env.fails(&["networks", "add", "slaac"]).await;
     assert!(e.stderr.contains("--interface is required"), "{}", e.stderr);
 
+    // Managed is the default form; this daemon ships no files, and says so.
+    let e = env.fails(&["networks", "add", "tor"]).await;
+    assert!(
+        e.stderr.contains("Not included in this build"),
+        "{}",
+        e.stderr
+    );
+    let e = env
+        .fails(&[
+            "networks",
+            "add",
+            "yggdrasil",
+            "--peer",
+            "tls://a.example:1",
+        ])
+        .await;
+    assert!(
+        e.stderr.contains("Not included in this build"),
+        "{}",
+        e.stderr
+    );
+    let e = env
+        .fails(&["networks", "add", "tor", "--control", "x:1"])
+        .await;
+    assert!(e.stderr.contains("--existing"), "{}", e.stderr);
+    let e = env.fails(&["networks", "peers", "ygg"]).await;
+    assert!(e.stderr.contains("not a managed Yggdrasil"), "{}", e.stderr);
+    assert!(env
+        .ok(&["status"])
+        .await
+        .stdout
+        .contains("managed networks not included"));
+    let detect = env.ok(&["networks", "detect", "--json"]).await.json();
+    assert_eq!(detect["tor"]["managed"]["available"], false);
+
     // Protect-host: refused with the risks, then forced.
     env.daemon
         .sockets

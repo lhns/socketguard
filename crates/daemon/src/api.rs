@@ -23,7 +23,7 @@ use socketguard_core::api_types::{
     DisableRequest, Enforcement, EnforcementNotice, EnforcementStatus, ExposureQuery,
     LockoutRiskInfo, MemberQuery, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer,
     NewPortGroup, NewReservation, NewTag, NewTagMember, ParseCredentialsRequest,
-    ProtectHostRequest, ProtectHostResponse, ReserveRequest, SetMembers, StatusResponse,
+    ProtectHostRequest, ProtectHostResponse, ReserveRequest, SetMembers, SetPeers, StatusResponse,
     UpdateLabel, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
@@ -138,6 +138,7 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::GET, "/api/networks/setup"),
     (Method::POST, "/api/networks"),
     (Method::DELETE, "/api/networks/{id}"),
+    (Method::PUT, "/api/networks/{id}/peers"),
     (Method::GET, "/api/exposure"),
     (Method::GET, "/api/settings"),
     (Method::PUT, "/api/settings/protect-host"),
@@ -208,6 +209,7 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("GET", "/api/networks/setup") => get(networks_setup),
         ("POST", "/api/networks") => post(network_create),
         ("DELETE", "/api/networks/{id}") => delete(network_delete),
+        ("PUT", "/api/networks/{id}/peers") => put(network_peers),
         ("GET", "/api/exposure") => get(exposure_get),
         ("GET", "/api/settings") => get(settings_get),
         ("PUT", "/api/settings/protect-host") => put(protect_host_put),
@@ -442,6 +444,7 @@ async fn status(State(state): State<Shared>) -> ApiResult<Json<StatusResponse>> 
             config.api_socket.clone()
         }),
         service_installed: crate::service::installed_hint(),
+        bundled: state.bundled.info(),
         portable: socketguard_core::portable::is_portable(),
         db_protected: crate::state::db_protected(),
         drop_events: crate::portable::drop_events(),
@@ -932,11 +935,13 @@ async fn networks_setup(State(state): State<Shared>) -> ApiResult<Response> {
         )
     };
     let config_path = state.config_path.clone();
+    let bundled = state.bundled.clone();
     let mut setup = tokio::task::spawn_blocking(move || {
         crate::setup::detect(
             &crate::setup::SystemProbes::default(),
             &existing,
             config_path.as_deref(),
+            &bundled,
         )
     })
     .await
@@ -956,6 +961,7 @@ async fn network_create(
     if id == "setup" {
         return Err(ApiErr::invalid("\"setup\" is not a usable network id"));
     }
+    check_managed(&state, &req.backend)?;
     if socketguard_core::portable::is_portable() {
         socketguard_core::portable::allowed_in_portable(&req.backend).map_err(ApiErr::invalid)?;
     }
@@ -989,6 +995,18 @@ async fn network_create(
         return Ok((StatusCode::ACCEPTED, Json(body)).into_response());
     }
     Ok(saved(&engine, StatusCode::CREATED, Some(network)))
+}
+
+/// Replace the peers of a managed Yggdrasil network.
+async fn network_peers(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<SetPeers>,
+) -> ApiResult<Response> {
+    let mut engine = state.engine.write().await;
+    let network = engine.set_peers(&state, &id, req.peers).await?;
+    persist_networks(&state, &engine).await;
+    Ok(Json(network).into_response())
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1036,6 +1054,19 @@ async fn exposure_get(
     Ok(Json(engine.exposure(&state, without.as_deref()).await?).into_response())
 }
 
+/// A managed network (ADR 0052) needs the files of this build; any API caller may add one.
+fn check_managed(state: &AppState, backend: &BackendConfig) -> Result<(), ApiErr> {
+    if !backend.is_managed() {
+        return Ok(());
+    }
+    backend.validate_managed().map_err(ApiErr::invalid)?;
+    let files = match backend {
+        BackendConfig::Tor { .. } => state.bundled.tor().map(|_| ()),
+        _ => state.bundled.yggdrasil().map(|_| ()),
+    };
+    files.map_err(ApiErr::invalid)
+}
+
 /// The Tor settings the API accepts: the defaults, or exactly what the config file already
 /// has for a Tor network. Every `socketguard` group member may call the API, and the Tor
 /// control endpoint decides who receives the onion keys (a Unix socket or an
@@ -1043,7 +1074,10 @@ async fn exposure_get(
 /// administrator who edits the file. The file is read afresh: `state.config` also holds
 /// what the API added itself.
 async fn check_tor_settings(state: &AppState, backend: &BackendConfig) -> Result<(), ApiErr> {
-    if !matches!(backend, BackendConfig::Tor { .. }) || *backend == BackendConfig::default_tor() {
+    if !matches!(backend, BackendConfig::Tor { .. })
+        || *backend == BackendConfig::default_tor()
+        || (backend.is_managed() && backend.validate_managed().is_ok())
+    {
         return Ok(());
     }
     let from_file = match &state.config_path {

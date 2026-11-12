@@ -1,0 +1,47 @@
+# Docker end-to-end tests (deploy/e2e/, README there). They build the daemon in a rust container,
+# start real Yggdrasil and Tor nodes and need minutes to tens of minutes plus the Tor network, so
+# they run on request and every night, not on push. Hosted Ubuntu runners have Docker, jq and
+# /dev/net/tun. The scripts share cache volumes by name, which is why each runs in its own job
+# (its own machine).
+name: e2e
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        script:
+          - managed-ygg-e2e   # SocketGuard's own Yggdrasil (built by fetch.sh), tun, firewall
+          - managed-tor-e2e   # SocketGuard's own Tor (fetched by fetch.sh), onion service over the Tor network
+          - ygg-e2e           # a system Yggdrasil, two nodes, tun
+          - tor-e2e           # a system Tor, onion service over the Tor network
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          docker version --format '{{.Server.Version}}'
+          jq --version
+          ls -l /dev/net/tun
+      - name: Run the script
+        env:
+          SCRIPT: ${{ matrix.script }}
+        run: |
+          rc=0
+          bash "deploy/e2e/$SCRIPT.sh" || rc=$?
+          # Exit code 2 is the script's SKIP: Tor could not bootstrap from this runner. Not a failure of
+          # SocketGuard, but visible.
+          if [ "$rc" = 2 ]; then
+            echo "::warning::$SCRIPT was skipped by the script (exit 2): see the SKIP line above"
+            exit 0
+          fi
+          exit "$rc"

@@ -50,6 +50,13 @@ pub enum Command {
         force: bool,
         export: Option<PathBuf>,
     },
+    /// Hidden: the daemon's own start of a child that must end with the daemon (Unix).
+    ChildGuard {
+        /// Where to record the program's pid (see `children::pidfile`).
+        pid_file: Option<PathBuf>,
+        program: String,
+        args: Vec<String>,
+    },
     Help,
 }
 
@@ -108,7 +115,9 @@ fn take_run_options(args: &[String]) -> Result<(crate::portable::RunOptions, Vec
 /// (a service, a group, an install record) or is the installed service's entry point.
 pub fn portable_refusal(cmd: &Command) -> Option<&'static str> {
     match cmd {
-        Command::Run(_) | Command::Help | Command::Disable { .. } => None,
+        Command::Run(_) | Command::Help | Command::Disable { .. } | Command::ChildGuard { .. } => {
+            None
+        }
         Command::Service(ServiceCmd::Status { .. }) => None,
         Command::Service(_) => Some("portable mode registers no service"),
         Command::Access(_) => Some("portable mode creates no access group"),
@@ -141,6 +150,16 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Disable { force })
         }
+        ["child-guard", "--pid-file", file, "--", program, rest @ ..] => Ok(Command::ChildGuard {
+            pid_file: Some(PathBuf::from(file)),
+            program: program.to_string(),
+            args: rest.iter().map(|s| s.to_string()).collect(),
+        }),
+        ["child-guard", "--", program, rest @ ..] => Ok(Command::ChildGuard {
+            pid_file: None,
+            program: program.to_string(),
+            args: rest.iter().map(|s| s.to_string()).collect(),
+        }),
         ["service", "install", rest @ ..] => {
             let mut no_start = false;
             for r in rest {
@@ -256,6 +275,23 @@ mod tests {
                 export: Some("out.json".into())
             }
         );
+        assert_eq!(
+            p("child-guard -- /bin/y -useconffile c").unwrap(),
+            Command::ChildGuard {
+                pid_file: None,
+                program: "/bin/y".into(),
+                args: vec!["-useconffile".into(), "c".into()]
+            }
+        );
+        assert_eq!(
+            p("child-guard --pid-file /run/y.child -- /bin/y").unwrap(),
+            Command::ChildGuard {
+                pid_file: Some("/run/y.child".into()),
+                program: "/bin/y".into(),
+                args: vec![]
+            }
+        );
+        assert!(p("child-guard").is_err());
         assert!(p("uninstall --purge --keep-data").is_err());
         assert!(p("uninstall --export").is_err());
         assert!(p("--disable --nope").is_err());

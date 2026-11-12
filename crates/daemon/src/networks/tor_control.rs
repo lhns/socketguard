@@ -685,6 +685,15 @@ pub fn parse_add_onion(reply: &Reply) -> Result<Added> {
     })
 }
 
+/// `PROGRESS=n` of a `status/bootstrap-phase` value
+/// (`NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY="Done"`).
+pub fn parse_bootstrap_progress(phase: &str) -> Option<u8> {
+    parse_keywords(phase)
+        .into_iter()
+        .find(|(k, _)| k == "PROGRESS")
+        .and_then(|(_, v)| v.parse::<u8>().ok())
+}
+
 /// The service ids in a `GETINFO onions/detached` reply.
 pub fn parse_detached(reply: &Reply) -> Vec<String> {
     reply
@@ -892,6 +901,14 @@ impl Control {
         Ok(r.value("version").unwrap_or_default().to_string())
     }
 
+    /// How far Tor has bootstrapped, in percent (100 = done).
+    pub fn bootstrap_progress(&mut self) -> Result<u8> {
+        let r = self.command("GETINFO status/bootstrap-phase")?.ok()?;
+        r.value("status/bootstrap-phase")
+            .and_then(parse_bootstrap_progress)
+            .context("Tor reported no bootstrap progress")
+    }
+
     /// Service ids of every detached onion service Tor is running.
     pub fn detached(&mut self) -> Result<Vec<String>> {
         Ok(parse_detached(
@@ -970,6 +987,23 @@ mod tests {
         assert_eq!(parse_detached(&r), ["only"]);
         let r = reply("250-onions/detached=\n250 OK\n").unwrap();
         assert!(parse_detached(&r).is_empty());
+    }
+
+    #[test]
+    fn bootstrap_progress_is_read_from_the_phase() {
+        let r = reply(
+            "250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=45 TAG=loading_descriptors SUMMARY=\"Loading relay descriptors\"\n250 OK\n",
+        )
+        .unwrap();
+        assert_eq!(
+            parse_bootstrap_progress(r.value("status/bootstrap-phase").unwrap()),
+            Some(45)
+        );
+        assert_eq!(
+            parse_bootstrap_progress("NOTICE BOOTSTRAP PROGRESS=100"),
+            Some(100)
+        );
+        assert_eq!(parse_bootstrap_progress("nothing"), None);
     }
 
     #[test]

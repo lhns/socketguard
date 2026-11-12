@@ -1,0 +1,62 @@
+name: bundle third-party
+description: >-
+  Lays out the pinned Tor and Yggdrasil (and wintun.dll on Windows) in installer/payload/<os>/ with
+  deploy/bundle/fetch.sh (ADR 0052), for the package build that follows.
+
+# Tor: checksum and Tor Project signature (gpg is required). Yggdrasil: built from the pinned commit
+# (Go, at least the version in versions.toml). Downloads and the Yggdrasil source are cached under
+# .bundle-cache, keyed on versions.toml (not under target/, which the Rust cache prunes).
+inputs:
+  target:
+    description: "fetch.sh target: windows-x86_64, linux-x86_64, linux-aarch64, macos-x86_64 or macos-aarch64"
+    required: true
+  outdir:
+    description: Where the files go, e.g. installer/payload/linux
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - id: pins
+      shell: bash
+      run: |
+        go=$(awk -F'"' '/^\[/ { s = ($0 == "[yggdrasil]") } s && /^go[ \t]*=/ { print $2; exit }' deploy/bundle/versions.toml)
+        [ -n "$go" ] || { echo "no [yggdrasil] go in versions.toml" >&2; exit 1; }
+        echo "go=$go" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/setup-go@v5
+      with:
+        go-version: ${{ steps.pins.outputs.go }}
+        cache: false
+
+    - uses: actions/cache@v4
+      with:
+        path: .bundle-cache
+        key: bundle-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('deploy/bundle/versions.toml') }}
+
+    # --require-signature needs gpg. Ubuntu and Git for Windows have it; the macOS image has it
+    # as a rule. Whatever is missing is installed here, never skipped.
+    - name: gpg
+      shell: bash
+      run: |
+        if ! command -v gpg >/dev/null 2>&1; then
+          case "$RUNNER_OS" in
+            macOS) brew install gnupg ;;
+            Linux) sudo apt-get update -qq && sudo apt-get install -y -qq gnupg ;;
+            Windows)
+              choco install gnupg -y --no-progress
+              export PATH="$PATH:/c/Program Files (x86)/GnuPG/bin"
+              echo 'C:\Program Files (x86)\GnuPG\bin' >> "$GITHUB_PATH"
+              ;;
+          esac
+        fi
+        gpg --version | head -1
+
+    - name: Fetch Tor, build Yggdrasil
+      shell: bash
+      run: |
+        export SOCKETGUARD_BUNDLE_CACHE="$PWD/.bundle-cache"
+        bash deploy/bundle/fetch.sh --require-signature --build-yggdrasil "${{ inputs.target }}" "${{ inputs.outdir }}/"
+        echo "--- ${{ inputs.outdir }}/VERSIONS"
+        cat "${{ inputs.outdir }}/VERSIONS"
+        find "${{ inputs.outdir }}" -type f | sort

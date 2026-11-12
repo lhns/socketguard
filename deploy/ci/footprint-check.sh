@@ -25,6 +25,12 @@
 # string in the file is compared (lower-cased, textual) with the host's addresses; if it is still
 # configured, the item `ledger-addresses` is PRESENT. Never required.
 #
+# Managed networks (ADR 0052) add: the programs `tor` and `yggdrasil` running from a
+# `third_party` directory, the directories <state dir>/tor and <state dir>/yggdrasil, the
+# account `socketguard-net`, the Linux adapter `sgygg0` (a macOS utun goes with its process)
+# and the `third_party` directory of the shipped programs (SOCKETGUARD_THIRD_PARTY, else the
+# places the packages put it).
+#
 # The firewall pieces need root (nft, pfctl); without it they are reported UNKNOWN and fail.
 
 set -uo pipefail
@@ -61,6 +67,21 @@ state_pf_anchor_rules() {
 # /etc/pf.conf text: an uncommented anchor "socketguard" line (also `load anchor "socketguard"`).
 state_pf_conf_line() { grep -Eq '^[[:space:]]*(load[[:space:]]+)?anchor[[:space:]]+"socketguard"' <<<"$1" && echo PRESENT || echo ABSENT; }
 
+# `ps -eo args`: is there a process of the program `$1` (tor, yggdrasil) that runs from a
+# `third_party` directory, i.e. one SocketGuard shipped and started?
+state_child_ps() { # name output
+    grep -Eq "(^|[[:space:]])[^[:space:]]*/third_party/$1/$1([[:space:]]|\$)" <<<"$2" && echo PRESENT || echo ABSENT
+}
+
+# getent passwd socketguard-net -> `socketguard-net:x:997:997::/nonexistent:/usr/sbin/nologin`
+state_account_getent() { grep -Eq '^socketguard-net:' <<<"$1" && echo PRESENT || echo ABSENT; }
+
+# dscl . -read /Users/socketguard-net -> `RecordName: socketguard-net`
+state_account_dscl() { grep -Eq '^RecordName:[[:space:]]+socketguard-net([[:space:]]|$)' <<<"$1" && echo PRESENT || echo ABSENT; }
+
+# ip -o link show sgygg0 -> `5: sgygg0: <POINTOPOINT,...>`; missing: `Device "sgygg0" does not exist.`
+state_link_ip() { grep -Eq '^[0-9]+: sgygg0[:@]' <<<"$1" && echo PRESENT || echo ABSENT; }
+
 # A newline list of existing paths and an ERE: PRESENT if any path matches.
 state_listed() { grep -Eq -- "$2" <<<"$1" && echo PRESENT || echo ABSENT; }
 
@@ -82,6 +103,8 @@ FILE_ITEMS=(
     "archived-database|\.pre-v1"
     "temp-file|/socketguard\.tmp-"
     "torrc-backup|\.socketguard\.bak$"
+    "dir-tor|/tor$"
+    "dir-yggdrasil|/yggdrasil$"
 )
 
 add_file_items() { # path list
@@ -98,6 +121,17 @@ add_ledger_item() { # ledger text, interface output
 # ---- live collection (only reached outside --self-test) ------------------------------------
 
 run() { command -v "$1" >/dev/null 2>&1 && "$@" 2>&1 || true; }
+
+# The processes and the shipped files, the same on both systems.
+add_managed_items() { # third_party candidate directories...
+    local ps_out; ps_out=$(run ps -eo args)
+    rec "$(state_child_ps tor "$ps_out")" child-tor
+    rec "$(state_child_ps yggdrasil "$ps_out")" child-yggdrasil
+    local dirs=() d
+    [ -n "${SOCKETGUARD_THIRD_PARTY:-}" ] && dirs+=("$SOCKETGUARD_THIRD_PARTY")
+    dirs+=("$@")
+    rec "$(state_listed "$(existing "${dirs[@]}")" '/third_party$')" third-party-files
+}
 existing() { local p; for p in "$@"; do [ -e "$p" ] && printf '%s\n' "$p"; done; return 0; }
 
 collect_linux() {
@@ -115,6 +149,9 @@ collect_linux() {
     rec "$(state_listed "$paths" '^/var/lib/socketguard$')" data-dir
     add_file_items "$paths"
     rec "$(state_listed "$paths" '^/run/socketguard\.sock$')" socket
+    rec "$(state_account_getent "$(run getent passwd socketguard-net)")" account-socketguard-net
+    rec "$(state_link_ip "$(run ip -o link show sgygg0)")" adapter-sgygg0
+    add_managed_items /usr/bin/third_party /usr/local/bin/third_party /usr/lib/socketguard/third_party /opt/socketguard/third_party
     LIVE_ADDRS=$(run ip -6 addr)
     REQUIRED=" systemd-unit group config-dir "
 }
@@ -131,6 +168,8 @@ collect_macos() {
     rec "$(state_listed "$paths" '^/Library/Application Support/SocketGuard$')" config-dir
     add_file_items "$paths"
     rec "$(state_listed "$paths" '^/var/run/socketguard\.sock$')" socket
+    rec "$(state_account_dscl "$(run dscl . -read /Users/socketguard-net)")" account-socketguard-net
+    add_managed_items /usr/local/bin/third_party /usr/local/lib/socketguard/third_party "$d/third_party"
     LIVE_ADDRS=$(run ifconfig)
     REQUIRED=" launchd-plist group config-dir "
 }
@@ -206,6 +245,25 @@ self_test() {
     expect list-torrc-bak PRESENT "$(state_listed "$list" '\.socketguard\.bak$')"
     expect list-unit PRESENT "$(state_listed "$list" 'systemd/system/socketguard\.service$')"
     expect list-dir-exact ABSENT "$(state_listed "$list" '^/var/lib/socketguard$')"
+    local mlist=$'/var/lib/socketguard/tor\n/var/lib/socketguard/yggdrasil'
+    expect list-tor-dir PRESENT "$(state_listed "$mlist" '/tor$')"
+    expect list-ygg-dir PRESENT "$(state_listed "$mlist" '/yggdrasil$')"
+    expect list-tor-dir-needs-exact-name ABSENT "$(state_listed "$list" '/tor$')"
+    expect list-third-party PRESENT "$(state_listed "/usr/lib/socketguard/third_party" '/third_party$')"
+
+    local ps_ours=$'/sbin/init\n/usr/lib/socketguard/third_party/tor/tor -f /var/lib/socketguard/tor/torrc\n/usr/lib/socketguard/third_party/yggdrasil/yggdrasil -useconffile /var/lib/socketguard/yggdrasil/yggdrasil.conf -user socketguard-net'
+    expect child-tor PRESENT "$(state_child_ps tor "$ps_ours")"
+    expect child-yggdrasil PRESENT "$(state_child_ps yggdrasil "$ps_ours")"
+    expect child-none ABSENT "$(state_child_ps yggdrasil $'/sbin/init\n/usr/sbin/tor --runasdaemon 1')"
+    expect child-system-yggdrasil-is-not-ours ABSENT "$(state_child_ps yggdrasil $'/usr/bin/yggdrasil -useconffile /etc/yggdrasil.conf')"
+    expect child-tor-path-must-be-exact ABSENT "$(state_child_ps tor $'/opt/third_party/yggdrasil/yggdrasil')"
+    expect account-getent PRESENT "$(state_account_getent 'socketguard-net:x:997:997::/nonexistent:/usr/sbin/nologin')"
+    expect account-getent-absent ABSENT "$(state_account_getent '')"
+    expect account-dscl PRESENT "$(state_account_dscl $'RecordName: socketguard-net\nUniqueID: 300')"
+    expect account-dscl-absent ABSENT "$(state_account_dscl '<dscl_cmd> DS Error: -14136 (eDSRecordNotFound)')"
+    expect adapter-present PRESENT "$(state_link_ip '5: sgygg0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 65535 qdisc fq_codel')"
+    expect adapter-absent ABSENT "$(state_link_ip 'Device "sgygg0" does not exist.')"
+    expect adapter-other-name ABSENT "$(state_link_ip '3: sgygg01: <BROADCAST>')"
     expect list-empty ABSENT "$(state_listed "" '/socketguard\.json$')"
 
     local ledger_arr='["fd00::1", "FD00:0:0:0::2/128"]'
@@ -237,7 +295,7 @@ self_test() {
 
 usage() { echo "usage: $0 expect-absent|expect-present [--allow-data] [--require NAME[,NAME]] [--ledger-export FILE] | --self-test" >&2; exit 2; }
 
-DATA_ITEMS=" config-dir data-dir config-json database database-wal database-shm setup-log archived-database temp-file torrc-backup "
+DATA_ITEMS=" config-dir data-dir config-json database database-wal database-shm setup-log archived-database temp-file torrc-backup dir-tor dir-yggdrasil account-socketguard-net "
 ALLOWED=" "
 mode="" ledger="" selftest=0 extra_required=""
 while [ $# -gt 0 ]; do

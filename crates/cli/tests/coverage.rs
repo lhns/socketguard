@@ -73,16 +73,11 @@ const UI_COMMANDS: &str = include_str!("../../../ui/src-tauri/src/main.rs");
 /// a window, and `watch` prints the event stream, which the UI consumes through its own bridge.
 /// Pinned: adding to it needs a decision, not an edit of the route table.
 ///
-/// `networks setup` runs elevated and edits the system (ADR 0048); the UI starts it through
-/// its own elevation command (not an API route), and its detection route is
-/// `networks detect`.
-///
 /// `access allow|deny|list` hand over to `socketguard-daemon access` (administrator only,
 /// ADR 0050); the UI runs the same daemon command through its own elevation command.
 const CLI_ONLY: &[&str] = &[
     "completions",
     "watch",
-    "networks setup",
     "access allow",
     "access deny",
     "access list",
@@ -95,7 +90,6 @@ fn the_cli_only_list_is_pinned() {
         [
             "completions",
             "watch",
-            "networks setup",
             "access allow",
             "access deny",
             "access list"

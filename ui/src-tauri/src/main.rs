@@ -18,7 +18,7 @@ use socketguard_core::api_types::{
     NewPortGroup, NewReservation, NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest,
     ShareResponse, StatusResponse, TorKeyResponse, UpdatePortGroup, UpdateTag,
 };
-use socketguard_core::setup::{NetworkSetup, SetupKind};
+use socketguard_core::setup::NetworkSetup;
 use socketguard_core::{
     ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
     NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, PortGroup, ReservationView, Scope,
@@ -391,6 +391,11 @@ async fn add_network(req: NewNetwork) -> DoneResult<Network> {
 }
 
 #[tauri::command]
+async fn set_network_peers(id: String, peers: Vec<String>) -> CmdResult<Network> {
+    Ok(client().set_peers(&id, &peers).await?)
+}
+
+#[tauri::command]
 async fn delete_network(id: String, force: bool, confirm_exposed: bool) -> CmdResult<()> {
     Ok(client().delete_network(&id, force, confirm_exposed).await?)
 }
@@ -589,9 +594,9 @@ async fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
-// ─── Network setup (ADR 0048) ────────────────────────────────────────────
+// ─── Elevated runs ──────────────────────────────────────────────────────
 
-/// How a run of `socketguard networks setup` ended, as the frontend needs it.
+/// How an elevated run of a SocketGuard command ended, as the frontend needs it.
 #[derive(Debug, Serialize)]
 struct SetupRun {
     /// The elevated command ran. False: it did not start (no elevation helper, or the
@@ -600,45 +605,6 @@ struct SetupRun {
     cancelled: bool,
     exit_code: Option<i32>,
     command: String,
-}
-
-/// The arguments of `socketguard networks setup <kind> --yes`, with the daemon's config
-/// file and socket given explicitly: the elevated process has another environment. `extra`
-/// are fixed flags (`--undo --stop-service-only`).
-fn setup_args_with(
-    kind: SetupKind,
-    config: &str,
-    socket: &str,
-    pause: bool,
-    extra: &[&str],
-) -> Result<Vec<String>, UiError> {
-    let bad = |what: &str| UiError {
-        code: "invalid".into(),
-        message: format!("{what} cannot be passed to the elevated command"),
-        details: None,
-    };
-    for (what, v) in [("the config path", config), ("the socket", socket)] {
-        if v.is_empty() || v.contains(['"', '\n', '\r']) {
-            return Err(bad(what));
-        }
-    }
-    let mut args: Vec<String> = ["networks", "setup"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    args.push(kind.to_string());
-    args.extend(extra.iter().map(|s| s.to_string()));
-    args.extend([
-        "--yes".into(),
-        "--config".into(),
-        config.into(),
-        "--socket".into(),
-        socket.into(),
-    ]);
-    if pause {
-        args.push("--pause".into());
-    }
-    Ok(args)
 }
 
 /// A program installed next to this executable (`base` without the platform suffix).
@@ -673,63 +639,10 @@ fn internal(message: String) -> UiError {
     }
 }
 
-/// The CLI next to this executable.
-fn cli_path() -> Result<std::path::PathBuf, UiError> {
-    sibling("socketguard")
-}
-
-/// Start `socketguard networks setup <kind>` with administrator rights and wait for it.
-/// Only the kind (an enum) and the two paths of the running daemon are passed on.
-#[tauri::command]
-async fn run_network_setup(kind: SetupKind, config: String) -> CmdResult<SetupRun> {
-    launch_setup(kind, config, &[]).await
-}
-
-/// Start `socketguard networks setup <kind> --undo --stop-service-only`: stop the service
-/// that setup started, and nothing else (ADR 0051). Same elevation as the setup.
-#[tauri::command]
-async fn stop_setup_service(kind: SetupKind, config: String) -> CmdResult<SetupRun> {
-    launch_setup(kind, config, &["--undo", "--stop-service-only"]).await
-}
-
 /// What becomes reachable over Yggdrasil without SocketGuard's block (ADR 0051).
 #[tauri::command]
 async fn exposure(without: Option<String>) -> CmdResult<ExposureResponse> {
     Ok(client().exposure(without.as_deref()).await?)
-}
-
-async fn launch_setup(
-    kind: SetupKind,
-    config: String,
-    extra: &'static [&'static str],
-) -> CmdResult<SetupRun> {
-    let socket = client().endpoint().to_string();
-    let cli = cli_path();
-    let shown = |pause| {
-        setup_args_with(kind, &config, &socket, pause, extra)
-            .map(|a| format!("socketguard {}", a.join(" ")))
-            .unwrap_or_default()
-    };
-    let (args, cli) = match (
-        setup_args_with(kind, &config, &socket, cfg!(windows), extra),
-        cli,
-    ) {
-        (Ok(a), Ok(c)) => (a, c),
-        (Err(e), _) => return Err(e),
-        (_, Err(_)) => {
-            return Ok(SetupRun {
-                launched: false,
-                cancelled: false,
-                exit_code: None,
-                command: shown(false),
-            })
-        }
-    };
-    let command = shown(false);
-    let run = tokio::task::spawn_blocking(move || elevated_run(&cli, &args, true))
-        .await
-        .map_err(|e| internal(e.to_string()))?;
-    Ok(setup_run(run, command))
 }
 
 fn setup_run(run: ElevatedRun, command: String) -> SetupRun {
@@ -1032,35 +945,6 @@ fn close_process(process: isize) {
     let _ = unsafe { CloseHandle(HANDLE(process as *mut _)) };
 }
 
-/// Open one of the two download pages in the system browser. Only those: the page asks
-/// for a link it got from the daemon, which is not trusted with any other.
-#[tauri::command]
-async fn open_download_page(url: String) -> CmdResult<()> {
-    const ALLOWED: [&str; 2] = [
-        socketguard_core::setup::YGGDRASIL_DOWNLOAD,
-        socketguard_core::setup::TOR_DOWNLOAD,
-    ];
-    let fail = |message: String| UiError {
-        code: "invalid".into(),
-        message,
-        details: None,
-    };
-    if !ALLOWED.contains(&url.as_str()) {
-        return Err(fail("that is not one of the download pages".into()));
-    }
-    #[cfg(windows)]
-    let result = std::process::Command::new("rundll32")
-        .args(["url.dll,FileProtocolHandler", &url])
-        .spawn();
-    #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("open").arg(&url).spawn();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let result = std::process::Command::new("xdg-open").arg(&url).spawn();
-    result
-        .map(|_| ())
-        .map_err(|e| fail(format!("cannot open the browser: {e}")))
-}
-
 fn main() {
     // Portable mode (ADR 0054): a `portable` file next to this program, or `--portable`. The
     // window's browser data then stays in the folder too, not under the user's profile.
@@ -1125,11 +1009,9 @@ fn main() {
             detach_port_group,
             list_networks,
             network_setup,
-            run_network_setup,
-            stop_setup_service,
             exposure,
-            open_download_page,
             add_network,
+            set_network_peers,
             delete_network,
             list_addresses,
             list_reservations,

@@ -97,7 +97,7 @@ try {
   $icon = Join-Path $root 'ui/src-tauri/icons/icon.ico'
 
   $inputs = @((Join-Path $here 'socketguard.wxs'))
-  $defs = @('-d', "BinDir=$binAbs", '-d', "Version=$Version", '-d', "IconFile=$icon")
+  $defs = @('-d', "BinDir=$binAbs", '-d', "Version=$Version", '-d', "IconFile=$icon", '-d', "RepoRoot=$($root.TrimEnd('\'))")
   $payload = Join-Path $root 'installer/payload/windows'
   $frag = Join-Path $work 'third_party.wxs'
   if ((Test-Path $payload) -and (New-ThirdPartyFragment $payload $frag)) {

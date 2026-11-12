@@ -77,6 +77,9 @@ What it does on this computer
   is in the data folder next to the programs. Nothing is written to ProgramData, the
   registry or any other folder, and no service or user group is created.
   The window keeps its own browser data in the ui-data folder next to it.
+  One exception: if you add SocketGuard's own Yggdrasil network, Windows installs the Wintun
+  network driver, which belongs to the computer. A normal exit removes it again if it was not
+  there before; if SocketGuard is killed, it stays until the next normal exit from this folder.
 
 Protection ends with the window
   The rules and addresses are removed when you close SocketGuard, sign out or shut down.

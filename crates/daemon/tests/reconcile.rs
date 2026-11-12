@@ -1258,6 +1258,8 @@ async fn adding_and_removing_a_network() {
         backend: BackendConfig::Yggdrasil {
             interface: Some("ygg0".into()),
             admin_endpoint: None,
+            managed: false,
+            peers: vec![],
         },
     };
     // The new network brings its own allocator (a mock stands in for yggdrasilctl).

@@ -160,6 +160,15 @@ fn remove_confirmed(
     if let Ok(false) = present {
         return Ok(false);
     }
+    // An interface that is gone took its addresses with it: the adapter of a managed
+    // node disappears when the node ends (a stopped daemon leaves the record behind).
+    if present.is_err()
+        && net
+            .list_interfaces()
+            .is_ok_and(|l| !l.iter().any(|i| i.name == iface))
+    {
+        return Ok(false);
+    }
     let removed = net.remove_address(iface, addr, ADDRESS_PREFIX_LEN);
     match net.list_addresses(iface) {
         Ok(l) if l.contains(&addr) => Err(removed
@@ -325,7 +334,7 @@ async fn disable_non_ip(db: &Database, slots: &[NetworkSlot]) -> Report {
 }
 
 /// What `--disable` and `uninstall` say when a Yggdrasil network was configured (ADR 0051).
-pub const YGGDRASIL_LEFT_RUNNING: &str = "The Yggdrasil block is removed with the rest: if a Yggdrasil node still runs, programs on this PC that listen on all addresses are reachable over it. Stop its service (if `networks setup` started it, `socketguard networks setup yggdrasil --undo --stop-service-only` does).";
+pub const YGGDRASIL_LEFT_RUNNING: &str = "The Yggdrasil block is removed with the rest: if a Yggdrasil node still runs, programs on this PC that listen on all addresses are reachable over it. Stop its service yourself to close it.";
 
 /// Whether the config file lists a Yggdrasil network.
 pub fn config_has_yggdrasil(config: &Path) -> bool {
@@ -473,6 +482,31 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("firewall rules: kept on purpose"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_address_on_an_interface_that_is_gone_is_already_absent() {
+        let db = db().await;
+        let addr: Ipv6Addr = "301:1:2:3::5".parse().unwrap();
+        db.claim_address(addr, "sgygg0", Some("ygg")).await.unwrap();
+        let net = MockInterfaceManager::new(Arc::new(Mutex::new(vec![])));
+        net.set_interface_missing("sgygg0", true);
+        let r = disable_with_db(DisableInput {
+            exposure: None,
+            db: &db,
+            interfaces: &HashMap::from([("ygg".to_string(), "sgygg0".to_string())]),
+            networks: vec![],
+            firewall: mock_fw(),
+            ifaces: Arc::new(net),
+        })
+        .await;
+        let text = r.render();
+        assert!(r.complete(), "{text}");
+        assert!(
+            text.contains("already absent  address 301:1:2:3::5"),
+            "{text}"
+        );
+        assert!(db.list_owned_addresses().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -809,7 +843,6 @@ mod tests {
                     port: 80,
                     proto: socketguard_core::Protocol::Tcp,
                 }],
-                services_started_by_setup: vec![],
             }],
         };
         let r = disable_with_db(DisableInput {

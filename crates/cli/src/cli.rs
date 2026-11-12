@@ -449,45 +449,21 @@ pub struct GrantsArgs {
 pub enum NetworksCmd {
     /// List networks
     List,
-    /// What can be added on this host: LAN interfaces, Yggdrasil, Tor, and what is missing
+    /// What can be added on this host: LAN interfaces, SocketGuard's own Tor and Yggdrasil,
+    /// and existing nodes
     Detect,
-    /// Install, start and configure Yggdrasil or Tor, then add the network. Needs
-    /// administrator rights (ADR 0048)
-    Setup {
-        #[arg(value_enum, ignore_case = true)]
-        kind: SetupTarget,
-        /// Do not ask before the steps are run
-        #[arg(long)]
-        yes: bool,
-        /// Print the steps and change nothing (needs no administrator rights)
-        #[arg(long)]
-        dry_run: bool,
-        /// The daemon's config file [default: the one the daemon reports]
-        #[arg(long, value_name = "PATH")]
-        config: Option<PathBuf>,
-        /// Tor: the torrc, when it is not in a standard place
-        #[arg(long, value_name = "PATH")]
-        torrc: Option<PathBuf>,
-        /// Wait for a key at the end (for a console that closes by itself)
-        #[arg(long)]
-        pause: bool,
-        /// Reverse what an earlier setup of this kind changed, from the setup log next to the
-        /// config file
-        #[arg(long)]
-        undo: bool,
-        /// With --undo: also run the uninstall command of packages setup installed (they are
-        /// only printed otherwise)
-        #[arg(long, requires = "undo")]
-        uninstall_packages: bool,
-        /// With --undo: only stop the service setup started; the network and everything
-        /// else stay
-        #[arg(long, requires = "undo", conflicts_with = "uninstall_packages")]
-        stop_service_only: bool,
-    },
-    /// Add a network (saved to the daemon's config file)
+    /// Add a network (saved to the daemon's config file). Tor and Yggdrasil are SocketGuard's
+    /// own copies unless --existing is given
     Add {
         #[arg(value_enum, ignore_case = true)]
         r#type: NetworkType,
+        /// Tor or Yggdrasil: use the node that already runs on this PC instead of
+        /// SocketGuard's own copy
+        #[arg(long)]
+        existing: bool,
+        /// Managed Yggdrasil: a peer to connect to, e.g. tls://host:port (repeatable)
+        #[arg(long = "peer", value_name = "URI")]
+        peers: Vec<String>,
         #[arg(long)]
         interface: Option<String>,
         /// Defaults to the type (and interface)
@@ -512,6 +488,16 @@ pub enum NetworksCmd {
         #[arg(long)]
         password_stdin: bool,
     },
+    /// Show or change the peers of a managed Yggdrasil network
+    Peers {
+        id: String,
+        /// Add a peer, e.g. tls://host:port (repeatable)
+        #[arg(long = "add", value_name = "URI")]
+        add: Vec<String>,
+        /// Remove a peer (repeatable)
+        #[arg(long = "rm", value_name = "URI")]
+        rm: Vec<String>,
+    },
     /// Remove a network; its addresses leave the interfaces
     Rm {
         id: String,
@@ -523,22 +509,6 @@ pub enum NetworksCmd {
         #[arg(long, short = 'y')]
         yes: bool,
     },
-}
-
-/// The networks `networks setup` handles.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SetupTarget {
-    Yggdrasil,
-    Tor,
-}
-
-impl From<SetupTarget> for socketguard_core::setup::SetupKind {
-    fn from(t: SetupTarget) -> Self {
-        match t {
-            SetupTarget::Yggdrasil => Self::Yggdrasil,
-            SetupTarget::Tor => Self::Tor,
-        }
-    }
 }
 
 /// The kinds of network `networks add` can make.
@@ -849,7 +819,15 @@ mod tests {
 
     #[test]
     fn network_types_are_choices() {
-        let c = parse(&["networks", "add", "YGGDRASIL", "--interface", "ygg0"]).unwrap();
+        let c = parse(&[
+            "networks",
+            "add",
+            "YGGDRASIL",
+            "--existing",
+            "--interface",
+            "ygg0",
+        ])
+        .unwrap();
         let Command::Networks(NetworksCmd::Add { r#type, .. }) = c.command else {
             panic!()
         };
@@ -858,8 +836,45 @@ mod tests {
     }
 
     #[test]
+    fn peers_flags_repeat() {
+        let c = parse(&[
+            "networks",
+            "add",
+            "yggdrasil",
+            "--peer",
+            "tls://a:1",
+            "--peer",
+            "tcp://b:2",
+        ])
+        .unwrap();
+        let Command::Networks(NetworksCmd::Add {
+            peers, existing, ..
+        }) = c.command
+        else {
+            panic!()
+        };
+        assert_eq!(peers, ["tls://a:1", "tcp://b:2"]);
+        assert!(!existing);
+        let c = parse(&[
+            "networks",
+            "peers",
+            "yggdrasil",
+            "--add",
+            "tls://a:1",
+            "--rm",
+            "tls://b:1",
+        ])
+        .unwrap();
+        let Command::Networks(NetworksCmd::Peers { id, add, rm }) = c.command else {
+            panic!()
+        };
+        assert_eq!((id.as_str(), add.len(), rm.len()), ("yggdrasil", 1, 1));
+        assert!(parse(&["networks", "setup", "tor"]).is_err());
+    }
+
+    #[test]
     fn the_tor_password_has_one_source() {
-        let add = ["networks", "add", "tor"];
+        let add = ["networks", "add", "tor", "--existing"];
         let with = |extra: &[&str]| parse(&[&add[..], extra].concat());
         assert!(with(&["--password", "x"]).is_ok());
         assert!(with(&["--password-env", "TOR_PW"]).is_ok());

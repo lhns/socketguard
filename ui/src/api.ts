@@ -50,7 +50,6 @@ import type { TagMember } from "./generated/TagMember";
 import type { Target } from "./generated/Target";
 import type { TorKeyResponse } from "./generated/TorKeyResponse";
 import type { NetworkSetup } from "./generated/NetworkSetup";
-import type { SetupKind } from "./generated/SetupKind";
 import type { UpdateTag } from "./generated/UpdateTag";
 
 export type {
@@ -62,17 +61,19 @@ export type {
   Settings, ShareResponse, StatusResponse, Tag, TagMember, Target, TorKeyResponse,
   UpdateTag,
 };
-export type { NetworkSetup, SetupKind, ExposureResponse };
+export type { NetworkSetup, ExposureResponse };
+export type { KindSetup } from "./generated/KindSetup";
+export type { ManagedInfo } from "./generated/ManagedInfo";
+export type { ManagedOffer } from "./generated/ManagedOffer";
 export type { NetworkExposure } from "./generated/NetworkExposure";
 export type { ExposedListener } from "./generated/ExposedListener";
 export type { YggdrasilBlock } from "./generated/YggdrasilBlock";
 export type { LanCandidate } from "./generated/LanCandidate";
 export type { SetupState } from "./generated/SetupState";
 export type { SetupStatus } from "./generated/SetupStatus";
-export type { InstallOffer } from "./generated/InstallOffer";
 export type { AccessOrigin } from "./generated/AccessOrigin";
 
-/** How `run_network_setup` ended: `launched` false means the elevated command did not start
+/** How an elevated command ended: `launched` false means the elevated command did not start
  * (`command` is what to run by hand); `cancelled` is a declined prompt, not an error. */
 export interface SetupRun {
   launched: boolean;
@@ -209,15 +210,13 @@ export const api = {
     callSaved<PortGroup>("detach_port_group", { id, appId }),
   listNetworks: () => call<Network[]>("list_networks"),
   networkSetup: () => call<NetworkSetup>("network_setup"),
-  runNetworkSetup: (kind: SetupKind, config: string) => call<SetupRun>("run_network_setup", { kind, config }),
-  openDownloadPage: (url: string) => call<void>("open_download_page", { url }),
   addNetwork: (req: NewNetwork) => callSaved<Network>("add_network", { req }),
   deleteNetwork: (id: string, force: boolean, confirmExposed = false) =>
     call<void>("delete_network", { id, force, confirmExposed }),
   /** What becomes reachable without the block of one network (or all of them): ADR 0051. */
   exposure: (without: string | null) => call<ExposureResponse>("exposure", { without }),
-  /** Stop the service that `networks setup` started (elevated); nothing else is undone. */
-  stopSetupService: (kind: SetupKind, config: string) => call<SetupRun>("stop_setup_service", { kind, config }),
+  /** Replace the peers of a managed Yggdrasil network; its node restarts. */
+  setNetworkPeers: (id: string, peers: string[]) => callSaved<Network>("set_network_peers", { id, peers }),
   listAddresses: () => call<Address[]>("list_addresses"),
   listReservations: () => call<ReservationView[]>("list_reservations"),
   getReservation: (id: string) => call<ReservationView>("get_reservation", { id }),

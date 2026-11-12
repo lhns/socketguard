@@ -314,6 +314,7 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
         status: NetworkStatus::Up,
         prefix: None,
         vlan_id: None,
+        managed: None,
     };
     let (peers, grants) = if creds.is_empty() {
         (vec![], vec![])

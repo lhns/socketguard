@@ -139,6 +139,7 @@ pub async fn run(
     networks::ip::dhcpv6::use_store(db.blocking_store());
     let engine = engine::Engine::new(&config, ula_global_id)?;
     engine.register_metrics(&opentelemetry::global::meter("socketguard"));
+    let bundled = engine.bundled();
 
     let (events_tx, _) = broadcast::channel::<api::DaemonEvent>(64);
 
@@ -148,6 +149,7 @@ pub async fn run(
         db,
         engine: tokio::sync::RwLock::new(engine),
         firewall_lock: tokio::sync::Mutex::new(()),
+        bundled,
         events: events_tx,
     });
 
@@ -226,6 +228,13 @@ pub async fn run(
     // Wait for reconciliation loop to finish
     let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), recon_handle).await;
 
+    // The children of managed networks end with the daemon (gracefully, then by force).
+    // Their onion services end with them; the ruleset does not.
+    {
+        let children = state.engine.read().await.children().clone();
+        children.shutdown().await;
+    }
+
     let mut left = Vec::new();
     if is_portable {
         // The one place portable mode tears down (ADR 0054): the same code as "turn off".
@@ -233,8 +242,25 @@ pub async fn run(
         // except addresses, which the next start sweeps.
         info!("Removing rules and addresses");
         left = portable::teardown(&state).await;
-        if let Some(dir) = &data_dir {
-            portable::write_last_exit(dir, &left);
+        if let Some(dir) = data_dir.clone() {
+            // The children are gone (the teardown waited for them), so the adapter is too:
+            // the Wintun driver goes if this run put it there. Before the session record,
+            // which holds that fact, is removed with the clean exit.
+            let removal = tokio::task::spawn_blocking({
+                let dir = dir.clone();
+                move || {
+                    portable::remove_wintun_driver(
+                        &mut host::SystemHost,
+                        &dir,
+                        std::time::Duration::from_secs(1),
+                    )
+                }
+            })
+            .await;
+            if let Ok(Some(why)) = removal {
+                left.push(why);
+            }
+            portable::write_last_exit(&dir, &left);
         }
         // Handlers that must not return before the teardown (close, logoff) may now.
         portable::mark_done();

@@ -75,6 +75,7 @@ pub const CLI_ROUTES: &[CliRoute] = &[
     r("networks detect", "network_setup"),
     r("networks add", "add_network"),
     r("init", "add_network"),
+    r("networks peers", "set_peers"),
     r("networks rm", "delete_network"),
     r("networks rm", "exposure"),
     r("exposure", "exposure"),

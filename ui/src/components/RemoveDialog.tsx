@@ -65,7 +65,7 @@ export default function RemoveDialog({ onCancel }: { onCancel: () => void }) {
                 <li>the firewall rules and the addresses SocketGuard added</li>
                 <li>the SocketGuard service</li>
                 <li>the access group, if SocketGuard created it</li>
-                <li>the changes made by network setup</li>
+                <li>SocketGuard's own Tor and Yggdrasil (they stop)</li>
               </ul>
               <label className="check">
                 <input type="checkbox" checked={purge} onChange={(e) => setPurge(e.target.checked)} />

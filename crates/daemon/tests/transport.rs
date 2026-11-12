@@ -282,7 +282,14 @@ mod windows {
     /// to the daemon's pipe.
     #[tokio::test]
     async fn a_group_member_cannot_create_a_pipe_instance() {
+        use socketguard_daemon::host::{Host, SystemHost};
         use tokio::net::windows::named_pipe::ServerOptions;
+        // An elevated process (a CI runner is an administrator) holds the rights over a
+        // pipe it created itself: the check is meant for a member of the group.
+        if SystemHost.is_elevated() {
+            eprintln!("skipping: this process is elevated");
+            return;
+        }
         let name = pipe_name();
         let sddl = transport::pipe_sddl(Some("S-1-5-32-545"));
         let _server = transport::bind_pipe(&name, &sddl).unwrap();

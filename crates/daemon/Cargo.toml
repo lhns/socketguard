@@ -46,6 +46,8 @@ data-encoding = { workspace = true }
 
 [dev-dependencies]
 socketguard-daemon = { path = ".", features = ["test-support"] }
+# A paused clock for the supervisor's backoff tests.
+tokio = { workspace = true, features = ["test-util"] }
 insta = { workspace = true }
 socketguard-client = { path = "../client" }
 tower = { version = "0.5", features = ["util"] }
@@ -72,6 +74,7 @@ windows ={ version = "0.62", features = [
     "Win32_System_Pipes",
     "Win32_System_Memory",
     "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
     "Win32_UI_WindowsAndMessaging",

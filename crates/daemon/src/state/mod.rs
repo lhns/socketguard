@@ -15,8 +15,10 @@ mod schema;
 mod settings;
 mod tags;
 #[cfg(windows)]
-mod winacl;
+pub(crate) mod winacl;
 
+#[cfg(windows)]
+pub use protect::protect_service_dir;
 #[cfg(windows)]
 pub use protect::system_volume_flags;
 pub use protect::{
@@ -970,6 +972,11 @@ impl NewActivity {
 
     pub fn peer(mut self, id: &str) -> Self {
         self.peer_id = Some(id.to_string());
+        self
+    }
+
+    pub fn network(mut self, id: &str) -> Self {
+        self.network_id = Some(id.to_string());
         self
     }
 }

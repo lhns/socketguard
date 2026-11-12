@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
 import { toDaemonError, type LockoutRiskInfo } from "../api";
 import ConfirmDialog from "../components/ConfirmDialog";
-import ExposureNotice, { exposedNetworks, stoppable, stopStartedService } from "../components/ExposureNotice";
+import ExposureNotice from "../components/ExposureNotice";
 import ExportSection from "../components/ExportSection";
 import NetworksSection from "../components/NetworksSection";
 import RemoveDialog from "../components/RemoveDialog";
 import { useToast } from "../components/Toast";
 import { errorText } from "../lib";
 import { useNav } from "../nav";
-import { useExposure, useNetworks, useNetworkSetup, useSetEnabled, useSetProtectHost, usePortable, useSettings, useStatus } from "../queries";
+import { useExposure, useNetworks, useSetEnabled, useSetProtectHost, usePortable, useSettings, useStatus } from "../queries";
 
 export default function SettingsPage() {
   const nav = useNav();
@@ -39,24 +39,11 @@ function DangerZone() {
   const setEnabled = useSetEnabled();
   const [confirmOff, setConfirmOff] = useState(false);
   const [removing, setRemoving] = useState(false);
-  const [stop, setStop] = useState(true);
-  const [offError, setOffError] = useState<string | null>(null);
   const exposure = useExposure("all", confirmOff);
   const portable = usePortable();
-  const configPath = useNetworkSetup().data?.config_path;
   const s = status.data;
 
-  const turnOff = async () => {
-    setOffError(null);
-    // The service goes first: if it cannot be stopped, SocketGuard stays on.
-    const exposed = exposedNetworks(exposure.data);
-    if (stoppable(exposed) && stop) {
-      const why = await stopStartedService(configPath);
-      if (why) {
-        setOffError(why);
-        return;
-      }
-    }
+  const turnOff = () => {
     setConfirmOff(false);
     setEnabled.mutate(false, {
       onSuccess: () => toast.success("SocketGuard is off"),
@@ -103,9 +90,7 @@ function DangerZone() {
               <button
                 className="btn btn-danger"
                 onClick={() => {
-                  setOffError(null);
-                  setStop(true);
-                  setConfirmOff(true);
+                                setConfirmOff(true);
                 }}
               >
                 Turn SocketGuard off
@@ -130,15 +115,14 @@ function DangerZone() {
           title="Turn SocketGuard off?"
           confirmLabel="Turn SocketGuard off"
           onCancel={() => setConfirmOff(false)}
-          onConfirm={() => void turnOff()}
+          onConfirm={turnOff}
         >
           <p>
             This removes all firewall rules and addresses SocketGuard added, and keeps them off, also after a restart, until you
             turn it on again. The host is then as open as the network allows: every service is reachable by whoever can reach the
             machine.
           </p>
-          <ExposureNotice exposure={exposure.data} stop={stop} onStop={setStop} />
-          {offError && <div className="error-banner" role="alert">{offError}</div>}
+          <ExposureNotice exposure={exposure.data} />
         </ConfirmDialog>
       )}
     </section>

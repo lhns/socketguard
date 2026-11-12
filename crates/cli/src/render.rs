@@ -9,9 +9,10 @@ use socketguard_core::api_types::{
     ShareResponse, StatusResponse, TorKeyResponse,
 };
 use socketguard_core::{
-    ranges_text, AccessOrigin, ActivityRecord, Address, App, AppDetail, BindingTarget, Credential,
-    GrantView, Locator, Network, NetworkKind, NetworkStatus, ParsedCredential, Peer, PeerGroup,
-    PortGroup, Reach, ReservationView, Scope, Settings, Subject, Tag, Target,
+    ranges_text, AccessOrigin, ActivityRecord, Address, App, AppDetail, BindingTarget, ChildState,
+    Credential, GrantView, Locator, ManagedInfo, Network, NetworkKind, NetworkStatus,
+    ParsedCredential, Peer, PeerGroup, PortGroup, Reach, ReservationView, Scope, Settings, Subject,
+    Tag, Target,
 };
 use std::collections::HashMap;
 
@@ -322,7 +323,23 @@ fn host_lines(s: &StatusResponse) -> String {
     ]
     .into_iter()
     .filter_map(|(k, v)| v.map(|v| format!("\n{k:<13} {v}")))
-    .collect()
+    .collect::<String>()
+        + &format!("\n{:<13} {}", "bundled", bundled(&s.bundled))
+}
+
+/// The third-party programs this build ships, or why there are none.
+fn bundled(b: &socketguard_core::setup::BundledInfo) -> String {
+    if b.dir.is_none() && b.versions.is_empty() {
+        return "none (managed networks not included in this build)".to_string();
+    }
+    if b.versions.is_empty() {
+        return "files found, no VERSIONS list".to_string();
+    }
+    b.versions
+        .iter()
+        .map(|v| format!("{} {}", v.name, v.version))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn status(s: &StatusResponse) -> String {
@@ -353,34 +370,49 @@ pub fn status(s: &StatusResponse) -> String {
     )
 }
 
-/// `networks detect`: what each kind of network needs.
+/// `networks detect`: what each kind of network offers.
 pub fn network_setup(s: &socketguard_core::setup::NetworkSetup) -> String {
-    use socketguard_core::setup::{SetupState, SetupStatus};
-    let state = |name: &str, st: &SetupState| {
+    use socketguard_core::setup::{KindSetup, SetupState, SetupStatus};
+    let existing = |st: &SetupState| {
         let label = match st.state {
             SetupStatus::Ready => "ready to add",
-            SetupStatus::NotConfigured => "needs setup",
-            SetupStatus::NotRunning => "not running",
-            SetupStatus::NotInstalled => "not installed",
             SetupStatus::Added => "added",
+            SetupStatus::Absent => "none found",
         };
-        let mut out = format!("{name}: {label}");
-        if let Some(m) = &st.missing {
-            out.push_str(&format!(" ({m})"));
-        }
+        let mut out = format!("  your own: {label}");
         for (k, v) in &st.found {
-            out.push_str(&format!("\n  {k}: {v}"));
-        }
-        if let Some(i) = &st.install {
-            out.push_str(&format!("\n  install: {}", i.command));
-        }
-        if let Some(l) = &st.download_link {
-            out.push_str(&format!("\n  download: {l}"));
+            out.push_str(&format!(
+                "
+    {k}: {v}"
+            ));
         }
         if let Some(w) = &st.warning {
-            out.push_str(&format!("\n  warning: {w}"));
+            out.push_str(&format!(
+                "
+    warning: {w}"
+            ));
         }
         out
+    };
+    let kind = |name: &str, k: &KindSetup| {
+        let m = &k.managed;
+        let managed = if m.available {
+            match &m.version {
+                Some(v) => format!("available (version {v})"),
+                None => "available".to_string(),
+            }
+        } else {
+            format!(
+                "not available ({})",
+                m.reason.as_deref().unwrap_or("unknown reason")
+            )
+        };
+        format!(
+            "{name}:
+  managed: {managed}
+{}",
+            existing(&k.existing)
+        )
     };
     let mut out = String::from("LAN interfaces:");
     if s.lan.is_empty() {
@@ -388,7 +420,8 @@ pub fn network_setup(s: &socketguard_core::setup::NetworkSetup) -> String {
     }
     for l in &s.lan {
         out.push_str(&format!(
-            "\n  {}{}{}{}{}",
+            "
+  {}{}{}{}{}",
             l.interface,
             l.description
                 .as_ref()
@@ -407,11 +440,20 @@ pub fn network_setup(s: &socketguard_core::setup::NetworkSetup) -> String {
             if l.already_added { ", added" } else { "" },
         ));
     }
+    let local = match s.local.state {
+        SetupStatus::Added => "added",
+        _ => "ready to add",
+    };
     format!(
-        "{out}\n\n{}\n\n{}\n\n{}",
-        state("Yggdrasil", &s.yggdrasil),
-        state("Tor", &s.tor),
-        state("Local", &s.local)
+        "{out}
+
+{}
+
+{}
+
+Local: {local}",
+        kind("Yggdrasil", &s.yggdrasil),
+        kind("Tor", &s.tor),
     )
 }
 
@@ -419,6 +461,45 @@ pub fn network_setup(s: &socketguard_core::setup::NetworkSetup) -> String {
 /// keeps running; empty when nothing does.
 pub fn exposure(e: &socketguard_core::api_types::ExposureResponse) -> String {
     e.sentences().join("\n")
+}
+
+/// How a managed network's child process is doing, in a few words.
+fn managed_status(kind: NetworkKind, m: &ManagedInfo) -> String {
+    let detail = |what: &str| match &m.detail {
+        Some(d) => format!("{what}: {d}"),
+        None => what.to_string(),
+    };
+    let mut out = match m.state {
+        ChildState::Stopped => "stopped".to_string(),
+        ChildState::Waiting => detail("waiting"),
+        ChildState::Starting => "starting".to_string(),
+        ChildState::Bootstrapping => match m.progress {
+            Some(p) => format!("bootstrapping {p}%"),
+            None => "bootstrapping".to_string(),
+        },
+        ChildState::Up => "up".to_string(),
+        ChildState::Exited => detail("exited"),
+        ChildState::Unavailable => detail("unavailable"),
+    };
+    if kind == NetworkKind::Yggdrasil && m.state == ChildState::Up {
+        if let Some(n) = m.peers_connected {
+            out.push_str(&format!("  {n} {}", if n == 1 { "peer" } else { "peers" }));
+        }
+    }
+    out
+}
+
+/// `tor (managed)`, `yggdrasil (your own)`; the other kinds are just named.
+fn kind_text(n: &Network) -> String {
+    match (n.kind, &n.managed) {
+        (NetworkKind::Tor | NetworkKind::Yggdrasil, Some(_)) => {
+            format!("{} (managed)", kind_label(n.kind))
+        }
+        (NetworkKind::Tor | NetworkKind::Yggdrasil, None) => {
+            format!("{} (your own)", kind_label(n.kind))
+        }
+        _ => kind_label(n.kind).to_string(),
+    }
 }
 
 pub fn networks(nets: &[Network]) -> String {
@@ -429,25 +510,41 @@ pub fn networks(nets: &[Network]) -> String {
         &["ID", "KIND", "INTERFACE", "STATUS", "NOTE"],
         nets.iter()
             .map(|n| {
-                let status = match &n.status {
-                    NetworkStatus::Up => "up".to_string(),
-                    NetworkStatus::Down { reason } => format!("down: {reason}"),
+                let mut notes: Vec<String> = vec![];
+                let status = match (&n.managed, &n.status) {
+                    (Some(m), status) => {
+                        if let NetworkStatus::Down { reason } = status {
+                            notes.push(format!("down: {reason}"));
+                        }
+                        if let Some(a) = &m.address {
+                            notes.push(a.clone());
+                        }
+                        managed_status(n.kind, m)
+                    }
+                    (None, NetworkStatus::Up) => "up".to_string(),
+                    (None, NetworkStatus::Down { reason }) => format!("down: {reason}"),
                 };
-                let note = if n.grants_apply {
-                    String::new()
-                } else {
-                    "this machine only, grants do not apply".to_string()
-                };
+                if !n.grants_apply {
+                    notes.push("this machine only, grants do not apply".to_string());
+                }
                 vec![
                     n.id.clone(),
-                    kind_label(n.kind).to_string(),
+                    kind_text(n),
                     n.interface.clone().unwrap_or_else(|| "-".into()),
                     status,
-                    note,
+                    notes.join("; "),
                 ]
             })
             .collect(),
     )
+}
+
+/// The peers of a managed Yggdrasil network, one per line.
+pub fn network_peers(id: &str, peers: &[String]) -> String {
+    if peers.is_empty() {
+        return format!("{id} has no peers");
+    }
+    format!("peers of {id}:\n{}", peers.join("\n"))
 }
 
 pub fn settings(s: &Settings) -> String {

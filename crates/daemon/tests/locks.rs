@@ -38,6 +38,8 @@ fn ygg() -> BackendInstanceConfig {
         backend: BackendConfig::Yggdrasil {
             interface: Some("ygg0".into()),
             admin_endpoint: None,
+            managed: false,
+            peers: vec![],
         },
     }
 }
@@ -79,6 +81,7 @@ async fn daemon(
         db,
         engine: tokio::sync::RwLock::new(engine),
         firewall_lock: tokio::sync::Mutex::new(()),
+        bundled: Default::default(),
         events: tokio::sync::broadcast::channel(64).0,
     });
     (state, sockets)

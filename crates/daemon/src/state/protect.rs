@@ -167,6 +167,14 @@ pub fn protect_dir(path: &Path, shared: bool) -> Result<()> {
     Ok(())
 }
 
+/// Windows: protect the data directory of a managed child (ADR 0052) so that SYSTEM and
+/// Administrators, and LocalService when `local_service`, and nobody else, can use it and
+/// what is created inside. Elsewhere the caller sets mode and owner itself.
+#[cfg(windows)]
+pub fn protect_service_dir(path: &Path, local_service: bool) -> Result<()> {
+    super::winacl::protect_service_dir(path, local_service)
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]

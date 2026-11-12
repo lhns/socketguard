@@ -253,6 +253,151 @@ function Invoke-FirewallExercise {
   if ($script:addedAddress) { Remove-NetIPAddress -InterfaceIndex $script:addedAddress[0] -IPAddress $script:addedAddress[1] -Confirm:$false -ErrorAction SilentlyContinue }
 }
 
+# ---- managed networks (ADR 0052): the bundled Tor and Yggdrasil ------------------------------
+# The Mn-* helpers and counters are shared with test/portable.ps1. A check the runner cannot do
+# is SKIPPED with the exact reason and listed at the end, never faked.
+. (Join-Path $PSScriptRoot 'managed-helpers.ps1')
+
+# The installed files, what `status` says about them, and that LocalService (the account Tor
+# runs as) can run what is in Program Files.
+function Assert-Bundled {
+  Section 'managed networks: the bundled files'
+  $tp = Join-Path $InstallDir 'third_party'
+  foreach ($f in 'tor\tor.exe', 'yggdrasil\yggdrasil.exe', 'yggdrasil\wintun.dll', 'VERSIONS', 'licenses\tor.txt', 'licenses\yggdrasil.txt', 'licenses\wintun.txt') {
+    if (-not (Test-Path (Join-Path $tp $f))) { Mn-Fail "missing $tp\$f" }
+  }
+  Mn-Ok "third_party has tor.exe, yggdrasil.exe, wintun.dll, VERSIONS and the licence texts"
+  foreach ($f in 'LICENSE.txt', 'THIRD_PARTY_NOTICES.md') {
+    if (-not (Test-Path (Join-Path $InstallDir "licenses\$f"))) { Mn-Fail "missing $InstallDir\licenses\$f" }
+  }
+  Mn-Ok 'licenses\LICENSE.txt and licenses\THIRD_PARTY_NOTICES.md are installed'
+
+  $st = Run $Cli @('status', '--json') 'mn-status'
+  try { $j = $st.Text | ConvertFrom-Json } catch { Mn-Fail "status --json is not JSON: $($st.Text)" }
+  Write-Host "  status.bundled: $($j.bundled | ConvertTo-Json -Compress -Depth 5)"
+  if (-not $j.bundled.dir) { Mn-Fail 'status shows no bundled directory' }
+  if ((Resolve-Path $j.bundled.dir).Path.TrimEnd('\') -ne (Resolve-Path $tp).Path.TrimEnd('\')) { Mn-Fail "the daemon found its third_party at '$($j.bundled.dir)', expected $tp" }
+  Mn-Ok "the daemon found $tp"
+  foreach ($name in 'tor', 'yggdrasil') {
+    $got = @($j.bundled.versions | Where-Object { $_.name -eq $name })
+    if ($got.Count -ne 1) { Mn-Fail "status does not name the bundled $name" }
+    $line = Get-Content (Join-Path $tp 'VERSIONS') | Where-Object { $_ -match "^$name\s+(\S+)" } | Select-Object -First 1
+    if (-not $line -or ($line -split '\s+')[1] -ne $got[0].version) { Mn-Fail "$name`: status says '$($got[0].version)', VERSIONS says '$line'" }
+    Mn-Ok "$name $($got[0].version) (as in VERSIONS)"
+  }
+
+  # Inherited from Program Files: Users may read and run it. Then the real test, as LocalService.
+  $tor = Join-Path $tp 'tor\tor.exe'
+  $rx = (Get-Acl $tor).Access | Where-Object {
+    $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -match 'Users|LOCAL SERVICE|Everyone|Authenticated' -and
+    (([int]$_.FileSystemRights -band 0x1200A9) -eq 0x1200A9)
+  }
+  if (-not $rx) { Mn-Fail "no ACL entry lets Users or LocalService read and run $tor`n$((& icacls $tor) -join "`n")" }
+  Mn-Ok "$tor is readable and runnable by $(($rx | ForEach-Object { $_.IdentityReference.Value }) -join ', ')"
+  $work = 'C:\Windows\Temp\sg-localservice'
+  Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+  New-Item -ItemType Directory -Force -Path $work | Out-Null
+  & icacls $work /grant '*S-1-5-19:(OI)(CI)M' | Out-Null
+  $cmd = Join-Path $work 'run.cmd'
+  Set-Content -Path $cmd -Encoding ascii -Value "@echo off`r`n`"$tor`" --version > `"$work\tor.txt`" 2>&1`r`n`"$(Join-Path $tp 'yggdrasil\yggdrasil.exe')`" -version > `"$work\ygg.txt`" 2>&1`r`necho done > `"$work\done.txt`"`r`n"
+  $ran = $false
+  try {
+    $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"$cmd`""
+    $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-19' -LogonType ServiceAccount
+    Register-ScheduledTask -TaskName 'sg-localservice-check' -Action $action -Principal $principal -Force | Out-Null
+    Start-ScheduledTask -TaskName 'sg-localservice-check'
+    $ran = Wait-Until { Test-Path (Join-Path $work 'done.txt') } 60 'task'
+  } catch { Write-Host "  scheduled task as LocalService failed: $_" }
+  finally { Unregister-ScheduledTask -TaskName 'sg-localservice-check' -Confirm:$false -ErrorAction SilentlyContinue }
+  if (-not $ran) {
+    Mn-Skip "could not run tor.exe as LocalService with a scheduled task (the task did not finish); the ACL check above stands"
+  } else {
+    Copy-Item "$work\*" $Out -ErrorAction SilentlyContinue
+    $t = Get-Content "$work\tor.txt" -Raw; $y = Get-Content "$work\ygg.txt" -Raw
+    if ($t -notmatch 'Tor version') { Mn-Fail "tor.exe --version as LocalService printed: $t" }
+    Mn-Ok "LocalService runs the installed tor.exe: $($t.Trim())"
+    if ($y -notmatch '\d+\.\d+') { Mn-Fail "yggdrasil.exe -version as LocalService printed: $y" }
+    Mn-Ok "LocalService runs the installed yggdrasil.exe: $($y.Trim())"
+  }
+  Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+}
+
+function Invoke-ManagedNetworks {
+  Section 'managed networks: Tor'
+  $r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor') 'mn-add-tor'
+  Write-Host $r.Text
+  if ($r.Code -ne 0) { Mn-Fail "networks add tor exited $($r.Code)" }
+  Write-Host '  waiting for the bootstrap (up to 5 minutes)'
+  if (-not (Mn-WaitUp 'tor' 300)) { Mn-Fail 'the managed Tor network is not up after 5 minutes' }
+  Mn-Ok 'the managed Tor network is up (bootstrapped)'
+  $procs = Mn-Procs 'tor.exe'
+  if ($procs.Count -eq 0) { Mn-Fail 'the network is up but no tor.exe from third_party is running' }
+  $owner = Mn-Owner $procs[0]
+  $n = Mn-Net 'tor'
+  Write-Host "  tor.exe (pid $($procs[0].ProcessId)) owner: $owner; the network card says runs_as = '$($n.managed.runs_as)', version $($n.managed.version)"
+  if ($owner -notmatch 'LOCAL SERVICE') { Mn-Fail "tor.exe runs as $owner, not NT AUTHORITY\LOCAL SERVICE (runs_as: '$($n.managed.runs_as)')" }
+  Mn-Ok 'tor.exe runs as NT AUTHORITY\LOCAL SERVICE'
+  if ("$($n.managed.runs_as)" -notmatch 'LocalService|LOCAL SERVICE') { Mn-Fail "runs_as is '$($n.managed.runs_as)'" }
+  Mn-Ok "the network card says it runs as $($n.managed.runs_as)"
+  if (-not (Wait-Until { Test-Path (Join-Path $DataDir 'tor') } 20 'tor dir')) { Mn-Fail "no $DataDir\tor" }
+
+  $r = Run $Cli @('networks', 'rm', 'tor', '--yes') 'mn-rm-tor'
+  Write-Host $r.Text
+  if ($r.Code -ne 0) { Mn-Fail "networks rm tor exited $($r.Code)" }
+  if (-not (Wait-Until { (Mn-Procs 'tor.exe').Count -eq 0 } 60 'tor gone')) { Mn-Fail 'tor.exe still runs 60 s after the network was removed' }
+  Mn-Ok 'removing the network ends tor.exe'
+  # Added again and left configured: the uninstall steps look at what a stop keeps and a purge removes.
+  $r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor') 'mn-add-tor-again'
+  if ($r.Code -ne 0) { Mn-Fail "networks add tor (again) exited $($r.Code): $($r.Text)" }
+  if (-not (Wait-Until { (Mn-Procs 'tor.exe').Count -gt 0 } 60 'tor again')) { Mn-Fail 'tor.exe did not start again' }
+  if (-not (Wait-Until { Test-Path (Join-Path $DataDir 'tor') } 20 'tor dir')) { Mn-Fail "no $DataDir\tor after adding the network again" }
+  Mn-Ok "added again; $DataDir\tor exists"
+
+  Section 'managed networks: Yggdrasil'
+  $r = Run $Cli @('networks', 'add', 'yggdrasil', '--id', 'ygg') 'mn-add-ygg'
+  Write-Host $r.Text
+  if ($r.Code -ne 0) { Mn-Fail "networks add yggdrasil exited $($r.Code)" }
+  Write-Host '  waiting for the adapter (the Wintun driver is installed by wintun.dll on the first adapter; up to 2 minutes)'
+  $seen = Wait-Until { [bool](Mn-Adapter) } 120 'adapter'
+  $n = Mn-Net 'ygg'
+  Write-Host "  ygg: $(Mn-Describe $n)"
+  if ($n -and "$($n.managed.state)" -eq 'unavailable') { Mn-Fail "the Yggdrasil files are not part of this build: $(Mn-Describe $n)" }
+  if (-not $seen) {
+    $why = Mn-Describe $n
+    Set-Content -Path (Join-Path $Out 'ygg-adapter-error.txt') -Value ("no adapter after 120 s`n$why`n" + ($n | ConvertTo-Json -Depth 6) + "`n" + ((Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Format-Table Name, InterfaceDescription, Status -AutoSize | Out-String)) + "`n" + ((& pnputil /enum-drivers 2>&1 | Select-String -Pattern 'wintun' -Context 3, 3 | Out-String)))
+    Mn-Skip "managed Yggdrasil: no adapter 'SocketGuard' on this runner after 120 s. Status: $why. Details in ygg-adapter-error.txt"
+    return
+  }
+  $script:mnAdapterSeen = $true
+  $ad = Mn-Adapter
+  Mn-Ok "the adapter exists: $($ad.Name) ($($ad.InterfaceDescription), $($ad.Status))"
+  if (-not (Mn-WaitUp 'ygg' 120)) { Mn-Fail 'the managed Yggdrasil network is not up 2 minutes after the adapter appeared' }
+  Mn-Ok 'the managed Yggdrasil network is up'
+  $n = Mn-Net 'ygg'
+  $addr = "$($n.managed.address)"
+  if (-not $addr) { Mn-Fail 'the network card shows no node address' }
+  $onAdapter = Wait-Until {
+    $ips = @(Get-NetIPAddress -InterfaceIndex (Mn-Adapter).ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue)
+    $null -ne ($ips | Where-Object { [System.Net.IPAddress]::Parse(($_.IPAddress -split '%')[0]).Equals([System.Net.IPAddress]::Parse($addr)) })
+  } 30 'address on adapter'
+  if (-not $onAdapter) { Mn-Fail "the adapter does not hold the node address $addr" }
+  Mn-Ok "the adapter holds the node address $addr"
+  $yp = Mn-Procs 'yggdrasil.exe'
+  if ($yp.Count -eq 0) { Mn-Fail 'no yggdrasil.exe from third_party is running' }
+  Write-Host "  yggdrasil.exe owner: $(Mn-Owner $yp[0]) (Windows cannot drop privileges after the adapter exists); runs_as: '$($n.managed.runs_as)'"
+  # Is the admin socket usable? peers_connected is known when it is; otherwise the valve engaged.
+  # The count is cached for a few seconds after the node comes up: poll before judging.
+  $known = Wait-Until { $n = Mn-Net 'ygg'; $null -ne $n.managed.peers_connected } 45 'peers_connected known'
+  $n = Mn-Net 'ygg'
+  if ($null -ne $n.managed.peers_connected) {
+    Mn-Ok "the admin socket works: peers_connected = $($n.managed.peers_connected) (no peers are configured here)"
+  } else {
+    Write-Host "  peers_connected is unknown: the admin endpoint did not answer or the valve engaged. Detail: '$($n.managed.detail)'" -ForegroundColor Yellow
+    Write-Host '::warning::managed networks: Yggdrasil admin socket: peer information unavailable on this runner'
+    $script:mnSkipped.Add("Yggdrasil admin socket: peers_connected unknown (detail: '$($n.managed.detail)')")
+  }
+}
+
 # ---- the run ---------------------------------------------------------------------------------
 
 Section 'install'
@@ -293,6 +438,8 @@ Save-Wfp 'installed'
 # The WFP objects appear when the daemon first applies; the pipe answering means it started.
 Assert-Footprint @{ Expect = 'present'; Require = @('wfp-provider', 'wfp-sublayer', 'named-pipe') } 'present'
 
+Assert-Bundled
+
 try { Invoke-FirewallExercise } catch { Soft "firewall exercise threw: $_" }
 
 Section 'upgrade'
@@ -321,10 +468,24 @@ if ($pgBefore -ne $pgAfter) { Fail "port groups changed over the upgrade:`nbefor
 Ok 'the stored state is the same after the upgrade'
 Assert-Footprint @{ Expect = 'present'; Require = @('wfp-provider', 'wfp-sublayer', 'named-pipe') } 'present-upgraded'
 
+Invoke-ManagedNetworks
+# What the install record says about the Wintun driver, read before the purge deletes it.
+try {
+  $rec = Get-Content (Join-Path $DataDir 'setup-log.json') -Raw | ConvertFrom-Json
+  $script:mnWintun = @($rec.entries | Where-Object { $_.type -eq 'wintun_driver' }) | Select-Object -First 1
+} catch { Write-Host "  cannot read the install record: $_" }
+
 Section 'uninstall the MSI'
 Invoke-Msi @('/x', $MsiNext) 'uninstall'
 if ((Service-State) -ne 'absent') { Fail "service is still $(Service-State)" }
 Ok 'service gone'
+if (-not (Wait-Until { ((Mn-Procs 'tor.exe').Count -eq 0) -and ((Mn-Procs 'yggdrasil.exe').Count -eq 0) } 60 'children')) { Mn-Fail 'tor.exe or yggdrasil.exe still runs after the removal' }
+Mn-Ok 'tor.exe and yggdrasil.exe are stopped'
+if ($script:mnAdapterSeen -and -not (Wait-Until { -not (Mn-Adapter) } 30 'adapter gone')) { Mn-Fail 'the SocketGuard adapter is still there after the removal' }
+if ($script:mnAdapterSeen) { Mn-Ok 'the Yggdrasil adapter is gone' }
+if (-not (Test-Path (Join-Path $DataDir 'tor'))) { Mn-Fail "the removal deleted $DataDir\tor" }
+if ($script:mnAdapterSeen -and -not (Test-Path (Join-Path $DataDir 'yggdrasil'))) { Mn-Fail "the removal deleted $DataDir\yggdrasil" }
+Mn-Ok "the data directories of the networks are kept ($DataDir\tor$(if ($script:mnAdapterSeen) { ', yggdrasil' }))"
 if (Test-Path $InstallDir) {
   $left = Get-ChildItem $InstallDir -Recurse -File
   if ($left) { Fail "$InstallDir still holds: $(($left | ForEach-Object Name) -join ', ')" }
@@ -343,9 +504,28 @@ Write-Host $pu.Text
 if ($pu.Code -ne 0) { Fail "uninstall --purge exited $($pu.Code)" }
 Ok 'uninstall --purge --yes exited 0'
 Save-Wfp 'purged'
+if ((Test-Path (Join-Path $DataDir 'tor')) -or (Test-Path (Join-Path $DataDir 'yggdrasil'))) { Mn-Fail "the purge left $DataDir\tor or $DataDir\yggdrasil" }
+Mn-Ok 'the purge removed the data directories of the networks'
+if ($script:mnWintun -and -not $script:mnWintun.present_before) {
+  $drv = (& pnputil /enum-drivers 2>&1 | Out-String)
+  Set-Content -Path (Join-Path $Out 'pnputil-after-purge.txt') -Value $drv
+  if ($drv -match '(?i)wintun') {
+    $why = 'the install record says Wintun was not present before, but pnputil still lists it after the purge (the purge reported it as kept; see pnputil-after-purge.txt and the purge output above for the reason)'
+    Write-Host "::warning::managed networks: $why"
+    $script:mnSkipped.Add("Wintun removal on purge: $why")
+  } else {
+    Mn-Ok 'Wintun was not present before the install and is not in the driver store after the purge'
+  }
+} elseif ($script:mnWintun) {
+  Write-Host '  the install record says Wintun was present before the install: the purge keeps it (not asserted)'
+} else {
+  Write-Host '  no wintun_driver entry in the install record (no adapter was created): nothing to assert'
+}
 Assert-Footprint @{ Expect = 'absent' } 'absent'
 
 Section 'done'
+Write-Host "managed networks: $($script:mnOk) checks passed, $($script:mnSkipped.Count) skipped"
+foreach ($s in $script:mnSkipped) { Write-Host "  skipped: $s" }
 if ($script:soft.Count -gt 0) {
   Write-Host 'Soft failures (the firewall exercise only reports until -StrictFirewall):'
   $script:soft | ForEach-Object { Write-Host "  $_" }

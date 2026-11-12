@@ -198,6 +198,7 @@ fn networks() -> Vec<Network> {
             status: NetworkStatus::Up,
             prefix: None,
             vlan_id: None,
+            managed: None,
         },
         Network {
             id: "ygg".into(),
@@ -208,6 +209,7 @@ fn networks() -> Vec<Network> {
             status: NetworkStatus::Up,
             prefix: None,
             vlan_id: None,
+            managed: None,
         },
         Network {
             id: "lan".into(),
@@ -220,6 +222,7 @@ fn networks() -> Vec<Network> {
             },
             prefix: None,
             vlan_id: None,
+            managed: None,
         },
     ]
 }
@@ -243,6 +246,7 @@ fn status() {
         db_path: None,
         socket: None,
         service_installed: None,
+        bundled: Default::default(),
         portable: false,
         db_protected: true,
         drop_events: true,
@@ -265,6 +269,96 @@ fn status() {
     s.service_installed = None;
     assert!(!render::status(&s).contains("config"));
     assert!(!render::status(&s).contains("service"));
+    // What the build ships, or that it ships nothing.
+    assert!(render::status(&s).contains("bundled       none (managed networks not included"));
+    s.bundled = socketguard_core::setup::BundledInfo {
+        dir: Some("/opt/socketguard/third_party".into()),
+        versions: socketguard_core::setup::BundledInfo::parse_versions(
+            "tor 16.0.1\nyggdrasil v0.5.15 abc\n",
+        ),
+    };
+    assert!(render::status(&s).contains("bundled       tor 16.0.1, yggdrasil v0.5.15"));
+}
+
+#[test]
+fn managed_networks_in_the_table() {
+    use socketguard_core::{ChildState, ManagedInfo};
+    let info = |state, progress, peers_connected, address: Option<&str>| ManagedInfo {
+        state,
+        progress,
+        detail: None,
+        runs_as: None,
+        version: None,
+        address: address.map(str::to_string),
+        peers: vec![],
+        peers_connected,
+    };
+    let net = |id: &str, kind, managed| Network {
+        id: id.into(),
+        kind,
+        name: id.into(),
+        interface: None,
+        grants_apply: true,
+        status: NetworkStatus::Up,
+        prefix: None,
+        vlan_id: None,
+        managed,
+    };
+    let out = render::networks(&[
+        net(
+            "tor",
+            NetworkKind::Tor,
+            Some(info(ChildState::Bootstrapping, Some(40), None, None)),
+        ),
+        net(
+            "yggdrasil",
+            NetworkKind::Yggdrasil,
+            Some(info(ChildState::Up, None, Some(2), Some("200:1::5"))),
+        ),
+        net("tor2", NetworkKind::Tor, None),
+    ]);
+    assert!(out.contains("tor (managed)"), "{out}");
+    assert!(out.contains("bootstrapping 40%"), "{out}");
+    assert!(out.contains("up  2 peers"), "{out}");
+    assert!(out.contains("200:1::5"), "{out}");
+    assert!(out.contains("tor (your own)"), "{out}");
+    assert_eq!(
+        render::network_peers("yggdrasil", &["tls://a.example:1".into()]),
+        "peers of yggdrasil:\ntls://a.example:1"
+    );
+    assert_eq!(
+        render::network_peers("yggdrasil", &[]),
+        "yggdrasil has no peers"
+    );
+}
+
+#[test]
+fn network_setup_shows_both_forms() {
+    use socketguard_core::setup::*;
+    let kind = |available, reason: Option<&str>, state| KindSetup {
+        managed: ManagedOffer {
+            available,
+            reason: reason.map(str::to_string),
+            version: available.then(|| "16.0.1".to_string()),
+        },
+        existing: SetupState::new(state),
+    };
+    let s = NetworkSetup {
+        lan: vec![],
+        yggdrasil: kind(false, Some(NOT_INCLUDED), SetupStatus::Absent),
+        tor: kind(true, None, SetupStatus::Ready),
+        local: SetupState::new(SetupStatus::Ready),
+        yggdrasil_block: None,
+        config_path: None,
+    };
+    let out = render::network_setup(&s);
+    assert!(
+        out.contains("managed: not available (Not included in this build)"),
+        "{out}"
+    );
+    assert!(out.contains("managed: available (version 16.0.1)"), "{out}");
+    assert!(out.contains("your own: ready to add"), "{out}");
+    assert!(out.contains("your own: none found"), "{out}");
 }
 
 #[test]
@@ -427,7 +521,8 @@ fn tor_network_config_from_flags() {
             cookie_dir: None,
             expect_tor_uid: None,
             cookie_owner: None,
-            allow_remote_control: false
+            allow_remote_control: false,
+            managed: false
         }
     );
     assert_eq!(
@@ -439,7 +534,8 @@ fn tor_network_config_from_flags() {
             cookie_dir: None,
             expect_tor_uid: None,
             cookie_owner: None,
-            allow_remote_control: false
+            allow_remote_control: false,
+            managed: false
         }
     );
 }

@@ -1,12 +1,14 @@
 # Installers (ADR 0050): the Windows MSI, the Linux deb and rpm, the macOS pkg. Each job builds
-# with ./build.sh, builds the package (and a second one with the next patch version, by
-# repackaging, for the upgrade test), then installs it on the runner and checks the host from
-# outside (deploy/ci/footprint-check.*). Reused by release.yml. Unsigned.
+# with ./build.sh, lays out the bundled Tor and Yggdrasil (ADR 0052, .github/actions/bundle),
+# builds the package (and a second one with the next patch version, by repackaging, for the
+# upgrade test), then installs it on the runner, runs managed Tor and Yggdrasil networks from
+# the installed files and checks the host from outside (deploy/ci/footprint-check.*). Reused by
+# release.yml. Unsigned.
 name: packages
 
 on:
   push:
-    branches: [installers, redesign, main, portable]
+    branches: [installers, redesign, main, portable, bundled]
   workflow_dispatch:
   workflow_call:
 
@@ -21,7 +23,7 @@ permissions:
 jobs:
   msi:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -40,6 +42,11 @@ jobs:
         shell: bash
         run: bash ./build.sh
       - uses: ./.github/actions/setup-wix
+      - name: Bundle Tor, Yggdrasil and wintun.dll (installer/payload/windows)
+        uses: ./.github/actions/bundle
+        with:
+          target: windows-x86_64
+          outdir: installer/payload/windows
       # SIGN (not done, docs/packaging.md): import WINDOWS_SIGNING_CERT_PFX and sign the three
       # target\release\*.exe here with `signtool sign /fd sha256 /tr <timestamp url> /td sha256`,
       # then sign the MSIs after the next step the same way.
@@ -58,7 +65,7 @@ jobs:
         run: ./deploy/ci/footprint-check.ps1 -SelfTest
       - name: Install, exercise, upgrade, remove, purge
         shell: pwsh
-        timeout-minutes: 30
+        timeout-minutes: 45
         run: ./test/msi.ps1 -Msi "dist/SocketGuard-$env:V-x64.msi" -MsiNext "dist/next/SocketGuard-$env:NEXT-x64.msi" -Out dist/msi-test -StrictFirewall
       - uses: actions/upload-artifact@v4
         if: always()
@@ -73,11 +80,12 @@ jobs:
           if-no-files-found: error
 
   # Portable mode on a clean runner (ADR 0054): real firewall, clean exit, kill, coexistence with
-  # the service. Elevated, machine-wide changes, no prompts; the runner is thrown away.
+  # the service, and the bundled Tor and Yggdrasil (ADR 0052) from the zip's third_party\. Elevated,
+  # machine-wide changes, no prompts; the runner is thrown away.
   portable:
     # Its own build, in parallel with the msi job: it needs nothing from it.
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -95,12 +103,17 @@ jobs:
       - name: Build (./build.sh)
         shell: bash
         run: bash ./build.sh
+      - name: Bundle Tor, Yggdrasil and wintun.dll (installer/payload/windows, copied to third_party\ in the zip)
+        uses: ./.github/actions/bundle
+        with:
+          target: windows-x86_64
+          outdir: installer/payload/windows
       - name: Build the portable zip
         shell: pwsh
         run: ./installer/windows/portable.ps1 -BinDir target/release -Out dist/portable/SocketGuard-portable-windows-x64.zip
-      - name: Start, exercise, end, kill, coexist
+      - name: Start, exercise, end, kill, coexist, managed Tor and Yggdrasil
         shell: pwsh
-        timeout-minutes: 30
+        timeout-minutes: 45
         run: ./test/portable.ps1 -Zip dist/portable/SocketGuard-portable-windows-x64.zip -Out dist/portable-test
       - uses: actions/upload-artifact@v4
         if: always()
@@ -149,6 +162,11 @@ jobs:
           tar -xzf "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" nfpm
           sudo install -m 0755 nfpm /usr/local/bin/nfpm
           nfpm --version
+      - name: Bundle Tor and Yggdrasil (installer/payload/linux)
+        uses: ./.github/actions/bundle
+        with:
+          target: linux-x86_64
+          outdir: installer/payload/linux
       - name: Build the packages (this version, and the next patch for the upgrade test)
         run: |
           v=$(bash deploy/ci/version.sh)
@@ -198,6 +216,19 @@ jobs:
         working-directory: ui
       - name: Build (./build.sh)
         run: bash ./build.sh
+      # The pkg is built for the runner's architecture (uname -m; macos-latest is Apple silicon).
+      - name: Architecture of the bundle
+        id: arch
+        run: |
+          case "$(uname -m)" in
+            arm64|aarch64) echo "target=macos-aarch64" >> "$GITHUB_OUTPUT" ;;
+            *) echo "target=macos-x86_64" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: Bundle Tor and Yggdrasil (installer/payload/macos)
+        uses: ./.github/actions/bundle
+        with:
+          target: ${{ steps.arch.outputs.target }}
+          outdir: installer/payload/macos
       - name: Build the pkgs (this version, and the next patch for the upgrade test)
         run: |
           v=$(bash deploy/ci/version.sh)

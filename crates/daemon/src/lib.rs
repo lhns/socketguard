@@ -1,7 +1,10 @@
 pub mod access;
+pub mod account;
 pub mod api;
 pub mod apply;
 pub mod args;
+pub mod bundled;
+pub mod children;
 pub mod commands;
 pub mod config_file;
 pub mod disable;
@@ -27,6 +30,7 @@ pub mod telemetry;
 pub mod test_support;
 pub mod transport;
 pub mod uninstall;
+pub mod wintun;
 
 use tokio::sync::{broadcast, Mutex, RwLock};
 
@@ -66,6 +70,8 @@ pub struct AppState {
     /// Serializes everything that changes the ruleset or a non-IP network. See the lock
     /// order above.
     pub firewall_lock: Mutex<()>,
+    /// The shipped Tor and Yggdrasil files (ADR 0052).
+    pub bundled: std::sync::Arc<bundled::Bundled>,
     /// Broadcast channel for SSE push notifications to GUI
     pub events: broadcast::Sender<api::DaemonEvent>,
 }

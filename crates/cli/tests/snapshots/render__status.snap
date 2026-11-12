@@ -7,9 +7,10 @@ enforcement   on
 protect-host  eth0
 apps          2, 3 addresses
 peers         1, groups 1, grants 3
+bundled       none (managed networks not included in this build)
 
 Networks
-  ID     KIND       INTERFACE  STATUS           NOTE
-  local  local      lo         up               this machine only, grants do not apply
-  ygg    yggdrasil  ygg0       up
-  lan    lan        eth0       down: no prefix
+  ID     KIND                  INTERFACE  STATUS           NOTE
+  local  local                 lo         up               this machine only, grants do not apply
+  ygg    yggdrasil (your own)  ygg0       up
+  lan    lan                   eth0       down: no prefix

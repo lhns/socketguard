@@ -42,6 +42,12 @@ Facts established for this decision (2026-11-11):
 - Without pluggable transports the managed Tor cannot use bridges.
 - The package-install flow of ADR 0048 lasted one day; its detection and cards remain.
 
+## Amendment (2026-11-12): trust in the pid file, the account decision, the child guard
+
+- **Pid files are the daemon's alone.** A child's pid and start time are kept in `<state dir>/run/<network id>.pid` (a directory only the daemon can write), never in a directory a child owns: a compromised child could otherwise have made the daemon, running as root, end any process at the next start. A leftover is ended only when its start time and its executable path both match what the daemon started.
+- **The account is decided once, before anything depends on it.** On Windows the daemon tries the LocalService logon first; on failure the child runs as the daemon's account, and the data-directory ACL, the expected owner of the cookie and the status all follow that answer.
+- **Unix: `child-guard`.** `-user` clears the parent-death signal, so Yggdrasil is started through `socketguard-daemon child-guard -- <program> <args>`: a root parent that holds the daemon's pipe as its stdin and ends the program when the pipe closes (the daemon died, `kill -9` included) or its parent changes. The pid file names the guard, whose executable is the daemon's.
+- **A node that never answers on its admin socket** is restarted without one after a deadline (20 s), so a network does not stay "starting"; its card then says peer information is unavailable.
 ## Amendment (2026-11-12): what the implementation showed
 
 - **How Tor is tied to the daemon.** Not through `TAKEOWNERSHIP`: that ties Tor to one control connection, and SocketGuard's are short. Tor is started with `__OwningControllerProcess` and, per system, a job object or the parent-death signal.

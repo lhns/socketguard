@@ -24,6 +24,8 @@ depends:
   - conntrack
   - libwebkit2gtk-4.1-0
   - libgtk-3-0
+  # The bundled Tor links the system libz.so.1 (the Tor bundle does not carry it).
+  - zlib1g
 
 contents:
   - src: ${BIN_DIR}/socketguard-daemon
@@ -44,6 +46,8 @@ contents:
     dst: /usr/share/icons/hicolor/128x128/apps/socketguard.png
   - src: LICENSE
     dst: /usr/share/doc/socketguard/LICENSE
+  - src: THIRD_PARTY_NOTICES.md
+    dst: /usr/share/doc/socketguard/THIRD_PARTY_NOTICES.md
   # THIRD_PARTY (build.sh replaces this line with a tree entry when installer/payload/linux has files)
 
 overrides:
@@ -59,6 +63,7 @@ overrides:
       - conntrack-tools
       - webkit2gtk4.1
       - gtk3
+      - zlib
     scripts:
       postinstall: installer/linux/scripts/rpm-post
       preremove: installer/linux/scripts/rpm-preun

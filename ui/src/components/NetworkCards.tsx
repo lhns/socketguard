@@ -1,36 +1,8 @@
 import { useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import { api, type LanCandidate, type NetworkSetup, type SetupKind, type SetupState } from "../api";
+import type { KindSetup, LanCandidate, NewNetwork } from "../api";
 import { errorText } from "../lib";
 import { useAddNetwork, useNetworkSetup } from "../queries";
 import { useToast } from "./Toast";
-
-/** The line that says where a kind of network stands. */
-function stateLine(kind: SetupKind, s: SetupState): string {
-  switch (s.state) {
-    case "ready":
-      return s.found.address
-        ? `Found at ${s.found.address}${s.found.interface ? ` on ${s.found.interface}` : ""}.`
-        : "Found and ready.";
-    case "not_installed":
-      if (kind === "yggdrasil") return "Yggdrasil is not installed.";
-      if (s.install) {
-        return `Tor is not installed. SocketGuard can install it with ${s.install.manager}.`;
-      }
-      return s.missing ?? "Not installed.";
-    default:
-      return s.missing ?? "Needs setup.";
-  }
-}
-
-/** Yggdrasil: how many peers the node has. Only a reading; its config is never edited. */
-function peersLine(s: SetupState): string | null {
-  const n = s.found.peers;
-  if (n === undefined) return null;
-  return Number(n) > 0
-    ? `Connected to ${n} ${Number(n) === 1 ? "peer" : "peers"}.`
-    : "No peers yet: it only finds other nodes on your LAN. Add peers in Yggdrasil's config to reach further.";
-}
 
 export default function NetworkCards() {
   const setup = useNetworkSetup();
@@ -49,14 +21,12 @@ export default function NetworkCards() {
           {data.lan
             .filter((l) => !l.already_added)
             .map((l) => <LanCard key={l.interface} lan={l} />)}
-          {data.yggdrasil.state !== "added" && (
-            <KindCard kind="yggdrasil" title="Yggdrasil" state={data.yggdrasil} data={data} />
-          )}
-          {data.tor.state !== "added" && <KindCard kind="tor" title="Tor" state={data.tor} data={data} />}
+          {data.yggdrasil.existing.state !== "added" && <KindCard kind="yggdrasil" setup={data.yggdrasil} />}
+          {data.tor.existing.state !== "added" && <KindCard kind="tor" setup={data.tor} />}
           {data.local.state !== "added" && <LocalCard interfaceName={data.local.found.interface} />}
           {data.lan.every((l) => l.already_added) &&
-            data.yggdrasil.state === "added" &&
-            data.tor.state === "added" &&
+            data.yggdrasil.existing.state === "added" &&
+            data.tor.existing.state === "added" &&
             data.local.state === "added" && <p className="hint">Every network this machine offers is added.</p>}
         </div>
       )}
@@ -140,128 +110,62 @@ function LocalCard({ interfaceName }: { interfaceName?: string }) {
   );
 }
 
-function KindCard({ kind, title, state, data }: { kind: SetupKind; title: string; state: SetupState; data: NetworkSetup }) {
+const KIND_TEXT = {
+  tor: { title: "Tor", own: "SocketGuard runs its own Tor. Nothing is installed or changed on your system." },
+  yggdrasil: { title: "Yggdrasil", own: "SocketGuard runs its own Yggdrasil node. Nothing is installed or changed on your system." },
+} as const;
+
+function KindCard({ kind, setup }: { kind: "tor" | "yggdrasil"; setup: KindSetup }) {
   const add = useAddNetwork();
   const toast = useToast();
-  const setup = useNetworkSetup();
-  const [panel, setPanel] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const canSetUp =
-    state.state === "not_running" || state.state === "not_configured" || (state.state === "not_installed" && !!state.install);
+  const { title, own } = KIND_TEXT[kind];
+  const { managed, existing } = setup;
 
-  const submit = () => {
+  const submit = (req: NewNetwork) => {
     setError(null);
-    add.mutate(kind === "yggdrasil" ? { type: "yggdrasil" } : { type: "tor", control: "127.0.0.1:9051", auth: "cookie" }, {
-      onSuccess: (n) => toast.success(`Added ${n.name}`),
-      onError: (e) => setError(errorText(e)),
-    });
+    add.mutate(req, { onSuccess: (n) => toast.success(`Added ${n.name}`), onError: (e) => setError(errorText(e)) });
   };
+  const addManaged = () => submit(kind === "yggdrasil" ? { type: "yggdrasil", managed: true, peers: [] } : { type: "tor", managed: true } as NewNetwork);
+  const addExisting = () => submit(kind === "yggdrasil" ? { type: "yggdrasil" } : { type: "tor", control: "127.0.0.1:9051", auth: "cookie" });
 
   return (
     <CardShell label={title} title={title}>
-      <p>{stateLine(kind, state)}</p>
-      {state.exposed && state.warning && <p className="hint warn" role="alert">{state.warning}</p>}
-      {kind === "yggdrasil" && state.state === "ready" && peersLine(state) && <p className="hint">{peersLine(state)}</p>}
-      {kind === "yggdrasil" && state.state === "ready" && (
-        <p className="hint">
-          Once added, everything on the Yggdrasil adapter is blocked except what you open in SocketGuard.
-        </p>
+      {managed.available ? (
+        <>
+          <p>{own}</p>
+          {managed.version && <small className="muted">Version {managed.version}</small>}
+        </>
+      ) : (
+        <p>Not included in this build{managed.reason ? `: ${managed.reason}` : ""}</p>
+      )}
+      {existing.state === "ready" && (
+        <>
+          <p className="hint">
+            {existing.found.address
+              ? `A ${title} node is running at ${existing.found.address}${existing.found.interface ? ` on ${existing.found.interface}` : ""}. `
+              : `A ${title} node was found. `}
+            Using it uses your node&apos;s identity; SocketGuard cannot start or stop it.
+          </p>
+          {existing.exposed && existing.warning && <p className="hint warn" role="alert">{existing.warning}</p>}
+          {kind === "yggdrasil" && (
+            <p className="hint">Once added, everything on the Yggdrasil adapter is blocked except what you open in SocketGuard.</p>
+          )}
+        </>
       )}
       <div className="actions">
-        {state.state === "ready" && (
-          <button className="btn btn-primary btn-sm" aria-label={`Add ${title}`} onClick={submit} disabled={add.isPending}>
+        {managed.available && (
+          <button className="btn btn-primary btn-sm" aria-label={`Add ${title}`} onClick={addManaged} disabled={add.isPending}>
             Add
           </button>
         )}
-        {canSetUp && (
-          <button className="btn btn-primary btn-sm" aria-expanded={panel} onClick={() => setPanel(!panel)}>
-            Set up…
-          </button>
-        )}
-        {state.state === "not_installed" && !state.install && state.download_link && (
-          <button className="btn btn-sm" onClick={() => void api.openDownloadPage(state.download_link as string).catch((e) => setError(errorText(e)))}>
-            Download page
-          </button>
-        )}
-        {state.state === "not_installed" && !state.install && (
-          <button className="btn btn-sm" onClick={() => void setup.refetch()} disabled={setup.isFetching}>
-            Check again
+        {existing.state === "ready" && (
+          <button className="btn btn-sm" aria-label={`Use my existing ${title}`} onClick={addExisting} disabled={add.isPending}>
+            Use my existing one
           </button>
         )}
       </div>
       {error && <div className="error-banner" role="alert">{error}</div>}
-      {panel && canSetUp && <SetupPanel kind={kind} state={state} configPath={data.config_path} onDone={() => setPanel(false)} />}
     </CardShell>
-  );
-}
-
-/** What the elevated command will do, and the button that runs it. */
-function SetupPanel({ kind, state, configPath, onDone }: { kind: SetupKind; state: SetupState; configPath?: string; onDone: () => void }) {
-  const toast = useToast();
-  const qc = useQueryClient();
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [byHand, setByHand] = useState<string | null>(null);
-
-  const steps: string[] = [];
-  if (state.state === "not_installed" && state.install) steps.push(`Install ${kind === "tor" ? "Tor" : "Yggdrasil"}: ${state.install.command}`);
-  if (kind === "yggdrasil") {
-    steps.push("Add the Yggdrasil network first, so that SocketGuard blocks it before Yggdrasil can start, and check that the block is in force.");
-  }
-  if (state.state === "not_running") steps.push(`Start the ${kind === "tor" ? "Tor" : "Yggdrasil"} service.`);
-  if (kind === "tor") {
-    steps.push(
-      "Use Tor's control endpoint if it has one. If not, add ControlPort 9051 and CookieAuthentication 1 to its torrc (a copy is kept as torrc.socketguard.bak) and restart Tor.",
-    );
-    steps.push("Tell SocketGuard where Tor's cookie file is, from the torrc, and add the Tor network.");
-  } else {
-    steps.push("Yggdrasil's own configuration is not touched.");
-  }
-  const command = `socketguard networks setup ${kind} --yes`;
-
-  const run = async () => {
-    if (!configPath) return;
-    setBusy(true);
-    setMessage(null);
-    setByHand(null);
-    try {
-      const r = await api.runNetworkSetup(kind, configPath);
-      if (r.cancelled) {
-        setMessage("Cancelled: nothing was changed.");
-      } else if (!r.launched) {
-        setByHand(r.command);
-        setMessage("This system has no way to ask for administrator rights from here. Run this in a terminal with administrator rights:");
-      } else if (r.exit_code === 0) {
-        toast.success(`${kind === "tor" ? "Tor" : "Yggdrasil"} is set up`);
-        onDone();
-      } else {
-        setMessage(`The setup stopped (exit code ${r.exit_code ?? "unknown"}). Its window shows why; fix that, then check again.`);
-      }
-    } catch (e) {
-      setMessage(errorText(e));
-    } finally {
-      setBusy(false);
-      void qc.invalidateQueries({ queryKey: ["networkSetup"] });
-      void qc.invalidateQueries({ queryKey: ["networks"] });
-    }
-  };
-
-  return (
-    <div className="setup-panel" role="group" aria-label={`Set up ${kind}`}>
-      <p>Setting up needs administrator rights. It will:</p>
-      <ol>{steps.map((s) => <li key={s}>{s}</li>)}</ol>
-      <p className="hint">
-        The command: <code>{command}</code>. You can undo this later with <code>{`socketguard networks setup ${kind} --undo`}</code>;
-        the changes are listed in setup-log.json next to the config file.
-      </p>
-      <div className="actions">
-        <button className="btn btn-primary btn-sm" onClick={() => void run()} disabled={busy || !configPath}>
-          Run as administrator
-        </button>
-      </div>
-      {!configPath && <p className="hint warn">The daemon did not say where its config file is.</p>}
-      {message && <p role="status">{message}</p>}
-      {byHand && <pre className="mono">{byHand}</pre>}
-    </div>
   );
 }

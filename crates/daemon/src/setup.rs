@@ -1,13 +1,14 @@
 //! Detecting what the host offers for each kind of network (ADR 0048): read-only. Every
 //! look at the system goes through [`Probes`], so tests use a fake.
 
+use crate::bundled::Bundled;
 use crate::iface::HostInterface;
 use crate::networks::ip::yggdrasil::{self, NodeInfo};
 use crate::networks::tor_control::{self, ProtocolInfo};
 use anyhow::{bail, Context, Result};
 use socketguard_core::config::DEFAULT_TOR_CONTROL;
 use socketguard_core::setup::{
-    download_link, install_command, LanCandidate, NetworkSetup, SetupKind, SetupState, SetupStatus,
+    KindSetup, LanCandidate, ManagedOffer, NetworkSetup, SetupState, SetupStatus,
 };
 use socketguard_core::{Network, NetworkKind};
 use std::collections::HashSet;
@@ -38,28 +39,16 @@ pub fn find_in_path(name: &str) -> Option<PathBuf> {
     })
 }
 
-/// A system service, as far as it can be told cheaply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceState {
-    Running,
-    Stopped,
-    Missing,
-    Unknown,
-}
-
 /// Everything detection looks at.
 pub trait Probes: Send + Sync {
     /// `std::env::consts::OS`.
     fn os(&self) -> &'static str;
-    /// A program on PATH (package managers, `tor`).
-    fn has_program(&self, name: &str) -> bool;
     /// Where `yggdrasilctl` is.
     fn yggdrasilctl(&self) -> Option<PathBuf>;
     /// `yggdrasilctl -json getSelf`.
     fn get_self(&self, ctl: &Path) -> Result<NodeInfo>;
     /// How many peers the node is connected to (`yggdrasilctl -json getPeers`).
     fn peers_up(&self, ctl: &Path) -> Result<usize>;
-    fn service(&self, name: &str) -> ServiceState;
     /// PROTOCOLINFO of the Tor control port at `addr`; no authentication.
     fn tor_protocolinfo(&self, addr: &str) -> Result<ProtocolInfo>;
     /// Whether the daemon would accept the cookie file with the default Tor settings.
@@ -121,10 +110,6 @@ impl Probes for SystemProbes {
         std::env::consts::OS
     }
 
-    fn has_program(&self, name: &str) -> bool {
-        find_in_path(name).is_some()
-    }
-
     fn yggdrasilctl(&self) -> Option<PathBuf> {
         yggdrasil::find_yggdrasilctl()
     }
@@ -139,33 +124,6 @@ impl Probes for SystemProbes {
         let mut cmd = std::process::Command::new(ctl);
         cmd.args(["-json", "getPeers"]);
         parse_peers_up(&run_limited(cmd)?)
-    }
-
-    #[cfg(windows)]
-    fn service(&self, name: &str) -> ServiceState {
-        let mut cmd = std::process::Command::new("sc.exe");
-        cmd.args(["query", name]);
-        match run_limited(cmd) {
-            Ok(out) if out.contains("RUNNING") => ServiceState::Running,
-            Ok(out) if out.contains("STOPPED") => ServiceState::Stopped,
-            Ok(_) => ServiceState::Unknown,
-            // `sc query` exits 1060 for a service that does not exist.
-            Err(e) if e.to_string().contains("1060") => ServiceState::Missing,
-            Err(_) => ServiceState::Unknown,
-        }
-    }
-
-    #[cfg(unix)]
-    fn service(&self, name: &str) -> ServiceState {
-        if find_in_path("systemctl").is_none() {
-            return ServiceState::Unknown;
-        }
-        let mut cmd = std::process::Command::new("systemctl");
-        cmd.args(["is-active", name]);
-        match run_limited(cmd) {
-            Ok(_) => ServiceState::Running,
-            Err(_) => ServiceState::Stopped,
-        }
     }
 
     fn tor_protocolinfo(&self, addr: &str) -> Result<ProtocolInfo> {
@@ -223,22 +181,27 @@ impl Existing {
     }
 }
 
-/// The service names the status lines look at.
-#[cfg(windows)]
-const YGGDRASIL_SERVICE: &str = "Yggdrasil";
-#[cfg(not(windows))]
-const YGGDRASIL_SERVICE: &str = "yggdrasil";
-
 /// Everything `GET /api/networks/setup` reports.
-pub fn detect(p: &dyn Probes, existing: &Existing, config_path: Option<&Path>) -> NetworkSetup {
-    let (yggdrasil, ygg_iface) = detect_yggdrasil(p, existing);
+pub fn detect(
+    p: &dyn Probes,
+    existing: &Existing,
+    config_path: Option<&Path>,
+    bundled: &Bundled,
+) -> NetworkSetup {
+    let (ygg_existing, ygg_iface) = detect_yggdrasil(p, existing);
     NetworkSetup {
         lan: detect_lan(p, existing, ygg_iface.as_deref()),
-        yggdrasil,
-        tor: detect_tor(p, existing),
+        yggdrasil: KindSetup {
+            managed: offer(bundled.yggdrasil().err(), bundled.version_of("yggdrasil")),
+            existing: ygg_existing,
+        },
+        tor: KindSetup {
+            managed: offer(bundled.tor().err(), bundled.version_of("tor")),
+            existing: detect_tor(p, existing),
+        },
         local: detect_local(existing),
         yggdrasil_block: None,
-        // Absolute: the elevated `networks setup` has another working directory.
+        // Absolute: the caller's working directory is not the daemon's.
         config_path: config_path
             .map(|c| std::path::absolute(c).unwrap_or_else(|_| c.to_path_buf()))
             .map(|c| c.display().to_string()),
@@ -282,16 +245,13 @@ fn detect_lan(p: &dyn Probes, existing: &Existing, skip: Option<&str>) -> Vec<La
     out
 }
 
-/// A state that says the software is missing: the package command where one is known to
-/// exist, else the official download page.
-fn not_installed(p: &dyn Probes, kind: SetupKind, missing: String) -> SetupState {
-    let mut s = SetupState::new(SetupStatus::NotInstalled);
-    s.missing = Some(missing);
-    match install_command(kind, p.os(), &|m| p.has_program(m)) {
-        Some(cmd) => s.install = Some(cmd.offer(Some(download_link(kind)))),
-        None => s.download_link = Some(download_link(kind).to_string()),
+/// Whether SocketGuard can run its own copy: `reason` is why not.
+fn offer(unavailable: Option<String>, version: Option<String>) -> ManagedOffer {
+    ManagedOffer {
+        available: unavailable.is_none(),
+        reason: unavailable,
+        version,
     }
-    s
 }
 
 /// What the card says about a running node that is not added to SocketGuard.
@@ -318,11 +278,7 @@ fn detect_yggdrasil(p: &dyn Probes, existing: &Existing) -> (SetupState, Option<
         return (SetupState::new(SetupStatus::Added), iface);
     }
     let Some(ctl) = ctl else {
-        // No package is offered: SocketGuard does not install Yggdrasil.
-        let mut s = SetupState::new(SetupStatus::NotInstalled);
-        s.missing = Some("Yggdrasil is not installed.".to_string());
-        s.download_link = Some(download_link(SetupKind::Yggdrasil).to_string());
-        return (s, None);
+        return (SetupState::new(SetupStatus::Absent), None);
     };
     let mut state;
     let ctl_path = ctl.clone();
@@ -339,23 +295,15 @@ fn detect_yggdrasil(p: &dyn Probes, existing: &Existing) -> (SetupState, Option<
                 Some(name) => {
                     state.found.insert("interface".into(), name.clone());
                 }
-                None => {
-                    state.state = SetupStatus::NotConfigured;
-                    state.missing = Some("the Yggdrasil adapter has no address yet".to_string());
-                }
+                // The node answers but its adapter has no address: not usable yet.
+                None => state.state = SetupStatus::Absent,
             }
         }
-        Err(_) => {
-            state = SetupState::new(SetupStatus::NotRunning);
-            state.missing = Some(match p.service(YGGDRASIL_SERVICE) {
-                ServiceState::Stopped => "The Yggdrasil service is stopped.".to_string(),
-                _ => "Yggdrasil is installed, but the node is not running.".to_string(),
-            });
-        }
+        Err(_) => state = SetupState::new(SetupStatus::Absent),
     }
     // A node answers but SocketGuard does not manage it (ADR 0051): programs listening on
     // all addresses are reachable over it.
-    if matches!(state.state, SetupStatus::Ready | SetupStatus::NotConfigured) {
+    if state.found.contains_key("address") {
         state.exposed = true;
         state.warning = Some(EXPOSED_WARNING.to_string());
     }
@@ -381,59 +329,18 @@ fn detect_tor(p: &dyn Probes, existing: &Existing) -> SetupState {
                 s.found.insert("cookie_path".into(), c.clone());
             }
             let cookie = info.methods.iter().any(|m| m == "SAFECOOKIE");
-            match (&info.cookie_file, cookie) {
-                (_, false) | (None, _) => {
-                    s.state = SetupStatus::NotConfigured;
-                    s.missing = Some("Tor's cookie authentication is off.".into());
-                }
-                // The API takes default Tor settings only, and those have no cookie_path:
-                // fine on Unix if the daemon accepts the cookie file as it is.
-                (Some(path), true) => {
-                    let known = p.os() != "windows" && p.cookie_accepted(path).is_ok();
-                    if !known {
-                        s.state = SetupStatus::NotConfigured;
-                        s.missing = Some("SocketGuard does not know Tor's cookie file yet.".into());
-                    }
-                }
+            // The API takes default Tor settings only, and those have no cookie_path:
+            // fine on Unix if the daemon accepts the cookie file as it is.
+            let usable = match &info.cookie_file {
+                Some(path) if cookie => p.os() != "windows" && p.cookie_accepted(path).is_ok(),
+                _ => false,
+            };
+            if !usable {
+                s.state = SetupStatus::Absent;
             }
             s
         }
-        // Debian's Tor offers a control socket with cookie authentication out of the box.
-        // The API takes default settings only, so the socket goes into the config file.
-        Err(_) if p.os() == "linux" && p.tor_protocolinfo(DEBIAN_CONTROL_SOCKET).is_ok() => {
-            let mut s = SetupState::new(SetupStatus::NotConfigured);
-            s.found
-                .insert("control".into(), DEBIAN_CONTROL_SOCKET.to_string());
-            s.missing = Some("SocketGuard does not know Tor's control socket yet.".into());
-            s
-        }
-        Err(_) if p.has_program("tor") || tor_service_exists(p) => {
-            let mut s = SetupState::new(SetupStatus::NotConfigured);
-            s.missing = Some("Tor's control port is not enabled.".into());
-            s
-        }
-        Err(_) => not_installed(p, SetupKind::Tor, tor_missing_sentence(p)),
-    }
-}
-
-/// The control socket of Debian's Tor service (`tor-service-defaults-torrc`).
-const DEBIAN_CONTROL_SOCKET: &str = "unix:/run/tor/control";
-
-fn tor_service_exists(p: &dyn Probes) -> bool {
-    matches!(
-        p.service("tor"),
-        ServiceState::Running | ServiceState::Stopped
-    )
-}
-
-fn tor_missing_sentence(p: &dyn Probes) -> String {
-    if install_command(SetupKind::Tor, p.os(), &|m| p.has_program(m)).is_some() {
-        "Tor is not installed.".into()
-    } else if p.os() == "windows" {
-        "Tor is not installed. Windows has no package for it; download the Tor Expert Bundle, then come back here."
-            .into()
-    } else {
-        "Tor is not installed; install it from the Tor Project's download page.".into()
+        Err(_) => SetupState::new(SetupStatus::Absent),
     }
 }
 
@@ -444,32 +351,26 @@ mod tests {
 
     struct Fake {
         os: &'static str,
-        programs: Vec<&'static str>,
         ctl: Option<PathBuf>,
         node: Option<NodeInfo>,
-        services: HashMap<&'static str, ServiceState>,
         tor: Option<ProtocolInfo>,
         cookie_ok: bool,
         ifaces: Vec<HostInterface>,
         addrs: HashMap<String, Vec<Ipv6Addr>>,
         peers: Option<usize>,
-        tor_sockets: HashMap<&'static str, ProtocolInfo>,
     }
 
     impl Default for Fake {
         fn default() -> Self {
             Self {
                 os: "windows",
-                programs: vec![],
                 ctl: None,
                 node: None,
-                services: HashMap::new(),
                 tor: None,
                 cookie_ok: false,
                 ifaces: vec![],
                 addrs: HashMap::new(),
                 peers: None,
-                tor_sockets: HashMap::new(),
             }
         }
     }
@@ -477,9 +378,6 @@ mod tests {
     impl Probes for Fake {
         fn os(&self) -> &'static str {
             self.os
-        }
-        fn has_program(&self, name: &str) -> bool {
-            self.programs.contains(&name)
         }
         fn yggdrasilctl(&self) -> Option<PathBuf> {
             self.ctl.clone()
@@ -490,20 +388,9 @@ mod tests {
         fn peers_up(&self, _: &Path) -> Result<usize> {
             self.peers.context("no peers")
         }
-        fn service(&self, name: &str) -> ServiceState {
-            self.services
-                .get(name)
-                .copied()
-                .unwrap_or(ServiceState::Unknown)
-        }
         fn tor_protocolinfo(&self, addr: &str) -> Result<ProtocolInfo> {
-            if let Some(i) = self.tor_sockets.get(addr) {
-                return Ok(i.clone());
-            }
-            self.tor
-                .clone()
-                .filter(|_| !addr.starts_with("unix:"))
-                .context("refused")
+            let _ = addr;
+            self.tor.clone().context("refused")
         }
         fn cookie_accepted(&self, _: &str) -> Result<()> {
             if self.cookie_ok {
@@ -535,52 +422,22 @@ mod tests {
     }
 
     #[test]
-    fn yggdrasil_is_never_offered_a_package_even_where_winget_exists() {
-        let p = Fake {
-            programs: vec!["winget"],
-            ..Default::default()
-        };
-        let (s, _) = detect_yggdrasil(&p, &Existing::default());
-        assert_eq!(s.state, SetupStatus::NotInstalled);
-        assert!(s.install.is_none());
-        assert_eq!(s.missing.as_deref(), Some("Yggdrasil is not installed."));
-        assert_eq!(
-            s.download_link.as_deref(),
-            Some(socketguard_core::setup::YGGDRASIL_DOWNLOAD)
-        );
-        assert!(!s.exposed);
+    fn yggdrasil_without_yggdrasilctl_is_absent() {
+        let (s, iface) = detect_yggdrasil(&Fake::default(), &Existing::default());
+        assert_eq!(s.state, SetupStatus::Absent);
+        assert!(!s.exposed && s.warning.is_none() && iface.is_none());
     }
 
     #[test]
-    fn yggdrasil_without_a_package_offers_the_download_page() {
+    fn yggdrasil_installed_but_not_running_is_absent() {
         let p = Fake {
-            os: "linux",
-            programs: vec!["apt-get"],
-            ..Default::default()
-        };
-        let (s, _) = detect_yggdrasil(&p, &Existing::default());
-        assert_eq!(s.state, SetupStatus::NotInstalled);
-        assert!(s.install.is_none());
-        assert_eq!(
-            s.download_link.as_deref(),
-            Some(socketguard_core::setup::YGGDRASIL_DOWNLOAD)
-        );
-    }
-
-    #[test]
-    fn yggdrasil_not_running_when_get_self_fails() {
-        let mut p = Fake {
             ctl: Some(PathBuf::from("C:/Program Files/Yggdrasil/yggdrasilctl.exe")),
             ..Default::default()
         };
-        p.services.insert(YGGDRASIL_SERVICE, ServiceState::Stopped);
         let (s, _) = detect_yggdrasil(&p, &Existing::default());
-        assert_eq!(s.state, SetupStatus::NotRunning);
-        assert_eq!(
-            s.missing.as_deref(),
-            Some("The Yggdrasil service is stopped.")
-        );
+        assert_eq!(s.state, SetupStatus::Absent);
         assert!(s.found["yggdrasilctl"].contains("yggdrasilctl"));
+        assert!(!s.exposed);
     }
 
     #[test]
@@ -598,6 +455,7 @@ mod tests {
         assert_eq!(s.found["address"], node().address.to_string());
         assert_eq!(found.as_deref(), Some("Yggdrasil"));
         assert!(!s.found.contains_key("peers"));
+        assert!(s.exposed && s.warning.as_deref() == Some(EXPOSED_WARNING));
     }
 
     #[test]
@@ -619,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn yggdrasil_without_an_adapter_address_is_not_configured() {
+    fn yggdrasil_without_an_adapter_address_is_absent() {
         let p = Fake {
             ctl: Some(PathBuf::from("yggdrasilctl")),
             node: Some(node()),
@@ -627,11 +485,7 @@ mod tests {
             ..Default::default()
         };
         let (s, _) = detect_yggdrasil(&p, &Existing::default());
-        assert_eq!(s.state, SetupStatus::NotConfigured);
-        assert_eq!(
-            s.missing.as_deref(),
-            Some("the Yggdrasil adapter has no address yet")
-        );
+        assert_eq!(s.state, SetupStatus::Absent);
     }
 
     #[test]
@@ -642,10 +496,48 @@ mod tests {
             local: true,
             ..Default::default()
         };
-        let s = detect(&Fake::default(), &existing, None);
-        assert_eq!(s.yggdrasil.state, SetupStatus::Added);
-        assert_eq!(s.tor.state, SetupStatus::Added);
+        let s = detect(&Fake::default(), &existing, None, &Bundled::none());
+        assert_eq!(s.yggdrasil.existing.state, SetupStatus::Added);
+        assert_eq!(s.tor.existing.state, SetupStatus::Added);
+        assert!(!s.tor.managed.available);
+        assert_eq!(
+            s.tor.managed.reason.as_deref(),
+            Some(socketguard_core::setup::NOT_INCLUDED)
+        );
         assert_eq!(s.local.state, SetupStatus::Added);
+    }
+
+    /// SocketGuard's own (managed) Tor and Yggdrasil count as added, so a running node of its
+    /// own never shows up as an existing one that could be added again.
+    #[test]
+    fn managed_networks_count_as_added() {
+        use socketguard_core::{ChildState, ManagedInfo, Network, NetworkKind, NetworkStatus};
+        let net = |kind| Network {
+            id: format!("{kind:?}"),
+            kind,
+            name: String::new(),
+            interface: None,
+            grants_apply: true,
+            status: NetworkStatus::Up,
+            prefix: None,
+            vlan_id: None,
+            managed: Some(ManagedInfo {
+                state: ChildState::Up,
+                progress: None,
+                detail: None,
+                runs_as: None,
+                version: None,
+                address: None,
+                peers: vec![],
+                peers_connected: None,
+            }),
+        };
+        let existing =
+            Existing::from_networks(&[net(NetworkKind::Tor), net(NetworkKind::Yggdrasil)]);
+        let s = detect(&Fake::default(), &existing, None, &Bundled::none());
+        assert_eq!(s.tor.existing.state, SetupStatus::Added);
+        assert_eq!(s.yggdrasil.existing.state, SetupStatus::Added);
+        assert!(!s.yggdrasil.existing.exposed);
     }
 
     fn tor_info(methods: &[&str], cookie: Option<&str>) -> ProtocolInfo {
@@ -671,96 +563,69 @@ mod tests {
     }
 
     #[test]
-    fn tor_needs_its_cookie_file_known_on_windows_and_for_untrusted_cookies() {
+    fn tor_is_absent_on_windows_and_for_untrusted_cookies_or_no_cookie_auth() {
         let windows = Fake {
             tor: Some(tor_info(&["SAFECOOKIE"], Some("C:/tor/cookie"))),
             cookie_ok: true,
             ..Default::default()
         };
         let s = detect_tor(&windows, &Existing::default());
-        assert_eq!(s.state, SetupStatus::NotConfigured);
-        assert_eq!(
-            s.missing.as_deref(),
-            Some("SocketGuard does not know Tor's cookie file yet.")
-        );
+        assert_eq!(s.state, SetupStatus::Absent);
         assert_eq!(s.found["cookie_path"], "C:/tor/cookie");
-        let linux = Fake {
+        let untrusted = Fake {
             os: "linux",
             tor: Some(tor_info(&["SAFECOOKIE"], Some("/run/tor/c"))),
             cookie_ok: false,
             ..Default::default()
         };
         assert_eq!(
-            detect_tor(&linux, &Existing::default()).state,
-            SetupStatus::NotConfigured
+            detect_tor(&untrusted, &Existing::default()).state,
+            SetupStatus::Absent
         );
-    }
-
-    #[test]
-    fn a_control_socket_is_found_but_needs_the_config_file() {
-        let mut p = Fake {
-            os: "linux",
-            ..Default::default()
-        };
-        p.tor_sockets.insert(
-            "unix:/run/tor/control",
-            tor_info(&["SAFECOOKIE"], Some("/run/tor/c")),
-        );
-        let s = detect_tor(&p, &Existing::default());
-        assert_eq!(s.state, SetupStatus::NotConfigured);
-        assert_eq!(s.found["control"], "unix:/run/tor/control");
-        assert_eq!(
-            s.missing.as_deref(),
-            Some("SocketGuard does not know Tor's control socket yet.")
-        );
-    }
-
-    #[test]
-    fn tor_with_cookie_authentication_off() {
-        let p = Fake {
+        let no_cookie = Fake {
             os: "linux",
             tor: Some(tor_info(&["NULL"], None)),
             ..Default::default()
         };
-        let s = detect_tor(&p, &Existing::default());
-        assert_eq!(s.state, SetupStatus::NotConfigured);
         assert_eq!(
-            s.missing.as_deref(),
-            Some("Tor's cookie authentication is off.")
+            detect_tor(&no_cookie, &Existing::default()).state,
+            SetupStatus::Absent
         );
     }
 
     #[test]
-    fn tor_installed_without_a_control_port_and_tor_missing() {
-        let installed = Fake {
-            os: "linux",
-            programs: vec!["tor"],
-            ..Default::default()
-        };
-        let s = detect_tor(&installed, &Existing::default());
-        assert_eq!(s.state, SetupStatus::NotConfigured);
-        assert_eq!(
-            s.missing.as_deref(),
-            Some("Tor's control port is not enabled.")
-        );
+    fn tor_without_a_control_port_is_absent() {
+        let s = detect_tor(&Fake::default(), &Existing::default());
+        assert_eq!(s.state, SetupStatus::Absent);
+        assert!(s.found.is_empty());
+    }
 
-        let windows = Fake::default();
-        let s = detect_tor(&windows, &Existing::default());
-        assert_eq!(s.state, SetupStatus::NotInstalled);
-        assert!(s.install.is_none());
-        assert_eq!(
-            s.download_link.as_deref(),
-            Some("https://www.torproject.org/download/tor/")
+    #[test]
+    fn managed_offer_follows_the_bundled_files() {
+        let d = std::env::temp_dir().join(format!("sg-setup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(d.join("tor")).unwrap();
+        std::fs::write(
+            d.join("tor")
+                .join(if cfg!(windows) { "tor.exe" } else { "tor" }),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("VERSIONS"),
+            "tor 16.0.1
+",
+        )
+        .unwrap();
+        let s = detect(
+            &Fake::default(),
+            &Existing::default(),
+            None,
+            &Bundled::from_dir(&d),
         );
-        assert!(s.missing.unwrap().contains("Windows has no package"));
-
-        let debian = Fake {
-            os: "linux",
-            programs: vec!["apt-get"],
-            ..Default::default()
-        };
-        let s = detect_tor(&debian, &Existing::default());
-        assert_eq!(s.install.unwrap().command, "apt-get install -y tor");
+        assert!(s.tor.managed.available);
+        assert_eq!(s.tor.managed.version.as_deref(), Some("16.0.1"));
+        assert!(!s.yggdrasil.managed.available);
+        assert!(s.yggdrasil.managed.reason.unwrap().contains("incomplete"));
     }
 
     #[test]

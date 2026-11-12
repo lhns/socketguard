@@ -57,6 +57,7 @@ impl Harness {
                 expect_tor_uid: None,
                 cookie_owner: None,
                 allow_remote_control: false,
+                managed: false,
             },
         };
         let mut backends = HashMap::new();
@@ -610,15 +611,17 @@ async fn a_remote_control_address_is_refused_when_the_network_is_made() {
         expect_tor_uid: None,
         cookie_owner: None,
         allow_remote_control: allow,
+        managed: false,
     };
     let net: Arc<dyn socketguard_daemon::iface::InterfaceManager> =
         Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![]))));
-    let err = networks::create(&tor("10.0.0.1:9051", false), [0; 5], net.clone())
+    let ctx = networks::ManagedCtx::inert();
+    let err = networks::create("t", &tor("10.0.0.1:9051", false), [0; 5], net.clone(), &ctx)
         .err()
         .unwrap();
     assert!(err.to_string().contains("allow_remote_control"), "{err:#}");
-    assert!(networks::create(&tor("10.0.0.1:9051", true), [0; 5], net.clone()).is_ok());
-    assert!(networks::create(&tor("localhost:9051", false), [0; 5], net).is_ok());
+    assert!(networks::create("t", &tor("10.0.0.1:9051", true), [0; 5], net.clone(), &ctx).is_ok());
+    assert!(networks::create("t", &tor("localhost:9051", false), [0; 5], net, &ctx).is_ok());
 }
 
 // ─── Removing the network ────────────────────────────────────────────────────

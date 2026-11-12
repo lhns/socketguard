@@ -9,6 +9,7 @@
 # icon). The app finds the CLI and the daemon in /usr/local/bin. postinstall runs
 # `socketguard-daemon service install`. Files in installer/payload/macos (README.md and
 # .gitkeep excepted) go to /usr/local/lib/socketguard/third_party/ (installer/payload/README.md).
+# LICENSE and THIRD_PARTY_NOTICES.md go into the app's Resources and /usr/local/share/doc/socketguard.
 #
 # SIGNING (not done yet): see docs/packaging.md for the secrets. Where it would go is marked
 # SIGN below.
@@ -51,7 +52,16 @@ if [ -n "$(find installer/payload/macos -type f ! -name .gitkeep ! -name README.
     mkdir -p "$root/usr/local/lib/socketguard/third_party"
     cp -a installer/payload/macos/. "$root/usr/local/lib/socketguard/third_party/"
     rm -f "$root/usr/local/lib/socketguard/third_party/.gitkeep" "$root/usr/local/lib/socketguard/third_party/README.md"
+    # Tor runs as the unprivileged account socketguard-net (ADR 0052): everyone reads the tree and
+    # runs the programs, only root writes (pkgbuild --ownership recommended makes root the owner).
+    chmod -R u+rwX,go+rX,go-w "$root/usr/local/lib/socketguard"
 fi
+
+# Licence and third-party notices, in the app and beside the other documentation.
+mkdir -p "$root/usr/local/share/doc/socketguard"
+for d in "$app/Contents/Resources" "$root/usr/local/share/doc/socketguard"; do
+    install -m 0644 LICENSE THIRD_PARTY_NOTICES.md "$d/"
+done
 
 # An ad-hoc signature: Apple silicon will not run an unsigned bundle. It is not an identity.
 codesign --force --deep --sign - "$app"

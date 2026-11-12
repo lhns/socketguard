@@ -218,6 +218,8 @@ export const useDeleteTag = () =>
 
 export const useAddNetwork = () =>
   useInvalidating((req: NewNetwork) => api.addNetwork(req), NETWORK_KEYS);
+export const useSetNetworkPeers = () =>
+  useInvalidating((v: { id: string; peers: string[] }) => api.setNetworkPeers(v.id, v.peers), NETWORK_KEYS);
 export const useDeleteNetwork = () =>
   useInvalidating(
     (v: { id: string; force: boolean; confirmExposed?: boolean }) => api.deleteNetwork(v.id, v.force, v.confirmExposed ?? false),

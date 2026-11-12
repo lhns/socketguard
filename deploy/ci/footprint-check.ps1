@@ -20,6 +20,13 @@
 # with an `addresses` array of strings (the addresses the daemon owned). Each one still returned
 # by Get-NetIPAddress makes the item `ledger-addresses` PRESENT. Never required.
 #
+# Managed networks (ADR 0052) add: the programs tor.exe and yggdrasil.exe running from a
+# `third_party` directory, the directories <ProgramData>\SocketGuard\tor and \yggdrasil, the
+# adapter `SocketGuard`, the Wintun driver in the driver store (-WintunPresentBefore says the
+# install record had it there before SocketGuard: then it is shared and expected to stay) and
+# the `third_party` directory of the shipped programs (SOCKETGUARD_THIRD_PARTY, else
+# %ProgramFiles%\SocketGuard\third_party).
+#
 # Not checkable from outside: the WFP engine option FWPM_ENGINE_COLLECT_NET_EVENTS (footprint.md
 # lists it as a gap); netsh wfp show state does not export engine options. Verify it by code review.
 #
@@ -28,6 +35,7 @@
 param(
     [ValidateSet('absent', 'present')][string]$Expect,
     [string]$LedgerExport,
+    [switch]$WintunPresentBefore,
     # present: item names that must also be PRESENT (e.g. wfp-provider after the first start)
     [string[]]$Require = @(),
     # absent: the data (config directory and files) may remain: after an uninstall without --purge
@@ -72,6 +80,30 @@ function Get-GroupState([string]$Out) {
     return 'ABSENT'
 }
 
+# Executable paths of the running processes: one of the program `$Name` (tor, yggdrasil) from a
+# `third_party` directory is one SocketGuard shipped and started.
+function Get-ChildProcessState($Paths, [string]$Name) {
+    foreach ($p in @($Paths)) {
+        if ($p -match ('(?i)\\third_party\\' + $Name + '\\' + $Name + '\.exe$')) { return 'PRESENT' }
+    }
+    return 'ABSENT'
+}
+
+# Names of the network adapters: the one SocketGuard creates for its Yggdrasil node.
+function Get-AdapterState($Names) {
+    foreach ($n in @($Names)) { if ($n -ieq 'SocketGuard') { return 'PRESENT' } }
+    return 'ABSENT'
+}
+
+# `pnputil /enum-drivers`: is Wintun's package in the store? Labels are translated on other
+# Windows languages, so the original name is recognised by its value. A driver that was there
+# before SocketGuard is shared and not counted.
+function Get-WintunState([string]$Out, [bool]$PresentBefore) {
+    if ($PresentBefore) { return 'ABSENT' }
+    if ($Out -match '(?im)^[^:\r\n]+:\s*wintun\.inf\s*$') { return 'PRESENT' }
+    return 'ABSENT'
+}
+
 # A list of existing paths and a regex: PRESENT if any path matches.
 function Get-ListedState($Paths, [string]$Regex) {
     foreach ($p in @($Paths)) { if ($p -match $Regex) { return 'PRESENT' } }
@@ -102,7 +134,7 @@ function Get-LedgerStillPresent([string]$Json, $InterfaceAddresses) {
 
 # ---- items and verdict ---------------------------------------------------------------------
 
-$DataItems = @('config-dir', 'config-json', 'database', 'database-wal', 'database-shm', 'setup-log', 'archived-database', 'temp-file')
+$DataItems = @('config-dir', 'config-json', 'database', 'database-wal', 'database-shm', 'setup-log', 'archived-database', 'temp-file', 'dir-tor', 'dir-yggdrasil', 'wintun-driver')
 $script:KeepData = $false
 $FileItems = @(
     @('config-json', '\\socketguard\.json$'),
@@ -111,7 +143,9 @@ $FileItems = @(
     @('database-shm', '\\socketguard\.db-shm$'),
     @('setup-log', '\\setup-log\.json$'),
     @('archived-database', '\.pre-v1'),
-    @('temp-file', '\\socketguard\.tmp-')
+    @('temp-file', '\\socketguard\.tmp-'),
+    @('dir-tor', '\\tor$'),
+    @('dir-yggdrasil', '\\yggdrasil$')
 )
 
 function New-Item2([string]$State, [string]$Name, [string]$Detail = '') {
@@ -186,6 +220,23 @@ function Invoke-SelfTest {
     Assert-Equal 'file-setup-log' 'PRESENT' (Get-ListedState $files '\\setup-log\.json$')
     Assert-Equal 'file-empty' 'ABSENT' (Get-ListedState @() '\\socketguard\.json$')
 
+    $procs = @('C:\Windows\System32\svchost.exe', 'C:\Program Files\SocketGuard\third_party\tor\tor.exe', 'C:\Program Files\SocketGuard\third_party\yggdrasil\yggdrasil.exe')
+    Assert-Equal 'child-tor' 'PRESENT' (Get-ChildProcessState $procs 'tor')
+    Assert-Equal 'child-yggdrasil' 'PRESENT' (Get-ChildProcessState $procs 'yggdrasil')
+    Assert-Equal 'child-none' 'ABSENT' (Get-ChildProcessState @('C:\Program Files\Yggdrasil\yggdrasil.exe') 'yggdrasil')
+    Assert-Equal 'child-name-exact' 'ABSENT' (Get-ChildProcessState @('C:\x\third_party\yggdrasil\yggdrasil.exe') 'tor')
+    Assert-Equal 'adapter-present' 'PRESENT' (Get-AdapterState @('Ethernet', 'SocketGuard'))
+    Assert-Equal 'adapter-absent' 'ABSENT' (Get-AdapterState @('Ethernet', 'Yggdrasil'))
+    $enum = "Published Name:     oem12.inf`nOriginal Name:      wintun.inf`nProvider Name:      WireGuard LLC`n`nPublished Name:     oem3.inf`nOriginal Name:      prnms009.inf`n"
+    Assert-Equal 'wintun-present' 'PRESENT' (Get-WintunState $enum $false)
+    Assert-Equal 'wintun-shared' 'ABSENT' (Get-WintunState $enum $true)
+    Assert-Equal 'wintun-absent' 'ABSENT' (Get-WintunState "Published Name:     oem3.inf`nOriginal Name:      prnms009.inf`n" $false)
+    Assert-Equal 'wintun-translated-labels' 'PRESENT' (Get-WintunState "Originalname:       wintun.inf`n" $false)
+    $dirs = @("$dir\tor", "$dir\yggdrasil", "$dir\setup-log.json")
+    Assert-Equal 'dir-tor' 'PRESENT' (Get-ListedState $dirs '\\tor$')
+    Assert-Equal 'dir-yggdrasil' 'PRESENT' (Get-ListedState $dirs '\\yggdrasil$')
+    Assert-Equal 'dir-tor-exact' 'ABSENT' (Get-ListedState $files '\\tor$')
+
     $pipes = @('\\.\pipe\lsass', '\\.\pipe\socketguard', '\\.\pipe\wkssvc')
     Assert-Equal 'pipe-present' 'PRESENT' (Get-ListedState $pipes '(?i)\\socketguard$')
     Assert-Equal 'pipe-absent' 'ABSENT' (Get-ListedState @('\\.\pipe\lsass') '(?i)\\socketguard$')
@@ -253,6 +304,16 @@ function Invoke-Live {
     $items += New-Item2 (Get-ListedState $pipes '(?i)\\socketguard$') 'named-pipe'
     # Portable mode (ADR 0054): its own pipe, and it must be gone once the daemon has ended.
     $items += New-Item2 (Get-ListedState $pipes '(?i)\\socketguard-portable$') 'named-pipe-portable'
+
+    # Managed networks (ADR 0052).
+    $exes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object { $_.ExecutablePath } | Where-Object { $_ })
+    $items += New-Item2 (Get-ChildProcessState $exes 'tor') 'child-tor'
+    $items += New-Item2 (Get-ChildProcessState $exes 'yggdrasil') 'child-yggdrasil'
+    $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    $items += New-Item2 (Get-AdapterState $adapters) 'adapter-SocketGuard'
+    $items += New-Item2 (Get-WintunState ((& pnputil.exe /enum-drivers 2>&1) | Out-String) $WintunPresentBefore.IsPresent) 'wintun-driver'
+    $shipped = @($env:SOCKETGUARD_THIRD_PARTY, (Join-Path $env:ProgramFiles 'SocketGuard\third_party')) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+    $items += New-Item2 (Get-ListedState $shipped '(?i)\\third_party$') 'third-party-files'
 
     if ($LedgerExport) {
         $live = @(Get-NetIPAddress -AddressFamily IPv6 | ForEach-Object { $_.IPAddress })

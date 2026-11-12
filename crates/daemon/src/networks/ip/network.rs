@@ -172,6 +172,10 @@ impl Network for IpNetwork {
         self.backend.node()
     }
 
+    fn managed(&self) -> Option<socketguard_core::ManagedInfo> {
+        self.backend.managed()
+    }
+
     fn ensure_locator(&self, _req: &LocatorRequest) -> Result<NewLocator> {
         let alloc = match self.backend.allocate(None) {
             Ok(a) => {

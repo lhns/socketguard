@@ -120,6 +120,9 @@ pub struct StatusResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub service_installed: Option<bool>,
+    /// The third-party files this build ships (ADR 0052); no `dir` when it has none.
+    #[serde(default)]
+    pub bundled: crate::setup::BundledInfo,
     /// Portable mode (ADR 0054): everything is in the program's folder and the rules and
     /// addresses end with the daemon's process.
     #[serde(default)]
@@ -206,6 +209,14 @@ pub struct NewNetwork {
     pub backend: BackendConfig,
 }
 
+/// Body of `PUT /api/networks/{id}/peers`: the peers of a managed Yggdrasil network (the
+/// node restarts to use them).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetPeers {
+    pub peers: Vec<String>,
+}
+
 /// Body of `PUT /api/settings/protect-host`. An empty list turns protection off.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,8 +275,6 @@ pub struct NetworkExposure {
     pub node_running: bool,
     /// The programs listening on all addresses (what the block keeps off the network).
     pub listeners: Vec<ExposedListener>,
-    /// The services `socketguard networks setup` started for this network (its setup log).
-    pub services_started_by_setup: Vec<String>,
 }
 
 impl NetworkExposure {
@@ -293,14 +302,7 @@ impl NetworkExposure {
             s.push_str(&format!(": {}", list.join(", ")));
         }
         s.push('.');
-        if self.services_started_by_setup.is_empty() {
-            s.push_str(" Stop its service yourself to close it.");
-        } else {
-            s.push_str(&format!(
-                " SocketGuard's setup started {}; `socketguard networks setup yggdrasil --undo --stop-service-only` stops it.",
-                self.services_started_by_setup.join(", ")
-            ));
-        }
+        s.push_str(" Stop its service yourself to close it.");
         Some(s)
     }
 }

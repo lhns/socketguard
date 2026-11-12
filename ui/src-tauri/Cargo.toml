@@ -18,6 +18,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
+    # SHELLEXECUTEINFOW and ShellExecuteExW are gated behind it; other crates of the
+    # workspace enable it, so only a build of this package alone (its tests) noticed.
+    "Win32_System_Registry",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Foundation",
