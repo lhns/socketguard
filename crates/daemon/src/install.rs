@@ -354,7 +354,19 @@ pub fn undo_entry(
     let mut r = Report::default();
     match &e.change {
         Change::ServiceRegistered { name, .. } => {
-            match (mgr.status(), mgr.uninstall(), mgr.status()) {
+            let before = mgr.status();
+            let removed = mgr.uninstall();
+            // Windows only marks a service for deletion; it disappears once the last handle
+            // to it closes. Give that a moment before calling it left behind.
+            let mut after = mgr.status();
+            for _ in 0..20 {
+                if !matches!(&after, Ok(s) if s.installed) || removed.is_err() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                after = mgr.status();
+            }
+            match (before, removed, after) {
                 (Ok(before), Ok(()), Ok(after)) => {
                     if after.installed {
                         r.left(format!("service {name}"), "still registered after removal");
