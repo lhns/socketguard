@@ -36,7 +36,10 @@ pub struct Ctx {
 pub async fn run(cli: Cli) -> Result<()> {
     if let Command::Completions { shell } = &cli.command {
         let mut cmd = Cli::command();
-        clap_complete::generate(*shell, &mut cmd, "socketguard", &mut std::io::stdout());
+        // Into memory first: `generate` panics when it cannot write.
+        let mut script = Vec::new();
+        clap_complete::generate(*shell, &mut cmd, "socketguard", &mut script);
+        socketguard_core::out!("{}", String::from_utf8_lossy(&script));
         return Ok(());
     }
     // The environment is read by clap (`--socket`); without either, the platform default.
@@ -137,11 +140,11 @@ impl Ctx {
         human: impl FnOnce() -> String,
     ) -> Result<()> {
         if self.json {
-            println!("{}", serde_json::to_string_pretty(value)?);
+            socketguard_core::outln!("{}", serde_json::to_string_pretty(value)?);
         } else {
             let text = human();
             if !text.is_empty() {
-                println!("{text}");
+                socketguard_core::outln!("{text}");
             }
         }
         Ok(())
@@ -1850,9 +1853,9 @@ fn print_records<'a>(
 ) -> Result<()> {
     for r in records {
         if c.json {
-            println!("{}", serde_json::to_string(r)?);
+            socketguard_core::outln!("{}", serde_json::to_string(r)?);
         } else {
-            println!("{}", render::activity_line(r, names));
+            socketguard_core::outln!("{}", render::activity_line(r, names));
         }
     }
     Ok(())
@@ -1863,9 +1866,9 @@ async fn watch(c: &Ctx) -> Result<()> {
     while let Some(ev) = events.next().await {
         let ev = ev?;
         if c.json {
-            println!("{}", serde_json::to_string(&ev)?);
+            socketguard_core::outln!("{}", serde_json::to_string(&ev)?);
         } else {
-            println!("{}", render::event_line(chrono::Utc::now(), &ev));
+            socketguard_core::outln!("{}", render::event_line(chrono::Utc::now(), &ev));
         }
     }
     Ok(())
@@ -1888,7 +1891,7 @@ async fn export(c: &Ctx, a: ExportArgs) -> Result<()> {
                 eprintln!("wrote {}", path.display());
             }
         }
-        None => print!("{text}"),
+        None => socketguard_core::out!("{text}"),
     }
     Ok(())
 }
@@ -1908,7 +1911,7 @@ async fn apply(c: &Ctx, a: ApplyArgs) -> Result<()> {
         return c.print(&diff, || render::changes(&diff));
     }
     if !c.json {
-        println!("{}", render::changes(&diff));
+        socketguard_core::outln!("{}", render::changes(&diff));
     }
     prompt::Stdin.confirm_or_yes(
         a.yes,

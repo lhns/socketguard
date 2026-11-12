@@ -32,7 +32,7 @@ fn main() -> ExitCode {
     }
     let code = match cmd {
         Command::Help => {
-            print!("{}", args::USAGE);
+            socketguard_core::out!("{}", args::USAGE);
             0
         }
         Command::Run(opts) => {

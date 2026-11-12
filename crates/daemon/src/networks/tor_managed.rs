@@ -224,6 +224,11 @@ impl ManagedTor {
             ChildState::Stopped => "SocketGuard is turned off".into(),
             ChildState::Waiting => or(s.detail, "waiting"),
             ChildState::Unavailable => or(s.detail, "Tor is not available"),
+            // A detail while it runs is what the health check could not do (see `children`):
+            // a frozen percentage must not hide it.
+            ChildState::Starting | ChildState::Bootstrapping if detailed && s.detail.is_some() => {
+                or(s.detail, "")
+            }
             ChildState::Starting => "Tor is starting".into(),
             ChildState::Bootstrapping => {
                 let through = self.ctx.bridge_counts.get(&self.id) > 0;
@@ -389,7 +394,7 @@ impl HealthCheck for TorHealth {
         match self.0.connect().and_then(|mut c| c.bootstrap_progress()) {
             Ok(p) if p >= 100 => ChildHealth::Up,
             Ok(p) => ChildHealth::Bootstrapping(p),
-            Err(_) => ChildHealth::Starting,
+            Err(e) => ChildHealth::NotReady(format!("cannot ask Tor over its control port: {e:#}")),
         }
     }
 }

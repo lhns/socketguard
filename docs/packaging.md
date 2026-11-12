@@ -158,7 +158,7 @@ section** (`test/managed.sh` for the deb and the pkg, `test/managed-helpers.ps1`
   `third_party/VERSIONS` and the directory the daemon found; the licence texts and notices are
   installed; the unprivileged account can run the installed `tor` and `yggdrasil` (Linux, macOS:
   `socketguard-net`; Windows: a task as LocalService, plus the ACL);
-- after the upgrade: `networks add tor` becomes up (bootstrapped, up to 5 minutes), tor runs as
+- after the upgrade: `networks add tor` becomes up (bootstrapped, up to 10 minutes), tor runs as
   `socketguard-net` (Windows: NT AUTHORITY\LOCAL SERVICE, the test fails and prints `runs_as`
   otherwise); removing the network ends tor; it is added again and left for the uninstall steps;
 - `networks add yggdrasil`: the node address is known and in the firewall ruleset before the adapter
@@ -196,7 +196,7 @@ and the Yggdrasil assertions are SKIPPED with that reason, not faked); Tor needs
   `--portable`; real WFP filters admit a granted port and block another; a clean exit and a kill
   (no SocketGuard filter may remain, the next start sweeps the addresses); portable and the
   installed service refuse to run side by side. Then, with the managed section shared with the MSI
-  test (`test/managed-helpers.ps1`): a managed Tor becomes up (bootstrapped, up to 5 minutes) and
+  test (`test/managed-helpers.ps1`): a managed Tor becomes up (bootstrapped, up to 10 minutes) and
   `tor.exe` runs as the same account as the portable daemon; a managed Yggdrasil creates the
   `SocketGuard` adapter (SKIPPED with the exact error in `ygg-adapter-error.txt` when the runner
   cannot, never faked); `data\tor` and `data\yggdrasil` are not inherited from `data\`; after the

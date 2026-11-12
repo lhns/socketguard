@@ -47,6 +47,12 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
+/// Consecutive failed health checks (while the process lives) after which the failure is
+/// logged at warn and shown as the child's detail.
+pub const FAILURES_BEFORE_DETAIL: u32 = 5;
+/// After that, the failure is logged again every this many checks.
+const REPEAT_WARN_EVERY: u32 = 60;
+
 /// One line a child printed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
@@ -136,10 +142,13 @@ pub trait Spawner: Send + Sync {
 }
 
 /// What a health check found out about a running child.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChildHealth {
-    /// Not answering yet.
+    /// Not answering yet, and nothing is wrong that could be named.
     Starting,
+    /// The check itself failed: why it cannot tell. Normal in the first moments of a start;
+    /// after [`FAILURES_BEFORE_DETAIL`] in a row it is shown as the child's detail.
+    NotReady(String),
     /// Tor: percent bootstrapped.
     Bootstrapping(u8),
     /// Ready.
@@ -147,7 +156,8 @@ pub enum ChildHealth {
 }
 
 /// Decides when a running child counts as `Up`. Blocking (the supervisor runs it on a
-/// blocking thread, once per `probe_every` until it says `Up`).
+/// blocking thread, once per `probe_every` until it says `Up`, and gives up on it after
+/// `Timing::probe_timeout`: a check cannot hold the supervisor).
 pub trait HealthCheck: Send + Sync {
     fn check(&self) -> ChildHealth;
 }
@@ -336,6 +346,8 @@ pub struct Timing {
     /// A run at least this long starts the backoff over.
     pub healthy_after: Duration,
     pub probe_every: Duration,
+    /// The longest one health check may take, connect to answer.
+    pub probe_timeout: Duration,
     /// After a stop request: how long to wait for a graceful end before killing.
     pub stop_grace: Duration,
     /// Lines per second relayed to the log.
@@ -349,6 +361,7 @@ impl Default for Timing {
             backoff_max: Duration::from_secs(60),
             healthy_after: Duration::from_secs(60),
             probe_every: Duration::from_secs(1),
+            probe_timeout: Duration::from_secs(20),
             stop_grace: Duration::from_secs(5),
             lines_per_sec: 20,
         }
@@ -641,7 +654,9 @@ impl Task {
         tokio::pin!(exit);
         let mut limiter = RateLimiter::new(self.timing.lines_per_sec, started);
         let mut last_line: Option<String> = None;
-        let mut probe: Option<JoinHandle<ChildHealth>> = None;
+        let mut probe: Option<Pin<Box<dyn Future<Output = ChildHealth> + Send>>> = None;
+        let mut failures = 0u32;
+        let mut shown_detail = false;
         let mut tick = tokio::time::interval(self.timing.probe_every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // Not asked again once it declined to restart.
@@ -712,29 +727,70 @@ impl Task {
                 }
                 _ = tick.tick(), if !up && probe.is_none() => {
                     if let Some(h) = spec.health.clone() {
-                        probe = Some(tokio::task::spawn_blocking(move || h.check()));
+                        probe = Some(bounded_probe(h, self.timing.probe_timeout));
                     }
                 }
                 res = async { probe.as_mut().expect("guarded").await }, if probe.is_some() => {
                     probe = None;
+                    if let ChildHealth::NotReady(why) = &res {
+                        failures += 1;
+                        if failures < FAILURES_BEFORE_DETAIL {
+                            debug!("{label}: health check failed ({failures}): {why}");
+                        } else {
+                            if (failures - FAILURES_BEFORE_DETAIL) % REPEAT_WARN_EVERY == 0 {
+                                warn!(
+                                    "{label} is running but its health check has failed \
+                                     {failures} times in a row: {why}"
+                                );
+                            }
+                            shown_detail = true;
+                            self.status.update(|s| s.detail = Some(why.clone()));
+                        }
+                        continue;
+                    }
+                    if failures >= FAILURES_BEFORE_DETAIL {
+                        info!("{label}: the health check works again (after {failures} failures)");
+                    }
+                    failures = 0;
+                    if std::mem::take(&mut shown_detail) {
+                        self.status.update(|s| s.detail = None);
+                    }
                     match res {
-                        Ok(ChildHealth::Up) => {
+                        ChildHealth::Up => {
                             up = true;
                             self.status.update(|s| {
                                 s.state = ChildState::Up;
                                 s.progress = None;
                             });
                         }
-                        Ok(ChildHealth::Bootstrapping(p)) => self.status.update(|s| {
+                        ChildHealth::Bootstrapping(p) => self.status.update(|s| {
                             s.state = ChildState::Bootstrapping;
                             s.progress = Some(p);
                         }),
-                        Ok(ChildHealth::Starting) | Err(_) => {}
+                        ChildHealth::Starting | ChildHealth::NotReady(_) => {}
                     }
                 }
             }
         }
     }
+}
+
+/// One health check on a blocking thread, ended after `limit` whatever it is doing (the
+/// thread is left to give up on its own socket timeouts). The one place that bounds a probe.
+fn bounded_probe(
+    check: Arc<dyn HealthCheck>,
+    limit: Duration,
+) -> Pin<Box<dyn Future<Output = ChildHealth> + Send>> {
+    Box::pin(async move {
+        let run = tokio::task::spawn_blocking(move || check.check());
+        match tokio::time::timeout(limit, run).await {
+            Ok(Ok(health)) => health,
+            Ok(Err(e)) => ChildHealth::NotReady(format!("the health check failed: {e}")),
+            Err(_) => {
+                ChildHealth::NotReady(format!("the health check did not answer within {limit:?}"))
+            }
+        }
+    })
 }
 
 /// End the process: ask, wait `grace`, then force.

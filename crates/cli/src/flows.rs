@@ -36,7 +36,7 @@ async fn pick_subject(c: &Ctx, p: &mut dyn Prompter) -> Result<Option<Subject>> 
                 credentials: parse::guess_credentials(&value)?,
             })
             .await?;
-        println!("added peer {}", peer.label);
+        socketguard_core::outln!("added peer {}", peer.label);
         Ok(Some(Subject::Peer(peer.id)))
     } else {
         Ok(None)
@@ -54,7 +54,7 @@ async fn grant_to(c: &Ctx, app: &App, port: PortRef, subject: Subject) -> Result
     };
     let saved = c.client.create_grant(&req).await?;
     c.warn_pending(&saved.enforcement);
-    println!("granted");
+    socketguard_core::outln!("granted");
     Ok(())
 }
 
@@ -98,7 +98,7 @@ pub async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
     }
     let interactive = p.interactive();
     let status = c.client.status().await?;
-    println!("{}\n", render::networks(&status.networks));
+    socketguard_core::outln!("{}\n", render::networks(&status.networks));
 
     // 1. A Yggdrasil network, if the node is running and none is configured.
     if !status
@@ -107,7 +107,9 @@ pub async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
         .any(|n| n.kind == NetworkKind::Yggdrasil)
     {
         if let Some(addr) = yggdrasil_node() {
-            println!("A Yggdrasil node is running (address {addr}) but has no network here.");
+            socketguard_core::outln!(
+                "A Yggdrasil node is running (address {addr}) but has no network here."
+            );
             if interactive && p.confirm("Add a Yggdrasil network?") {
                 let n = c
                     .client
@@ -122,9 +124,9 @@ pub async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
                     })
                     .await?;
                 c.warn_pending(&n.enforcement);
-                println!("added network {}", n.value.id);
+                socketguard_core::outln!("added network {}", n.value.id);
             } else if !interactive {
-                println!("Add it with: socketguard networks add yggdrasil");
+                socketguard_core::outln!("Add it with: socketguard networks add yggdrasil");
             }
         }
     }
@@ -149,17 +151,18 @@ pub async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
         }
     }
     if found.is_empty() {
-        println!("No remote-administration listener (sshd, RDP) without a grant.");
+        socketguard_core::outln!("No remote-administration listener (sshd, RDP) without a grant.");
     }
     for (app, port) in found {
-        println!(
+        socketguard_core::outln!(
             "{} listens for remote administration on {port} and nobody can reach it.",
             app.name
         );
         if !interactive {
-            println!(
+            socketguard_core::outln!(
                 "  grant it with: socketguard grant {}:{} <peer>",
-                app.name, port.port
+                app.name,
+                port.port
             );
             continue;
         }
@@ -176,7 +179,7 @@ pub async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
 
     // 3. Protect-host, with the lockout check.
     if status.protect_host_interfaces.is_empty() {
-        println!(
+        socketguard_core::outln!(
             "\nWhole-host protection also closes listeners that SocketGuard has no address for."
         );
         if interactive && p.confirm("Turn on protect-host?") {
@@ -195,22 +198,22 @@ pub async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
                 .filter(|s| !s.is_empty())
                 .collect();
             if interfaces.is_empty() {
-                println!("no interfaces given; protect-host stays off");
+                socketguard_core::outln!("no interfaces given; protect-host stays off");
             } else if set_protect_host(c, interfaces.clone(), false)
                 .await?
                 .is_none()
             {
                 if p.confirm("Turn it on anyway (--force)?") {
                     set_protect_host(c, interfaces, true).await?;
-                    println!("protect-host is on");
+                    socketguard_core::outln!("protect-host is on");
                 }
             } else {
-                println!("protect-host is on");
+                socketguard_core::outln!("protect-host is on");
             }
         } else if !interactive {
-            println!("Turn it on with: socketguard protect-host on <interface>...");
+            socketguard_core::outln!("Turn it on with: socketguard protect-host on <interface>...");
         }
     }
-    println!("\nDone. `socketguard status` shows the result.");
+    socketguard_core::outln!("\nDone. `socketguard status` shows the result.");
     Ok(())
 }

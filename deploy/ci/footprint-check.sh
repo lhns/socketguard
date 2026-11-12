@@ -108,7 +108,6 @@ FILE_ITEMS=(
     "setup-log|/setup-log\.json$"
     "archived-database|\.pre-v1"
     "temp-file|/socketguard\.tmp-"
-    "torrc-backup|\.socketguard\.bak$"
     "dir-tor|/tor$"
     "dir-yggdrasil|/yggdrasil$"
 )
@@ -146,8 +145,7 @@ collect_linux() {
     paths=$(existing /lib/systemd/system/socketguard.service /usr/lib/systemd/system/socketguard.service \
                      /etc/systemd/system/socketguard.service /etc/socketguard /var/lib/socketguard \
                      /run/socketguard.sock
-            find /etc/socketguard /var/lib/socketguard -mindepth 1 -maxdepth 1 2>/dev/null
-            find /etc/tor -maxdepth 2 -name '*.socketguard.bak' 2>/dev/null)
+            find /etc/socketguard /var/lib/socketguard -mindepth 1 -maxdepth 1 2>/dev/null)
     rec "$(state_nft_table inet "$(run nft list table inet socketguard)")" nft-table-inet
     rec "$(state_nft_table ip6 "$(run nft list table ip6 socketguard)")" nft-table-ip6-legacy
     rec "$(state_listed "$paths" 'systemd/system/socketguard\.service$')" systemd-unit
@@ -166,8 +164,7 @@ collect_linux() {
 collect_macos() {
     local paths d="/Library/Application Support/SocketGuard"
     paths=$(existing /Library/LaunchDaemons/de.lhns.socketguard.plist "$d" /var/run/socketguard.sock
-            find "$d" -mindepth 1 -maxdepth 1 2>/dev/null
-            find /opt/homebrew/etc/tor /usr/local/etc/tor -maxdepth 2 -name '*.socketguard.bak' 2>/dev/null)
+            find "$d" -mindepth 1 -maxdepth 1 2>/dev/null)
     rec "$(state_pf_anchor_rules "$(run pfctl -a socketguard -sr)")" pf-anchor-rules
     rec "$(state_pf_conf_line "$(cat /etc/pf.conf 2>/dev/null)")" pf-conf-anchor-line
     rec "$(state_listed "$paths" 'LaunchDaemons/de\.lhns\.socketguard\.plist$')" launchd-plist
@@ -242,14 +239,13 @@ self_test() {
     expect pf-conf-commented ABSENT "$(state_pf_conf_line $'# anchor "socketguard"\nanchor "com.apple/*"')"
     expect pf-conf-absent ABSENT "$(state_pf_conf_line $'anchor "com.apple/*"')"
 
-    local list=$'/etc/socketguard\n/etc/socketguard/socketguard.json\n/var/lib/socketguard/socketguard.db-wal\n/var/lib/socketguard/socketguard.db.pre-v1.2\n/var/lib/socketguard/socketguard.tmp-12-abc\n/etc/tor/torrc.socketguard.bak\n/etc/systemd/system/socketguard.service'
+    local list=$'/etc/socketguard\n/etc/socketguard/socketguard.json\n/var/lib/socketguard/socketguard.db-wal\n/var/lib/socketguard/socketguard.db.pre-v1.2\n/var/lib/socketguard/socketguard.tmp-12-abc\n/etc/systemd/system/socketguard.service'
     expect list-config PRESENT "$(state_listed "$list" '/socketguard\.json$')"
     expect list-db-not-wal ABSENT "$(state_listed "$list" '/socketguard\.db$')"
     expect list-wal PRESENT "$(state_listed "$list" '/socketguard\.db-wal$')"
     expect list-shm ABSENT "$(state_listed "$list" '/socketguard\.db-shm$')"
     expect list-prev1 PRESENT "$(state_listed "$list" '\.pre-v1')"
     expect list-tmp PRESENT "$(state_listed "$list" '/socketguard\.tmp-')"
-    expect list-torrc-bak PRESENT "$(state_listed "$list" '\.socketguard\.bak$')"
     expect list-unit PRESENT "$(state_listed "$list" 'systemd/system/socketguard\.service$')"
     expect list-dir-exact ABSENT "$(state_listed "$list" '^/var/lib/socketguard$')"
     local mlist=$'/var/lib/socketguard/tor\n/var/lib/socketguard/yggdrasil'
@@ -306,7 +302,7 @@ self_test() {
 
 usage() { echo "usage: $0 expect-absent|expect-present [--allow-data] [--require NAME[,NAME]] [--ledger-export FILE] | --self-test" >&2; exit 2; }
 
-DATA_ITEMS=" config-dir data-dir config-json database database-wal database-shm setup-log archived-database temp-file torrc-backup dir-tor dir-yggdrasil account-socketguard-net "
+DATA_ITEMS=" config-dir data-dir config-json database database-wal database-shm setup-log archived-database temp-file dir-tor dir-yggdrasil account-socketguard-net "
 ALLOWED=" "
 mode="" ledger="" selftest=0 extra_required=""
 while [ $# -gt 0 ]; do

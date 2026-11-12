@@ -99,8 +99,8 @@ mn_bundled() {
 mn_tor() {
     mn_step "managed Tor"
     $SG networks add tor --id tor || mn_die "networks add tor failed"
-    mn_note "waiting for the bootstrap (up to 5 minutes)"
-    mn_wait_up tor 300 || mn_die "the managed Tor network is not up after 5 minutes"
+    mn_note "waiting for the bootstrap (up to 10 minutes)"
+    mn_wait_up tor 600 || mn_die "the managed Tor network is not up after 10 minutes"
     mn_ok "the managed Tor network is up (bootstrapped)"
     local pid uid want runs
     pid="$(mn_pid '/third_party/tor/tor')"

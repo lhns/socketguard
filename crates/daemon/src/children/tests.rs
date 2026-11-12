@@ -244,7 +244,7 @@ impl HealthCheck for Scripted {
         if q.len() > 1 {
             q.pop_front().unwrap()
         } else {
-            q.front().copied().unwrap_or(ChildHealth::Starting)
+            q.front().cloned().unwrap_or(ChildHealth::Starting)
         }
     }
 }
@@ -351,4 +351,72 @@ async fn a_quiet_line_is_not_taken_for_the_reason_it_exited() {
         sup.status("t").detail.as_deref(),
         Some("Tor exited: [err] cannot bind")
     );
+}
+
+/// A check stuck on a socket: it waits until the test drops the sender (or two real
+/// seconds pass, so no thread outlives the test).
+struct Hanging(Mutex<std::sync::mpsc::Receiver<()>>);
+
+impl HealthCheck for Hanging {
+    fn check(&self) -> ChildHealth {
+        let _ = self
+            .0
+            .lock()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(2));
+        ChildHealth::Up
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn failing_checks_are_named_after_a_few_and_cleared_when_they_work_again() {
+    let (sup, _fake) = supervisor();
+    let mut s = spec(&[]);
+    let mut steps: Vec<ChildHealth> = (0..6)
+        .map(|_| ChildHealth::NotReady("cannot ask Tor over its control port: refused".into()))
+        .collect();
+    steps.extend([ChildHealth::Bootstrapping(30), ChildHealth::Up]);
+    s.health = Some(Arc::new(Scripted(Mutex::new(steps.into()))));
+    sup.set("t", Some(s));
+    pass(TICK).await;
+
+    // The first check runs at once: four failures by 3 s, only the log (at debug) knows.
+    pass(Duration::from_millis(3100)).await;
+    assert_eq!(sup.status("t").detail, None);
+    assert_eq!(sup.status("t").state, ChildState::Starting);
+
+    // The fifth in a row is shown.
+    pass(Duration::from_millis(1000)).await;
+    assert_eq!(
+        sup.status("t").detail.as_deref(),
+        Some("cannot ask Tor over its control port: refused")
+    );
+    assert_eq!(sup.status("t").state, ChildState::Starting);
+
+    // It works again: the detail goes.
+    pass(Duration::from_millis(2000)).await;
+    let st = sup.status("t");
+    assert_eq!(st.detail, None);
+    assert_eq!(st.state, ChildState::Bootstrapping);
+    assert_eq!(st.progress, Some(30));
+    pass(Duration::from_millis(1000)).await;
+    assert_eq!(sup.status("t").state, ChildState::Up);
+}
+
+/// Real time: the paused clock does not advance while a blocking thread is busy.
+#[tokio::test]
+async fn a_check_that_never_returns_is_given_up_on_and_named() {
+    let (release, rx) = std::sync::mpsc::channel::<()>();
+    let started = std::time::Instant::now();
+    let health = bounded_probe(
+        Arc::new(Hanging(Mutex::new(rx))),
+        Duration::from_millis(200),
+    )
+    .await;
+    assert_eq!(
+        health,
+        ChildHealth::NotReady("the health check did not answer within 200ms".into())
+    );
+    assert!(started.elapsed() < Duration::from_millis(1500));
+    drop(release);
 }

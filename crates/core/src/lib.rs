@@ -6,6 +6,7 @@ pub mod credential;
 pub mod identity;
 pub mod install_log;
 pub mod model;
+pub mod out;
 pub mod paths;
 pub mod portable;
 pub mod reach;

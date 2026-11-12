@@ -93,7 +93,7 @@ impl Host for SystemHost {
     }
 
     fn say(&mut self, line: &str) {
-        println!("{line}");
+        socketguard_core::outln!("{line}");
     }
 
     fn interactive(&self) -> bool {
@@ -103,7 +103,7 @@ impl Host for SystemHost {
 
     fn confirm(&mut self, question: &str) -> bool {
         use std::io::Write;
-        print!("{question} ");
+        socketguard_core::out!("{question} ");
         let _ = std::io::stdout().flush();
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() {
