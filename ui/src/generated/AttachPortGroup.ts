@@ -2,6 +2,6 @@
 
 /**
  * Body of `PUT /api/port-groups/{id}/apps/{app_id}`. Attaching a group to an app widens
- * what the grants covering the app's All sockets cover; where that reaches Anyone it needs `confirm_open`.
+ * what the grants covering the app's All ports cover; where that reaches Anyone it needs `confirm_open`.
  */
 export type AttachPortGroup = { confirm_open: boolean, };

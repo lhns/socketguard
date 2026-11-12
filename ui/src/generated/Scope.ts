@@ -2,6 +2,6 @@
 import type { Protocol } from "./Protocol";
 
 /**
- * Which sockets of an app a grant, a tag member or an address means.
+ * Which ports of an app a grant, a tag member or an address means.
  */
 export type Scope = { "kind": "all" } | { "kind": "port", port: number, proto: Protocol, } | { "kind": "group", id: string, };
