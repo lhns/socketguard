@@ -4,7 +4,7 @@
 
 Accepted. Supersedes ADRs 0009 and 0016-0024, the schema and migration parts of ADR 0005, and the stale-socket deletion of ADR 0007.
 
-Amended below; read the amendments in order. The address mode, split/merge and "every app has an address" are superseded by ADR 0047.
+Amended below; read the amendments in order. The address mode, split/merge and "every app has an address" are superseded by ADR 0047. Amended by ADR 0046: unidentified sockets become apps (the amendment on unattributable sockets). Superseded in part by ADR 0053: the reviewed flag (new apps are no longer pending).
 
 ## Date
 

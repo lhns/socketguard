@@ -4,7 +4,7 @@
 
 Accepted
 
-Amended below; read the amendments in order.
+Amended below; read the amendments in order. ADR 0054 makes an exception for portable mode: its filters live in a dynamic session, not persistently.
 
 ## Date
 

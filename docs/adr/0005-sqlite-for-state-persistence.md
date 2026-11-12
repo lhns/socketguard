@@ -4,6 +4,8 @@
 
 Accepted (schema and migrations superseded by ADR 0027)
 
+Superseded in part by ADR 0050: the database location (it no longer defaults to the working directory).
+
 ## Date
 
 2026-03-12

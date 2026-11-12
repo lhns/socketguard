@@ -1,5 +1,5 @@
 # Release (ADR 0050): on a tag v<version>, build and test every package (packages.yml), then put
-# the MSI, deb, rpm, pkg and SHA256SUMS on a DRAFT GitHub release. workflow_dispatch is a dry
+# the MSI, portable zip, deb, rpm, pkg and SHA256SUMS on a DRAFT GitHub release. workflow_dispatch is a dry
 # run: same builds, the files and SHA256SUMS are uploaded as a workflow artifact and no release
 # is made. Packages are unsigned; docs/packaging.md lists the secrets and where signing goes.
 name: release

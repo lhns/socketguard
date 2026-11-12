@@ -36,8 +36,8 @@ fine to run directly.
                     (bundled third-party files per platform)
 - deploy/         — bundle/ (fetch pinned Tor/Yggdrasil/Wintun), ci/ (version and footprint checks,
                     macOS smoke), e2e/ (Docker tests), otel/ (telemetry stack), systemd/
-- test/           — Package tests: msi.ps1, portable.ps1, deb.sh, rpm.sh, rpm-systemd.sh, pkg.sh, managed.sh
-- docs/           — adr/, api.md, footprint.md, packaging.md, manual-checks.md
+- test/           — Package tests: msi.ps1, portable.ps1, deb.sh, rpm.sh, rpm-systemd.sh, pkg.sh, managed.sh, managed-helpers.ps1 (sourced by the others)
+- docs/           — adr/, api.md, cli.md, footprint.md, packaging.md, manual-checks.md
 - .github/workflows/ — ci, packages (builds and installs each package), e2e (nightly/dispatch),
                     release (tags); .forgejo/workflows/ci.yml
 

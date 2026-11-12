@@ -78,7 +78,7 @@ credentials, groups or grants is saved before it is enforced; if a network that 
 enforced by the firewall (Tor) still has a change waiting that it could not apply, the
 response is **202** instead, with the same body (deletes: a body with only the notice) plus
 [`enforcement`](#pending-enforcement). A network that is down but has nothing outstanding
-does not cause a 202. Every error has the [error body](#errors).
+does not cause a 202. Creating or renaming a peer or a peer group, `PUT /api/networks/{id}/peers` and `/bridges`, `DELETE /api/networks/{id}`, `apply`, `disable` and `enable` never answer 202 (except `POST /api/networks`, below). Every error has the [error body](#errors).
 
 | Method | Path | Request | Response | Notes |
 |---|---|---|---|---|
@@ -86,7 +86,7 @@ does not cause a 202. Every error has the [error body](#errors).
 | GET | `/api/events` | | SSE stream | [events](#events) |
 | GET | `/api/apps` | | `App[]` | |
 | GET | `/api/apps/{id}` | | `AppDetail` | app with addresses (the ones serving its rows, each with `up`; none until a grant names a row), ports, grants on it (with reach), `access` (every access with its origin: direct, tag, group or reservation, and what it covers on this app: `scope` and `ports`), its `tags`, the port groups attached to it (`port_groups`) and counters |
-| GET | `/api/apps/{id}/share` | | `ShareResponse` | per onion service and granted peer with a Tor client key the daemon generated: the `<onion>:descriptor:x25519:<key>` line for the client's `ClientOnionAuthDir`. Holds private keys |
+| GET | `/api/apps/{id}/share` | | `ShareResponse` | `{tor: [{network_id, hostname, peer_id, peer_label, auth_private}]}`, per onion service and granted peer with a Tor client key the daemon generated: `auth_private` is the `<onion>:descriptor:x25519:<key>` line for the client's `ClientOnionAuthDir`. Holds private keys |
 | DELETE | `/api/apps/{id}` | | 204 | forgets the app, its addresses and its grants; **it reappears as a new, closed app the next time it listens** |
 | POST | `/api/apps/{id}/move` | `MoveAppRequest` | `AppDetail` | `{"to": app id, "confirm_open"}`: moves the app's addresses, grants, tag memberships and reservation bindings to another app, for a program that came back under a new identity. Grants the target already has are skipped; a port group used by a moved item is attached to the target. Needs `"confirm_open": true` where an Anyone grant moves or the target gains access for Anyone (409 `confirmation_required` otherwise) |
 | GET | `/api/peers` | | `Peer[]` | |
@@ -94,27 +94,27 @@ does not cause a 202. Every error has the [error body](#errors).
 | GET | `/api/peers/{id}` | | `Peer` | |
 | PATCH | `/api/peers/{id}` | `UpdateLabel` | `Peer` | rename |
 | DELETE | `/api/peers/{id}` | | 204 | also deletes the grants naming the peer |
-| POST | `/api/credentials/parse` | `ParseCredentialsRequest` | `ParsedCredential[]` | classifies pasted values (newline, comma or space separated); changes nothing |
+| POST | `/api/credentials/parse` | `ParseCredentialsRequest` | `ParsedCredential[]` | `{"text"}`; classifies pasted values (newline, comma or space separated); changes nothing |
 | POST | `/api/peers/{id}/credentials` | `NewCredential` | `Credential` (201) | |
-| POST | `/api/peers/{id}/tor-key` | | `TorKeyResponse` (201) | generates an x25519 pair: the public key becomes a `tor_client_key` credential, the private key is stored in the database (like the onion service keys) and returned. Replaces the key generated before; a pasted key stays |
+| POST | `/api/peers/{id}/tor-key` | | `TorKeyResponse` (201) | `{credential, private_key}`; generates an x25519 pair: the public key becomes a `tor_client_key` credential, the private key is stored in the database (like the onion service keys) and returned. Replaces the key generated before; a pasted key stays |
 | DELETE | `/api/peers/{id}/credentials/{cred_id}` | | 204 | |
 | GET | `/api/peer-groups` | | `PeerGroup[]` | |
 | POST | `/api/peer-groups` | `NewGroup` | `PeerGroup` (201) | |
 | GET | `/api/peer-groups/{id}` | | `PeerGroup` | |
 | PATCH | `/api/peer-groups/{id}` | `UpdateLabel` | `PeerGroup` | rename |
 | DELETE | `/api/peer-groups/{id}` | | 204 | also deletes the grants naming the group |
-| PUT | `/api/peer-groups/{id}/members` | `SetMembers` | `PeerGroup` | replaces the members |
+| PUT | `/api/peer-groups/{id}/members` | `SetMembers` | `PeerGroup` | `{"peer_ids": [peer id]}` replaces the members |
 | GET | `/api/grants` | query `app`, `tag`, `reservation`, `peer`, `group` (all optional) | `GrantView[]` | `app`/`tag`/`reservation`: grants whose target is that app/tag/reservation; `peer` matches grants to the peer or to a group it is in |
-| POST | `/api/grants` | `NewGrant` | `GrantView` (201) | `target` is `{"kind": "app", "tag" or "reservation", "id"}`; a reservation takes scope All only. Anyone needs `"confirm_open": true`. The grant creates the addresses of the rows it names (see [addresses](#addresses-and-reservations)) |
+| POST | `/api/grants` | `NewGrant` | `GrantView` (201) | `target` is `{"kind": "app", "tag" or "reservation", "id"}`; `subject` is `{"kind": "peer" or "group", "id"}` or `{"kind": "anyone"}`; `scope` (default All) and `network_id` (default every network) are optional; a reservation takes scope All only. Anyone needs `"confirm_open": true`. The grant creates the addresses of the rows it names (see [addresses](#addresses-and-reservations)) |
 | DELETE | `/api/grants/{id}` | | 204 | |
 | POST | `/api/changes` | `ChangesRequest` | `ChangesResponse` | [batch changes](#batch-changes): many operations, one transaction, one firewall update |
 | GET | `/api/tags` | | `Tag[]` | [tags](#tags) |
-| POST | `/api/tags` | `NewTag` | `Tag` (201) | apps already matching the patterns join |
+| POST | `/api/tags` | `NewTag` | `Tag` (201) | `label`, optional `patterns` and `members` (`TagMember[]`); apps already matching the patterns join |
 | GET | `/api/tags/{id}` | | `Tag` | |
 | PATCH | `/api/tags/{id}` | `UpdateTag` | `Tag` | rename and/or replace the patterns; apps matching a new pattern join, none leaves. If any would join a tag that has a grant to Anyone, it needs `"confirm_open": true` (409 `confirmation_required` otherwise) |
 | DELETE | `/api/tags/{id}` | | 204 | also deletes the grants on the tag |
 | POST | `/api/tags/{id}/members` | `NewTagMember` | `Tag` | an app with a `scope` (all of it by default, one port, or a port group attached to it); a manual addition clears an exclusion. On a tag that has a grant to Anyone it opens the app, so it needs `"confirm_open": true` |
-| DELETE | `/api/tags/{id}/members/{app_id}` | query `port`, `proto` or `group` (optional) | `Tag` | without them the All-ports membership goes; with `port` (and `proto`) or `group` (a port group id) the membership by that scope. Removing a whole app that a pattern matches records an exclusion (`excluded`) |
+| DELETE | `/api/tags/{id}/members/{app_id}` | query `port`, `proto` or `group` (optional) | `Tag` | without them the All-ports membership goes; with `port` (and `proto`, default `tcp`) or `group` (a port group id) the membership by that scope; a port and a group together are 400. Removing an app's All-ports membership that a pattern gave records an exclusion (`excluded`) |
 | GET | `/api/port-groups` | | `PortGroup[]` | [port groups](#port-groups) |
 | POST | `/api/port-groups` | `NewPortGroup` | `PortGroup` (201) | `ports` (`{start, end, proto}` ranges, normalized), optional `label` (a missing or blank one names the group after its ports, e.g. `80/tcp, 443/tcp`, with ` (2)` appended on a clash; an explicit label that is taken is a 409), optional `apps` to attach it to. Needs `"confirm_open": true` where attaching opens an app to Anyone |
 | GET | `/api/port-groups/{id}` | | `PortGroup` | |
@@ -127,7 +127,7 @@ does not cause a 202. Every error has the [error body](#errors).
 | GET | `/api/reservations/{id}` | | `ReservationView` | |
 | PUT | `/api/reservations/{id}` | `{"label"}` | `ReservationView` | rename |
 | DELETE | `/api/reservations/{id}` | | 204 | release: its addresses and the grants on it go |
-| POST | `/api/reservations/{id}/bindings` | `NewBinding` | `ReservationView` | `{"target", "confirm_open"}`; binding a row opens it where the reservation has a grant to Anyone, so that needs `confirm_open` |
+| POST | `/api/reservations/{id}/bindings` | `NewBinding` | `ReservationView` (201) | `{"target", "confirm_open"}`; binding a row opens it where the reservation has a grant to Anyone, so that needs `confirm_open` |
 | DELETE | `/api/reservations/{id}/bindings/{binding_id}` | | `ReservationView` | |
 | GET | `/api/addresses` | | `Address[]` | every address, automatic and reserved, with `up` |
 | POST | `/api/addresses/{id}/reserve` | `ReserveRequest` | `ReservationView` (201) | `{"label"}`: turns an automatic address into a reservation with that row bound, keeping the address |
@@ -139,7 +139,7 @@ does not cause a 202. Every error has the [error body](#errors).
 | DELETE | `/api/networks/{id}` | | 204 | its addresses leave the interfaces first; removed from the config file as well. Query `force=true`; a Tor network whose services cannot be removed is 409 `conflict` without it. Query `confirm_exposed=true`: removing a Yggdrasil network whose node keeps running removes its block, so without it the answer is 409 `confirmation_required` with the `ExposureResponse` in `details` (unless SocketGuard is off) |
 | GET | `/api/exposure` | | `ExposureResponse` | what becomes reachable when a block goes, read only (ADR 0051). Query `without=<network id>` or `all` (default). `networks`: per Yggdrasil network `{network, kind, interface?, node_running, listeners: [{app, port, proto}]}`. `listeners` are the known ports bound to all IPv6 addresses (empty when the node does not run). Frontends show it before confirming turn off or remove. 404 for an unknown network |
 | GET | `/api/settings` | | `Settings` | only `protect_host_interfaces`; there is no address mode (`PUT /api/settings` is gone) |
-| PUT | `/api/settings/protect-host` | `ProtectHostRequest` | `ProtectHostResponse` | an empty list turns it off; refused with 409 `protect_host_refused` unless `force` |
+| PUT | `/api/settings/protect-host` | `ProtectHostRequest` | `ProtectHostResponse` | `{"interfaces": [name], "force"}`, answer `{settings, overridden}` (`overridden`: the lockout risks that `force` overrode); an empty list turns it off; refused with 409 `protect_host_refused` unless `force` |
 | GET | `/api/activity` | query `since`, `kind`, `app_id`, `peer_id`, `limit`, `before` | `ActivityRecord[]` | newest first; `since` is RFC 3339; `before` is a record id, for paging |
 | GET | `/api/export` | | `ExportDocument` | [export and apply](#export-and-apply) |
 | POST | `/api/apply` | `ApplyRequest` | `ApplyResponse` | |
@@ -169,7 +169,8 @@ A network is a backend instance (`POST /api/networks`, `{"id"?, "type": ..., ...
 | `type` | Fields | Notes |
 |---|---|---|
 | `ula` | `interface` (default loopback) | Local; singleton |
-| `slaac`, `dhcpv6` | `interface`, `prefix?` | LAN |
+| `slaac` | `interface`, `prefix?` (default: discovered from the interface) | LAN |
+| `dhcpv6` | `interface` | LAN |
 | `yggdrasil` | `interface`, `admin_endpoint?` (a `unix://` endpoint is read by the daemon itself, any other one through `yggdrasilctl`), or `managed`, `peers` | singleton |
 | `tor` | `control` (`host:port` or `unix:/path`, default `127.0.0.1:9051`), `auth`, or `managed`, `bridges` (see `PUT /api/networks/{id}/bridges`) | singleton; no interface. `auth` is `"cookie"` (default; SAFECOOKIE with the cookie file named by PROTOCOLINFO), `"cookie_insecure"`, `"none"` (Unix socket only) or `{"password": "..."}`. Through the API only the defaults are accepted (below); other settings are edited in the config file |
 
@@ -336,8 +337,9 @@ upgrades (the name is for humans).
 `reservations` match by label. Each lists its bindings (an app with a `scope`, or a tag by label)
 and its grants (`network?` and `subject`; a grant on a reservation always covers all its rows).
 The addresses of reservations are not part of the document, so applying it elsewhere creates
-new ones. A document from before this change may carry `settings.address_mode`: it is still
-accepted and the field is ignored.
+new ones. An older document may carry `settings.address_mode` or call `port_groups` by the key
+`socket_groups`: both are still accepted (the first is ignored, the second is read as
+`port_groups`).
 
 `POST /api/apply {"document": ..., "dry_run": bool}` compares the document with the current
 state and returns the diff, then applies it unless `dry_run`:
@@ -362,9 +364,8 @@ state and returns the diff, then applies it unless `dry_run`:
 
 The daemon opens a span per request (`tower-http` `TraceLayer`; name `METHOD /route`) and
 takes the W3C `traceparent` header as its parent, so a CLI or UI action and the daemon's work
-are one trace when OpenTelemetry export is configured (ADR 0034). The client crate adds the
-header from the current OpenTelemetry context when built with its `otel` feature, or from any
-hook set with `Client::with_header_hook`.
+are one trace when OpenTelemetry export is configured (ADR 0034). The client crate sends no trace
+context (ADR 0034, amendment): a CLI or UI action is one trace starting at the daemon's API layer.
 
 ## Client
 
@@ -372,7 +373,7 @@ hook set with `Client::with_header_hook`.
 `events`, ...), returning the core types, and a typed `Error` (`Connect`, `Api { status, code,
 message, details }`, `Protocol`). The daemon's test `tests/coverage.rs` compares the daemon's
 `api::ROUTES` with the client's `CLIENT_ROUTES` and fails when they differ; the CLI's own table
-(`CLI_ROUTES`, which lists the client method behind every command) is checked against
+(`CLI_ROUTES` in `crates/cli/src/routes.rs`, which lists the client method behind every command) is checked against
 `ROUTES` too (ADR 0033). The CLI test also reads `ui/src-tauri/src/main.rs` and fails when a route has no Tauri command, except for the CLI-only `completions` and `watch` (ADR 0042). A change that gets the 202 notice reaches the UI as `{value, enforcement}`.
 
 ## TypeScript types

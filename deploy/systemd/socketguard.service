@@ -6,8 +6,8 @@ After=local-fs.target
 Before=network-pre.target
 Wants=network-pre.target
 # A node must not start before the rules that close it (ADR 0051). Yggdrasil's own unit
-# ordering was not checked against its packaging (only the unit name `yggdrasil`, as
-# `networks setup` uses it); this makes the order explicit. A unit that does not exist is
+# ordering was not checked against its packaging (only the unit name `yggdrasil`, the
+# name the Yggdrasil package uses); this makes the order explicit. A unit that does not exist is
 # ignored.
 Before=yggdrasil.service
 Conflicts=shutdown.target

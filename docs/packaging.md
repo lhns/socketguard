@@ -9,21 +9,24 @@ real runner and checks the host from outside with `deploy/ci/footprint-check.*`;
 **Bundled Tor and Yggdrasil (ADR 0052).** Each package job first runs `.github/actions/bundle`,
 which calls `deploy/bundle/fetch.sh --require-signature --build-yggdrasil <os>-<arch>
 installer/payload/<os>/` (Tor Expert Bundle with its Tor Project signature, Yggdrasil built from the
-pinned commit with Go, `wintun.dll` on Windows; `gpg` and Go are installed on the runner when
-missing, downloads are cached on `hashFiles('deploy/bundle/versions.toml')`). The build scripts then
-pick the files up (`installer/payload/README.md`). They land in `C:\Program Files\SocketGuard	hird_party\`,
+pinned commit with Go, `wintun.dll` on Windows; the action sets up the Go version `versions.toml`
+asks for and installs `gpg` when the runner has none, downloads are cached on
+`hashFiles('deploy/bundle/versions.toml')`). The build scripts then
+pick the files up (`installer/payload/README.md`). They land in `C:\Program Files\SocketGuard\third_party\`,
 `/usr/lib/socketguard/third_party/` and `/usr/local/lib/socketguard/third_party/`; the daemon looks
-there (and next to its executable, then `$SOCKETGUARD_THIRD_PARTY`). Modes are set so the
+there (it looks next to its executable first, then at the platform's package location, then in
+`$SOCKETGUARD_THIRD_PARTY`). Modes are set so the
 unprivileged account the children run as can run them: `socketguard-net` on Linux and macOS (the
 Linux packages depend on `zlib1g` / `zlib` for the `libz.so.1` Tor needs), LocalService on Windows
 (Program Files is readable by everyone). The CI builds Windows x86_64, Linux x86_64 (the nfpm file
 says `arch: amd64`) and macOS for both architectures (an Apple silicon and an Intel runner each build and test
-their own pkg). Linux aarch64 is fetchable (`fetch.sh linux-aarch64`) but no job builds or tests it.
+their own pkg). Linux aarch64 and Windows aarch64 are fetchable (`fetch.sh linux-aarch64`,
+`windows-aarch64`) but no job builds or tests them.
 
 | | Install | Upgrade | Remove | Purge |
 |---|---|---|---|---|
 | **MSI** (Windows, per machine) | `service install`; `access allow <ALLOWUSER>` when given | the same, after the old version is removed without `uninstall`; the service is restarted | `uninstall --keep-data --yes` | `socketguard-daemon uninstall --purge` (the MSI never deletes data) |
-| **deb** | postinst `configure`: `service install` | the same (`configure` runs again); a running daemon is restarted | prerm `remove`: `uninstall --keep-data --yes` | postrm `purge`: deletes the named files, `<state>/tor`, `<state>/yggdrasil`, and `socketguard-net` when the install record says the install created it (`apt purge`) |
+| **deb** | postinst `configure`: `service install` | the same (`configure` runs again); a running daemon is restarted | prerm `remove`: `uninstall --keep-data --yes` | postrm `purge`: deletes the named files, `<state>/tor`, `<state>/yggdrasil`, `<state>/run`, and `socketguard-net` when the install record says the install created it (`apt purge`) |
 | **rpm** | `%post`: `service install` | the same (`$1` is 2); restarted | `%preun` with `$1` = 0: `uninstall --keep-data --yes` | none: run `socketguard-daemon uninstall --purge` before erasing |
 | **pkg** (macOS) | postinstall: `service install` | the same; restarted | no uninstaller: `sudo socketguard-daemon uninstall`, then delete the files (README) | `sudo socketguard-daemon uninstall --purge` |
 
@@ -72,6 +75,9 @@ service before replacing the file (`ServiceControl`, stop only) and `service ins
   the account of the elevated portable daemon (the card says "the account running portable
   SocketGuard"), and `data\tor` and `data\yggdrasil` have a protected access list that the read
   access of the allowed user on `data\` does not reach.
+- An existing (unmanaged) Tor or Yggdrasil node is refused in portable mode: the folder is writable by
+  the user, so a path outside it could steer something that runs with administrator rights.
+  SocketGuard's own Tor and Yggdrasil (`managed`) are allowed.
 - Whether the Wintun driver was in the driver store before the first managed Yggdrasil start is kept
   in `data\session.json`. A clean exit removes the driver (`pnputil /delete-driver`, never `/force`)
   only if it was absent, after the children have ended; a kill leaves it, and the next clean exit
@@ -90,8 +96,8 @@ service before replacing the file (`ServiceControl`, stop only) and `service ins
 - Dependencies: nftables, iproute2, conntrack, libwebkit2gtk-4.1, GTK 3, zlib (Fedora names in the rpm).
 - Documentation: `/usr/share/doc/socketguard/{LICENSE,THIRD_PARTY_NOTICES.md}`; the licence texts of
   the bundled programs are in `third_party/licenses/`.
-- No systemd (a container): the scripts print a note and do nothing; run
-  `socketguard-daemon service install` where systemd runs.
+- No systemd (a container): the install scripts print a note and do nothing, the remove scripts do
+  nothing; run `socketguard-daemon service install` where systemd runs.
 - `SOCKETGUARD_FORCE_REMOVE=1` makes the remove scripts pass `--force` and ignore a failure.
 - The deb `postrm` cannot run the daemon (the file is gone at purge). It deletes the same named
   files; `the_debian_postrm_names_what_purge_deletes` (crates/daemon/src/uninstall.rs) fails when
@@ -119,8 +125,8 @@ service before replacing the file (`ServiceControl`, stop only) and `service ins
 ## Releases
 
 Push a tag `v<version>` (the workspace version in `Cargo.toml`). `release.yml` checks they match,
-builds and tests all packages, and creates a **draft** release with the MSI, deb, rpm, pkg and
-`SHA256SUMS`. The release notes name the shipped Tor, Yggdrasil and Wintun versions (read from
+builds and tests all packages, and creates a **draft** release with the MSI, the portable zip, the
+deb, the rpm, the pkgs (arm64 and x86_64) and `SHA256SUMS`. The release notes name the shipped Tor, Yggdrasil and Wintun versions (read from
 `deploy/bundle/versions.toml`), link the pinned Yggdrasil source commit and the Tor version page, and
 point to `THIRD_PARTY_NOTICES.md`; the same text is the job summary of a dry run. *Run workflow* on a branch is a dry run: the same files, uploaded as a workflow
 artifact, no release.
@@ -142,9 +148,11 @@ Provide these repository secrets and add the marked steps (`SIGN` comments in
 
 ## What CI proves, and what it does not
 
-`packages.yml` on every push to `installers`, `redesign` and `main`, and for each release. Every
-job also has the **managed networks section** (`test/managed.sh` on Linux and macOS, `test/msi.ps1`
-on Windows), summarised in a line `managed networks: N checks passed, M skipped`:
+`packages.yml` on every push to `installers`, `redesign`, `main`, `portable` and `bundled`, on
+request, and for each release. The MSI, portable, deb and pkg jobs also have the **managed networks
+section** (`test/managed.sh` for the deb and the pkg, `test/managed-helpers.ps1` shared by
+`test/msi.ps1` and `test/portable.ps1` on Windows), summarised in a line
+`managed networks: N checks passed, M skipped`; the rpm jobs check the bundled files only (below):
 
 - after the install: `status --json` names the bundled `tor` and `yggdrasil` with the versions of
   `third_party/VERSIONS` and the directory the daemon found; the licence texts and notices are
@@ -173,9 +181,14 @@ and the Yggdrasil assertions are SKIPPED with that reason, not faked); Tor needs
 
 - **MSI** (Windows runner): silent install with `ALLOWUSER`; service running; the pipe answers; the
   group has the account; WFP provider, sublayer and filters present; a LAN network on a ULA /64
-  with a granted port range: one `FWP_MATCH_RANGE` filter and a connection from a second local
-  address to a granted port succeeds while a port outside the range is refused (`netsh wfp`
-  dumps and net events are uploaded as `msi-test-output`); upgrade (restarted daemon, same
+  with a granted port range: `netsh wfp show filters` names the range ends (a range condition is
+  looked for and reported, not required) and a connection from a second local address to a granted
+  port succeeds while a port outside the range is refused (`-StrictFirewall` in CI makes that a
+  failure; `netsh wfp` dumps and net events are uploaded as `msi-test-output`); after the upgrade
+  and the managed networks, a prefix block on the real engine: a connection to an address inside
+  the managed Yggdrasil node's /64 that SocketGuard did not assign is dropped. That does not prove
+  the /64 filter alone (the interface scope of the same adapter drops it too), and the granted-port
+  half is SKIPPED when a local-to-local connection does not reach the permit; upgrade (restarted daemon, same
   database file, same stored state, no `uninstall`); removal (service, filters and group gone, data
   kept); `uninstall --purge` with the daemon copied aside; `footprint-check.ps1` from outside after
   each step.
@@ -191,15 +204,20 @@ and the Yggdrasil assertions are SKIPPED with that reason, not faked); Tor needs
   driver is removed if and only if the driver store did not have it before, and `footprint-check`
   agrees. Not covered: the kill with a managed Yggdrasil (the driver staying after it).
 - **deb** (Ubuntu 22.04 VM with systemd): install, unit active and enabled, socket answers, nft
-  table, upgrade restarts onto the new binary and keeps the database inode and state, remove, purge.
-- **rpm**: dependency resolution, file list, scriptlets and library check in a Fedora container
-  without systemd, plus the full life cycle in one that runs systemd. It also checks that the bundled
-  `tor` and `yggdrasil` are in the package, run as an unprivileged user (`setpriv`) and find their libraries.
-- **rpm on systemd** (`rpm-systemd` job, Fedora container with systemd as PID 1 on the Ubuntu VM, `test/rpm-systemd.sh`): install, unit active, socket, nft table, upgrade restart, `dnf remove`, then purge by command and erase.
+  table, upgrade restarts onto the new binary and keeps the database inode and state, managed Tor
+  (as `socketguard-net`) and Yggdrasil (skipped without `/dev/net/tun`), remove, purge.
+- **rpm** (`test/rpm.sh`): dependency resolution, file list, scriptlets and library check in a Fedora
+  container without systemd (the service is not started or removed there). It also checks that the
+  bundled `tor`, `yggdrasil` and the obfs4 helper are in the package, run as an unprivileged user
+  (`setpriv`) and find their libraries. No managed network runs from an rpm.
+- **rpm on systemd** (`rpm-systemd` job, Fedora container with systemd as PID 1 on the Ubuntu VM, `test/rpm-systemd.sh`): install, `Type=notify` unit active with the nft table present at once, socket, a restart that brings the table back before it returns, upgrade restart onto the same database and state, `dnf remove`, then purge by command and erase.
 - **pkg** (macOS runners `macos-latest` = arm64 and `macos-15-intel` = x86_64, per GitHub's runner table; same test on both): install, launchd daemon answering, pf anchor line, upgrade restart,
-  `uninstall --purge` restores `/etc/pf.conf`, then the manual removal.
+  managed Tor and Yggdrasil, `uninstall --keep-data`, `uninstall --purge` restores `/etc/pf.conf`,
+  then the manual removal.
 
-Not covered: the installer dialogs (CI installs silently; the access dialog, the WebView2 note and
+Not covered: the range block (`200::/7`) of an existing Yggdrasil node on the real Windows engine
+(it needs an existing node there; the plan test, the nftables and pf renderings and the Linux netns
+test cover it, see `docs/footprint.md`), the installer dialogs (CI installs silently; the access dialog, the WebView2 note and
 the `FORCEREMOVE` path are built but never clicked or run), a standard user elevating with an
 administrator's credentials, Windows 10, Linux distributions other than Ubuntu 22.04 and Fedora,
 signing, and every dialog (see docs/manual-checks.md for the checklist a person runs once).

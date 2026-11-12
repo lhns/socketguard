@@ -1,7 +1,7 @@
 # CI on Forgejo Actions. Runners on this instance: `ubuntu-latest` = Node 22 on Debian
 # bookworm, running as root. Rust is installed per job. The Tauri crate (socketguard-ui)
 # is excluded from the Rust job: it needs webkit2gtk and builds the frontend; the `ui` job
-# covers the frontend. Docker end-to-end tests (deploy/e2e) stay local.
+# covers the frontend. Docker end-to-end tests (deploy/e2e) run in .github/workflows/e2e.yml (GitHub, nightly).
 name: ci
 
 on:

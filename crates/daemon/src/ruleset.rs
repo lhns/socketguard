@@ -16,9 +16,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
 use tracing::warn;
 
-/// The addresses of a managed Yggdrasil node: its own `200::/7` address and its routed
-/// `300::/64` subnet. SocketGuard denies exactly these as destinations on any interface
-/// (ADR 0051), so a node it does not manage is left alone. Remembered once known, so the
+/// The addresses of a Yggdrasil node: its own `200::/7` address and its routed `300::/64`
+/// subnet. For a managed node SocketGuard denies exactly these as destinations on any
+/// interface (ADR 0051), so a node it does not manage is left alone; an existing node is
+/// blocked by the whole range instead (ADR 0051, amendment). Remembered once known, so the
 /// block outlives the node being stopped or its adapter missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OverlayNode {
@@ -239,9 +240,11 @@ fn host_ipv4_rules(
 /// - Managed scope: every IP locator that is up (see [`Model`]) and every address still on
 ///   an interface (`owned`), so an address is denied from the moment it exists and until
 ///   it is gone.
-/// - Per Yggdrasil network an overlay scope for each of the node's known addresses (its
-///   `/128` and its `/64`), and one for its interface when that is known, a whole-host scope per protected interface
-///   (both families: IPv4 grants allow the way in, see [`host_ipv4_rules`]).
+/// - Per Yggdrasil network an overlay scope for its interface when that is known, plus
+///   one for the whole range `200::/7` on an existing node, or on a managed node one for
+///   each of its known addresses (its `/128` and its `/64`).
+/// - A whole-host scope per protected interface (both families: IPv4 grants allow the way
+///   in, see [`host_ipv4_rules`]).
 /// - A grant to Anyone scoped to a LAN or Local network ("everyone on <network>") admits
 ///   only that network's prefix and link-local sources, not every source on the interface.
 /// - Rules: for each IP address, each port it serves, each grant that applies, the

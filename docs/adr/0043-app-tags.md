@@ -4,6 +4,8 @@
 
 Accepted. Refines ADR 0027 and ADR 0041.
 
+Amended below; read the amendments in order.
+
 ## Date
 
 2026-11-10

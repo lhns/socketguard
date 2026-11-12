@@ -4,6 +4,8 @@
 
 Accepted. Refines ADR 0026 and ADR 0032.
 
+Amended below. Superseded in part by ADR 0050: the config file's default location (no longer `socketguard.json` in the working directory).
+
 ## Date
 
 2026-11-09

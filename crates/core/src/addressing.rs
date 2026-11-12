@@ -2,7 +2,7 @@
 //! the daemon's state, used by the ruleset producer, the Tor enforcement, the interface
 //! pass and the API, so they cannot disagree.
 //!
-//! - A **row** is (app, scope): "All ports", one socket or an attached port group.
+//! - A **row** is (app, scope): "All ports", one port or an attached port group.
 //! - A grant **names** a row: a grant on an app names (app, its scope); a grant on a tag
 //!   names each member's row. A grant on a reservation names no row.
 //! - An **automatic address** belongs to a row and is up while a grant that applies on its

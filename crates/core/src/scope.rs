@@ -1,9 +1,9 @@
-//! Scopes and port groups (ADR 0047): which sockets of an app a grant, a tag member or
+//! Scopes and port groups (ADR 0047): which ports of an app a grant, a tag member or
 //! an address means, the port sets that follow from it, and the sets themselves.
 //!
 //! [`PortRangeSet`] is the arithmetic (union, intersection, subtraction) on ports and port
 //! ranges per protocol. [`ScopePorts`] is a set of ports in two parts: `fixed`, the ports
-//! the app listens on or a scope names explicitly, and `ranged`, ports that only a socket
+//! the app has detected or a scope names explicitly, and `ranged`, ports that only a port
 //! group's range contributes. The firewall renders `fixed` ports one by one and `ranged`
 //! ones as ranges, and the exclusion rule of ADR 0047 only touches `ranged`.
 
@@ -309,12 +309,12 @@ pub fn ranges_text(ranges: &[PortRange]) -> String {
 
 // ─── Scope and port groups ─────────────────────────────────────────────────
 
-/// Which sockets of an app a grant, a tag member or an address means.
+/// Which ports of an app a grant, a tag member or an address means.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Scope {
-    /// Every socket of the app: its detected ports and its attached port groups.
+    /// "All ports" of the app: its detected ports and its attached port groups.
     #[default]
     All,
     Port {
@@ -360,7 +360,7 @@ impl Scope {
         }
     }
 
-    /// For people: `All sockets`, `80/tcp`, `group <label>` (the id if the group is unknown).
+    /// For people: `All ports`, `80/tcp`, `group <label>` (the id if the group is unknown).
     pub fn describe(&self, groups: &[PortGroup]) -> String {
         match self {
             Scope::All => "All ports".to_string(),
