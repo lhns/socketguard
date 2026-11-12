@@ -184,7 +184,6 @@ impl Engine {
                     interpreter_arg: l.interpreter_arg.clone(),
                     identity_note: l.identity_note.clone(),
                     exe_missing: false,
-                    reviewed: false,
                     system: l.system,
                     first_seen: now,
                     last_seen: now,

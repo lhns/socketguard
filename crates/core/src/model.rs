@@ -43,8 +43,6 @@ pub struct App {
     /// or removed). Computed by the daemon at poll time; not stored.
     #[serde(default)]
     pub exe_missing: bool,
-    /// False = pending: no decision has been made about this app yet.
-    pub reviewed: bool,
     /// An OS component (service or system process), so frontends can group it away from
     /// the user's own apps.
     #[serde(default)]

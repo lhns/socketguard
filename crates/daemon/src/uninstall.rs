@@ -309,10 +309,23 @@ fn list_prefixed(dir: &Path, prefix: &str) -> Vec<PathBuf> {
 }
 
 fn remove_named(report: &mut Report, f: &Path) {
-    match std::fs::remove_file(f) {
-        Ok(()) => report.removed(format!("file {}", f.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => report.left(format!("file {}", f.display()), e.to_string()),
+    let mut tries = 0;
+    loop {
+        match std::fs::remove_file(f) {
+            Ok(()) => report.removed(format!("file {}", f.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // Windows: a file another process still has open (the process that just
+            // closed it, a scanner, the indexer) cannot be deleted for a moment.
+            Err(e)
+                if cfg!(windows) && tries < 15 && matches!(e.raw_os_error(), Some(5 | 32 | 33)) =>
+            {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                continue;
+            }
+            Err(e) => report.left(format!("file {}", f.display()), e.to_string()),
+        }
+        return;
     }
 }
 
@@ -840,6 +853,61 @@ mod tests {
             }
             std::fs::remove_dir_all(w.d).unwrap();
         }
+    }
+
+
+    /// The Debian postrm cannot run the daemon (the binary is gone at purge) and deletes the
+    /// same files by a list of its own: this keeps that list in step with `named_files`.
+    #[test]
+    fn the_debian_postrm_names_what_purge_deletes() {
+        let script = include_str!("../../../installer/linux/scripts/deb-postrm");
+        let l = socketguard_core::paths::locations_for("linux", None);
+        let unix = |p: &Path| p.to_string_lossy().replace('\\', "/");
+        let (config, db) = (l.config(), l.db());
+        let p = UninstallPaths {
+            config: config.clone(),
+            db: db.clone(),
+            socket: None,
+            state_dir: l.state_dir.clone(),
+        };
+        // Files that exist by name; the prefixed ones (temp files, archived databases) are
+        // matched below by their prefix.
+        for f in named_files(&p) {
+            assert!(
+                script.contains(&unix(&f)),
+                "postrm does not delete {}",
+                f.display()
+            );
+        }
+        assert!(script.contains(&unix(&l.config_dir.join("socketguard.tmp-"))));
+        assert!(script.contains(&format!("{}.pre-v1", unix(&db))));
+        for d in l.dirs() {
+            assert!(script.contains(&unix(&d)), "postrm leaves {}", d.display());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_file_held_open_for_a_moment_is_removed_after_a_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let d = std::env::temp_dir().join(format!("sg-rm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("socketguard.db");
+        std::fs::write(&f, b"x").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&f)
+            .unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            drop(held);
+        });
+        let mut report = Report::default();
+        remove_named(&mut report, &f);
+        assert!(!f.exists());
+        assert!(report.complete(), "{}", report.render());
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

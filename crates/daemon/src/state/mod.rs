@@ -242,12 +242,17 @@ impl Database {
         })
     }
 
+    /// Close every connection, so the files can be deleted (Windows refuses otherwise).
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+
     // ======== Apps ========
 
     pub async fn insert_app(&self, app: &App) -> Result<()> {
         sqlx::query(
             "INSERT INTO apps (id, name, process_name, exe_path, interpreter_arg, identity_note, \
-             reviewed, system, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             system, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&app.id)
         .bind(&app.name)
@@ -255,7 +260,6 @@ impl Database {
         .bind(&app.exe_path)
         .bind(&app.interpreter_arg)
         .bind(&app.identity_note)
-        .bind(app.reviewed)
         .bind(app.system)
         .bind(ts(app.first_seen))
         .bind(ts(app.last_seen))
@@ -292,16 +296,6 @@ impl Database {
         Ok(())
     }
 
-    /// Returns false when the app does not exist.
-    pub async fn set_reviewed(&self, id: &str, reviewed: bool) -> Result<bool> {
-        let r = sqlx::query("UPDATE apps SET reviewed = ? WHERE id = ?")
-            .bind(reviewed)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(r.rows_affected() > 0)
-    }
-
     /// Delete an app; its ports, addresses and grants go with it. False if unknown.
     pub async fn delete_app(&self, id: &str) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
@@ -328,13 +322,13 @@ impl Database {
     async fn load_apps(&self, only: Option<&str>) -> Result<Vec<App>> {
         let rows = match only {
             Some(id) => {
-                sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, identity_note, reviewed, system, first_seen, last_seen FROM apps WHERE id = ?")
+                sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, identity_note, system, first_seen, last_seen FROM apps WHERE id = ?")
                     .bind(id)
                     .fetch_all(&self.pool)
                     .await?
             }
             None => {
-                sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, identity_note, reviewed, system, first_seen, last_seen FROM apps ORDER BY name, id")
+                sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, identity_note, system, first_seen, last_seen FROM apps ORDER BY name, id")
                     .fetch_all(&self.pool)
                     .await?
             }
@@ -349,7 +343,6 @@ impl Database {
                 interpreter_arg: r.get("interpreter_arg"),
                 identity_note: r.get("identity_note"),
                 exe_missing: false,
-                reviewed: r.get("reviewed"),
                 system: r.get("system"),
                 first_seen: parse_ts(r.get("first_seen"))?,
                 last_seen: parse_ts(r.get("last_seen"))?,
@@ -1212,7 +1205,6 @@ mod test_util {
             interpreter_arg: None,
             identity_note: None,
             exe_missing: false,
-            reviewed: false,
             system: false,
             first_seen: now(),
             last_seen: now(),

@@ -1,0 +1,12 @@
+#!/bin/sh
+# rpm %preun: $1 is 0 when the last version is being erased and 1 on an upgrade (never uninstall
+# then). The data is kept: rpm has no purge, so remove it with
+# 'socketguard-daemon uninstall --purge' before erasing the package.
+if [ "$1" = 0 ] && [ -x /usr/bin/socketguard-daemon ] && [ -d /run/systemd/system ]; then
+    if [ "${SOCKETGUARD_FORCE_REMOVE:-}" = 1 ]; then
+        /usr/bin/socketguard-daemon uninstall --keep-data --yes --force || true
+    else
+        /usr/bin/socketguard-daemon uninstall --keep-data --yes
+    fi
+fi
+exit 0

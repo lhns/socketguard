@@ -949,27 +949,6 @@ impl Engine {
                     activity,
                 );
             }
-            ChangeOp::Review { app_id, reviewed } => {
-                let app = plan
-                    .cat
-                    .apps
-                    .iter_mut()
-                    .find(|a| a.id == *app_id)
-                    .ok_or_else(|| EngineError::NotFound(format!("app {app_id}")))?;
-                app.reviewed = *reviewed;
-                let name = app.name.clone();
-                plan.change(
-                    ChangeKind::Update,
-                    ChangeItem::App,
-                    name,
-                    Some(app_id.clone()),
-                );
-                plan.writes.push(Write::SetReviewed {
-                    app_id: app_id.clone(),
-                    reviewed: *reviewed,
-                });
-                plan.event(DaemonEvent::AppsChanged);
-            }
         }
         Ok(())
     }

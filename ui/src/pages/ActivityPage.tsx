@@ -3,7 +3,7 @@ import type { ActivityKind, ActivityRecord } from "../api";
 import { formatTime } from "../lib";
 import { errorText } from "../lib";
 import { useNav } from "../nav";
-import { useActivity, useApps, usePeers, useStatus } from "../queries";
+import { useActivity, useApps, usePeers } from "../queries";
 
 const KIND_LABEL: Record<ActivityKind, string> = {
   app_discovered: "New app",
@@ -35,14 +35,12 @@ const KIND_LABEL: Record<ActivityKind, string> = {
 /** A log of what happened. Decisions are made in Apps; a row links to the thing it is about. */
 export default function ActivityPage() {
   const id = useId();
-  const nav = useNav();
   const [kind, setKind] = useState<ActivityKind | "">("");
   const [appId, setAppId] = useState("");
   const [peerId, setPeerId] = useState("");
   const [source, setSource] = useState("");
   const apps = useApps();
   const peers = usePeers();
-  const status = useStatus();
   const activity = useActivity({ kind: kind || null, appId: appId || null, peerId: peerId || null });
   const all = activity.data?.pages.flat() ?? [];
   const src = source.trim().toLowerCase();
@@ -50,16 +48,9 @@ export default function ActivityPage() {
   const appName = (aid: string | null) => (aid ? (apps.data?.find((a) => a.id === aid)?.name ?? null) : null);
   const peerLabel = (pid: string | null) => (pid ? (peers.data?.find((p) => p.id === pid)?.label ?? null) : null);
   const events = records.reduce((n, r) => n + r.count, 0);
-  const pending = status.data?.counts.pending_apps ?? 0;
 
   return (
     <div>
-      {pending > 0 && (
-        <div className="warn-banner banner" role="status">
-          <span>{pending} new {pending === 1 ? "app needs" : "apps need"} a decision.</span>
-          <button className="btn btn-sm btn-primary" onClick={() => nav.go("apps", { pendingOnly: true })}>Review in Apps</button>
-        </div>
-      )}
       <div className="toolbar">
         <label htmlFor={`${id}-k`}>Kind</label>
         <select id={`${id}-k`} className="input" value={kind} onChange={(e) => setKind(e.target.value as ActivityKind | "")}>

@@ -1,5 +1,5 @@
-//! The interactive flows, `pending` and `init`: they talk to a [`Prompter`] so the tests
-//! can script the answers. Neither has a `--json` mode.
+//! The interactive flow `init`: it talks to a [`Prompter`] so the tests can script the
+//! answers. It has no `--json` mode.
 
 use crate::commands::{set_protect_host, Ctx};
 use crate::parse;
@@ -43,76 +43,18 @@ async fn pick_subject(c: &Ctx, p: &mut dyn Prompter) -> Result<Option<Subject>> 
     }
 }
 
-/// Grant `app` (one `port`, or all) to `subject` on every network, asking first for
-/// Anyone. Whether it was granted; the caller decides what that means for the review.
-async fn grant_to(
-    c: &Ctx,
-    p: &mut dyn Prompter,
-    app: &App,
-    port: Option<PortRef>,
-    subject: Subject,
-) -> Result<bool> {
-    let mut req = NewGrant {
+/// Grant the `port` of `app` to `subject` on every network.
+async fn grant_to(c: &Ctx, app: &App, port: PortRef, subject: Subject) -> Result<()> {
+    let req = NewGrant {
         target: socketguard_core::Target::App(app.id.clone()),
-        scope: port.map_or(socketguard_core::Scope::All, socketguard_core::Scope::port),
+        scope: socketguard_core::Scope::port(port),
         network_id: None,
         subject,
         confirm_open: false,
     };
-    if req.subject == Subject::Anyone {
-        if !p.confirm(&render::open_question(&app.name, None)) {
-            println!("skipped");
-            return Ok(false);
-        }
-        req.confirm_open = true;
-    }
     let saved = c.client.create_grant(&req).await?;
     c.warn_pending(&saved.enforcement);
     println!("granted");
-    Ok(true)
-}
-
-/// Walk through the apps without a decision.
-pub async fn pending(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
-    let apps = c.client.list_apps(true).await?;
-    if c.json || !p.interactive() {
-        return c.print(&apps, || render::apps(&apps));
-    }
-    if apps.is_empty() {
-        println!("no pending apps");
-        return Ok(());
-    }
-    for app in &apps {
-        println!("\n{}", render::apps(std::slice::from_ref(app)));
-        let options = [
-            "keep closed (mark reviewed)".to_string(),
-            "grant to a peer or group".to_string(),
-            "open to anyone".to_string(),
-            "skip".to_string(),
-        ];
-        let Some(choice) = p.choose(&format!("{} is listening and closed:", app.name), &options)
-        else {
-            break;
-        };
-        let mut granted = false;
-        match choice {
-            0 => {
-                c.client.review_app(&app.id, true).await?;
-                println!("kept closed");
-            }
-            1 => {
-                if let Some(s) = pick_subject(c, p).await? {
-                    granted = grant_to(c, p, app, None, s).await?;
-                }
-            }
-            2 => granted = grant_to(c, p, app, None, Subject::Anyone).await?,
-            _ => println!("skipped"),
-        }
-        // The decision about the whole app is made here, not by a grant of one port.
-        if granted {
-            c.client.review_app(&app.id, true).await?;
-        }
-    }
     Ok(())
 }
 
@@ -188,7 +130,7 @@ pub async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
     }
 
     // 2. Remote-admin listeners.
-    let apps = c.client.list_apps(false).await?;
+    let apps = c.client.list_apps().await?;
     let exposed = c
         .client
         .activity(&ActivityQuery {
@@ -227,7 +169,7 @@ pub async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
         ];
         if p.choose(&format!("What should happen to {}?", app.name), &options) == Some(0) {
             if let Some(s) = pick_subject(c, p).await? {
-                grant_to(c, p, &app, Some(port), s).await?;
+                grant_to(c, &app, port, s).await?;
             }
         }
     }

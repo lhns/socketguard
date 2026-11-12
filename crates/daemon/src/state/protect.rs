@@ -98,7 +98,7 @@ pub fn protect_dir(path: &Path, shared: bool) -> Result<()> {
     #[cfg(windows)]
     {
         let _ = shared;
-        enforce_protected(super::winacl::protect(path), path)?;
+        enforce_protected(super::winacl::protect_dir(path), path)?;
     }
     #[cfg(not(any(unix, windows)))]
     {

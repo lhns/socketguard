@@ -1,0 +1,265 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Windows installer (ADR 0050). Built on Windows by WiX v5; see build.ps1 beside this
+  file. Per machine only: the service runs as LocalSystem and the firewall is system-wide.
+
+  Preprocessor variables, passed by build.ps1:
+    BinDir       directory holding socketguard-daemon.exe, socketguard.exe, socketguard-ui.exe
+    Version      major.minor.build (validated by build.ps1)
+    IconFile     the .ico used for the shortcut and the Add/Remove Programs entry
+    ThirdParty   defined only when installer/payload/windows holds files (see installer/payload/README.md);
+                 build.ps1 then also compiles a generated fragment with the ComponentGroup "ThirdParty"
+
+  Packages only call commands of the daemon binary (ADR 0050). Nothing in here knows how a
+  service is made, or what a firewall rule is:
+
+    install, upgrade, repair   socketguard-daemon service install      (safe to repeat)
+    removal (NOT an upgrade)   socketguard-daemon uninstall (keep-data, yes)
+    ALLOWUSER given            socketguard-daemon access allow <account>
+
+  The data (%ProgramData%\SocketGuard: database, config, keys) is never deleted by this
+  package. `socketguard-daemon uninstall (purge)` does that, or the app's "Remove SocketGuard...".
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <!--
+    THE UpgradeCode MUST NEVER CHANGE. It is the only thing that relates one release's MSI
+    to the next: change it and every future upgrade silently stops being an upgrade, leaving
+    two installs side by side and two entries in Programs and Features.
+  -->
+  <Package Name="SocketGuard"
+           Manufacturer="lhns"
+           Version="$(Version)"
+           UpgradeCode="F3E0B72B-FD6F-4C59-878D-68BA159A16B3"
+           Scope="perMachine"
+           Language="1033"
+           Compressed="yes"
+           InstallerVersion="500">
+
+    <SummaryInformation Description="Per-application firewall and addresses" />
+
+    <!--
+      MajorUpgrade removes the old product first (its removal runs the old package's own
+      actions with UPGRADINGPRODUCTCODE set, which is how the removal action below tells
+      an upgrade from a removal), then installs the new one. Data and rules stay.
+    -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed. Uninstall it first if you mean to go back." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="SocketGuard.ico" SourceFile="$(IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="SocketGuard.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/lhns/socketguard" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="SocketGuard">
+        <!-- Extra binaries bundled later (Tor, Yggdrasil, wintun.dll): installer/payload/README.md -->
+        <Directory Id="THIRDPARTYDIR" Name="third_party" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <!-- ===== Who may use SocketGuard without administrator rights ===================== -->
+    <!--
+      ALLOWUSER (public, for silent installs): the account added to the group "SocketGuard
+      Users" by `access allow`. Empty (the default) adds nobody:
+        msiexec /i SocketGuard.msi /qn ALLOWUSER=PC\alice
+      The dialog sets it from ALLOWME, a checkbox ticked by default in the interface
+      sequence only, so a silent install never adds anybody on its own. Secure="yes" lets a
+      value given by a standard user reach the elevated side of the install.
+
+      SGUSER is the account that started the installer, read in the CLIENT process (the
+      interface sequence), which runs as the interactive user even when the install is
+      elevated with another administrator's credentials: that elevation only applies to the
+      Windows Installer service. A local account is named as the app names it
+      (ui/src-tauri account_name): plain, and DOMAIN\user for a domain account.
+    -->
+    <Property Id="ALLOWUSER" Secure="yes" />
+    <Property Id="SGUSER" Secure="yes" />
+    <Property Id="ALLOWME" Secure="yes" />
+    <CustomAction Id="SetSgUserLocal" Property="SGUSER" Value="[%USERNAME]" />
+    <CustomAction Id="SetSgUserDomain" Property="SGUSER" Value="[%USERDOMAIN]\[%USERNAME]" />
+    <InstallUISequence>
+      <Custom Action="SetSgUserLocal" Before="CostInitialize" Condition="%USERDOMAIN ~= %COMPUTERNAME" />
+      <Custom Action="SetSgUserDomain" Before="CostInitialize" Condition="NOT (%USERDOMAIN ~= %COMPUTERNAME)" />
+    </InstallUISequence>
+    <SetProperty Id="ALLOWME" Value="1" Before="CostInitialize" Sequence="ui" Condition="NOT Installed" />
+
+    <!-- FORCEREMOVE=1 on a removal adds the force flag and ignores a failure: the way out when the
+         normal removal reports something LEFT and the product cannot otherwise be removed. -->
+    <Property Id="FORCEREMOVE" Secure="yes" />
+
+    <!-- ===== WebView2 =================================================================== -->
+    <!--
+      The desktop app needs the Microsoft Edge WebView2 Runtime. Windows 11 ships it, and
+      Windows 10 receives it through Windows Update and Edge; it is not bundled here (the
+      daemon and the CLI do not need it). This only looks, so the install can tell: the
+      dialog shows a note and the log has it. Tauri's own bundler defaults to a download
+      bootstrapper, which would put a network fetch into a firewall product's installer.
+    -->
+    <Property Id="WEBVIEW2_MACHINE" Secure="yes">
+      <RegistrySearch Id="RS.WebView2Machine" Root="HKLM"
+                      Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                      Name="pv" Type="raw" Bitness="always32" />
+    </Property>
+    <Property Id="WEBVIEW2_USER" Secure="yes">
+      <RegistrySearch Id="RS.WebView2User" Root="HKCU"
+                      Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                      Name="pv" Type="raw" />
+    </Property>
+    <SetProperty Id="WEBVIEW2NOTE" Before="CostInitialize" Sequence="ui"
+                 Value="The Microsoft Edge WebView2 Runtime was not found. The desktop app needs it (Windows 11 has it; for Windows 10 install it from https://developer.microsoft.com/microsoft-edge/webview2/). The service and the command line work without it."
+                 Condition="(NOT WEBVIEW2_MACHINE OR WEBVIEW2_MACHINE = &quot;0.0.0.0&quot;) AND (NOT WEBVIEW2_USER OR WEBVIEW2_USER = &quot;0.0.0.0&quot;)" />
+
+    <!-- ===== Files ====================================================================== -->
+    <Feature Id="Main" Title="SocketGuard" Level="1" AllowAbsent="no" AllowAdvertise="no"
+             Description="The service, the command line and the desktop app.">
+
+      <Component Id="C.Daemon" Directory="INSTALLFOLDER">
+        <File Id="F.Daemon" Name="socketguard-daemon.exe" Source="$(BinDir)\socketguard-daemon.exe" KeyPath="yes" />
+        <!--
+          Only stops the service, before a file is replaced or removed (the running exe is
+          locked). It never removes it: that is `service uninstall`, run by the daemon.
+          Stopping removes no rules (ADR 0026).
+        -->
+        <ServiceControl Id="SC.SocketGuard" Name="SocketGuard" Stop="both" Wait="yes" />
+      </Component>
+
+      <Component Id="C.Cli" Directory="INSTALLFOLDER">
+        <File Id="F.Cli" Name="socketguard.exe" Source="$(BinDir)\socketguard.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="C.Ui" Directory="INSTALLFOLDER">
+        <File Id="F.Ui" Name="socketguard-ui.exe" Source="$(BinDir)\socketguard-ui.exe" KeyPath="yes" />
+      </Component>
+
+      <!-- The CLI is the primary frontend: on the system PATH (appended, never prepended). -->
+      <Component Id="C.Path" Directory="INSTALLFOLDER">
+        <RegistryValue Root="HKLM" Key="Software\lhns\SocketGuard" Name="Path"
+                       Type="integer" Value="1" KeyPath="yes" />
+        <Environment Id="E.Path" Name="PATH" Value="[INSTALLFOLDER]"
+                     Part="last" Action="set" System="yes" Permanent="no" />
+      </Component>
+
+      <Component Id="C.Shortcut" Directory="ProgramMenuFolder">
+        <Shortcut Id="S.Ui" Name="SocketGuard" Description="Per-application firewall and addresses"
+                  Target="[#F.Ui]" WorkingDirectory="INSTALLFOLDER" Icon="SocketGuard.ico" />
+        <RegistryValue Root="HKLM" Key="Software\lhns\SocketGuard" Name="Shortcut"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <?ifdef ThirdParty?>
+      <ComponentGroupRef Id="ThirdParty" />
+      <?endif?>
+    </Feature>
+
+    <!-- ===== Custom actions =============================================================== -->
+    <!--
+      Run by WixQuietExec as SYSTEM (Impersonate="no", deferred): the command's output goes
+      into the MSI log and a non-zero exit fails the action. The daemon exits 1 when a step
+      fails or an item is LEFT, 2 on a usage error, so a failed `service install` fails the
+      install with the daemon's own message in the log.
+
+      REMOVE is "ALL" on a removal; UPGRADINGPRODUCTCODE is set while the NEW package removes
+      the OLD one. `uninstall` (disable, remove the service, undo the install record) must
+      never run for an upgrade: the host would be unprotected between the old and new version.
+
+      Rollback actions precede the action they undo; a rollback runs only if the script got
+      that far.
+    -->
+    <?define Daemon = '"[INSTALLFOLDER]socketguard-daemon.exe"' ?>
+    <?define Arriving = 'NOT REMOVE' ?>
+    <?define Leaving = 'REMOVE AND NOT UPGRADINGPRODUCTCODE' ?>
+    <?define Fresh = 'NOT REMOVE AND NOT Installed AND NOT WIX_UPGRADE_DETECTED' ?>
+
+    <CustomAction Id="R.Uninstall" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  Execute="rollback" Impersonate="no" Return="ignore" />
+    <CustomAction Id="R.Start" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  Execute="rollback" Impersonate="no" Return="ignore" />
+    <CustomAction Id="CA.Install" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="CA.Access" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <!--
+      A removal that leaves something (exit 1) fails and rolls back: the persistent filters
+      would otherwise outlive the program that can remove them. FORCEREMOVE=1 is the way out.
+    -->
+    <CustomAction Id="CA.Uninstall" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="CA.UninstallForce" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <SetProperty Id="R.Uninstall" Value="$(Daemon) uninstall --keep-data --yes" Before="R.Uninstall" Sequence="execute"
+                 Condition="$(Fresh)" />
+    <SetProperty Id="R.Start" Value="$(Daemon) service start" Before="R.Start" Sequence="execute"
+                 Condition="$(Arriving) AND (Installed OR WIX_UPGRADE_DETECTED)" />
+    <SetProperty Id="CA.Install" Value="$(Daemon) service install" Before="CA.Install" Sequence="execute"
+                 Condition="$(Arriving)" />
+    <SetProperty Id="CA.Access" Value="$(Daemon) access allow &quot;[ALLOWUSER]&quot;" Before="CA.Access" Sequence="execute"
+                 Condition="$(Arriving) AND ALLOWUSER" />
+    <SetProperty Id="CA.Uninstall" Value="$(Daemon) uninstall --keep-data --yes" Before="CA.Uninstall" Sequence="execute"
+                 Condition="$(Leaving)" />
+    <SetProperty Id="CA.UninstallForce" Value="$(Daemon) uninstall --keep-data --yes --force" Before="CA.UninstallForce" Sequence="execute"
+                 Condition="$(Leaving)" />
+
+    <InstallExecuteSequence>
+      <Custom Action="R.Uninstall" After="InstallFiles" Condition="$(Fresh)" />
+      <Custom Action="R.Start" After="R.Uninstall" Condition="$(Arriving) AND (Installed OR WIX_UPGRADE_DETECTED)" />
+      <Custom Action="CA.Install" After="R.Start" Condition="$(Arriving)" />
+      <Custom Action="CA.Access" After="CA.Install" Condition="$(Arriving) AND ALLOWUSER" />
+      <!-- Before StopServices: the exe is still there, and the daemon stops the service itself. -->
+      <Custom Action="CA.Uninstall" Before="StopServices" Condition="$(Leaving) AND NOT FORCEREMOVE" />
+      <Custom Action="CA.UninstallForce" Before="StopServices" Condition="$(Leaving) AND FORCEREMOVE" />
+    </InstallExecuteSequence>
+
+    <UI>
+      <ProgressText Action="CA.Install" Message="Registering and starting the SocketGuard service" />
+      <ProgressText Action="CA.Access" Message="Allowing the account to use SocketGuard" />
+      <ProgressText Action="CA.Uninstall" Message="Removing the firewall rules and the SocketGuard service (settings are kept)" />
+    </UI>
+
+    <!-- ===== User interface ================================================================ -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+
+    <!-- One dialog after the folder: who may use SocketGuard, and the WebView2 note. Built
+         here, never clicked by CI (CI installs silently). -->
+    <UI>
+      <Dialog Id="AccessDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)">
+          <Publish Property="ALLOWUSER" Value="[SGUSER]" Order="1" Condition="ALLOWME = 1" />
+          <Publish Property="ALLOWUSER" Value="{}" Order="2" Condition="NOT ALLOWME AND ALLOWUSER = SGUSER" />
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" Order="3" />
+        </Control>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)">
+          <Publish Event="NewDialog" Value="InstallDirDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="{\WixUI_Font_Title}Who may use SocketGuard" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="340" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="Administrators always can." />
+        <Control Id="AllowMe" Type="CheckBox" X="20" Y="62" Width="335" Height="28" Property="ALLOWME" CheckBoxValue="1"
+                 Text="Let [SGUSER] manage SocketGuard without administrator rights" />
+        <Control Id="AllowNote" Type="Text" X="38" Y="94" Width="317" Height="40" NoPrefix="yes"
+                 Text="The account joins the group &quot;SocketGuard Users&quot;. It must sign out and in again before that applies." />
+        <!-- Empty unless the runtime is missing (WEBVIEW2NOTE is set below). -->
+        <Control Id="WebView2Note" Type="Text" X="20" Y="160" Width="335" Height="50" NoPrefix="yes"
+                 Text="[WEBVIEW2NOTE]" />
+      </Dialog>
+
+      <!-- InstallDirDlg Next goes to VerifyReadyDlg at Order 4 when the folder is valid; the
+           later NewDialog wins, which is how WixUI is customised without copying it. -->
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="AccessDlg" Order="5"
+               Condition="NOT Installed AND (WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID=&quot;1&quot;)" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="AccessDlg" Order="3"
+               Condition="NOT Installed" />
+    </UI>
+  </Package>
+</Wix>

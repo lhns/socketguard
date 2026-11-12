@@ -5,13 +5,15 @@ import { useToast } from "./Toast";
 
 export const locatorText = (a: Address) => (a.locator.kind === "ipv6" ? a.locator.addr : a.locator.hostname);
 
-/** The locator in monospace with a Copy button. */
-export function Locator({ address }: { address: Address }) {
+/** The locator in monospace, then Copy and `children` (a badge, Reserve…) as one group that
+ * wraps as a whole. */
+export function Locator({ address, children }: { address: Address; children?: React.ReactNode }) {
   const toast = useToast();
   const text = locatorText(address);
   return (
     <>
       <span className="mono address-locator">{text}</span>
+      <span className="address-controls">
       <button
         type="button"
         className="btn btn-sm"
@@ -22,6 +24,8 @@ export function Locator({ address }: { address: Address }) {
       >
         Copy
       </button>
+      {children}
+      </span>
     </>
   );
 }
@@ -50,20 +54,21 @@ export default function AddressLines({ addresses, networks, empty, onReserve }: 
             <div className={`address-row${local ? " muted" : ""}`}>
               <span className="address-name">{net?.name ?? a.network_id}</span>
               <span className="muted" aria-hidden="true">·</span>
-              <Locator address={a} />
-              {local ? (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span>this machine only</span>
-                </>
-              ) : (
-                <span className={`badge reach ${a.up ? "reach-ok" : "reach-muted"}`}>{a.up ? "up" : "closed"}</span>
-              )}
-              {onReserve && !local && !a.reservation_id && (
-                <button type="button" className="btn btn-sm address-reserve" aria-label={`Reserve ${net?.name ?? ""} address`} onClick={() => onReserve(a)}>
-                  Reserve…
-                </button>
-              )}
+              <Locator address={a}>
+                {local ? (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span>this machine only</span>
+                  </>
+                ) : (
+                  <span className={`badge reach ${a.up ? "reach-ok" : "reach-muted"}`}>{a.up ? "up" : "closed"}</span>
+                )}
+                {onReserve && !local && !a.reservation_id && (
+                  <button type="button" className="btn btn-sm address-reserve" aria-label={`Reserve ${net?.name ?? ""} address`} onClick={() => onReserve(a)}>
+                    Reserve…
+                  </button>
+                )}
+              </Locator>
             </div>
             {a.excluded.length > 0 && (
               <p className="muted address-note">

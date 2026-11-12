@@ -170,11 +170,6 @@ async fn peers_grants_and_revoke() {
     let apps = env.ok(&["apps", "list", "--json"]).await.json();
     assert_eq!(apps[0]["name"], "nginx");
     let app_id = apps[0]["id"].as_str().unwrap().to_string();
-    assert!(env
-        .ok(&["apps", "list", "--pending"])
-        .await
-        .stdout
-        .contains("pending"));
 
     // Granting by name, by id prefix, with a port and a network.
     env.ok(&["grant", "nginx:80", "bnode", "--network", "ygg"])
@@ -354,10 +349,7 @@ async fn errors_status_and_everything_else() {
     );
     env.ok(&["peers", "rm", "erin"]).await;
 
-    // Review, settings, networks (and the config file).
-    env.ok(&["apps", "review", "nginx", "--unreviewed"]).await;
-    assert!(env.ok(&["pending"]).await.stdout.contains("nginx"));
-    env.ok(&["apps", "review", "nginx"]).await;
+    // Settings, networks (and the config file).
     assert!(env
         .ok(&["settings", "show"])
         .await
@@ -561,10 +553,10 @@ async fn export_apply_and_disable() {
 // ─── Interactive flows (scripted prompter, in-process client) ─────────────────
 
 use socketguard_cli::commands::Ctx;
-use socketguard_cli::flows::{init, pending};
+use socketguard_cli::flows::init;
 use socketguard_cli::prompt::Prompter;
 use socketguard_core::api_types::NewPeer;
-use socketguard_core::{GrantView, Subject};
+use socketguard_core::GrantView;
 use std::collections::VecDeque;
 
 /// What the user types, in order.
@@ -642,70 +634,11 @@ async fn ip_peer(env: &Env, label: &str, ip: &str) -> socketguard_core::Peer {
         .unwrap()
 }
 
-/// Whether the only app is reviewed, and its grants.
-async fn the_app(env: &Env) -> (bool, Vec<GrantView>) {
+/// The grants of the only app.
+async fn the_grants(env: &Env) -> Vec<GrantView> {
     let c = env.client();
-    let id = c.list_apps(false).await.unwrap()[0].id.clone();
-    let d = c.get_app(&id).await.unwrap();
-    (d.app.reviewed, d.grants)
-}
-
-/// Run `pending` with `answers` on a daemon with one pending app (nginx) and a peer.
-async fn run_pending(answers: Vec<A>) -> (Env, Script) {
-    let env = Env::start().await;
-    ip_peer(&env, "friend", "2001:db8::7").await;
-    let mut script = Script::new(answers);
-    pending(&Ctx::new(env.client(), false), &mut script)
-        .await
-        .unwrap();
-    script.finished();
-    (env, script)
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn pending_keep_closed_marks_the_app_reviewed() {
-    let (env, _) = run_pending(vec![A::Pick(0)]).await;
-    let (reviewed, grants) = the_app(&env).await;
-    assert!(reviewed && grants.is_empty());
-    assert!(env.client().list_apps(true).await.unwrap().is_empty());
-    env.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn pending_grant_to_an_existing_peer_creates_the_grant() {
-    // grant, then the first peer in the list.
-    let (env, script) = run_pending(vec![A::Pick(1), A::Pick(0)]).await;
-    assert!(script.asked.iter().any(|q| q == "Grant to:"));
-    let (reviewed, grants) = the_app(&env).await;
-    let friend = env.client().list_peers().await.unwrap()[0].id.clone();
-    assert!(reviewed);
-    assert_eq!(grants.len(), 1);
-    assert_eq!(grants[0].grant.subject, Subject::Peer(friend));
-    env.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn pending_open_to_anyone_needs_the_confirmation() {
-    let (env, _) = run_pending(vec![A::Pick(2), A::Yes]).await;
-    let (reviewed, grants) = the_app(&env).await;
-    assert!(reviewed);
-    assert_eq!(grants.len(), 1);
-    assert_eq!(grants[0].grant.subject, Subject::Anyone);
-    env.stop().await;
-
-    let (env, _) = run_pending(vec![A::Pick(2), A::No]).await;
-    let (reviewed, grants) = the_app(&env).await;
-    assert!(!reviewed && grants.is_empty(), "declined: nothing created");
-    env.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn pending_skip_leaves_the_app_pending() {
-    let (env, _) = run_pending(vec![A::Pick(3)]).await;
-    let (reviewed, grants) = the_app(&env).await;
-    assert!(!reviewed && grants.is_empty());
-    assert_eq!(env.client().list_apps(true).await.unwrap().len(), 1);
-    env.stop().await;
+    let id = c.list_apps().await.unwrap()[0].id.clone();
+    c.get_app(&id).await.unwrap().grants
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -748,10 +681,7 @@ async fn init_offers_a_grant_for_sshd_and_checks_protect_host_for_lockout() {
         .await
         .unwrap();
     script.finished();
-    let (reviewed, grants) = the_app(&env).await;
-    assert_eq!(grants.len(), 1);
-    // One port was granted; the app as a whole is still undecided.
-    assert!(!reviewed);
+    assert_eq!(the_grants(&env).await.len(), 1);
     assert_eq!(
         env.client().status().await.unwrap().protect_host_interfaces,
         ["eth0"]

@@ -14,23 +14,8 @@ use socketguard_core::{
 use std::collections::{BTreeSet, HashSet};
 
 impl Engine {
-    /// Mark an app reviewed (or pending again). It stays closed until granted.
-    pub async fn review_app(
-        &self,
-        state: &AppState,
-        id: &str,
-        reviewed: bool,
-    ) -> Result<(), EngineError> {
-        if !state.db.set_reviewed(id, reviewed).await? {
-            return Err(EngineError::NotFound(format!("app {id}")));
-        }
-        self.commit(state, Ok(()), None, &[DaemonEvent::AppsChanged])
-            .await?;
-        Ok(())
-    }
-
     /// Forget an app: its addresses leave the interfaces, then it and its grants go. It
-    /// reappears as pending the next time it listens.
+    /// reappears as a new app the next time it listens.
     pub async fn delete_app(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
         let app = state
             .db

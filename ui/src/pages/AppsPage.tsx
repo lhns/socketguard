@@ -5,6 +5,7 @@ import type { AccessHighlight } from "../components/AccessList";
 import { AppInspector, AppsInspector } from "../components/AppInspector";
 import EntityList, { type ListColumn, type ListRow, type ListSection } from "../components/EntityList";
 import Inspector, { InspectorEmpty } from "../components/Inspector";
+import Split from "../components/Split";
 import Picker, { type PickerItem } from "../components/Picker";
 import { NewPortGroupForm, PortGroupInspector, PortGroupsInspector } from "../components/PortGroupInspector";
 import { NewTagForm, TagInspector, TagsInspector } from "../components/TagInspector";
@@ -52,7 +53,6 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   const [creating, setCreating] = useState(false);
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [search, setSearch] = useState("");
-  const [pendingOnly, setPendingOnly] = useState(false);
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [showSystem, setShowSystem] = useState(false);
   const [scope, setScope] = useState<string | null>(null);
@@ -84,7 +84,6 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   useEffect(() => {
     if (focus.seq === 0) return;
     if (focus.search !== undefined) setSearch(focus.search);
-    if (focus.pendingOnly) setPendingOnly(true);
     const key = focus.appId ? `app:${focus.appId}` : focus.tagId ? `tag:${focus.tagId}` : null;
     if (key) {
       setSelected(new Set([key]));
@@ -115,11 +114,10 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
   const shownApps = useMemo(
     () =>
       appList
-        .filter((a) => !pendingOnly || !a.reviewed)
         .filter((a) => !tagFilter || tagMembers.has(a.id))
         .filter((a) => !q || a.name.toLowerCase().includes(q) || a.process_name.toLowerCase().includes(q))
-        .sort((a, b) => Number(a.reviewed) - Number(b.reviewed) || a.name.localeCompare(b.name)),
-    [appList, pendingOnly, tagFilter, tagMembers, q],
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [appList, tagFilter, tagMembers, q],
   );
   const shownTags = useMemo(() => tagList.filter((t) => !q || t.label.toLowerCase().includes(q)), [tagList, q]);
   const shownGroups = useMemo(() => groupList.filter((g) => !q || g.label.toLowerCase().includes(q)), [groupList, q]);
@@ -211,7 +209,8 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
         }
         if (r.m.kind === "tag") {
           const t = tagById.get(r.m.target.id);
-          return <span className="muted">{t && t.patterns.length > 0 ? `matches ${t.patterns.join(", ")}` : ""}</span>;
+          const text = t && t.patterns.length > 0 ? `matches ${t.patterns.join(", ")}` : "";
+          return <span className="muted cell-ellipsis" title={text || undefined}>{text}</span>;
         }
         const mine = (membershipsByApp.get(r.m.target.id) ?? []).filter((m) => (r.m.kind === "app" ? true : sameScope(m.scope, r.m.scope)));
         return (
@@ -268,19 +267,19 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
         }
         const sum = summaries.get(r.m.target.id)!;
         return (
-          <>
+          <span className="cell-flow">
             {sum.open && <span className="badge reach reach-bad">open to anyone</span>}
             {sum.segment && <span className="badge reach reach-warn">segment</span>}
             {sum.direct + sum.viaTag === 0 ? (
-              <span className="muted">closed</span>
+              <span className="muted nowrap">closed</span>
             ) : (
-              <span className="muted">
+              <span className="muted nowrap">
                 {sum.direct > 0 && `${sum.direct} direct`}
                 {sum.direct > 0 && sum.viaTag > 0 && ", "}
                 {sum.viaTag > 0 && `${sum.viaTag} via tag`}
               </span>
             )}
-          </>
+          </span>
         );
       },
     },
@@ -385,7 +384,6 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
     columns.set(next);
   };
 
-  const pendingCount = appList.filter((a) => !a.reviewed).length;
   const filterTag: Tag | undefined = tagList.find((t) => t.id === tagFilter);
   const grantNetworks = (networks.data ?? []).filter((n) => n.grants_apply);
 
@@ -400,10 +398,6 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <label className="check">
-          <input type="checkbox" checked={pendingOnly} onChange={(e) => setPendingOnly(e.target.checked)} />
-          Pending only ({pendingCount})
-        </label>
         {filterTag && (
           <button className="tag-pill tag-pill-active" onClick={() => setTagFilter(null)} aria-label={`Stop filtering by tag ${filterTag.label}`}>
             tag: {filterTag.label} <span className="pill-x" aria-hidden="true">×</span>
@@ -436,7 +430,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
       {apps.isLoading && <p className="muted">Loading…</p>}
       {apps.error && <div className="error-banner">{errorText(apps.error)}</div>}
 
-      <div className={`split-layout${collapsed ? " split-collapsed" : ""}${hidden ? " split-closed" : ""}`}>
+      <Split id="apps" collapsed={collapsed} closed={hidden}>
         <section aria-label="Apps and tags" className="split-list">
           <EntityList<AppRow>
             label="Apps and tags"
@@ -466,7 +460,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
           />
         </section>
         {!hidden && <section aria-label="Details" className="split-inspector">{inspector}</section>}
-      </div>
+      </Split>
     </div>
   );
 }
@@ -477,10 +471,9 @@ function RowName({ r }: { r: AppRow }) {
   if (r.m.kind === "port") return <span className={r.m.port ? "mono" : undefined}>{r.m.label}</span>;
   const a = r.m.app!;
   return (
-    <>
-      {a.name}{" "}
-      {!a.reviewed && <span className="badge badge-pending">pending</span>}
+    <span className="name-badges">
+      <span className="name-text" title={a.name}>{a.name}</span>
       {a.identity_note === "unidentified" && <span className="badge reach reach-warn" title="Owner of the port unknown">unidentified</span>}
-    </>
+    </span>
   );
 }

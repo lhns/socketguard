@@ -60,6 +60,8 @@ ADRs document significant architectural decisions made during the project's deve
 | [0050](0050-install-service-uninstall.md) | Installed as a Service, with Fixed Paths and an Uninstall That Leaves Nothing | Accepted |
 | [0051](0051-nothing-socketguard-adds-opens-the-host.md) | Nothing SocketGuard Adds Opens the Host | Accepted (extends 0026, 0048) |
 | [0052](0052-bundled-tor-and-yggdrasil.md) | SocketGuard Ships and Runs Its Own Tor and Yggdrasil | Accepted (supersedes 0048 in part) |
+| [0053](0053-no-review-state.md) | New Apps Are Just Closed; There Is No Review State | Accepted |
+| [0054](0054-portable-mode-on-windows.md) | A Portable Mode on Windows That Leaves Nothing Behind | Accepted (exception to 0026, 0050) |
 
 ## Format
 

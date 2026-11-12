@@ -161,7 +161,6 @@ export const api = {
   listApps: () => call<App[]>("list_apps"),
   getApp: (id: string) => call<AppDetail>("get_app", { id }),
   deleteApp: (id: string) => callSaved<null>("delete_app", { id }),
-  reviewApp: (id: string, reviewed: boolean) => call<AppDetail>("review_app", { id, reviewed }),
   moveApp: (id: string, req: MoveAppRequest) => callSaved<AppDetail>("move_app", { id, req }),
   shareApp: (id: string) => call<ShareResponse>("share_app", { id }),
   listPeers: () => call<Peer[]>("list_peers"),

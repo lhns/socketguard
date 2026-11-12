@@ -355,7 +355,6 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
             interpreter_arg: None,
             identity_note: None,
             exe_missing: false,
-            reviewed: true,
             system: false,
             first_seen: now,
             last_seen: now,

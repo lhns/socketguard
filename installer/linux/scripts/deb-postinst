@@ -1,0 +1,15 @@
+#!/bin/sh
+# Debian postinst. `configure` runs on a fresh install and on every upgrade; `service install`
+# is safe to repeat and restarts a running daemon so the new binary is the one in memory.
+# Nothing is prompted; nobody is added to the group (the frontends offer "allow my account").
+set -e
+case "$1" in
+configure)
+    if [ ! -d /run/systemd/system ]; then
+        echo "socketguard: systemd is not running; run 'socketguard-daemon service install' when it is." >&2
+        exit 0
+    fi
+    /usr/bin/socketguard-daemon service install
+    ;;
+esac
+exit 0

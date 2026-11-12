@@ -85,6 +85,47 @@ desktop UI (Tauri) ┘  (Unix socket /    ├─▶ networks: Local, LAN, Yggdra
 
 Daemon modules: `monitor/` (listening sockets), `iface/` (addresses on the OS interfaces), `networks/` (`ip/` for Local, LAN, Yggdrasil and DHCPv6; `tor`), `firewall/` (nftables, pf, `wfp/`), `engine/` (reconcile loop), `api`.
 
+## Install
+
+Packages are attached to each [release](https://github.com/lhns/socketguard/releases) with a
+`SHA256SUMS` file. They are **not signed yet**, so each system warns once (below). Every package
+does the same thing with the daemon's own commands (`socketguard-daemon service install`, ADR 0050;
+details in [docs/packaging.md](docs/packaging.md)): it installs the three programs
+(`socketguard-daemon`, `socketguard`, `socketguard-ui`), registers SocketGuard as a service that
+starts with the system, and starts it. The firewall rules and addresses survive stopping or
+removing the service; removing SocketGuard is a separate step.
+
+**Windows** (`SocketGuard-<version>-x64.msi`). Installs to `C:\Program Files\SocketGuard`, puts it
+on `PATH`, adds a Start menu entry. The installer asks whether *your* account may manage
+SocketGuard without administrator rights (box ticked by default; it joins the local group
+`SocketGuard Users`; **sign out and in again** before it applies). Silent install:
+`msiexec /i SocketGuard-<version>-x64.msi /qn ALLOWUSER=PC\alice` (without `ALLOWUSER` nobody is
+added). The desktop app needs the Microsoft Edge WebView2 Runtime (included in Windows 11; the
+installer tells you if it is missing). *Unsigned:* SmartScreen shows "Windows protected your PC";
+choose *More info*, *Run anyway*. Upgrade: run the newer MSI; settings and rules stay and the
+service is restarted. Uninstall: Apps & features, or `msiexec /x`; this **keeps** settings and
+keys. To delete them too run `socketguard-daemon uninstall --purge` first (an administrator
+terminal), or use the app's "Remove SocketGuard...".
+
+**Debian, Ubuntu** (`socketguard_<version>-1_amd64.deb`): `sudo apt install ./socketguard_*.deb`.
+**Fedora, RHEL** (`socketguard-<version>-1.x86_64.rpm`): `sudo dnf install ./socketguard-*.rpm`.
+Both need systemd and pull in nftables, iproute2, conntrack, WebKitGTK and GTK. Nobody is added to
+the `socketguard` group: run `sudo socketguard-daemon access allow $USER` (or use the app's "allow
+my account"), then **sign out and in again**. Upgrade: install the newer package; the service is
+restarted onto it. `apt remove socketguard` / `dnf remove socketguard` stops the service and
+removes the rules and the unit but **keeps** settings and keys; `apt purge socketguard` deletes
+them too. rpm has no purge: run `sudo socketguard-daemon uninstall --purge` before erasing it.
+
+**macOS** (`SocketGuard-<version>-<arch>.pkg`). Installs `socketguard-daemon` and `socketguard` in
+`/usr/local/bin` and `SocketGuard.app` in `/Applications`, and starts the launchd daemon. *Unsigned:*
+macOS refuses to open a downloaded pkg; use *Open* from its context menu, or *System Settings >
+Privacy & Security > Open Anyway*. Run `sudo socketguard-daemon access allow $USER` (or the app's
+"allow my account") and sign out and in. A pkg has no uninstaller: run
+`sudo socketguard-daemon uninstall` (`--purge` also deletes settings and keys; the app's "Remove
+SocketGuard..." does the same), then delete `/Applications/SocketGuard.app`,
+`/usr/local/bin/socketguard*` and `/usr/local/lib/socketguard`, and `sudo pkgutil --forget
+de.lhns.socketguard`.
+
 ## Building
 
 Prerequisites: Rust (via [rustup](https://rustup.rs)) and Node.js; on Windows the Visual
@@ -119,7 +160,7 @@ and start `socketguard-daemon` yourself as root / Administrator.
 
 The service applies the stored state before networking comes up (the systemd unit is `deploy/systemd/socketguard.service`).
 
-It serves the local API on `/run/socketguard.sock` or the named pipe `\.\pipe\socketguard`.
+It serves the local API on `/run/socketguard.sock` (macOS: `/var/run/socketguard.sock`) or the named pipe `\.\pipe\socketguard`.
 To use the CLI or UI without elevation, join the `socketguard` group (Unix) or the local group
 `SocketGuard Users` (Windows): `socketguard-daemon access allow <account>`, see [docs/api.md](docs/api.md). On start it applies the stored
 state; on stop everything stays in place until `socketguard disable` (or
@@ -132,8 +173,7 @@ state; on stop everything stays in place until `socketguard disable` (or
 ```bash
 socketguard init                              # first-run setup (networks, sshd/RDP grants, protect-host)
 socketguard status                            # daemon, networks, protect-host, counts
-socketguard pending                           # new apps; interactive on a terminal
-socketguard apps list [--pending]             # also: show, review, rm
+socketguard apps list                         # also: show, move, rm
 socketguard apps show nginx                   # addresses (up or not), ports, grants with reach, counters
 socketguard apps move old-nginx nginx [-y]    # a program that came back under a new identity: addresses, grants, tags and bindings move
 socketguard share nginx                       # [addr]:port and http(s):// URLs
@@ -184,7 +224,7 @@ Reach is shown per network as `verified`, `whole subnet`, `IP only`, `open` or `
 
 ### Desktop app
 
-The Tauri app covers the everyday flows: review new apps, grant and revoke with reach badges,
+The Tauri app covers the everyday flows: see what each app lets in, grant and revoke with reach badges,
 manage peers, follow the activity feed (including blocked attempts, with "grant this source"),
 and toggle whole-host protection. Everything else is in the CLI.
 

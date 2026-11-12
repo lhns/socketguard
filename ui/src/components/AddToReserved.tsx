@@ -3,6 +3,7 @@ import type { BindingTarget } from "../api";
 import { useCommit } from "../commit";
 import { useNav } from "../nav";
 import { useList, useReservations } from "../queries";
+import { useFormOpen } from "./ActionRow";
 import CommitPreview from "./CommitPreview";
 import Picker, { type PickerItem } from "./Picker";
 
@@ -13,6 +14,7 @@ export default function AddToReserved({ target }: { target: BindingTarget }) {
   const reservations = useList(useReservations());
   const commit = useCommit();
   const [open, setOpen] = useState(false);
+  const stepAside = useFormOpen(false);
 
   const items: PickerItem[] = reservations.map((r) => ({
     id: r.id,
@@ -22,6 +24,7 @@ export default function AddToReserved({ target }: { target: BindingTarget }) {
   }));
   const show = (reservationId: string) => ({ label: "Show reserved address", onClick: () => nav.go("reserved", { reservationId }) });
 
+  if (stepAside) return null;
   return (
     <div className="add-reserved">
       <Picker
@@ -57,7 +60,7 @@ export default function AddToReserved({ target }: { target: BindingTarget }) {
         placeholder="Find or create a reserved address"
         empty="No reserved addresses yet. Type a name to create one."
       />
-      <CommitPreview commit={commit} title="This lets more in" />
+      <CommitPreview commit={commit} title="Add to reserved address?" confirmLabel="Add to reserved address" />
     </div>
   );
 }

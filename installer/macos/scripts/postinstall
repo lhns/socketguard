@@ -1,0 +1,7 @@
+#!/bin/sh
+# Runs as root after the files are in place, on a fresh install and on an upgrade alike.
+# `service install` is safe to repeat and restarts a running daemon onto the new binary.
+# Never `uninstall` here: an upgrade is not an uninstall. A pkg has no uninstaller; to remove
+# SocketGuard run `sudo socketguard-daemon uninstall` (docs/packaging.md).
+set -e
+exec /usr/local/bin/socketguard-daemon service install

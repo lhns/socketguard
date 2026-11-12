@@ -11,7 +11,7 @@ types are generated from the same Rust types (see below).
 
 | Platform | Endpoint | Config key | Default |
 |---|---|---|---|
-| Linux, macOS | Unix socket | `api_socket` | `/run/socketguard.sock` |
+| Linux, macOS | Unix socket | `api_socket` | `/run/socketguard.sock` (macOS: `/var/run/socketguard.sock`) |
 | Windows | named pipe | `api_pipe` | `\\.\pipe\socketguard` |
 
 Clients (`socketguard`, the UI, `socketguard-client`) take the endpoint from the
@@ -72,11 +72,10 @@ does not cause a 202. Every error has the [error body](#errors).
 |---|---|---|---|---|
 | GET | `/api/status` | | `StatusResponse` | version, networks, protect-host interfaces, `disabled`, `unadopted` (an existing ruleset was found with an empty database and is left alone until `enable` or `disable`), counts, `config_path`, `db_path`, `socket` (where the daemon keeps its state), `service_installed`, `bundled` `{dir?, versions: [{name, version}]}` (the third-party programs this build ships, from `third_party/VERSIONS`; empty without `dir` when managed networks are not included, ADR 0052) |
 | GET | `/api/events` | | SSE stream | [events](#events) |
-| GET | `/api/apps` | query `pending=true` (optional) | `App[]` | `pending=true`: only apps without a decision |
+| GET | `/api/apps` | | `App[]` | |
 | GET | `/api/apps/{id}` | | `AppDetail` | app with addresses (the ones serving its rows, each with `up`; none until a grant names a row), ports, grants on it (with reach), `access` (every access with its origin: direct, tag, group or reservation, and what it covers on this app: `scope` and `ports`), its `tags`, the port groups attached to it (`port_groups`) and counters |
 | GET | `/api/apps/{id}/share` | | `ShareResponse` | per onion service and granted peer with a Tor client key the daemon generated: the `<onion>:descriptor:x25519:<key>` line for the client's `ClientOnionAuthDir`. Holds private keys |
-| DELETE | `/api/apps/{id}` | | 204 | forgets the app, its addresses and its grants; **it reappears as pending the next time it listens** |
-| POST | `/api/apps/{id}/review` | `ReviewRequest` | `AppDetail` | mark reviewed (or pending again); it stays closed until granted |
+| DELETE | `/api/apps/{id}` | | 204 | forgets the app, its addresses and its grants; **it reappears as a new, closed app the next time it listens** |
 | POST | `/api/apps/{id}/move` | `MoveAppRequest` | `AppDetail` | `{"to": app id, "confirm_open"}`: moves the app's addresses, grants, tag memberships and reservation bindings to another app, for a program that came back under a new identity. Grants the target already has are skipped; a port group used by a moved item is attached to the target. Needs `"confirm_open": true` where an Anyone grant moves or the target gains access for Anyone (409 `confirmation_required` otherwise) |
 | GET | `/api/peers` | | `Peer[]` | |
 | POST | `/api/peers` | `NewPeer` | `Peer` (201) | credentials are validated and normalized; unique across peers. `label` is optional: an unnamed peer is named after its first credential (see below) |
@@ -218,7 +217,7 @@ carries the meaning; `data` is empty unless stated. Clients re-fetch what change
 |---|---|
 | `apps_changed` | apps or ports changed |
 | `addresses_changed` | addresses appeared, went up or down, or were reserved |
-| `app_discovered` | a new, pending app; `data` is its id |
+| `app_discovered` | a new app; `data` is its id |
 | `peers_changed` | peers, credentials or groups changed |
 | `grants_changed` | grants (or what they resolve to) changed |
 | `tags_changed` | tags, their patterns or members changed |
@@ -278,7 +277,6 @@ A tag (ADR 0043) is a label with members (an app with a scope) and optional glob
 | `remove_grant` | `grant_id` |
 | `add_tag_member` | `tag_id`, `app_id`, `scope?`, `confirm_open` (needed when the tag has a grant to Anyone) |
 | `remove_tag_member` | `tag_id`, `app_id`, `scope?` |
-| `review` | `app_id`, `reviewed` |
 | `create_reservation` | `label`, `bindings?`, `confirm_open`, `ref?` |
 | `reserve_address` | `address_id`, `label`, `ref?` |
 | `rename_reservation` | `reservation_id`, `label` |

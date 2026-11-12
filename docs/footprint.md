@@ -52,7 +52,7 @@ Default locations (ADR 0050): Windows `%ProgramData%\SocketGuard`, Linux `/etc/s
 | Temp file `socketguard.tmp-<pid>-<uuid>` | next to the config | removed on error; left after a crash: `uninstall --purge` |
 | Install record and setup log `setup-log.json` | next to the config | `uninstall --purge`; kept (with the entries still to undo) otherwise |
 | Directories created by SocketGuard | the config and state directories | `uninstall`, only if the install record says SocketGuard created them and they are empty |
-| Unix socket `/run/socketguard.sock` | | graceful stop; `uninstall --purge` |
+| Unix socket `/run/socketguard.sock` (macOS `/var/run/socketguard.sock`) | | graceful stop; `uninstall --purge` |
 | Named pipe `\\.\pipe\socketguard` | Windows | process exit |
 | UI storage: webview profile of `com.socketguard.desktop`, localStorage `socketguard.columns` | per user | the UI's "Remove SocketGuard" flow clears the signed-in user's own storage. **Gap:** the profiles of other users on the machine cannot be removed by an elevated system command; they stay under each user's profile (paths below) |
 
@@ -69,6 +69,17 @@ No log files are written (children log into the daemon's log). A pid file `child
 | systemd unit `/etc/systemd/system/socketguard.service` | `service install`; removed by `service uninstall` and `uninstall` |
 | launchd daemon `/Library/LaunchDaemons/de.lhns.socketguard.plist` | `service install`; removed by `service uninstall` and `uninstall` |
 | Registry keys, scheduled tasks, autostart entries, environment variables | none |
+
+## Package files (ADR 0050, docs/packaging.md)
+
+What the installers put on a host besides the items above, and who removes it. The rule for the
+data above (kept on remove, deleted on purge) applies to every package.
+
+| Item | System | Removed by |
+|---|---|---|
+| `C:\Program Files\SocketGuard\` (three exes, `third_party\`), the folder on the system `PATH` (`Software\lhns\SocketGuard` marker keys), Start menu shortcut `SocketGuard`, Add/Remove Programs entry, Windows Installer cache | Windows | the MSI (Apps & features, `msiexec /x`); the MSI never touches the data |
+| `/usr/bin/{socketguard-daemon,socketguard,socketguard-ui}`, `/usr/share/applications/socketguard.desktop`, the icon, `/usr/share/doc/socketguard/`, `/usr/lib/socketguard/third_party/`, the dpkg or rpm database entry | Linux | `apt remove` / `dnf remove`; `apt purge` also deletes the data by name (rpm: `uninstall --purge` first) |
+| `/usr/local/bin/{socketguard-daemon,socketguard}`, `/Applications/SocketGuard.app`, `/usr/local/lib/socketguard/`, the package receipt `de.lhns.socketguard` | macOS | **gap by nature of a pkg:** `uninstall` removes everything else; these are deleted by hand and `pkgutil --forget` (documented in the README); the CI test does it and checks the rest |
 
 ## Managed Tor and Yggdrasil (ADR 0052)
 
@@ -116,4 +127,4 @@ The invariant: a network SocketGuard adds, installs or manages never makes the h
 - **`--disable` from the wrong directory** can no longer happen: config and database have fixed locations. If the database is not at the resolved location, `--disable` refuses, names the paths it looked at, exits non-zero and changes nothing.
 - **Partial disable keeps the rules.** If one address cannot be removed, the rules stay (fail closed), the command says which addresses are left and exits non-zero; a running daemon retries.
 - **An invalid Tor network no longer aborts `--disable`:** the other networks are processed and the Tor services are reported as LEFT.
-- **No Windows test of the real WFP removal.** CI has no Windows job; the Windows service, the WFP removal and the engine option are covered by fakes and by the footprint check run after each package. The Linux and macOS service and package steps are verified only in CI.
+- **The removal paths run for real in CI** (`.github/workflows/packages.yml`, ADR 0050): the MSI job installs, grants a port range through WFP, upgrades, removes and purges on a Windows runner, the deb job does the same with nftables on an Ubuntu VM with systemd, the pkg job with pf and launchd on macOS, and each ends with `deploy/ci/footprint-check.*` looking from outside. Not covered: restoring the engine option `FWPM_ENGINE_COLLECT_NET_EVENTS` to *off* (`netsh wfp show options optionsfor=netevents` reads it from outside; on the CI runner it was already on before the install, so the install record says `prior: 1` and nothing changes), the address-prefix block (needs a Yggdrasil node), the rpm service steps (CI only installs it in a container without systemd) and other users' webview profiles.

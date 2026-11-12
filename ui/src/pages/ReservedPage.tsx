@@ -3,6 +3,7 @@ import type { ReservationView } from "../api";
 import { locatorText } from "../components/AddressLines";
 import EntityList, { type ListColumn, type ListRow, type ListSection } from "../components/EntityList";
 import { InspectorEmpty } from "../components/Inspector";
+import Split from "../components/Split";
 import { NewReservationForm, ReservationInspector, ReservationsInspector } from "../components/ReservationInspector";
 import { errorText } from "../lib";
 import type { FocusMessage } from "../nav";
@@ -97,12 +98,14 @@ export default function ReservedPage({ focus = { seq: 0 } }: { focus?: FocusMess
               const net = networks.find((n) => n.id === a.network_id);
               return (
                 <li key={a.id}>
-                  {net?.name ?? a.network_id}: <span className="mono">{locatorText(a)}</span>{" "}
-                  {net?.grants_apply === false ? (
-                    <span className="muted">this machine only</span>
-                  ) : (
-                    <span className={`badge reach ${a.up ? "reach-ok" : "reach-muted"}`}>{a.up ? "up" : "closed"}</span>
-                  )}
+                  <span className="cell-flow">
+                    <span className="nowrap">{net?.name ?? a.network_id}: <span className="mono">{locatorText(a)}</span></span>{" "}
+                    {net?.grants_apply === false ? (
+                      <span className="muted nowrap">this machine only</span>
+                    ) : (
+                      <span className={`badge reach ${a.up ? "reach-ok" : "reach-muted"}`}>{a.up ? "up" : "closed"}</span>
+                    )}
+                  </span>
                 </li>
               );
             })}
@@ -117,13 +120,11 @@ export default function ReservedPage({ focus = { seq: 0 } }: { focus?: FocusMess
         const own = row.r.grants.length;
         const single = rowGrants(boundRows(row.r, apps, tags, groups), grants).length;
         return (
-          <>
+          <span className="cell-flow">
             {row.r.grants.some((g) => g.subject.kind === "anyone" && g.network_id === null) && <span className="badge reach reach-bad">open to anyone</span>}
-            <span className="muted">
-              {own === 0 ? "no grants" : `${own} ${own === 1 ? "grant" : "grants"}`}
-              {single > 0 && `, ${single} on single ports`}
-            </span>
-          </>
+            <span className="muted nowrap">{own === 0 ? "no grants" : `${own} ${own === 1 ? "grant" : "grants"}`}{single > 0 && ","}</span>{" "}
+            {single > 0 && <span className="muted nowrap">{single} on single ports</span>}
+          </span>
         );
       },
     },
@@ -156,7 +157,7 @@ export default function ReservedPage({ focus = { seq: 0 } }: { focus?: FocusMess
       {reservations.isLoading && <p className="muted">Loading…</p>}
       {reservations.error && <div className="error-banner">{errorText(reservations.error)}</div>}
 
-      <div className={`split-layout${hidden ? " split-closed" : ""}`}>
+      <Split id="reserved" closed={hidden}>
         <section aria-label="Reservations" className="split-list">
           <EntityList<ResRow>
             label="Reservations"
@@ -172,16 +173,16 @@ export default function ReservedPage({ focus = { seq: 0 } }: { focus?: FocusMess
           />
         </section>
         {!hidden && <section aria-label="Details" className="split-inspector">{inspector}</section>}
-      </div>
+      </Split>
     </div>
   );
 }
 
 function ResName({ r }: { r: ReservationView }) {
   return (
-    <>
-      <span className="row-tag"><span className="tag-glyph" aria-hidden="true">◈</span>{r.label}</span>{" "}
+    <span className="name-badges">
+      <span className="row-tag name-text" title={r.label}><span className="tag-glyph" aria-hidden="true">◈</span>{r.label}</span>
       {r.conflicts.length > 0 && <span className="badge reach reach-warn" title="Several apps claim the same ports">port conflict</span>}
-    </>
+    </span>
   );
 }

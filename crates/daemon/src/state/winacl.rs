@@ -74,14 +74,22 @@ pub fn sddl() -> String {
     }
 }
 
+/// The same principals for a directory, inherited by the files and directories created in
+/// it. Without the inheritance flags a file written there (the install record, the config)
+/// gets the default DACL of the creating process, which for a service is SYSTEM only: an
+/// elevated administrator then cannot read the record to uninstall.
+pub fn dir_sddl() -> String {
+    let mut s = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_string();
+    if let Some(sid) = extra_principal() {
+        s.push_str(&format!("(A;OICI;FA;;;{sid})"));
+    }
+    s
+}
+
 struct Descriptor(PSECURITY_DESCRIPTOR);
 
 impl Descriptor {
-    fn new() -> anyhow::Result<Self> {
-        Self::from_sddl(&sddl())
-    }
-
-    fn from_sddl(sddl: &str) -> anyhow::Result<Self> {
+    fn new(sddl: &str) -> anyhow::Result<Self> {
         let mut sd = PSECURITY_DESCRIPTOR::default();
         // SAFETY: `sd` receives a LocalAlloc'd descriptor that Drop frees.
         unsafe {
@@ -115,7 +123,7 @@ pub fn create_protected(path: &Path) -> anyhow::Result<()> {
     if path.exists() {
         return protect(path);
     }
-    let sd = Descriptor::new()?;
+    let sd = Descriptor::new(&sddl())?;
     let attrs = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: sd.0 .0,
@@ -155,18 +163,21 @@ pub fn service_dir_sddl(local_service: bool) -> String {
 
 /// Replace the DACL of an existing file with the protected one.
 pub fn protect(path: &Path) -> anyhow::Result<()> {
-    protect_with(path, Descriptor::new()?)
+    protect_with(path, &sddl())
+}
+
+/// Replace the DACL of a directory with the protected, inheritable one ([`dir_sddl`]).
+pub fn protect_dir(path: &Path) -> anyhow::Result<()> {
+    protect_with(path, &dir_sddl())
 }
 
 /// [`protect`] the data directory of a managed child, see [`service_dir_sddl`].
 pub fn protect_service_dir(path: &Path, local_service: bool) -> anyhow::Result<()> {
-    protect_with(
-        path,
-        Descriptor::from_sddl(&service_dir_sddl(local_service))?,
-    )
+    protect_with(path, &service_dir_sddl(local_service))
 }
 
-fn protect_with(path: &Path, sd: Descriptor) -> anyhow::Result<()> {
+fn protect_with(path: &Path, sddl: &str) -> anyhow::Result<()> {
+    let sd = Descriptor::new(sddl)?;
     let mut present = windows::core::BOOL::default();
     let mut defaulted = windows::core::BOOL::default();
     let mut dacl: *mut ACL = std::ptr::null_mut();
@@ -269,6 +280,19 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(with_suffix(&path, suffix));
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_a_protected_directory_gives_new_files_system_and_administrators() {
+        let dir = std::env::temp_dir().join(format!("sg-dir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        super::protect_dir(&dir).unwrap();
+        let file = dir.join("setup-log.json");
+        std::fs::write(&file, b"{}").unwrap();
+        let sddl = dacl_sddl(&file);
+        assert!(sddl.contains(";;;SY)") && sddl.contains(";;;BA)"), "{sddl}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(windows)]

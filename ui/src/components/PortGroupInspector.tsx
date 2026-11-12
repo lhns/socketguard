@@ -6,6 +6,7 @@ import { errorField, rangeLabel, sameScope, splitOperationError, withRange } fro
 import { useNav } from "../nav";
 import { useApps, useGrants } from "../queries";
 import AccessList, { type AccessHighlight } from "./AccessList";
+import { ActionRow, DangerZone } from "./ActionRow";
 import AddAccess from "./AddAccess";
 import CommitPreview from "./CommitPreview";
 import ConfirmDialog from "./ConfirmDialog";
@@ -98,7 +99,7 @@ export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { 
           }}
         />
         {lastPort && <span className="field-error" role="alert">A port group needs at least one port. Delete the group instead.</span>}
-        <CommitPreview commit={edit} title="This lets more in" />
+        <CommitPreview commit={edit} title="Change this port group?" confirmLabel="Apply" />
       </Section>
 
       <Section
@@ -119,7 +120,7 @@ export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { 
         }
       >
         <AttachedApps apps={attachedApps} />
-        <CommitPreview commit={attach} title="This lets more in" />
+        <CommitPreview commit={attach} title="Change where this port group is attached?" confirmLabel="Apply" />
       </Section>
 
       <Section title="Who can reach it">
@@ -151,14 +152,14 @@ export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { 
               );
             })}
             <CommitPreview commit={revokeCommit} />
-            <AddAccess fixed={{ side: "targets", targets: attachedApps.map((a) => ({ kind: "app" as const, id: a.id })) }} preselect={scope} rowLabel={group.label} />
+            <ActionRow><AddAccess fixed={{ side: "targets", targets: attachedApps.map((a) => ({ kind: "app" as const, id: a.id })) }} preselect={scope} rowLabel={group.label} /></ActionRow>
           </>
         )}
       </Section>
 
-      <div className="actions">
+      <DangerZone>
         <button className="btn btn-danger btn-sm" onClick={() => setDeleting(true)}>Delete port group</button>
-      </div>
+      </DangerZone>
       <CommitPreview commit={del} />
 
       {deleting && (
@@ -239,19 +240,21 @@ export function PortGroupsInspector({ groups, onCollapse, onClose }: { groups: P
           <ul className="plain-list member-list">
             {attachedTo.map((a) => (
               <li key={a.id}>
-                {a.name}{" "}
-                <span className={count(a.id) === groups.length ? "muted" : "badge reach reach-warn"}>
-                  {count(a.id) === groups.length ? `all ${groups.length}` : `${count(a.id)} of ${groups.length}`}
+                <span className="name-badges">
+                  <span className="name-text">{a.name}</span>
+                  <span className={count(a.id) === groups.length ? "muted" : "badge reach reach-warn"}>
+                    {count(a.id) === groups.length ? `all ${groups.length}` : `${count(a.id)} of ${groups.length}`}
+                  </span>
                 </span>
               </li>
             ))}
           </ul>
         )}
-        <CommitPreview commit={edit} title="This lets more in" />
+        <CommitPreview commit={edit} title="Change this port group?" confirmLabel="Apply" />
       </Section>
-      <div className="actions">
+      <DangerZone>
         <button className="btn btn-danger btn-sm" onClick={() => setDeleting(true)}>Delete {groups.length} port groups</button>
-      </div>
+      </DangerZone>
       <CommitPreview commit={del} />
       {deleting && (
         <ConfirmDialog

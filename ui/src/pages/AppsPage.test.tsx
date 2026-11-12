@@ -8,7 +8,7 @@ import {
   batch, detail, grantView, mkApp, mkGroup, mkPeer, mkReservation, mkTag, memoryStorage, mockDaemon, renderWithProviders, saved,
 } from "../test/helpers";
 
-const nginx = mkApp("a1", "nginx", [80, 443], { reviewed: false });
+const nginx = mkApp("a1", "nginx", [80, 443]);
 const redis = mkApp("a2", "redis-server", [6379]);
 const sshd = mkApp("a3", "sshd", [22]);
 const svc = mkApp("s1", "svchost (RpcSs)", [135], { system: true });
@@ -89,7 +89,7 @@ describe("Apps list", () => {
     expect(screen.queryByRole("button", { name: "Access" })).not.toBeInTheDocument();
   });
 
-  it("a search or a filter that matches a system service shows it; pending only filters", async () => {
+  it("a search that matches a system service shows it, and there is no pending filter", async () => {
     setup();
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
@@ -98,9 +98,7 @@ describe("Apps list", () => {
     expect(inList().getByRole("button", { name: "svchost (RpcSs)" })).toBeInTheDocument();
     expect(inList().queryByRole("button", { name: /^nginx/ })).not.toBeInTheDocument();
     await user.clear(screen.getByRole("searchbox", { name: "Filter apps" }));
-    await user.click(screen.getByRole("checkbox", { name: /Pending only/ }));
-    expect(inList().getByRole("button", { name: /^nginx/ })).toBeInTheDocument();
-    expect(inList().queryByRole("button", { name: "redis-server" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /Pending/ })).not.toBeInTheDocument();
   });
 
   it("a tag pill on an app filters the list by that tag, and the filter can be dropped", async () => {
@@ -157,7 +155,7 @@ describe("Inspector: one app", () => {
     await user.click(await inList().findByRole("button", { name: /^nginx/ }));
     const panel = inspector();
     expect(await within(panel).findByRole("heading", { name: /^nginx/ })).toBeInTheDocument();
-    expect(within(panel).getByText("pending")).toBeInTheDocument();
+    expect(within(panel).queryByText("pending")).not.toBeInTheDocument();
     // One section of rows: All ports first. Tag pill of the app; access: direct and through the tag, each once.
     const ports = within(panel).getByRole("heading", { name: "Ports" }).closest("section")!;
     const all = within(ports).getByText("All ports", { selector: ".port-name" }).closest("li")!;
@@ -296,13 +294,13 @@ describe("Inspector: one app", () => {
     ]);
   });
 
-  it("Keep closed marks the app reviewed through the same rule", async () => {
-    const d = setup();
+  it("has no review actions", async () => {
+    setup();
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await user.click(await inList().findByRole("button", { name: /^nginx/ }));
-    await user.click(await within(inspector()).findByRole("button", { name: "Keep closed" }));
-    await waitFor(() => expect(applied(d)).toEqual([[{ op: "review", app_id: "a1", reviewed: true }]]));
+    await within(inspector()).findByRole("button", { name: "Forget app" });
+    expect(within(inspector()).queryByRole("button", { name: /Keep closed|Mark (reviewed|pending)/ })).not.toBeInTheDocument();
   });
 
   it("Forget asks first", async () => {
@@ -323,36 +321,38 @@ describe("A program that moved", () => {
   const old = mkApp("o1", "nginx-old", [80], { process_name: "nginx", exe_missing: true });
   const gone = mkApp("o2", "nginx-gone", [80], { process_name: "nginx", exe_missing: false });
 
-  it("a pending app named like an app with a missing executable offers to take over, after a review", async () => {
-    const d = setup({ list_apps: () => [nginx, redis, old], changes: (a) => batch(a.req as ChangesRequest, false, [moved]) });
+  // The new app has no grants, so nothing speaks for it yet.
+  const closed = detail(nginx);
+
+  it("an app without grants named like an app with a missing executable offers to take over, after a review", async () => {
+    const d = setup({ list_apps: () => [nginx, redis, old], get_app: (a) => (a.id === "a1" ? closed : detail(old)), changes: (a) => batch(a.req as ChangesRequest, false, [moved]) });
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await user.click(await inList().findByRole("button", { name: /^nginx(?!-)/ }));
     const card = await within(inspector()).findByRole("group", { name: "Moved program" });
     expect(card).toHaveTextContent("Looks like nginx-old moved.");
     await user.click(within(card).getByRole("button", { name: "Take over from the old entry" }));
-    const review = await within(card).findByRole("region", { name: "Review before applying" });
+    const review = await screen.findByRole("dialog");
     expect(applied(d)).toEqual([]);
-    await user.click(within(review).getByRole("button", { name: "Apply" }));
+    await user.click(within(review).getByRole("button", { name: /^(Give access|Apply|Add to reserved address|Add|Transfer access|Take over|Create and attach|Open .* to anyone)$/ }));
     await waitFor(() => expect(applied(d)).toEqual([[{ op: "move_app", from: "o1", to: "a1", confirm_open: false }]]));
   });
 
-  it("is hidden when the other app's executable is still there, or the app is already reviewed", async () => {
-    setup({ list_apps: () => [nginx, redis, gone] });
+  it("is hidden when the other app's executable is still there", async () => {
+    setup({ list_apps: () => [nginx, redis, gone], get_app: () => closed });
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await user.click(await inList().findByRole("button", { name: /^nginx(?!-)/ }));
-    await within(inspector()).findByRole("button", { name: "Keep closed" });
+    await within(inspector()).findByRole("button", { name: "Forget app" });
     expect(screen.queryByRole("group", { name: "Moved program" })).not.toBeInTheDocument();
   });
 
-  it("is hidden for an app that was already reviewed", async () => {
-    const reviewed = { ...nginx, reviewed: true };
-    setup({ list_apps: () => [reviewed, old], get_app: () => detail(reviewed) });
+  it("is hidden for an app that has grants", async () => {
+    setup({ list_apps: () => [nginx, old] });
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await user.click(await inList().findByRole("button", { name: /^nginx(?!-)/ }));
-    await within(inspector()).findByRole("button", { name: "Mark pending again" });
+    await within(inspector()).findByRole("button", { name: "Forget app" });
     expect(screen.queryByRole("group", { name: "Moved program" })).not.toBeInTheDocument();
   });
 });
@@ -372,10 +372,10 @@ describe("Transfer access to another app", () => {
     const user = userEvent.setup();
     const go = vi.fn();
     await pickTarget(user, go);
-    const review = await within(inspector()).findByRole("region", { name: "Review before applying" });
+    const review = await screen.findByRole("dialog");
     expect(review).toHaveTextContent("alice on nginx moves to redis-server");
     expect(applied(d)).toEqual([]);
-    await user.click(within(review).getByRole("button", { name: "Apply" }));
+    await user.click(within(review).getByRole("button", { name: /^(Give access|Apply|Add to reserved address|Add|Transfer access|Take over|Create and attach|Open .* to anyone)$/ }));
     await waitFor(() => expect(applied(d)).toEqual([[{ op: "move_app", from: "a1", to: "a2", confirm_open: false }]]));
     // The target is selected afterwards.
     await waitFor(() => expect(go).toHaveBeenCalledWith("apps", { appId: "a2" }));
@@ -385,11 +385,10 @@ describe("Transfer access to another app", () => {
     const d = setup({ changes: (a) => batch(a.req as ChangesRequest, true, [{ ...moved, opens_to_anyone: true }]) });
     const user = userEvent.setup();
     await pickTarget(user);
-    const review = await within(inspector()).findByRole("region", { name: "Review before applying" });
-    await user.click(within(review).getByRole("button", { name: "Apply" }));
     const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("note")).toBeInTheDocument();
     expect(applied(d)).toEqual([]);
-    await user.click(within(dialog).getByRole("button", { name: "Open it" }));
+    await user.click(within(dialog).getByRole("button", { name: /^Open .* to anyone$/ }));
     await waitFor(() => expect(applied(d)).toEqual([[{ op: "move_app", from: "a1", to: "a2", confirm_open: true }]]));
   });
 
@@ -397,7 +396,7 @@ describe("Transfer access to another app", () => {
     const d = setup();
     const user = userEvent.setup();
     await pickTarget(user);
-    const review = await within(inspector()).findByRole("region", { name: "Review before applying" });
+    const review = await screen.findByRole("dialog");
     await user.click(within(review).getByRole("button", { name: "Cancel" }));
     expect(applied(d)).toEqual([]);
   });
@@ -416,15 +415,15 @@ describe("Add access", () => {
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     const form = await openForm(user);
-    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
+    await user.click(within(form).getByRole("combobox", { name: "Who" }));
     await user.click(screen.getByRole("checkbox", { name: "alice" }));
     await user.keyboard("{Escape}");
     await user.click(within(form).getByRole("button", { name: "Add access" }));
-    const review = await within(form).findByRole("region", { name: "Review before applying" });
+    const review = await screen.findByRole("dialog");
     expect(review).toHaveTextContent("alice to sshd");
     expect(review).toHaveTextContent("verified by key");
     expect(applied(d)).toEqual([]);
-    await user.click(within(review).getByRole("button", { name: "Apply" }));
+    await user.click(within(review).getByRole("button", { name: /^(Give access|Apply|Add to reserved address|Add|Transfer access|Take over|Create and attach|Open .* to anyone)$/ }));
     await waitFor(() => expect(applied(d)).toEqual([[
       { op: "add_grant", target: { kind: "app", id: "a3" }, scope: { kind: "all" }, subject: { kind: "peer", id: "p1" }, confirm_open: false },
     ]]));
@@ -435,8 +434,8 @@ describe("Add access", () => {
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     const form = await openForm(user);
-    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
-    await user.type(screen.getByRole("combobox", { name: "Search Who" }), "10.0.0.7");
+    await user.click(within(form).getByRole("combobox", { name: "Who" }));
+    await user.type(screen.getByRole("combobox", { name: "Who" }), "10.0.0.7");
     await user.click(await screen.findByRole("option", { name: /New peer from/ }));
     await user.keyboard("{Escape}");
     await user.click(within(form).getByRole("button", { name: "Add access" }));
@@ -454,13 +453,13 @@ describe("Add access", () => {
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     const form = await openForm(user);
-    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
+    await user.click(within(form).getByRole("combobox", { name: "Who" }));
     await user.click(screen.getByRole("checkbox", { name: /Anyone/ }));
     await user.keyboard("{Escape}");
     await user.click(within(form).getByRole("button", { name: "Add access" }));
-    await user.click(within(await within(form).findByRole("region", { name: "Review before applying" })).getByRole("button", { name: "Apply" }));
+    const dialog = await screen.findByRole("dialog", { name: /Open sshd to anyone/ });
     expect(applied(d)).toEqual([]);
-    await user.click(within(await screen.findByRole("dialog", { name: /Open to anyone/ })).getByRole("button", { name: "Open it" }));
+    await user.click(within(dialog).getByRole("button", { name: "Open sshd to anyone" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0]).toMatchObject([{ op: "add_grant", subject: { kind: "anyone" }, confirm_open: true }]);
   });
@@ -472,11 +471,10 @@ describe("Add access", () => {
     await user.click(await inList().findByRole("button", { name: /^nginx/ }));
     await user.click(await within(inspector()).findByRole("button", { name: "Add access to 443/tcp" }));
     const form = screen.getByRole("form", { name: "Add access" });
-    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
+    await user.click(within(form).getByRole("combobox", { name: "Who" }));
     await user.click(screen.getByRole("checkbox", { name: "bob" }));
     await user.keyboard("{Escape}");
-    await user.click(within(form).getByText("Limit to networks (optional)"));
-    await user.click(within(form).getByRole("checkbox", { name: "LAN" }));
+    await user.click(within(form).getByRole("button", { name: "LAN" }));
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0]).toEqual([
@@ -522,10 +520,10 @@ describe("Tags", () => {
     await user.click(within(inspector()).getByRole("button", { name: "Add or remove members" }));
     await user.click(screen.getByRole("checkbox", { name: "sshd" }));
     await user.click(within(await within(inspector()).findByRole("group", { name: "Rows of sshd in web" })).getByRole("button", { name: "All ports" }));
-    const review = await within(inspector()).findByRole("region", { name: "Review before applying" });
+    const review = await screen.findByRole("dialog");
     expect(review).toHaveTextContent("reachable by bob");
     expect(applied(d)).toHaveLength(1);
-    await user.click(within(review).getByRole("button", { name: "Apply" }));
+    await user.click(within(review).getByRole("button", { name: /^(Give access|Apply|Add to reserved address|Add|Transfer access|Take over|Create and attach|Open .* to anyone)$/ }));
     await waitFor(() => expect(applied(d)).toHaveLength(2));
     expect(applied(d)[1]).toEqual([{ op: "add_tag_member", tag_id: "t1", app_id: "a3", scope: { kind: "all" }, confirm_open: false }]);
   });
@@ -578,7 +576,7 @@ describe("Inspector: several tags", () => {
 
     await user.click(panel.getByRole("button", { name: "Add access…" }));
     const form = screen.getByRole("form", { name: "Add access" });
-    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
+    await user.click(within(form).getByRole("combobox", { name: "Who" }));
     await user.click(screen.getByRole("checkbox", { name: "alice" }));
     await user.keyboard("{Escape}");
     await user.click(within(form).getByRole("button", { name: "All ports" }));
@@ -651,24 +649,21 @@ describe("Inspector: several apps", () => {
     ]]));
   });
 
-  it("adds access for all of them in one batch, and marks the pending ones reviewed", async () => {
+  it("adds access for all of them in one batch", async () => {
     const d = setup();
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await selectThree(user);
     await user.click(within(inspector()).getByRole("button", { name: "Add access…" }));
     const form = screen.getByRole("form", { name: "Add access" });
-    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
+    await user.click(within(form).getByRole("combobox", { name: "Who" }));
     await user.click(screen.getByRole("checkbox", { name: "group team" }));
     await user.keyboard("{Escape}");
     await user.click(within(form).getByRole("button", { name: "All ports" }));
     await user.click(within(form).getByRole("button", { name: "Add access" }));
     await waitFor(() => expect(applied(d)).toHaveLength(1));
     expect(applied(d)[0].map((o) => (o as { target: { id: string } }).target.id)).toEqual(["a1", "a2", "a3"]);
-
-    await user.click(within(inspector()).getByRole("button", { name: "Mark reviewed (1)" }));
-    await waitFor(() => expect(applied(d)).toHaveLength(2));
-    expect(applied(d)[1]).toEqual([{ op: "review", app_id: "a1", reviewed: true }]);
+    expect(within(inspector()).queryByRole("button", { name: /Mark reviewed/ })).not.toBeInTheDocument();
   });
 
   it("has no bulk bar and no dialog of its own", async () => {
@@ -818,7 +813,7 @@ describe("Add access: what to open", () => {
     return screen.getByRole("form", { name: "Add access" });
   }
   async function chooseBob(user: ReturnType<typeof userEvent.setup>, form: HTMLElement) {
-    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
+    await user.click(within(form).getByRole("combobox", { name: "Who" }));
     await user.click(screen.getByRole("checkbox", { name: "bob" }));
     await user.keyboard("{Escape}");
   }
@@ -889,8 +884,8 @@ describe("Add access: what to open", () => {
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     const form = await openNginx(user);
-    await user.click(within(form).getByRole("button", { name: "Choose who…" }));
-    await user.click(screen.getByRole("combobox", { name: "Search Who" }));
+    await user.click(within(form).getByRole("combobox", { name: "Who" }));
+    await user.click(screen.getByRole("combobox", { name: "Who" }));
     await user.paste("10.0.0.7 10.0.0.8");
     await user.click(await screen.findByRole("option", { name: /2 new peers from/ }));
     await user.keyboard("{Escape}");

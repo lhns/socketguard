@@ -110,7 +110,7 @@ async fn status() -> CmdResult<StatusResponse> {
 
 #[tauri::command]
 async fn list_apps() -> CmdResult<Vec<App>> {
-    Ok(client().list_apps(false).await?)
+    Ok(client().list_apps().await?)
 }
 
 #[tauri::command]
@@ -121,11 +121,6 @@ async fn get_app(id: String) -> CmdResult<AppDetail> {
 #[tauri::command]
 async fn delete_app(id: String) -> DoneResult<()> {
     Ok(client().delete_app(&id).await?.into())
-}
-
-#[tauri::command]
-async fn review_app(id: String, reviewed: bool) -> CmdResult<AppDetail> {
-    Ok(client().review_app(&id, reviewed).await?)
 }
 
 #[tauri::command]
@@ -610,12 +605,24 @@ struct SetupRun {
 fn sibling(base: &str) -> Result<std::path::PathBuf, UiError> {
     let exe = std::env::current_exe().map_err(|e| internal(e.to_string()))?;
     let name = format!("{base}{}", std::env::consts::EXE_SUFFIX);
-    let path = exe.parent().map(|d| d.join(&name)).filter(|p| p.exists());
+    let path = sibling_candidates(exe.parent(), &name)
+        .into_iter()
+        .find(|p| p.exists());
     path.ok_or_else(|| UiError {
         code: "not_found".into(),
         message: format!("{name} was not found next to the SocketGuard window"),
         details: None,
     })
+}
+
+/// Where `name` may be: next to the executable, and on macOS also in `/usr/local/bin`, where
+/// the installer puts the CLI and the daemon (the app itself is inside an `.app` bundle).
+fn sibling_candidates(exe_dir: Option<&std::path::Path>, name: &str) -> Vec<std::path::PathBuf> {
+    let mut v: Vec<std::path::PathBuf> = exe_dir.map(|d| d.join(name)).into_iter().collect();
+    if cfg!(target_os = "macos") {
+        v.push(std::path::Path::new("/usr/local/bin").join(name));
+    }
+    v
 }
 
 fn internal(message: String) -> UiError {
@@ -755,7 +762,6 @@ fn main() {
             list_apps,
             get_app,
             delete_app,
-            review_app,
             move_app,
             share_app,
             list_peers,
@@ -825,4 +831,21 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error running SocketGuard UI");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sibling_candidates;
+    use std::path::Path;
+
+    #[test]
+    fn the_executable_directory_comes_first() {
+        let c = sibling_candidates(Some(Path::new("/opt/sg")), "socketguard-daemon");
+        assert_eq!(c[0], Path::new("/opt/sg").join("socketguard-daemon"));
+        // /usr/local/bin is a fallback on macOS only, where the app sits in a bundle.
+        assert_eq!(c.len(), if cfg!(target_os = "macos") { 2 } else { 1 });
+        if cfg!(target_os = "macos") {
+            assert_eq!(c[1], Path::new("/usr/local/bin/socketguard-daemon"));
+        }
+    }
 }

@@ -62,7 +62,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::ProtectHost(cmd) => protect_host(&c, cmd).await,
         Command::Activity(a) => activity(&c, a).await,
         Command::Watch => watch(&c).await,
-        Command::Pending => flows::pending(&c, &mut prompt::Stdin).await,
         Command::Share(a) => share(&c, a).await,
         Command::Init => flows::init(&c, &mut prompt::Stdin).await,
         Command::Export(a) => export(&c, a).await,
@@ -168,7 +167,7 @@ impl Ctx {
     }
 
     async fn apps(&self) -> Result<Vec<App>> {
-        Ok(self.client.list_apps(false).await?)
+        Ok(self.client.list_apps().await?)
     }
 
     async fn app(&self, query: &str) -> Result<App> {
@@ -570,8 +569,8 @@ pub(crate) async fn set_protect_host(
 
 async fn apps(c: &Ctx, cmd: AppsCmd) -> Result<()> {
     match cmd {
-        AppsCmd::List { pending } => {
-            let a = c.client.list_apps(pending).await?;
+        AppsCmd::List => {
+            let a = c.client.list_apps().await?;
             c.print(&a, || render::apps(&a))
         }
         AppsCmd::Show { app } => {
@@ -580,28 +579,13 @@ async fn apps(c: &Ctx, cmd: AppsCmd) -> Result<()> {
             let names = c.names().await?;
             c.print(&detail, || render::app_detail(&detail, &names))
         }
-        AppsCmd::Review { app, unreviewed } => {
-            let app = c.app(&app).await?;
-            let d = c.client.review_app(&app.id, !unreviewed).await?;
-            c.print(&d, || {
-                format!(
-                    "{} is now {}",
-                    d.app.name,
-                    if d.app.reviewed {
-                        "reviewed"
-                    } else {
-                        "pending"
-                    }
-                )
-            })
-        }
         AppsCmd::Rm { app } => {
             let app = c.app(&app).await?;
             let saved = c.client.delete_app(&app.id).await?;
             c.done_saved(
                 saved,
                 format!(
-                    "forgot {} (it reappears as pending if it listens again)",
+                    "forgot {} (it reappears as a new app if it listens again)",
                     app.name
                 ),
             )

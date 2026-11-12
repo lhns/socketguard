@@ -28,7 +28,7 @@ async fn status_reports_networks_and_counts() {
     assert!(body["version"].is_string());
     assert_eq!(body["networks"].as_array().unwrap().len(), 3);
     assert_eq!(body["counts"]["apps"], 1);
-    assert_eq!(body["counts"]["pending_apps"], 1);
+    assert!(body["counts"].get("pending_apps").is_none());
     assert_eq!(
         body["counts"]["addresses"], 1,
         "only loopback until a grant"
@@ -56,53 +56,40 @@ async fn errors_have_code_and_message() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let (s, body) = d.post("/api/peers", json!({"label": 5})).await;
     assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
-    let (s, body) = d.get("/api/apps?pending=maybe").await;
+    let (s, body) = d.get("/api/activity?limit=maybe").await;
     assert_eq!((s, code(&body)), (StatusCode::BAD_REQUEST, "invalid"));
 }
 
 // ─── Apps ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn apps_list_get_review_and_pending_filter() {
+async fn apps_list_and_get_have_no_review_state() {
     let d = Daemon::new().await;
     let app_id = d.app_id().await;
 
     let (s, body) = d.get("/api/apps").await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(body.as_array().unwrap().len(), 1);
-    assert_eq!(
-        d.get("/api/apps?pending=true")
-            .await
-            .1
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert!(body[0].get("reviewed").is_none(), "{body}");
 
     let (s, body) = d.get(&format!("/api/apps/{app_id}")).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(body["name"], "nginx");
+    assert!(body["app"].get("reviewed").is_none() && body.get("reviewed").is_none());
     assert_eq!(body["grants"], json!([]));
     assert_eq!(body["counters"], json!([]));
     assert_eq!(body["addresses"].as_array().unwrap().len(), 1);
 
-    let (s, body) = d
+    let (s, body) = d.get("/api/apps/nope").await;
+    assert_eq!((s, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
+    // The review route is gone.
+    let (s, _) = d
         .post(
             &format!("/api/apps/{app_id}/review"),
             json!({"reviewed": true}),
         )
         .await;
-    assert_eq!(s, StatusCode::OK);
-    assert_eq!(body["reviewed"], true);
-    assert_eq!(d.get("/api/apps?pending=true").await.1, json!([]));
-
-    let (s, body) = d.get("/api/apps/nope").await;
-    assert_eq!((s, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
-    let (s, _) = d
-        .post("/api/apps/nope/review", json!({"reviewed": true}))
-        .await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(s == StatusCode::NOT_FOUND || s == StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[tokio::test]
@@ -121,11 +108,11 @@ async fn deleting_an_app_forgets_it_until_it_listens_again() {
     );
 
     d.reconcile().await;
-    let (_, body) = d.get("/api/apps?pending=true").await;
+    let (_, body) = d.get("/api/apps").await;
     assert_eq!(
         body.as_array().unwrap().len(),
         1,
-        "it listens, so it is pending again"
+        "it listens, so it is a new app again"
     );
 }
 
@@ -987,6 +974,20 @@ async fn apply_accepts_and_ignores_the_address_mode_of_an_old_document() {
     assert_eq!(body["changes"], json!([]), "the field changes nothing");
     let settings = d.get("/api/settings").await.1;
     assert!(settings.get("address_mode").is_none());
+}
+
+#[tokio::test]
+async fn apply_accepts_and_ignores_the_review_state_of_an_old_document() {
+    let d = populated().await;
+    let mut doc = serde_json::to_value(export(&d).await).unwrap();
+    assert!(!doc.to_string().contains("reviewed"), "exports carry none");
+    doc["reviewed"] = json!(["nginx"]);
+    doc["pending"] = json!(["redis"]);
+    let (s, body) = d
+        .post("/api/apply", json!({"document": doc, "dry_run": false}))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["changes"], json!([]), "the fields change nothing");
 }
 
 #[tokio::test]
