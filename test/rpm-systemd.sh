@@ -24,6 +24,11 @@ fail() {
 }
 x() { docker exec "$name" bash -euo pipefail -c "$*"; }
 
+# The base image has no systemd and no sudo-ish tools; add systemd (and nothing the rpm should bring).
+printf 'FROM %s
+RUN dnf install -y systemd && dnf clean all
+' "$img" | docker build -t sg-fedora-systemd -
+img=sg-fedora-systemd
 docker run -d --name "$name" --privileged --cgroupns=host --tmpfs /run --tmpfs /tmp \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     -v "$here:/repo:ro" -v "$rpm1:/p1.rpm:ro" -v "$rpm2:/p2.rpm:ro" "$img" /sbin/init >/dev/null
