@@ -587,20 +587,34 @@ async fn stalls_without_progress_restart_with_a_doubling_limit_up_to_the_cap() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn progress_beyond_the_earlier_runs_starts_the_limit_over() {
+async fn the_same_progress_in_every_run_is_not_progress() {
+    let (sup, fake) = supervisor();
+    let gauge = Arc::new(Gauge::default());
+    gauge.set(5);
+    sup.set("t", Some(stalling(gauge)));
+    pass(TICK).await;
+    // Every run reaches 5% and stops there: the first run only sets the bar.
+    let mut limits = vec![];
+    for n in 2..=6 {
+        limits.push(minutes_until_started(&fake, n).await);
+    }
+    assert_eq!(limits, [3, 6, 12, 24, 30]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn progress_beyond_the_earlier_runs_puts_the_limit_back_to_its_base() {
     let (sup, fake) = supervisor();
     let gauge = Arc::new(Gauge::default());
     sup.set("t", Some(stalling(gauge.clone())));
     pass(TICK).await;
     assert_eq!(minutes_until_started(&fake, 2).await, 3);
     assert_eq!(minutes_until_started(&fake, 3).await, 6);
-    // The third run (limit 12 min) reaches 30% after a minute and then stalls: the limit
-    // counts from that advance.
+    // The third run (limit 12 min) reaches 30% after a minute and then stalls: it is given
+    // the base limit from that advance on, not the 12 minutes.
     pass(Duration::from_secs(60)).await;
     gauge.set(30);
-    assert_eq!(minutes_until_started(&fake, 4).await, 12);
-    // The progress counted: the next run is watched for the base limit again, and 30% is
-    // not progress any more.
+    assert_eq!(minutes_until_started(&fake, 4).await, 3);
+    // 30% is not progress any more: the next runs back off again from the base.
     assert_eq!(minutes_until_started(&fake, 5).await, 3);
     assert_eq!(minutes_until_started(&fake, 6).await, 6);
 }

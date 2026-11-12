@@ -699,12 +699,14 @@ impl Task {
             .start_deadline
             .filter(|_| !up && spec.on_deadline.is_some())
             .map(|d| started + d);
-        // The highest bootstrap progress of this run, and when the stall limit runs out unless
-        // it advances beyond what earlier stalled runs reached.
+        // The highest bootstrap progress of this run, the highest of the earlier stalled runs
+        // (`floor`), and when the stall limit runs out unless progress is made.
         let mut best: Option<u8> = None;
-        let floor = self.stall.best;
-        let stall_limit = spec.stall_limit.map(|base| self.stall.limit(base));
-        let mut stall_at = stall_limit.filter(|_| !up).map(|l| started + l);
+        let mut floor = self.stall.best;
+        let mut limit = spec.stall_limit.map(|base| self.stall.limit(base));
+        let mut stall_at = limit.filter(|_| !up).map(|l| started + l);
+        // Progress beyond what earlier runs reached: the limit is back at its base.
+        let mut advanced = false;
 
         loop {
             tokio::select! {
@@ -769,27 +771,27 @@ impl Task {
                 _ = async { tokio::time::sleep_until(stall_at.expect("guarded")).await },
                     if !up && stall_at.is_some() =>
                 {
-                    let limit = stall_limit.expect("guarded");
+                    let limit = limit.expect("guarded");
                     let minutes = limit.as_secs() / 60;
                     let last = match best {
                         Some(p) => format!("last progress {p}%"),
                         None => "no progress reported".to_string(),
                     };
                     let base = spec.stall_limit.expect("guarded");
-                    let first = self.stall.streak == 0;
-                    if best.is_some_and(|b| floor.is_none_or(|f| b > f)) {
-                        self.stall = StallBackoff { streak: 0, best };
-                    } else {
+                    let repeated = !advanced && self.stall.streak > 0;
+                    if !advanced {
                         self.stall.streak += 1;
                     }
+                    self.stall.best = self.stall.best.max(best);
                     let next = self.stall.limit(base);
                     let message = format!(
-                        "{label} made no bootstrap progress for {minutes} min ({last});                          restarting it, the next start gets {} min",
+                        "{label} made no bootstrap progress for {minutes} min ({last}); \
+                         restarting it, the next start gets {} min",
                         next.as_secs() / 60
                     );
                     // A host without internet stalls every time: say so once, and again when
                     // the limit stops growing.
-                    if first || (limit < next && next == STALL_LIMIT_MAX.max(base)) {
+                    if !repeated || (limit < next && next == STALL_LIMIT_MAX.max(base)) {
                         warn!("{message}");
                     } else {
                         info!("{message}");
@@ -851,7 +853,16 @@ impl Task {
                             if best.is_none_or(|b| p > b) {
                                 best = Some(p);
                                 if floor.is_none_or(|f| p > f) {
-                                    stall_at = stall_limit.map(|l| Instant::now() + l);
+                                    // Progress: the watchdog counts from here. Beyond what an
+                                    // earlier run reached it also ends the backoff (the first
+                                    // run only sets that bar).
+                                    if self.stall.streak > 0 || floor.is_some() {
+                                        advanced = true;
+                                        self.stall = StallBackoff { streak: 0, best: Some(p) };
+                                        limit = spec.stall_limit;
+                                    }
+                                    floor = Some(p);
+                                    stall_at = limit.map(|l| Instant::now() + l);
                                 }
                             }
                             self.status.update(|s| {
