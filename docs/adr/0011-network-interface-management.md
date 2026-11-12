@@ -4,6 +4,8 @@
 
 Accepted
 
+Superseded in part by ADR 0016 and ADR 0027 (interfaces belong to networks; there is no single interface setting) and ADR 0030 (Windows adds addresses through the IP Helper API).
+
 ## Date
 
 2026-03-12

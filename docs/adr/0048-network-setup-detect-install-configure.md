@@ -4,6 +4,8 @@
 
 Accepted. Extends ADR 0038 (networks in the config file) and ADR 0040 (who may configure Tor); changes neither. Its install and configure steps are superseded by ADR 0052.
 
+The detection states named below were reduced by ADR 0052 to ready, added and absent.
+
 ## Date
 
 2026-11-11

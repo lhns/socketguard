@@ -4,6 +4,8 @@
 
 Accepted (stale-socket deletion superseded by ADR 0027)
 
+Superseded in part by ADR 0027 (apps are identified by program, not by pid and port) and ADR 0047 (an address exists only for what is granted, not on detection).
+
 ## Date
 
 2026-03-12

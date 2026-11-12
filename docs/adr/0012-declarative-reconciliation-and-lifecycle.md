@@ -6,6 +6,8 @@ Accepted (startup and shutdown cleanup superseded by ADR 0026)
 
 Superseded in part by ADR 0049: the reconcile pass takes `&self` and runs under the engine's read lock.
 
+Superseded in part by ADR 0029 (one `inet` table) and ADR 0038 (networks are changed through the API and saved to the config file; there is no `PUT /api/config`).
+
 ## Date
 
 2026-03-12

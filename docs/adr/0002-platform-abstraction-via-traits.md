@@ -4,6 +4,8 @@
 
 Accepted
 
+Still the pattern, but the details are history: the firewall trait is `apply`, `verify`, `revoke`, `disable` (ADR 0029), and Windows uses the Windows Filtering Platform and the IP Helper API, not `netsh` (ADR 0030).
+
 ## Date
 
 2026-03-12

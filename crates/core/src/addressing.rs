@@ -58,7 +58,7 @@ pub fn grant_applies(grant: &Grant, network: &Network) -> bool {
     network.grants_apply && grant.network_id.as_deref().is_none_or(|n| n == network.id)
 }
 
-/// The state the models reads.
+/// The state the model reads.
 #[derive(Clone, Copy)]
 pub struct World<'a> {
     pub apps: &'a [App],

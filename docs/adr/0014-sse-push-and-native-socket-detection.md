@@ -4,6 +4,8 @@
 
 Accepted
 
+The event names are history: events are per kind of object (`apps_changed`, `peers_changed`, …), see `docs/api.md`. Push over server-sent events and native detection stand.
+
 ## Date
 
 2026-03-13

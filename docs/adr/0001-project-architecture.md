@@ -4,6 +4,8 @@
 
 Accepted
 
+Superseded in substance by ADR 0027 (domain model), ADR 0032 (local API over a socket or pipe), ADR 0033 (the CLI as a client of it) and ADR 0047 (addresses only for what is granted). Kept as the record of the starting point.
+
 ## Date
 
 2026-03-12

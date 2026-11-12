@@ -50,3 +50,8 @@ Amended below; read the amendments in order. ADR 0054 makes an exception for por
 - **The state directory's protection is inherited** by the files created in it on Windows, so the administrator who uninstalls can read what the service wrote.
 - **Packages pass the choice explicitly:** removal calls `uninstall --keep-data`, and only `apt purge` or `uninstall --purge` deletes data.
 - **Verified by CI on real machines:** MSI on Windows Server, deb on Ubuntu, pkg on macOS (Apple Silicon). The rpm is only built and checked; its service steps have not run.
+
+## Amendment (2026-11-12, later): corrections to the previous amendment
+
+- The rpm's service steps do run: a CI job installs, upgrades, removes and purges it on Fedora with systemd.
+- The macOS package is built and tested on Apple Silicon and on Intel.

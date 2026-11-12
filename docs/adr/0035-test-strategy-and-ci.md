@@ -4,6 +4,8 @@
 
 Accepted. Extends ADR 0025.
 
+Superseded in part by later practice: CI fails when the netns tests skip, runs pf and a smoke test on macOS, and exercises the Windows firewall through the MSI and portable jobs (ADR 0050, ADR 0054; `docs/packaging.md`).
+
 ## Date
 
 2026-11-09
