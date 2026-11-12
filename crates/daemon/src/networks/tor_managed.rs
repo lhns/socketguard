@@ -123,7 +123,12 @@ pub fn torrc(paths: &TorPaths, windows: bool) -> String {
             quote(&paths.control_port_file)
         ));
     } else {
-        t.push_str(&format!("ControlSocket {}\n", quote(&paths.control_socket)));
+        // `ControlSocket` splits its value at spaces, `ControlPort unix:"…"` takes a quoted path
+        // (the macOS state directory is "/Library/Application Support/SocketGuard").
+        t.push_str(&format!(
+            "ControlPort unix:{}\n",
+            quote(&paths.control_socket)
+        ));
     }
     t.push_str("CookieAuthentication 1\n");
     t.push_str(&format!("CookieAuthFile {}\n", quote(&paths.cookie)));
@@ -473,11 +478,23 @@ mod tests {
             "# Written by SocketGuard each time it starts Tor; changes made here are overwritten.\n\
              DataDirectory \"/var/lib/socketguard/tor\"\n\
              SocksPort 0\n\
-             ControlSocket \"/var/lib/socketguard/tor/control\"\n\
+             ControlPort unix:\"/var/lib/socketguard/tor/control\"\n\
              CookieAuthentication 1\n\
              CookieAuthFile \"/var/lib/socketguard/tor/control_auth_cookie\"\n\
              Log notice stdout\n"
         );
+    }
+
+    /// The macOS state directory has a space in it; `ControlSocket` would split there (found
+    /// by the first macOS package run), `ControlPort unix:"…"` keeps the quoted path whole.
+    #[test]
+    fn a_state_directory_with_a_space_stays_one_argument() {
+        let p = TorPaths::new(Path::new("/Library/Application Support/SocketGuard"));
+        let t = torrc(&p, false);
+        assert!(t.contains(
+            "ControlPort unix:\"/Library/Application Support/SocketGuard/tor/control\"\n"
+        ));
+        assert!(!t.contains("ControlSocket"));
     }
 
     #[test]
@@ -488,7 +505,7 @@ mod tests {
         assert!(
             t.contains("ControlPortWriteToFile \"C:/ProgramData/SocketGuard/tor/control-port\"\n")
         );
-        assert!(!t.contains("ControlSocket"));
+        assert!(!t.contains("ControlSocket") && !t.contains("unix:"));
         for forbidden in ["GeoIP", "ClientTransportPlugin", "ORPort", "User "] {
             assert!(!t.contains(forbidden), "{forbidden}");
         }

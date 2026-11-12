@@ -148,7 +148,9 @@
            third_party\licenses (installer/payload/README.md). -->
       <Component Id="C.Licenses" Directory="LICENSESDIR">
         <File Id="F.License" Name="LICENSE.txt" Source="$(RepoRoot)\LICENSE" KeyPath="yes" />
-        <File Id="F.Notices" Name="THIRD_PARTY_NOTICES.md" Source="$(RepoRoot)\THIRD_PARTY_NOTICES.md" />
+      </Component>
+      <Component Id="C.Notices" Directory="LICENSESDIR">
+        <File Id="F.Notices" Name="THIRD_PARTY_NOTICES.md" Source="$(RepoRoot)\THIRD_PARTY_NOTICES.md" KeyPath="yes" />
       </Component>
 
       <Component Id="C.Shortcut" Directory="ProgramMenuFolder">

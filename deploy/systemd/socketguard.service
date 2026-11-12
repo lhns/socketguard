@@ -29,8 +29,11 @@ ReadWritePaths=/run /etc/socketguard
 # nftables, interface addresses and the NFLOG netlink socket need CAP_NET_ADMIN (nothing
 # opens a raw or packet socket: DHCPv6 is a plain UDP socket). CAP_SYS_PTRACE reads other
 # users' /proc entries to identify listening processes; CAP_CHOWN/CAP_FOWNER set the API
-# socket's group and mode.
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER
+# socket's group and mode. The managed Tor and Yggdrasil (ADR 0052) run as the account
+# `socketguard-net`: CAP_SETUID/CAP_SETGID let the daemon start them as that user,
+# CAP_DAC_OVERRIDE lets it write their generated configuration into the directories that
+# account owns (mode 0700), CAP_KILL lets it stop them. Found by the first run under systemd.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID CAP_KILL
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

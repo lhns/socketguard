@@ -772,7 +772,13 @@ fn relay(spec: &ChildSpec, limiter: &mut RateLimiter, last: &mut Option<String>,
             if dropped > 0 {
                 warn!("[{name}] {dropped} lines were dropped (too much output)");
             }
-            info!("[{name}] {line}");
+            if line.contains("[err]") {
+                tracing::error!("[{name}] {line}");
+            } else if line.contains("[warn]") {
+                warn!("[{name}] {line}");
+            } else {
+                info!("[{name}] {line}");
+            }
         }
         Take::Drop => {}
     }
