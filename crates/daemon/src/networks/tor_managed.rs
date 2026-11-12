@@ -642,7 +642,7 @@ mod tests {
     #[tokio::test]
     async fn bridges_need_the_helper_and_change_the_launch() {
         let d = state_dir();
-        let c = ctx(Some(d.clone()), FakeAccounts::present());
+        let c = ctx(Some(d.clone()), FakeAccounts::absent());
         let t = ManagedTor::new("tor", &c);
         let err = t.spec_with_bridges(&[BRIDGE.to_string()]).unwrap_err();
         assert!(err.contains("obfs4 helper"), "{err}");
