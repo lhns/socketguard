@@ -19,6 +19,7 @@ mod winacl;
 
 #[cfg(windows)]
 pub use protect::protect_service_dir;
+#[cfg(windows)]
 pub use protect::system_volume_flags;
 pub use protect::{
     db_protected, give_up_protection, protect_dir, volume_supports_acls, ALLOW_UNPROTECTED_DB_ENV,
