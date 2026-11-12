@@ -204,6 +204,9 @@ pub fn write_session(data_dir: &Path, owner_pid: Option<u32>) {
 /// first managed Yggdrasil start of this run (or of a killed run it carries over from).
 const WINTUN_KEY: &str = "wintun_present_before";
 
+/// How often a refused driver removal is tried again at the end of a run.
+const DRIVER_RETRIES: u32 = 3;
+
 /// The session record as the place for the "driver was there before" fact (portable mode has
 /// no install record, ADR 0054).
 pub struct SessionLog {
@@ -261,7 +264,16 @@ pub fn session_log() -> Option<SessionLog> {
 /// the driver store before this run and Windows lets it go without force. A killed daemon
 /// does not get here, so the driver stays then (nothing runs; the card says so). Returns what
 /// is left, as a sentence, for `last-exit.log`.
-pub fn remove_wintun_driver(host: &mut dyn crate::host::Host, data_dir: &Path) -> Option<String> {
+///
+/// Windows refuses the removal while the adapter still exists, and the adapter goes a moment
+/// after `yggdrasil.exe` ends: a refusal is tried again [`DRIVER_RETRIES`] times, `pause`
+/// apart, before the driver counts as shared with other software and is kept. (The session
+/// record goes with the clean exit either way, so a driver kept here is not removed later.)
+pub fn remove_wintun_driver(
+    host: &mut dyn crate::host::Host,
+    data_dir: &Path,
+    pause: Duration,
+) -> Option<String> {
     let present_before = match SessionLog::new(data_dir).recorded() {
         // Yggdrasil never started: the driver was never put there by us.
         Ok(None) => return None,
@@ -272,7 +284,19 @@ pub fn remove_wintun_driver(host: &mut dyn crate::host::Host, data_dir: &Path) -
             return None;
         }
     };
-    let report = crate::wintun::undo(host, present_before);
+    let mut report = crate::wintun::undo(host, present_before);
+    let kept = |r: &crate::report::Report| {
+        r.items
+            .iter()
+            .any(|i| matches!(i.outcome, crate::report::Outcome::Kept(_)))
+    };
+    for _ in 0..DRIVER_RETRIES {
+        if present_before || !kept(&report) {
+            break;
+        }
+        std::thread::sleep(pause);
+        report = crate::wintun::undo(host, present_before);
+    }
     tracing::info!("Wintun driver:\n{}", report.render());
     let left: Vec<String> = report
         .left_items()
@@ -691,9 +715,41 @@ mod tests {
         SessionLog::new(&dir).record(false).unwrap();
         let mut host = crate::host::fake::FakeHost::new("windows");
         pnputil(&mut host, &[WITH_WINTUN, WITHOUT_WINTUN]);
-        assert_eq!(remove_wintun_driver(&mut host, &dir), None);
+        assert_eq!(remove_wintun_driver(&mut host, &dir, Duration::ZERO), None);
         assert!(host.ran("pnputil /delete-driver oem12.inf"));
         assert!(!host.commands.iter().any(|c| c.contains("/force")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The adapter goes a moment after the child: the first delete is refused, the retry works.
+    #[test]
+    fn a_refused_driver_removal_is_tried_again() {
+        let dir = temp_data_dir();
+        write_session(&dir, None);
+        SessionLog::new(&dir).record(false).unwrap();
+        let mut host = crate::host::fake::FakeHost::new("windows");
+        // Per attempt: list, delete, list again.
+        pnputil(
+            &mut host,
+            &[WITH_WINTUN, WITH_WINTUN, WITH_WINTUN, WITHOUT_WINTUN],
+        );
+        host.answer_in_order(
+            "pnputil /delete-driver",
+            vec![
+                crate::host::Output {
+                    code: 1,
+                    ..Default::default()
+                },
+                crate::host::Output::default(),
+            ],
+        );
+        assert_eq!(remove_wintun_driver(&mut host, &dir, Duration::ZERO), None);
+        let deletes = host
+            .commands
+            .iter()
+            .filter(|c| c.starts_with("pnputil /delete-driver"))
+            .count();
+        assert_eq!(deletes, 2, "{:?}", host.commands);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -703,11 +759,11 @@ mod tests {
         write_session(&dir, None);
         // Yggdrasil never started: nothing was recorded, nothing is run.
         let mut host = crate::host::fake::FakeHost::new("windows");
-        assert_eq!(remove_wintun_driver(&mut host, &dir), None);
+        assert_eq!(remove_wintun_driver(&mut host, &dir, Duration::ZERO), None);
         assert!(host.commands.is_empty(), "{:?}", host.commands);
         // There before: shared with other software.
         SessionLog::new(&dir).record(true).unwrap();
-        assert_eq!(remove_wintun_driver(&mut host, &dir), None);
+        assert_eq!(remove_wintun_driver(&mut host, &dir, Duration::ZERO), None);
         assert!(host.commands.is_empty(), "{:?}", host.commands);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -722,11 +778,11 @@ mod tests {
         let mut host = crate::host::fake::FakeHost::new("windows");
         host.answer("pnputil /enum-drivers", 0, WITH_WINTUN);
         host.answer("pnputil /delete-driver", 1, "");
-        assert_eq!(remove_wintun_driver(&mut host, &dir), None);
+        assert_eq!(remove_wintun_driver(&mut host, &dir, Duration::ZERO), None);
 
         let mut host = crate::host::fake::FakeHost::new("windows");
         host.answer("pnputil", 1, "");
-        let left = remove_wintun_driver(&mut host, &dir).expect("named as left");
+        let left = remove_wintun_driver(&mut host, &dir, Duration::ZERO).expect("named as left");
         assert!(left.contains("Wintun driver"), "{left}");
         let _ = std::fs::remove_dir_all(&dir);
     }

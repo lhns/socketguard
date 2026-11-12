@@ -248,7 +248,13 @@ pub async fn run(
             // which holds that fact, is removed with the clean exit.
             let removal = tokio::task::spawn_blocking({
                 let dir = dir.clone();
-                move || portable::remove_wintun_driver(&mut host::SystemHost, &dir)
+                move || {
+                    portable::remove_wintun_driver(
+                        &mut host::SystemHost,
+                        &dir,
+                        std::time::Duration::from_secs(1),
+                    )
+                }
             })
             .await;
             if let Ok(Some(why)) = removal {

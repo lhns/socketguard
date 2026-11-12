@@ -438,19 +438,29 @@ Write-Host "  ygg: $(Mn-Describe $n)"
 if ($n -and "$($n.managed.state)" -eq 'unavailable') { Mn-Fail "the Yggdrasil files are not part of this build: $(Mn-Describe $n)" }
 # The key and the cookie are not for the account that may read data\: the managed directories do not inherit its read access.
 $sidOf = { param($rule) try { $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { '' } }
-foreach ($sub in 'tor', 'yggdrasil') {
+$subs = @('tor')
+if ($seen) { $subs += 'yggdrasil' }
+foreach ($sub in $subs) {
   $p = Join-Path $Data $sub
   if (-not (Wait-Until { Test-Path $p } 60)) { Mn-Fail "no $p; status: $(Mn-Describe (Mn-Net $(if ($sub -eq 'tor') { 'tor' } else { 'ygg' })))" }
   $acl = Get-Acl $p
   if (-not $acl.AreAccessRulesProtected) { Mn-Fail "$p inherits its access list from data\ (the allowed user's read access would reach it)`n$((& icacls $p) -join "`n")" }
   $names = @($acl.Access | ForEach-Object { & $sidOf $_ })
-  if ($names -contains $Sid) { Write-Host "  note: $Sid has an entry on $p`: $((& icacls $p) -join ' ')" }
+  # The daemon is an elevated administrator, so it needs no entry of its own: Administrators covers
+  # it. An entry for the allowed account would be the inherited read access of data\ leaking in.
+  # (On this runner the allowed account and the elevated one are the same user, so this proves the
+  # protected list, not that a different unelevated user is locked out.)
+  if ($names -contains $Sid) { Mn-Fail "$p has an access entry for the allowed account $Sid`n$((& icacls $p) -join "`n")" }
   $open = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and ((& $sidOf $_) -in @('S-1-1-0', 'S-1-5-32-545', 'S-1-5-11')) })
   if ($open.Count -gt 0) { Mn-Fail "$p admits Everyone, Users or Authenticated Users`n$((& icacls $p) -join "`n")" }
   Mn-Ok "$sub`: the directory has a protected access list (SYSTEM, Administrators and the daemon's account)"
 }
-Set-Content (Join-Path $Out 'd-acl.txt') ((& icacls (Join-Path $Data 'tor')) + (& icacls (Join-Path $Data 'yggdrasil')) -join "`n")
-if (Wait-Until { try { $script:session = Get-Content (Join-Path $Data 'session.json') -Raw | ConvertFrom-Json; $null -ne $script:session.wintun_present_before } catch { $false } } 30) {
+Set-Content (Join-Path $Out 'd-acl.txt') ((& icacls (Join-Path $Data 'tor')) -join "`n")
+# The Wintun fact is recorded before the first Yggdrasil start; when the adapter never appeared the
+# start may not have happened (see the SKIP below), so it is asserted only when it did.
+if (-not $seen) {
+  Write-Host '  session.json and data\yggdrasil are not asserted: the adapter did not appear'
+} elseif (Wait-Until { try { $script:session = Get-Content (Join-Path $Data 'session.json') -Raw | ConvertFrom-Json; $null -ne $script:session.wintun_present_before } catch { $false } } 30) {
   if ([bool]$script:session.wintun_present_before -ne $wintunBefore) { Mn-Fail "session.json says Wintun was present before: $($script:session.wintun_present_before), the driver store said $wintunBefore" }
   Mn-Ok "session.json records that the Wintun driver was present before: $wintunBefore (no install record exists in portable mode)"
 } else {

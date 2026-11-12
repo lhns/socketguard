@@ -53,8 +53,8 @@ async fn the_teardown_waits_for_a_managed_tor_and_a_managed_yggdrasil_to_be_gone
         "{names:?}"
     );
 
-    // What `run` calls after it has stopped serving; `mark_done` follows only after this
-    // returns, so the children must be gone by then.
+    // The teardown alone, without the supervisor shutdown `run` does first: `mark_done`
+    // follows only after it returns, so the children must be gone by then either way.
     let left = portable::teardown(&state).await;
     assert!(left.is_empty(), "{left:?}");
     assert!(
@@ -71,7 +71,37 @@ async fn the_teardown_waits_for_a_managed_tor_and_a_managed_yggdrasil_to_be_gone
     // The on/off setting is back as it was: the networks, not the teardown, decide again.
     assert!(!state.db.disabled().await);
 
-    // `run` then closes the supervisor, which is a no-op for what has already ended.
+    // Closing the supervisor afterwards is a no-op for what has already ended.
     h.ctx.children.shutdown().await;
+    assert!(h.spawner.running().is_empty());
+}
+
+/// The order `run` uses: the supervisor is shut down first, then the teardown runs. It must
+/// not hang on children that are already gone, and nothing is left.
+#[tokio::test]
+async fn the_teardown_after_the_supervisor_shutdown_returns_with_nothing_left() {
+    let h = ManagedHarness::new();
+    let state = h.app_state(DaemonConfig::default()).await;
+    let (_, applied) = state
+        .engine
+        .write()
+        .await
+        .add_network(
+            &state,
+            BackendInstanceConfig {
+                id: "tor".into(),
+                backend: BackendConfig::managed_tor(),
+            },
+        )
+        .await
+        .unwrap();
+    applied.unwrap();
+    wait_until("the child to start", || h.spawner.running().len() == 1).await;
+    h.ctx.children.shutdown().await;
+    assert!(h.spawner.running().is_empty());
+    let left = tokio::time::timeout(Duration::from_secs(10), portable::teardown(&state))
+        .await
+        .expect("the teardown does not hang");
+    assert!(left.is_empty(), "{left:?}");
     assert!(h.spawner.running().is_empty());
 }
