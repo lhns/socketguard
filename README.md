@@ -13,6 +13,12 @@ A daemon (a system service) does the work: it finds listening apps, keeps firewa
 pf, Windows Filtering Platform) and addresses in step with your grants, and serves a local API.
 The `socketguard` command line and the desktop app are two frontends for that API.
 
+[Install](#install) · [First steps](#first-steps) · [Networks](#networks) ·
+[Uninstall](#uninstall-and-purge) · [Portable mode](#portable-mode) · [Architecture](#architecture) ·
+[Platform support](#platform-support) · [Command line](#command-line) ·
+[Configuration](#configuration) · [Roadmap](#roadmap-and-what-is-not-built) ·
+[Building](#building-from-source) · [Testing](#testing)
+
 ## Install
 
 Packages are attached to each [release](https://github.com/lhns/socketguard/releases) with a
@@ -71,7 +77,7 @@ socketguard revoke nginx:80 alice
 (`reservations`, `addresses`), peer groups (`groups`), batch `grant`/`revoke`, `export`/`apply`,
 `protect-host`, `disable`/`enable`. `--json` prints the API types as JSON; apps, peers and groups can be
 named by id, unique id prefix or name. Reach is shown per network as `verified`, `whole subnet`,
-`IP only`, `open` or `not reachable`. See [docs/api.md](docs/api.md) and ADR 0033.
+`IP only`, `open` or `not reachable`. See [Command line](#command-line), [docs/api.md](docs/api.md) and ADR 0033.
 
 ## Networks
 
@@ -98,15 +104,6 @@ one"): `socketguard networks add yggdrasil --existing`, or `socketguard networks
 SocketGuard never installs, starts or reconfigures software it did not ship. `socketguard networks
 detect` and the app's Settings page show what this machine offers. Tor access control is described
 in [ADR 0040](docs/adr/0040-onion-service-lifecycle-consolidated.md).
-
-## Configuration
-
-The daemon reads `socketguard.json` from its fixed directory (Windows `%ProgramData%\SocketGuard`,
-Linux `/etc/socketguard`, macOS `/Library/Application Support/SocketGuard`), or from
-`$SOCKETGUARD_CONFIG`. Networks added with `socketguard networks add` are written to it. The other
-keys are `api_socket`, `api_pipe`, `poll_interval_secs`, `db_path`, `log_level` and `process_filter`
-(`DaemonConfig` in `crates/core/src/config.rs`). Telemetry is exported over OTLP when the standard
-`OTEL_EXPORTER_OTLP_*` variables are set; `deploy/otel/` has a local collector stack.
 
 ## Uninstall and purge
 
@@ -143,6 +140,182 @@ does not start beside the installed service, offers only Local, LAN and the mana
 Yggdrasil, and trusts the folder: anything running as you can change what then runs with
 administrator rights, so keep it where only you can write. Delete the folder to remove it. To try
 the UI or CLI against a daemon without installing, use this mode.
+
+## Architecture
+
+```
+  desktop app (Tauri) --+
+                        +--> local API ---------> socketguard-daemon (system service)
+  socketguard (CLI) ----+    Unix socket or       |
+                             named pipe           |  monitor   listening sockets -> apps
+                                                  |  engine    apps + grants + peers -> desired state
+                                                  |  state     SQLite database, activity log
+                                                  |  ruleset --> firewall: nftables | pf | WFP
+                                                  |  iface     addresses on the OS interfaces
+                                                  |  networks  Local, LAN (SLAAC, DHCPv6),
+                                                  |            Yggdrasil, Tor
+                                                  v
+                  host: firewall rules, addresses, and the child processes of the
+                        managed networks (SocketGuard's own Tor and Yggdrasil)
+```
+
+The frontends only speak the local API; they hold no state. The daemon applies the stored state
+when it starts and leaves it in place when it stops (portable mode excepted).
+
+| Path | Contents |
+|---|---|
+| `crates/core/` | Domain model (apps, peers, grants, reach), config, API types |
+| `crates/daemon/` | The daemon: monitor, engine, SQLite state, ruleset producer, firewall backends, interface addresses, networks (Local, LAN, Yggdrasil, DHCPv6, Tor), local API, telemetry |
+| `crates/client/` | Typed client for the local API, shared by the CLI and the app |
+| `crates/cli/` | The `socketguard` command line |
+| `ui/`, `ui/src-tauri/` | Desktop app: React frontend and its Tauri v2 Rust backend |
+| `installer/` | MSI (WiX), portable zip, deb and rpm (nfpm), macOS pkg; `installer/payload/` receives the bundled Tor and Yggdrasil |
+| `deploy/` | `bundle/` (pinned third-party programs), `ci/`, `e2e/` (Docker tests), `otel/` (telemetry stack), `systemd/` |
+| `test/` | Package tests run by `packages.yml` |
+| `docs/` | API, packaging, footprint, manual checks, `adr/` |
+
+## Platform support
+
+| | Windows | Linux | macOS |
+|---|---|---|---|
+| Firewall | Windows Filtering Platform | nftables (`inet` table) | pf anchor |
+| Service | Windows service | systemd unit | launchd daemon |
+| Installer | MSI, x86_64 | deb and rpm, x86_64 | pkg, arm64 and x86_64 |
+| Portable | zip, x86_64 | no | no |
+| Managed Tor | yes | yes | yes |
+| Managed Yggdrasil | yes (Wintun adapter) | yes (needs `/dev/net/tun`) | yes (`utun`) |
+| CI | Windows runner: unit tests; MSI and portable zip installed and run, real WFP filters | Ubuntu 22.04 VM: deb with systemd, netns tests (real nftables); Fedora containers: rpm, and one with systemd; nightly Docker e2e | arm64 and Intel runners: unit tests, `pfctl` check, pkg installed with launchd; smoke test |
+
+Only built, never run: no Linux aarch64 or Windows arm64 package exists (the bundle script can fetch
+their Tor and Yggdrasil, but no job builds them). Nothing is signed or notarized. On CI runners the
+managed Yggdrasil adapter depends on the runner (tun device, Wintun driver); the tests then report a
+skip with the reason instead of passing. The Docker tests run on Linux only.
+
+Not verified: Windows 10 (the WebView2 Runtime arriving through Windows Update is unchecked), the
+installer dialogs (CI installs silently; the checklist is [docs/manual-checks.md](docs/manual-checks.md)),
+a standard user elevating with an administrator's credentials, Linux distributions other than
+Ubuntu 22.04 and Fedora, and signing. Details: [docs/packaging.md](docs/packaging.md); the boot gap
+before the rules are applied is listed in [docs/footprint.md](docs/footprint.md).
+
+## Command line
+
+The essentials; every command is in [docs/cli.md](docs/cli.md) and `socketguard --help`.
+`--json` prints the API types; `--socket PATH` picks another daemon.
+
+```bash
+socketguard status                         # daemon, networks, protect-host, counts
+socketguard apps list | show nginx         # what listens; addresses, ports, grants and reach
+socketguard grant nginx:80 alice           # app[:port[/proto]] to a peer; or group:team, or anyone
+socketguard grant ftpd:port-group=passive alice
+socketguard grant tag:dev group:team       # a tag: every member, now and later
+socketguard grant reservation:web alice    # a reserved address: its bound rows, All ports
+socketguard grant --app web --app api --port 80 --port 443 --to alice --network lan --dry-run
+socketguard revoke nginx:80 alice          # or: revoke <grant-id>
+socketguard grants --peer alice            # also --app, --tag, --reservation, --group
+socketguard peers add --label alice <key>  # 64 hex = Yggdrasil key, IP/CIDR, 52 base32 = Tor client key
+socketguard peers tor-key bob              # generate a Tor client key; `share` prints the client line
+socketguard groups add team alice bob
+socketguard tags add dev --match 'python*' # apps matching join, now and when they start
+socketguard port-groups add 21/tcp 50000-51000/tcp -n passive --app ftpd
+socketguard addresses list                 # automatic and reserved addresses
+socketguard reservations add web nginx:80 tag:dev   # bind rows; then grant reservation:web
+socketguard networks add tor | add yggdrasil --peer tls://host:port | add yggdrasil --existing
+socketguard networks list | detect | peers yggdrasil --add URI --rm URI | rm ID
+socketguard share nginx                    # connection strings for the peer
+socketguard activity --blocked -f          # what was refused
+socketguard protect-host on eth0           # close the host's other listeners on eth0
+socketguard exposure                       # what Yggdrasil would expose without SocketGuard
+socketguard export -o sg.toml | apply -f sg.toml --dry-run
+socketguard disable | enable | shutdown    # rules off/on; shutdown is portable mode
+socketguard-daemon service install | access allow $USER | uninstall [--purge] | --disable | --portable
+```
+
+## Configuration
+
+The daemon reads one JSON file, `socketguard.json`. Networks added with `socketguard networks add`
+are written back to it; the other keys are edited by hand and need a daemon restart. Every key is
+optional.
+
+| Where | Windows | Linux | macOS | Portable |
+|---|---|---|---|---|
+| Config file, setup log | `%ProgramData%\SocketGuard` | `/etc/socketguard` | `/Library/Application Support/SocketGuard` | `data\` next to the programs |
+| Database | same folder | `/var/lib/socketguard` | same folder | `data\` |
+
+`$SOCKETGUARD_CONFIG` replaces the config file path (portable mode ignores it); a relative `db_path`
+is taken against the config file's folder. Nothing uses the working directory.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `backends` | array | one Local network | The networks (below). `id` is optional: the type, or `type-interface` for `slaac` and `dhcpv6`. At most one each of `ula`, `yggdrasil`, `tor` |
+| `backend` | object | none | Single-network form, used if `backends` is absent |
+| `api_socket` | string | `/run/socketguard.sock`; macOS `/var/run/socketguard.sock` | Unix socket of the local API; ignored on Windows |
+| `api_pipe` | string | `\\.\pipe\socketguard` | Named pipe of the local API; ignored elsewhere |
+| `poll_interval_secs` | number | `2` | How often listening sockets are read |
+| `db_path` | string | empty: `socketguard.db` in the database folder above | SQLite file, absolute or relative to the config folder |
+| `log_level` | string | `info` | `trace`, `debug`, `info`, `warn`, `error` |
+| `process_filter` | object | `{"mode": "denylist", "patterns": []}` (nothing excluded) | `mode` is `allowlist` or `denylist`; `patterns` are case-insensitive globs (`*`, `?`) on the process name. An empty allowlist admits nothing |
+
+Entries of `backends` (`"type"` selects the kind):
+
+| `type` | Key | Type | Default | Meaning |
+|---|---|---|---|---|
+| `ula` (Local) | `interface` | string | loopback: `lo`, `lo0`, `Loopback Pseudo-Interface 1` | Interface that holds the addresses |
+| `slaac` (LAN) | `interface` | string | required | Interface on the router's LAN |
+| | `prefix` | string | discovered (also `"auto"`) | IPv6 `/64` to use |
+| `dhcpv6` (LAN) | `interface` | string | required | Interface on the DHCPv6 server's LAN |
+| `yggdrasil` | `managed` | bool | `false` | Run SocketGuard's own node; excludes `interface` and `admin_endpoint` |
+| | `peers` | string array | `[]` | Managed only: URIs (`tcp`, `tls`, `quic`, `ws`, `wss`, `socks`, `sockstls`) |
+| | `interface` | string | found at runtime | Existing node: its interface |
+| | `admin_endpoint` | string | `yggdrasilctl`'s default | Existing node: admin socket, e.g. `unix:///var/run/yggdrasil.sock` |
+| `tor` | `managed` | bool | `false` | Run SocketGuard's own Tor; none of the keys below may be set |
+| | `control` | string | `127.0.0.1:9051` | Existing Tor: `host:port` or `unix:/path`. Administrator |
+| | `auth` | string or object | `"cookie"` | `"cookie"` (SAFECOOKIE), `"cookie_insecure"`, `{"password": "..."}`, `"none"` (Unix socket only). Administrator |
+| | `cookie_path` | string | none | Cookie file Tor must report. Administrator |
+| | `cookie_dir` | string | folder of `cookie_path` | Folder whose owner may own the cookie. Administrator |
+| | `expect_tor_uid` | number | none | Unix control socket: the uid Tor must run as. Administrator |
+| | `cookie_owner` | string | none | Windows: SID that may own the cookie, besides SYSTEM and Administrators. Administrator |
+| | `allow_remote_control` | bool | `false` | Accept a control address that is not loopback. Administrator |
+
+**Administrator only.** The API is open to every member of the access group, so it accepts a Tor
+network only with default settings or settings already in the file. The Tor control settings above
+(ADR 0040) therefore belong in the file, which only an administrator can write.
+
+Environment variables:
+
+| Variable | Read by | Meaning |
+|---|---|---|
+| `SOCKETGUARD_CONFIG` | daemon and its commands | Config file path |
+| `SOCKETGUARD_SOCKET` | CLI, app | Socket or pipe of the daemon to talk to |
+| `SOCKETGUARD_THIRD_PARTY` | daemon | Extra folder to look in for the bundled Tor and Yggdrasil |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_{TRACES,LOGS,METRICS}_ENDPOINT` | daemon | Export telemetry over OTLP when set; `deploy/otel/` has a local stack |
+| `OTEL_SDK_DISABLED`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | daemon | Standard OpenTelemetry settings |
+| `SOCKETGUARD_FORCE_REMOVE` | deb and rpm remove scripts | `1` passes `--force` and ignores a failed removal |
+| `SOCKETGUARD_TRUST_PIPE_SERVER` | CLI, app (Windows) | `1` accepts a pipe not owned by SYSTEM or Administrators; development only |
+| `SOCKETGUARD_ALLOW_UNPROTECTED_DB` | daemon (Windows) | `1` runs although the database ACL could not be set; development only |
+| `SOCKETGUARD_BUNDLE_CACHE` | `deploy/bundle/fetch.sh` | Download cache |
+| `SOCKETGUARD_NETNS_TESTS`, `SOCKETGUARD_PF_CHECK` | tests | Enable the netns tests (Linux, root) and the `pfctl` check (macOS, root) |
+
+## Roadmap and what is not built
+
+Not built, and not promised. Each item is recorded in an ADR.
+
+- WireGuard as a network on an existing interface, and an opt-in mTLS gateway: only the credential
+  kinds `wg_key` and `tls_spki` exist ([ADR 0036](docs/adr/0036-future-directions.md)). Key-verified
+  access therefore exists on Yggdrasil and Tor only.
+- IPv4 per-app addresses: IPv4 gets whole-host protection only (ADR 0036, 0026). Also not built:
+  out-of-process network plugins, mDNS/DNS-SD names, dynamic DNS, pflog capture on macOS.
+- More than one Yggdrasil node per host: SocketGuard's own node and one you already run cannot run
+  at the same time ([ADR 0052](docs/adr/0052-bundled-tor-and-yggdrasil.md),
+  [0051](docs/adr/0051-nothing-socketguard-adds-opens-the-host.md)).
+- Pluggable transports and bridges for the managed Tor (ADR 0052). The ADR's later amendment
+  describes obfs4 bridge lines, but nothing in this tree ships or reads them.
+- Port remapping on a reserved address, and per-client access on one onion address
+  ([ADR 0047](docs/adr/0047-addresses-on-demand-reservations-port-groups.md)). Inside a reservation,
+  Tor access is all or nothing.
+- Keeping the last ruleset across a reboot, loaded before the daemon: if the daemon cannot start,
+  nothing is filtered (ADR 0051).
+- Signed installers: no Authenticode, Developer ID or notarization yet
+  ([docs/packaging.md](docs/packaging.md)). No Linux aarch64 or Windows arm64 packages.
 
 ## Building from source
 
