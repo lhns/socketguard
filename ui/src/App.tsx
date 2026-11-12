@@ -1,140 +1,199 @@
-import { useState, useEffect, useCallback, useRef } from "react";
-import {
-  listSockets, onSocketsChanged, onDaemonConnected, startDaemon, initSSE,
-  ManagedSocket, AclGroupResponse, SocketGroupResponse,
-} from "./api";
-import AppTree from "./components/AppTree";
-import SocketDetail from "./components/SocketDetail";
-import Settings from "./components/Settings";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, onEnforcementNotice, toDaemonError, type Enforcement } from "./api";
+import ElevatedAction from "./components/ElevatedAction";
+import PortableClose from "./components/PortableClose";
+import { errorText } from "./lib";
+import { NavContext, type Focus, type FocusMessage, type Page } from "./nav";
+import ActivityPage from "./pages/ActivityPage";
+import AppsPage from "./pages/AppsPage";
+import PeersPage from "./pages/PeersPage";
+import ReservedPage from "./pages/ReservedPage";
+import SettingsPage from "./pages/SettingsPage";
+import { useDaemonEvents, usePortable, useStatus } from "./queries";
 
-function App() {
-  const [sockets, setSockets] = useState<ManagedSocket[]>([]);
-  const [aclGroups, setAclGroups] = useState<AclGroupResponse[]>([]);
-  const [socketGroups, setSocketGroups] = useState<SocketGroupResponse[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [starting, setStarting] = useState(false);
-  const [selectedSocket, setSelectedSocket] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
-  const lastJson = useRef("");
-  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+const PAGES: { id: Page; label: string }[] = [
+  { id: "apps", label: "Apps" },
+  { id: "reserved", label: "Reserved" },
+  { id: "peers", label: "Peers" },
+  { id: "activity", label: "Activity" },
+  { id: "settings", label: "Settings" },
+];
 
-  const refresh = useCallback(async () => {
-    try {
-      const resp = await listSockets();
-      setError(null);
-      const json = JSON.stringify(resp);
-      if (json !== lastJson.current) {
-        lastJson.current = json;
-        setSockets(resp.sockets);
-        setAclGroups(resp.acl_groups);
-        setSocketGroups(resp.socket_groups);
-      }
-      setStarting(false);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (error) {
-      retryTimer.current = setTimeout(() => refresh(), 5000);
-      return () => {
-        if (retryTimer.current) clearTimeout(retryTimer.current);
-      };
-    }
-  }, [error, refresh]);
-
-  useEffect(() => {
-    initSSE().catch(console.error);
-    refresh();
-    const unlistens: (() => void)[] = [];
-    onSocketsChanged(() => refresh()).then((fn) => unlistens.push(fn));
-    onDaemonConnected(() => refresh()).then((fn) => unlistens.push(fn));
-    return () => unlistens.forEach((fn) => fn());
-  }, [refresh]);
-
-  const handleStartDaemon = async () => {
-    setStarting(true);
-    try {
-      await startDaemon();
-    } catch (e) {
-      setStarting(false);
-      setError(String(e));
-    }
+/** What is wrong when the daemon cannot be used, and the one action that fixes it (ADR 0050). */
+function ConnectionBanner({ error, portable }: { error: unknown; portable: boolean | undefined }) {
+  const qc = useQueryClient();
+  const err = toDaemonError(error);
+  const hint = (err.details as { hint?: string } | undefined)?.hint;
+  const cannotUse = err.code === "connection" || err.code === "permission_denied";
+  const service = useQuery({ queryKey: ["service"], queryFn: api.serviceStatus, enabled: cannotUse && portable === false, refetchInterval: 4_000 });
+  const account = useQuery({ queryKey: ["account"], queryFn: api.currentAccount, enabled: err.code === "permission_denied" && portable === false });
+  const [allowed, setAllowed] = useState(false);
+  const s = service.data;
+  const recheck = () => {
+    void qc.invalidateQueries({ queryKey: ["service"] });
+    void qc.invalidateQueries({ queryKey: ["status"] });
   };
 
-  if (loading) return <div className="loading">Loading...</div>;
+  // Portable mode (ADR 0054): there is no service; the window starts the daemon itself.
+  if (cannotUse && portable) {
+    return (
+      <div className="error-banner banner" role="alert">
+        <div>
+          <p>
+            SocketGuard runs from this folder and is not started. Starting it asks for administrator rights. It stops and
+            removes its rules when you close this window.
+          </p>
+          <ElevatedAction label="Start" command="socketguard-daemon --portable ..." run={api.startPortableDaemon} onDone={recheck} />
+        </div>
+      </div>
+    );
+  }
+
+  let action: ReactNode = null;
+  if (cannotUse && s && !s.installed) {
+    action = (
+      <>
+        <p>The SocketGuard service is not installed on this computer.</p>
+        <ElevatedAction label="Install the service" command="socketguard-daemon service install" run={api.installService} onDone={recheck} />
+      </>
+    );
+  } else if (cannotUse && s && !s.running) {
+    action = (
+      <>
+        <p>The SocketGuard service is installed but stopped.</p>
+        <ElevatedAction label="Start" command="socketguard-daemon service start" run={api.startDaemon} onDone={recheck} />
+      </>
+    );
+  } else if (err.code === "permission_denied") {
+    action = allowed ? (
+      <p role="status">
+        Done. Sign out of this computer and sign in again, then open SocketGuard: group membership applies from the next sign-in.
+      </p>
+    ) : (
+      <>
+        <p>The service is running, but this account may not use it.</p>
+        {account.data ? (
+          <ElevatedAction
+            label="Allow my account"
+            command={`socketguard-daemon access allow ${account.data}`}
+            run={api.allowMyAccount}
+            onDone={() => setAllowed(true)}
+          />
+        ) : (
+          <p className="hint">Looking up your account name…</p>
+        )}
+      </>
+    );
+  }
 
   return (
-    <>
-      <header className="header">
-        <div className="header-inner">
-          <h1>
-            <span className="logo">S</span>
-            SocketGuard
-          </h1>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            {selectedSocket && (
-              <button
-                className="btn btn-sm btn-ghost"
-                onClick={() => setSelectedSocket(null)}
-              >
-                &larr; Back
-              </button>
-            )}
-            <button
-              className="btn btn-sm btn-ghost"
-              onClick={() => { setShowSettings(!showSettings); setSelectedSocket(null); }}
-              title="Settings"
-              style={{ fontSize: 16, padding: "4px 8px" }}
-            >
-              {showSettings ? "x" : "\u2699"}
-            </button>
-          </div>
-        </div>
-      </header>
-
-      <main className="content">
-        {error && (
-          <div className="error-banner" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16 }}>
-            <span>Cannot connect to daemon: {error}</span>
-            <button className="btn btn-primary btn-sm" onClick={handleStartDaemon} disabled={starting}>
-              {starting ? "Starting..." : "Start Daemon"}
-            </button>
-          </div>
-        )}
-
-        {showSettings ? (
-          <Settings />
-        ) : selectedSocket ? (
-          <SocketDetail
-            socketId={selectedSocket}
-            aclGroups={aclGroups}
-            onBack={() => setSelectedSocket(null)}
-          />
-        ) : sockets.length === 0 && !error ? (
-          <div className="card">
-            <div className="empty">
-              <div className="empty-icon">~</div>
-              <p>No sockets detected yet.</p>
-              <p style={{ fontSize: 12, marginTop: 4 }}>The daemon will discover listening sockets automatically.</p>
-            </div>
-          </div>
-        ) : (
-          <AppTree
-            sockets={sockets}
-            aclGroups={aclGroups}
-            socketGroups={socketGroups}
-            onRefresh={refresh}
-            onSelectSocket={(id) => setSelectedSocket(id)}
-          />
-        )}
-      </main>
-    </>
+    <div className="error-banner banner" role="alert">
+      <div>
+        <strong>{cannotUse ? "Cannot use the SocketGuard service." : "Daemon error."}</strong> {err.message}
+        {hint && <div>{hint}</div>}
+        {cannotUse && service.error && <div>The service state is not known: {errorText(service.error)}</div>}
+        {action}
+      </div>
+    </div>
   );
 }
 
-export default App;
+export default function App() {
+  useDaemonEvents();
+  const status = useStatus();
+  const portable = usePortable();
+  const [page, setPage] = useState<Page>("apps");
+  // A page stays mounted once it has been opened, so its selection, filters and columns
+  // survive following a link and coming back.
+  const [visited, setVisited] = useState<Set<Page>>(new Set(["apps"]));
+  const [focus, setFocus] = useState<FocusMessage>({ seq: 0 });
+  const [notice, setNotice] = useState<Enforcement | null>(null);
+
+  // A change the daemon saved but could not enforce everywhere yet (HTTP 202) stays visible.
+  useEffect(() => onEnforcementNotice(setNotice), []);
+
+  const nav = useMemo(
+    () => ({
+      go: (p: Page, f: Focus = {}) => {
+        if (Object.keys(f).length > 0) setFocus((cur) => ({ ...f, seq: cur.seq + 1 }));
+        setVisited((v) => (v.has(p) ? v : new Set(v).add(p)));
+        setPage(p);
+      },
+    }),
+    [],
+  );
+
+  return (
+    <NavContext.Provider value={nav}>
+      <header className="header">
+        <div className="header-inner">
+          <h1>
+            <span className="logo" aria-hidden="true">S</span>
+            SocketGuard
+            {portable && (
+              <span className="badge badge-portable" title="Portable: protection ends when you close SocketGuard.">portable</span>
+            )}
+          </h1>
+          <nav className="nav" aria-label="Main">
+            {PAGES.map((p) => (
+              <button
+                key={p.id}
+                className={`nav-btn${page === p.id ? " active" : ""}`}
+                aria-current={page === p.id ? "page" : undefined}
+                onClick={() => nav.go(p.id)}
+              >
+                {p.label}
+              </button>
+            ))}
+          </nav>
+        </div>
+      </header>
+      <main className="content">
+        {status.error && <ConnectionBanner error={status.error} portable={portable} />}
+        {notice && (
+          <div className="warn-banner banner" role="status">
+            <div>
+              <strong>Saved, but not enforced everywhere yet.</strong> {notice.message}
+            </div>
+            <button className="btn btn-sm" onClick={() => setNotice(null)}>Dismiss</button>
+          </div>
+        )}
+        {status.data?.disabled && (
+          <div className="error-banner banner" role="status">
+            <span>SocketGuard is off: no firewall rules or addresses are applied. Turn it on in Settings.</span>
+            <button className="btn btn-sm" onClick={() => nav.go("settings")}>Settings</button>
+          </div>
+        )}
+        {status.data?.unadopted && !status.data.disabled && (
+          <div className="error-banner banner" role="status">
+            <span>
+              Rules from an earlier install are active, but this database doesn&apos;t know them. Adopt them?
+              Nothing changes until you do.
+            </span>
+            <button className="btn btn-sm" onClick={() => nav.go("settings")}>Settings</button>
+          </div>
+        )}
+        {PAGES.map(
+          (p) => visited.has(p.id) && <div key={p.id} hidden={page !== p.id}>{renderPage(p.id, focus)}</div>,
+        )}
+      </main>
+      {portable && <PortableClose />}
+    </NavContext.Provider>
+  );
+}
+
+function renderPage(p: Page, focus: FocusMessage) {
+  switch (p) {
+    case "apps":
+      return <AppsPage focus={focus} />;
+    case "reserved":
+      return <ReservedPage focus={focus} />;
+    case "peers":
+      return <PeersPage focus={focus} />;
+    case "activity":
+      return <ActivityPage />;
+    case "settings":
+      return <SettingsPage />;
+  }
+}

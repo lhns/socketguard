@@ -1,535 +1,455 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use futures_util::StreamExt;
-use socketguard_core::api_types::*;
-use socketguard_core::config::BackendInstanceConfig;
-use socketguard_core::Policy;
-use std::path::Path;
-use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 use tauri::Emitter;
 
-const DEFAULT_API: &str = "http://127.0.0.1:9476";
+// ======== Data commands ========
+//
+// Thin wrappers over `socketguard_client::Client` (ADR 0033, 0042): one command per API
+// route. Errors reach the frontend as `{code, message, details}`. The coverage test in
+// crates/cli/tests/coverage.rs reads this file and fails when a route has no command here.
 
-fn api_base() -> &'static str {
-    static BASE: OnceLock<String> = OnceLock::new();
-    BASE.get_or_init(|| {
-        std::env::var("SOCKETGUARD_API").unwrap_or_else(|_| DEFAULT_API.to_string())
-    })
+use serde::Serialize;
+use socketguard_client::{Client, Error as ClientError, GrantQuery, Saved};
+use socketguard_core::api_types::{
+    ApplyRequest, ApplyResponse, AttachPortGroup, ChangesRequest, ChangesResponse, Enforcement,
+    ExportDocument, ExposureResponse, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer,
+    NewPortGroup, NewReservation, NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest,
+    ShareResponse, StatusResponse, TorKeyResponse, UpdatePortGroup, UpdateTag,
+};
+use socketguard_core::setup::NetworkSetup;
+use socketguard_core::{
+    ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, GrantView, Network,
+    NewCredential, NewGrant, ParsedCredential, Peer, PeerGroup, PortGroup, ReservationView, Scope,
+    Settings, Tag, TagMember,
+};
+
+/// Error shape the frontend branches on. API errors keep the daemon's code
+/// (`confirmation_required`, `protect_host_refused`, ...); `connection` means the daemon
+/// could not be reached.
+#[derive(Debug, Serialize)]
+struct UiError {
+    code: String,
+    message: String,
+    details: Option<serde_json::Value>,
 }
 
-fn client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .pool_idle_timeout(Duration::from_secs(60))
-            .build()
-            .expect("failed to build HTTP client")
-    })
-}
+const ACCESS_HINT: &str = if cfg!(windows) {
+    "Make sure the SocketGuard service is running and your account is in the local group 'SocketGuard Users'."
+} else {
+    "Make sure the SocketGuard service is running and your user is in the 'socketguard' group."
+};
 
-/// Shared, re-readable API token.
-fn token_store() -> &'static Arc<RwLock<Option<String>>> {
-    static STORE: OnceLock<Arc<RwLock<Option<String>>>> = OnceLock::new();
-    STORE.get_or_init(|| Arc::new(RwLock::new(read_api_token())))
-}
-
-fn read_api_token() -> Option<String> {
-    std::fs::read_to_string(socketguard_core::api_token_path())
-        .ok()
-        .map(|s| s.trim().to_string())
-}
-
-fn get_token() -> Result<String, String> {
-    let store = token_store();
-    {
-        let guard = store.read().unwrap();
-        if let Some(ref t) = *guard {
-            return Ok(t.clone());
+impl From<ClientError> for UiError {
+    fn from(e: ClientError) -> Self {
+        match e {
+            ClientError::Connect { endpoint, source } => UiError {
+                // The service answers on its socket, but this account may not use it.
+                code: if source.kind() == std::io::ErrorKind::PermissionDenied {
+                    "permission_denied"
+                } else {
+                    "connection"
+                }
+                .into(),
+                message: format!("Cannot reach the daemon at {endpoint}: {source}"),
+                details: Some(serde_json::json!({ "endpoint": endpoint, "hint": ACCESS_HINT })),
+            },
+            ClientError::Api {
+                code,
+                message,
+                details,
+                ..
+            } => UiError {
+                code,
+                message,
+                details,
+            },
+            ClientError::Protocol(m) => UiError {
+                code: "protocol".into(),
+                message: m,
+                details: None,
+            },
         }
     }
-    // Token not cached yet — try reading from disk (daemon may have started since)
-    refresh_token()
 }
 
-/// Re-read token from disk (after a 401 / daemon restart).
-fn refresh_token() -> Result<String, String> {
-    let store = token_store();
-    let mut guard = store.write().unwrap();
-    *guard = read_api_token();
-    guard
-        .clone()
-        .ok_or_else(|| "API token not available after refresh".into())
+type CmdResult<T> = Result<T, UiError>;
+
+/// What a change returns to the frontend: the value and, after an HTTP 202, the notice that
+/// the change is saved but not yet enforced. The frontend shows it.
+#[derive(Debug, Serialize)]
+struct Done<T> {
+    value: T,
+    enforcement: Option<Enforcement>,
 }
 
-/// Send a request with Bearer auth, retry once on 401 after refreshing the token.
-async fn authed_request(
-    build: impl Fn(&str) -> reqwest::RequestBuilder,
-) -> Result<reqwest::Response, String> {
-    let token = get_token()?;
-    let resp = build(&token).send().await.map_err(|e| e.to_string())?;
-
-    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        let token = refresh_token()?;
-        return build(&token).send().await.map_err(|e| e.to_string());
-    }
-
-    Ok(resp)
-}
-
-/// Check response status; on non-success parse ApiError body.
-async fn check_response(resp: reqwest::Response) -> Result<(), String> {
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
-        Err(err.error)
+impl<T> From<Saved<T>> for Done<T> {
+    fn from(s: Saved<T>) -> Self {
+        Done {
+            value: s.value,
+            enforcement: s.enforcement,
+        }
     }
 }
 
-// ======== Socket commands ========
+type DoneResult<T> = CmdResult<Done<T>>;
+
+fn client() -> Client {
+    Client::from_env()
+}
+
+// ─── Status ──────────────────────────────────────────────────────────────
 
 #[tauri::command]
-async fn list_sockets() -> Result<SocketListResponse, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/sockets", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+async fn status() -> CmdResult<StatusResponse> {
+    Ok(client().status().await?)
+}
+
+// ─── Apps ────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn list_apps() -> CmdResult<Vec<App>> {
+    Ok(client().list_apps().await?)
 }
 
 #[tauri::command]
-async fn get_socket(id: String) -> Result<SocketDetailResponse, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/sockets/{id}", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+async fn get_app(id: String) -> CmdResult<AppDetail> {
+    Ok(client().get_app(&id).await?)
 }
 
 #[tauri::command]
-async fn allow_ip(socket_id: String, ip: String, label: Option<String>) -> Result<(), String> {
-    let req = AllowIpRequest {
-        allowed_ip: ip,
-        label,
-    };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/sockets/{socket_id}/acl/allow", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+async fn delete_app(id: String) -> DoneResult<()> {
+    Ok(client().delete_app(&id).await?.into())
 }
 
 #[tauri::command]
-async fn remove_acl_entry(socket_id: String, entry_id: i64) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!(
-                "{}/api/sockets/{socket_id}/acl/{entry_id}",
-                api_base()
-            ))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
+async fn move_app(id: String, req: MoveAppRequest) -> DoneResult<AppDetail> {
+    Ok(client().move_app(&id, &req).await?.into())
 }
 
 #[tauri::command]
-async fn set_policy(socket_id: String, policy: String) -> Result<(), String> {
-    let policy: Policy = policy.parse().map_err(|e: String| e)?;
-    let req = UpdatePolicyRequest { policy };
-    let resp = authed_request(|token| {
-        client()
-            .put(format!("{}/api/sockets/{socket_id}/policy", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+async fn share_app(id: String) -> CmdResult<ShareResponse> {
+    Ok(client().share_app(&id).await?)
+}
+
+// ─── Peers ───────────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn list_peers() -> CmdResult<Vec<Peer>> {
+    Ok(client().list_peers().await?)
 }
 
 #[tauri::command]
-async fn set_backend_policy(socket_id: String, backend_id: String, policy: String) -> Result<(), String> {
-    let policy: Policy = policy.parse().map_err(|e: String| e)?;
-    let req = UpdatePolicyRequest { policy };
-    let resp = authed_request(|token| {
-        client()
-            .put(format!("{}/api/sockets/{socket_id}/backends/{backend_id}/policy", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+async fn create_peer(req: NewPeer) -> CmdResult<Peer> {
+    Ok(client().create_peer(&req).await?)
 }
 
 #[tauri::command]
-async fn allow_backend_ip(socket_id: String, backend_id: String, ip: String, label: Option<String>) -> Result<(), String> {
-    let req = AllowIpRequest {
-        allowed_ip: ip,
-        label,
-    };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/sockets/{socket_id}/backends/{backend_id}/acl/allow", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
-}
-
-// ======== ACL Group commands (ADR 0018) ========
-
-#[tauri::command]
-async fn list_acl_groups() -> Result<Vec<AclGroupResponse>, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/acl-groups", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+async fn get_peer(id: String) -> CmdResult<Peer> {
+    Ok(client().get_peer(&id).await?)
 }
 
 #[tauri::command]
-async fn create_acl_group(label: String) -> Result<AclGroupResponse, String> {
-    let req = CreateAclGroupRequest { label };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/acl-groups", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    if resp.status().is_success() {
-        resp.json().await.map_err(|e| e.to_string())
-    } else {
-        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
-        Err(err.error)
-    }
+async fn update_peer(id: String, label: String) -> CmdResult<Peer> {
+    Ok(client().update_peer(&id, &label).await?)
 }
 
 #[tauri::command]
-async fn get_acl_group(id: String) -> Result<AclGroupResponse, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/acl-groups/{id}", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+async fn delete_peer(id: String) -> DoneResult<()> {
+    Ok(client().delete_peer(&id).await?.into())
 }
 
 #[tauri::command]
-async fn update_acl_group(id: String, label: Option<String>, policy: Option<String>) -> Result<(), String> {
-    let policy = match policy {
-        Some(p) => Some(p.parse::<Policy>().map_err(|e: String| e)?),
-        None => None,
-    };
-    let req = UpdateAclGroupRequest { label, policy };
-    let resp = authed_request(|token| {
-        client()
-            .put(format!("{}/api/acl-groups/{id}", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+async fn parse_credentials(text: String) -> CmdResult<Vec<ParsedCredential>> {
+    Ok(client().parse_credentials(&text).await?)
 }
 
 #[tauri::command]
-async fn delete_acl_group(id: String) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!("{}/api/acl-groups/{id}", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
+async fn add_credential(peer_id: String, req: NewCredential) -> DoneResult<Credential> {
+    Ok(client().add_credential(&peer_id, &req).await?.into())
 }
 
 #[tauri::command]
-async fn add_to_acl_group(group_id: String, socket_ids: Vec<String>) -> Result<(), String> {
-    let req = AddToGroupRequest { socket_ids };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/acl-groups/{group_id}/members", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+async fn remove_credential(peer_id: String, credential_id: String) -> DoneResult<()> {
+    Ok(client()
+        .remove_credential(&peer_id, &credential_id)
+        .await?
+        .into())
+}
+
+/// Generate a Tor client key for a peer; the answer carries the private key.
+#[tauri::command]
+async fn generate_tor_key(peer_id: String) -> DoneResult<TorKeyResponse> {
+    Ok(client().generate_tor_key(&peer_id).await?.into())
+}
+
+// ─── Groups ──────────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn list_groups() -> CmdResult<Vec<PeerGroup>> {
+    Ok(client().list_groups().await?)
 }
 
 #[tauri::command]
-async fn remove_from_acl_group(group_id: String, socket_id: String) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!("{}/api/acl-groups/{group_id}/members/{socket_id}", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
+async fn create_group(req: NewGroup) -> CmdResult<PeerGroup> {
+    Ok(client().create_group(&req).await?)
 }
 
 #[tauri::command]
-async fn add_acl_group_entry(group_id: String, backend_id: String, ip: String, label: Option<String>) -> Result<(), String> {
-    let req = AddAclGroupEntryRequest {
-        backend_id,
-        allowed_ip: ip,
-        label,
-    };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/acl-groups/{group_id}/acl", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+async fn get_group(id: String) -> CmdResult<PeerGroup> {
+    Ok(client().get_group(&id).await?)
 }
 
 #[tauri::command]
-async fn remove_acl_group_entry(group_id: String, entry_id: i64) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!("{}/api/acl-groups/{group_id}/acl/{entry_id}", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
-}
-
-// ======== Socket Group commands (ADR 0018) ========
-
-#[tauri::command]
-async fn list_socket_groups() -> Result<Vec<SocketGroupResponse>, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/socket-groups", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+async fn update_group(id: String, label: String) -> CmdResult<PeerGroup> {
+    Ok(client().update_group(&id, &label).await?)
 }
 
 #[tauri::command]
-async fn create_socket_group(label: String, app_name: String) -> Result<SocketGroupResponse, String> {
-    let req = CreateSocketGroupRequest { label, app_name };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/socket-groups", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    if resp.status().is_success() {
-        resp.json().await.map_err(|e| e.to_string())
-    } else {
-        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
-        Err(err.error)
-    }
+async fn delete_group(id: String) -> DoneResult<()> {
+    Ok(client().delete_group(&id).await?.into())
 }
 
 #[tauri::command]
-async fn update_socket_group(id: String, label: String) -> Result<(), String> {
-    #[derive(serde::Serialize)]
-    struct Req {
-        label: Option<String>,
-    }
-    let req = Req { label: Some(label) };
-    let resp = authed_request(|token| {
-        client()
-            .put(format!("{}/api/socket-groups/{id}", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+async fn set_group_members(id: String, peer_ids: Vec<String>) -> DoneResult<PeerGroup> {
+    Ok(client().set_group_members(&id, &peer_ids).await?.into())
+}
+
+// ─── Grants and batch changes ────────────────────────────────────────────
+
+#[tauri::command]
+async fn list_grants() -> CmdResult<Vec<GrantView>> {
+    Ok(client().list_grants(&GrantQuery::default()).await?)
 }
 
 #[tauri::command]
-async fn delete_socket_group(id: String) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!("{}/api/socket-groups/{id}", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
+async fn create_grant(req: NewGrant) -> DoneResult<GrantView> {
+    Ok(client().create_grant(&req).await?.into())
 }
 
 #[tauri::command]
-async fn add_socket_to_socket_group(group_id: String, socket_ids: Vec<String>) -> Result<(), String> {
-    let req = AddToGroupRequest { socket_ids };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/socket-groups/{group_id}/members", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+async fn delete_grant(id: String) -> DoneResult<()> {
+    Ok(client().delete_grant(&id).await?.into())
+}
+
+/// Many changes at once: all or nothing, one firewall update (ADR 0045).
+#[tauri::command]
+async fn changes(req: ChangesRequest) -> DoneResult<ChangesResponse> {
+    Ok(client().changes(&req).await?.into())
+}
+
+// ─── Tags ────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn list_tags() -> CmdResult<Vec<Tag>> {
+    Ok(client().list_tags().await?)
 }
 
 #[tauri::command]
-async fn remove_socket_from_socket_group(group_id: String, socket_id: String) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!("{}/api/socket-groups/{group_id}/members/{socket_id}", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
-}
-
-// ======== Socket Group address policy & ACL ========
-
-#[tauri::command]
-async fn set_socket_group_address_policy(group_id: String, backend_id: String, policy: String) -> Result<(), String> {
-    let policy: Policy = policy.parse().map_err(|e: String| e)?;
-    let req = UpdatePolicyRequest { policy };
-    let resp = authed_request(|token| {
-        client()
-            .put(format!("{}/api/socket-groups/{group_id}/backends/{backend_id}/policy", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+async fn create_tag(req: NewTag) -> DoneResult<Tag> {
+    Ok(client().create_tag(&req).await?.into())
 }
 
 #[tauri::command]
-async fn add_socket_group_acl_entry(group_id: String, backend_id: String, ip: String, label: Option<String>) -> Result<(), String> {
-    let req = AllowIpRequest {
-        allowed_ip: ip,
-        label,
-    };
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/socket-groups/{group_id}/backends/{backend_id}/acl", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
+async fn get_tag(id: String) -> CmdResult<Tag> {
+    Ok(client().get_tag(&id).await?)
 }
 
 #[tauri::command]
-async fn remove_socket_group_acl_entry(group_id: String, entry_id: i64) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!("{}/api/socket-groups/{group_id}/acl/{entry_id}", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
-}
-
-// ======== Socket Group ACL Group (ADR 0020) ========
-
-#[tauri::command]
-async fn set_socket_group_acl_group(group_id: String, acl_group_id: Option<String>) -> Result<(), String> {
-    #[derive(serde::Serialize)]
-    struct Req {
-        acl_group_id: Option<String>,
-    }
-    let req = Req { acl_group_id };
-    let resp = authed_request(|token| {
-        client()
-            .put(format!("{}/api/socket-groups/{group_id}/acl-group", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    check_response(resp).await
-}
-
-// ======== Config, Backends, Interfaces, Events, Daemon ========
-
-#[tauri::command]
-async fn get_config() -> Result<ConfigResponse, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/config", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+async fn update_tag(id: String, req: UpdateTag) -> DoneResult<Tag> {
+    Ok(client().update_tag(&id, &req).await?.into())
 }
 
 #[tauri::command]
-async fn update_config(config: UpdateConfigRequest) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .put(format!("{}/api/config", api_base()))
-            .bearer_auth(token)
-            .json(&config)
-    })
-    .await?;
-    check_response(resp).await
+async fn delete_tag(id: String) -> DoneResult<()> {
+    Ok(client().delete_tag(&id).await?.into())
 }
 
 #[tauri::command]
-async fn list_interfaces() -> Result<InterfacesResponse, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/interfaces", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+async fn add_tag_member(tag_id: String, member: TagMember, confirm_open: bool) -> DoneResult<Tag> {
+    Ok(client()
+        .add_tag_member(&tag_id, &member, confirm_open)
+        .await?
+        .into())
 }
 
 #[tauri::command]
-async fn list_backend_instances() -> Result<BackendsResponse, String> {
-    let resp = authed_request(|token| {
-        client()
-            .get(format!("{}/api/backends", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    resp.json().await.map_err(|e| e.to_string())
+async fn remove_tag_member(tag_id: String, app_id: String, scope: Scope) -> DoneResult<Tag> {
+    Ok(client()
+        .remove_tag_member(&tag_id, &app_id, &scope)
+        .await?
+        .into())
+}
+
+// ─── Port groups ───────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn list_port_groups() -> CmdResult<Vec<PortGroup>> {
+    Ok(client().list_port_groups().await?)
 }
 
 #[tauri::command]
-async fn add_backend(req: AddBackendRequest) -> Result<BackendInstanceConfig, String> {
-    let resp = authed_request(|token| {
-        client()
-            .post(format!("{}/api/backends", api_base()))
-            .bearer_auth(token)
-            .json(&req)
-    })
-    .await?;
-    if resp.status().is_success() {
-        resp.json().await.map_err(|e| e.to_string())
-    } else {
-        let err: ApiError = resp.json().await.map_err(|e| e.to_string())?;
-        Err(err.error)
-    }
+async fn create_port_group(req: NewPortGroup) -> DoneResult<PortGroup> {
+    Ok(client().create_port_group(&req).await?.into())
 }
 
 #[tauri::command]
-async fn remove_backend(id: String) -> Result<(), String> {
-    let resp = authed_request(|token| {
-        client()
-            .delete(format!("{}/api/backends/{id}", api_base()))
-            .bearer_auth(token)
-    })
-    .await?;
-    check_response(resp).await
+async fn get_port_group(id: String) -> CmdResult<PortGroup> {
+    Ok(client().get_port_group(&id).await?)
+}
+
+#[tauri::command]
+async fn update_port_group(id: String, req: UpdatePortGroup) -> DoneResult<PortGroup> {
+    Ok(client().update_port_group(&id, &req).await?.into())
+}
+
+#[tauri::command]
+async fn delete_port_group(id: String) -> DoneResult<()> {
+    Ok(client().delete_port_group(&id).await?.into())
+}
+
+#[tauri::command]
+async fn attach_port_group(
+    id: String,
+    app_id: String,
+    req: AttachPortGroup,
+) -> DoneResult<PortGroup> {
+    Ok(client()
+        .attach_port_group(&id, &app_id, req.confirm_open)
+        .await?
+        .into())
+}
+
+#[tauri::command]
+async fn detach_port_group(id: String, app_id: String) -> DoneResult<PortGroup> {
+    Ok(client().detach_port_group(&id, &app_id).await?.into())
+}
+
+// ─── Addresses and reservations ──────────────────────────────────────────
+
+#[tauri::command]
+async fn list_addresses() -> CmdResult<Vec<Address>> {
+    Ok(client().list_addresses().await?)
+}
+
+#[tauri::command]
+async fn list_reservations() -> CmdResult<Vec<ReservationView>> {
+    Ok(client().list_reservations().await?)
+}
+
+#[tauri::command]
+async fn get_reservation(id: String) -> CmdResult<ReservationView> {
+    Ok(client().get_reservation(&id).await?)
+}
+
+#[tauri::command]
+async fn create_reservation(req: NewReservation) -> DoneResult<ReservationView> {
+    Ok(client().create_reservation(&req).await?.into())
+}
+
+#[tauri::command]
+async fn rename_reservation(id: String, label: String) -> DoneResult<ReservationView> {
+    Ok(client().rename_reservation(&id, &label).await?.into())
+}
+
+#[tauri::command]
+async fn release_reservation(id: String) -> DoneResult<()> {
+    Ok(client().release_reservation(&id).await?.into())
+}
+
+#[tauri::command]
+async fn add_binding(id: String, req: NewBinding) -> DoneResult<ReservationView> {
+    Ok(client().add_binding(&id, &req).await?.into())
+}
+
+#[tauri::command]
+async fn remove_binding(id: String, binding_id: String) -> DoneResult<ReservationView> {
+    Ok(client().remove_binding(&id, &binding_id).await?.into())
+}
+
+#[tauri::command]
+async fn reserve_address(id: String, req: ReserveRequest) -> DoneResult<ReservationView> {
+    Ok(client().reserve_address(&id, &req).await?.into())
+}
+
+// ─── Networks and settings ───────────────────────────────────────────────
+
+#[tauri::command]
+async fn list_networks() -> CmdResult<Vec<Network>> {
+    Ok(client().list_networks().await?)
+}
+
+#[tauri::command]
+async fn network_setup() -> CmdResult<NetworkSetup> {
+    Ok(client().network_setup().await?)
+}
+
+#[tauri::command]
+async fn add_network(req: NewNetwork) -> DoneResult<Network> {
+    Ok(client().add_network(&req).await?.into())
+}
+
+#[tauri::command]
+async fn set_network_peers(id: String, peers: Vec<String>) -> CmdResult<Network> {
+    Ok(client().set_peers(&id, &peers).await?)
+}
+
+#[tauri::command]
+async fn delete_network(id: String, force: bool, confirm_exposed: bool) -> CmdResult<()> {
+    Ok(client().delete_network(&id, force, confirm_exposed).await?)
+}
+
+#[tauri::command]
+async fn get_settings() -> CmdResult<Settings> {
+    Ok(client().get_settings().await?)
+}
+
+#[tauri::command]
+async fn set_protect_host(req: ProtectHostRequest) -> CmdResult<ProtectHostResponse> {
+    Ok(client().set_protect_host(&req).await?)
+}
+
+// ─── Activity, export, enforcement ───────────────────────────────────────
+
+#[tauri::command]
+async fn activity(query: ActivityQuery) -> CmdResult<Vec<ActivityRecord>> {
+    Ok(client().activity(&query).await?)
+}
+
+#[tauri::command]
+async fn export_state() -> CmdResult<ExportDocument> {
+    Ok(client().export().await?)
+}
+
+#[tauri::command]
+async fn apply_state(req: ApplyRequest) -> CmdResult<ApplyResponse> {
+    Ok(client().apply(&req).await?)
+}
+
+#[tauri::command]
+async fn enable() -> CmdResult<()> {
+    Ok(client().enable().await?)
+}
+
+#[tauri::command]
+async fn disable(confirm: bool) -> CmdResult<()> {
+    Ok(client().disable(confirm).await?)
+}
+
+/// Portable mode only (ADR 0054): end the daemon through its teardown.
+#[tauri::command]
+async fn shutdown() -> CmdResult<()> {
+    Ok(client().shutdown().await?)
 }
 
 #[tauri::command]
 async fn subscribe_events(app: tauri::AppHandle) -> Result<(), String> {
+    // One bridge per process: a frontend reload calls this again.
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(());
+    }
     tokio::spawn(async move {
         loop {
             match connect_sse(&app).await {
@@ -545,142 +465,601 @@ async fn subscribe_events(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Forward the daemon's push events to the frontend as Tauri events of the same name.
 async fn connect_sse(app: &tauri::AppHandle) -> Result<(), String> {
-    let token = get_token().unwrap_or_default();
-    let resp = reqwest::Client::new()
-        .get(format!("{}/api/events", api_base()))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        let token = refresh_token()?;
-        let resp = reqwest::Client::new()
-            .get(format!("{}/api/events", api_base()))
-            .bearer_auth(&token)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        return process_sse_stream(app, resp).await;
-    }
-
+    let client = socketguard_client::Client::from_env();
+    let mut events = client.events().await.map_err(|e| e.to_string())?;
     let _ = app.emit("daemon_connected", ());
-    process_sse_stream(app, resp).await
-}
-
-async fn process_sse_stream(
-    app: &tauri::AppHandle,
-    resp: reqwest::Response,
-) -> Result<(), String> {
-    let _ = app.emit("daemon_connected", ());
-
-    let mut stream = resp.bytes_stream();
-    let mut buf = String::new();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| e.to_string())?;
-        buf.push_str(&String::from_utf8_lossy(&chunk));
-
-        while let Some(pos) = buf.find("\n\n") {
-            let message = buf[..pos].to_string();
-            buf = buf[pos + 2..].to_string();
-
-            for line in message.lines() {
-                if let Some(event_name) = line.strip_prefix("event: ") {
-                    let event_name = event_name.trim();
-                    let _ = app.emit(event_name, ());
-                }
-            }
-        }
+    while let Some(event) = events.next().await {
+        let event = event.map_err(|e| e.to_string())?;
+        let _ = app.emit(event.name(), ());
     }
-
     Ok(())
 }
 
-#[tauri::command]
-async fn start_daemon() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let daemon = exe.parent().unwrap().join("socketguard-daemon.exe");
-    if !daemon.exists() {
-        return Err("socketguard-daemon.exe not found next to UI executable".into());
-    }
-    spawn_elevated(&daemon).map_err(|e| e.to_string())
+// ─── The service, access and removal (ADR 0050) ──────────────────────────
+//
+// Everything that changes the host is a command of `socketguard-daemon`, run through the
+// system's elevation prompt. The window never starts a daemon of its own.
+
+#[derive(Debug, Serialize)]
+struct ServiceStatus {
+    installed: bool,
+    running: bool,
 }
 
-fn spawn_elevated(path: &Path) -> anyhow::Result<()> {
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
-
-    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
-    let file: Vec<u16> = path
-        .to_string_lossy()
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            PCWSTR(verb.as_ptr()),
-            PCWSTR(file.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_HIDE,
-        )
+/// Run `socketguard-daemon <args>` with administrator rights and wait for it.
+async fn run_daemon_elevated(args: Vec<String>) -> CmdResult<SetupRun> {
+    let command = format!("socketguard-daemon {}", args.join(" "));
+    let Ok(daemon) = sibling("socketguard-daemon") else {
+        return Ok(SetupRun {
+            launched: false,
+            cancelled: false,
+            exit_code: None,
+            command,
+        });
     };
+    let run = tokio::task::spawn_blocking(move || elevated_run(&daemon, &args, false))
+        .await
+        .map_err(|e| internal(e.to_string()))?;
+    Ok(setup_run(run, command))
+}
 
-    let code = result.0 as isize;
-    if code > 32 {
-        Ok(())
-    } else {
-        anyhow::bail!("ShellExecuteW failed with code {code}")
+/// Whether the service is installed and running; needs no administrator rights.
+#[tauri::command]
+async fn service_status() -> CmdResult<ServiceStatus> {
+    let daemon = sibling("socketguard-daemon")?;
+    tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new(daemon);
+        cmd.args(["service", "status", "--json"]);
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000); // CREATE_NO_WINDOW
+        let out = cmd.output().map_err(|e| internal(e.to_string()))?;
+        serde_json::from_slice::<serde_json::Value>(&out.stdout)
+            .ok()
+            .and_then(|v| Some((v.get("installed")?.as_bool()?, v.get("running")?.as_bool()?)))
+            .map(|(installed, running)| ServiceStatus { installed, running })
+            .ok_or_else(|| internal("service status gave no answer".into()))
+    })
+    .await
+    .map_err(|e| internal(e.to_string()))?
+}
+
+/// Start the SocketGuard service, installing it first when it is not installed.
+#[tauri::command]
+async fn start_daemon() -> CmdResult<SetupRun> {
+    let installed = service_status().await.map(|s| s.installed).unwrap_or(true);
+    let action = if installed { "start" } else { "install" };
+    run_daemon_elevated(vec!["service".into(), action.into()]).await
+}
+
+/// Install the service (it starts at once).
+#[tauri::command]
+async fn install_service() -> CmdResult<SetupRun> {
+    run_daemon_elevated(vec!["service".into(), "install".into()]).await
+}
+
+/// The account this window runs as, in the form `access allow` takes: `DOMAIN\user` for a
+/// domain account on Windows, the plain name otherwise.
+fn account_name() -> CmdResult<String> {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    #[cfg(windows)]
+    let name = var("USERNAME").map(|user| match (var("USERDOMAIN"), var("COMPUTERNAME")) {
+        (Some(d), Some(c)) if !d.eq_ignore_ascii_case(&c) => format!("{d}\\{user}"),
+        _ => user,
+    });
+    #[cfg(not(windows))]
+    let name = var("USER").or_else(|| {
+        let out = std::process::Command::new("id").arg("-un").output().ok()?;
+        let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+        (!s.is_empty()).then_some(s)
+    });
+    name.filter(|n| !n.contains(['"', '\n', '\r']))
+        .ok_or_else(|| internal("cannot tell which account this is".into()))
+}
+
+#[tauri::command]
+async fn current_account() -> CmdResult<String> {
+    account_name()
+}
+
+/// Add this account to the group that may use the service (applies from the next sign-in).
+#[tauri::command]
+async fn allow_my_account() -> CmdResult<SetupRun> {
+    let account = account_name()?;
+    run_daemon_elevated(vec!["access".into(), "allow".into(), account]).await
+}
+
+/// Remove SocketGuard from this computer. `purge` also deletes the settings and keys;
+/// otherwise they stay. Always silent: the window has asked already.
+#[tauri::command]
+async fn remove_socketguard(purge: bool) -> CmdResult<SetupRun> {
+    let keep = if purge { "--purge" } else { "--keep-data" };
+    run_daemon_elevated(vec!["uninstall".into(), "--yes".into(), keep.into()]).await
+}
+
+/// Forget this window's own local storage (the columns shown in Apps, and whatever else the
+/// webview keeps). Only the webview profile of this app is touched.
+#[tauri::command]
+async fn clear_local_ui_settings(window: tauri::WebviewWindow) -> CmdResult<()> {
+    let _ = window.eval("try { localStorage.removeItem('socketguard.columns'); } catch (e) {}");
+    window
+        .clear_all_browsing_data()
+        .map_err(|e| internal(e.to_string()))
+}
+
+/// Close the window and the app.
+#[tauri::command]
+async fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
+// ─── Elevated runs ──────────────────────────────────────────────────────
+
+/// How an elevated run of a SocketGuard command ended, as the frontend needs it.
+#[derive(Debug, Serialize)]
+struct SetupRun {
+    /// The elevated command ran. False: it did not start (no elevation helper, or the
+    /// prompt was cancelled); `command` is what to run by hand.
+    launched: bool,
+    cancelled: bool,
+    exit_code: Option<i32>,
+    command: String,
+}
+
+/// A program installed next to this executable (`base` without the platform suffix).
+fn sibling(base: &str) -> Result<std::path::PathBuf, UiError> {
+    let exe = std::env::current_exe().map_err(|e| internal(e.to_string()))?;
+    let name = format!("{base}{}", std::env::consts::EXE_SUFFIX);
+    let path = sibling_candidates(exe.parent(), &name)
+        .into_iter()
+        .find(|p| p.exists());
+    path.ok_or_else(|| UiError {
+        code: "not_found".into(),
+        message: format!("{name} was not found next to the SocketGuard window"),
+        details: None,
+    })
+}
+
+/// Where `name` may be: next to the executable, and on macOS also in `/usr/local/bin`, where
+/// the installer puts the CLI and the daemon (the app itself is inside an `.app` bundle).
+fn sibling_candidates(exe_dir: Option<&std::path::Path>, name: &str) -> Vec<std::path::PathBuf> {
+    let mut v: Vec<std::path::PathBuf> = exe_dir.map(|d| d.join(name)).into_iter().collect();
+    if cfg!(target_os = "macos") {
+        v.push(std::path::Path::new("/usr/local/bin").join(name));
     }
+    v
+}
+
+fn internal(message: String) -> UiError {
+    UiError {
+        code: "internal".into(),
+        message,
+        details: None,
+    }
+}
+
+/// What becomes reachable over Yggdrasil without SocketGuard's block (ADR 0051).
+#[tauri::command]
+async fn exposure(without: Option<String>) -> CmdResult<ExposureResponse> {
+    Ok(client().exposure(without.as_deref()).await?)
+}
+
+fn setup_run(run: ElevatedRun, command: String) -> SetupRun {
+    match run {
+        ElevatedRun::Done(code) => SetupRun {
+            launched: true,
+            cancelled: false,
+            exit_code: code,
+            command,
+        },
+        ElevatedRun::Cancelled => SetupRun {
+            launched: true,
+            cancelled: true,
+            exit_code: None,
+            command,
+        },
+        ElevatedRun::Unavailable => SetupRun {
+            launched: false,
+            cancelled: false,
+            exit_code: None,
+            command,
+        },
+    }
+}
+
+enum ElevatedRun {
+    Done(Option<i32>),
+    /// The person declined the prompt: not an error.
+    Cancelled,
+    /// No way to ask for administrator rights here.
+    Unavailable,
+}
+
+/// UAC (`runas`), in a visible console (that the CLI keeps open at the end with `--pause`)
+/// or hidden.
+#[cfg(windows)]
+fn elevated_run(cli: &std::path::Path, args: &[String], visible: bool) -> ElevatedRun {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+    let process = match shell_execute_runas(cli, args, visible) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let mut code = None;
+    unsafe {
+        if WaitForSingleObject(process, INFINITE) == WAIT_OBJECT_0 {
+            let mut c = 0u32;
+            if GetExitCodeProcess(process, &mut c).is_ok() {
+                code = Some(c as i32);
+            }
+        }
+        let _ = CloseHandle(process);
+    }
+    ElevatedRun::Done(code)
+}
+
+/// Start `cli args` elevated through UAC and return its process handle. The error is the
+/// outcome to report: declined, or no way to ask.
+#[cfg(windows)]
+fn shell_execute_runas(
+    cli: &std::path::Path,
+    args: &[String],
+    visible: bool,
+) -> Result<windows::Win32::Foundation::HANDLE, ElevatedRun> {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
+
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let verb = wide("runas");
+    let file = wide(&cli.to_string_lossy());
+    let params = wide(
+        &args
+            .iter()
+            .map(|a| format!("\"{a}\""))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(params.as_ptr()),
+        nShow: if visible { SW_SHOWNORMAL.0 } else { SW_HIDE.0 },
+        ..Default::default()
+    };
+    if unsafe { ShellExecuteExW(&mut info) }.is_err() {
+        // ERROR_CANCELLED (1223): the UAC prompt was declined.
+        return Err(
+            if std::io::Error::last_os_error().raw_os_error() == Some(1223) {
+                ElevatedRun::Cancelled
+            } else {
+                ElevatedRun::Unavailable
+            },
+        );
+    }
+    Ok(info.hProcess)
+}
+
+/// Single-quote for a POSIX shell.
+#[cfg(not(windows))]
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// pkexec on Linux, osascript on macOS; nothing else is tried.
+#[cfg(not(windows))]
+fn elevated_run(cli: &std::path::Path, args: &[String], _visible: bool) -> ElevatedRun {
+    use std::process::Command;
+    let status = if cfg!(target_os = "macos") {
+        let line = std::iter::once(cli.to_string_lossy().to_string())
+            .chain(args.iter().cloned())
+            .map(|a| sh_quote(&a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let script = format!(
+            "do shell script \"{}\" with administrator privileges",
+            line.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        Command::new("osascript").args(["-e", &script]).status()
+    } else {
+        Command::new("pkexec").arg(cli).args(args).status()
+    };
+    match status {
+        Ok(s) => match s.code() {
+            // pkexec: 126 = not authorized, 127 = dismissed. osascript: -128 = cancelled.
+            Some(126) | Some(127) if !cfg!(target_os = "macos") => ElevatedRun::Cancelled,
+            code => ElevatedRun::Done(code),
+        },
+        Err(_) => ElevatedRun::Unavailable,
+    }
+}
+
+// ─── Portable mode (ADR 0054) ────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct PortableInfo {
+    /// This window runs from a folder (a `portable` file next to it, or `--portable`).
+    portable: bool,
+}
+
+/// Known without the daemon: the window decides what to show when the daemon is not there.
+#[tauri::command]
+async fn portable_info() -> PortableInfo {
+    PortableInfo {
+        portable: socketguard_core::portable::is_portable(),
+    }
+}
+
+/// What the last portable run left (`data\last-exit.log`), if there is a record.
+#[derive(Debug, Serialize)]
+struct PortableExit {
+    /// Unix seconds.
+    at: u64,
+    /// Empty: everything was removed.
+    left: Vec<String>,
+}
+
+#[tauri::command]
+async fn portable_last_exit() -> CmdResult<Option<PortableExit>> {
+    let Some(dir) = socketguard_core::portable::data_dir() else {
+        return Ok(None);
+    };
+    let file = dir.join(socketguard_core::portable::LAST_EXIT_FILE);
+    Ok(std::fs::read_to_string(file)
+        .ok()
+        .and_then(|t| socketguard_core::portable::parse_last_exit(&t))
+        .map(|(at, left)| PortableExit { at, left }))
+}
+
+/// The SID of the account this window runs as (its own token, not the elevated one a
+/// credentials prompt may start the daemon with).
+#[cfg(windows)]
+fn current_user_sid() -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    // SAFETY: token queries on the current process; the buffer is sized by the first call.
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+        let mut len = 0u32;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+        let mut buf = vec![0u8; len as usize];
+        let sid = if len > 0
+            && GetTokenInformation(
+                token,
+                TokenUser,
+                Some(buf.as_mut_ptr().cast()),
+                len,
+                &mut len,
+            )
+            .is_ok()
+        {
+            let user = (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+            let mut out = PWSTR::null();
+            ConvertSidToStringSidW(user, &mut out).ok().and_then(|()| {
+                let s = out.to_string().ok();
+                let _ = LocalFree(Some(HLOCAL(out.0.cast())));
+                s
+            })
+        } else {
+            None
+        };
+        let _ = CloseHandle(token);
+        sid
+    }
+}
+
+/// Start `socketguard-daemon --portable --owner-pid <this window> --allow-user <this account>`
+/// with administrator rights, hidden, and wait until its pipe answers. The daemon ends when
+/// this process does. Reported like the other elevated runs: `exit_code` 0 is a daemon that
+/// answers, another number a daemon that stopped, none one that never answered.
+#[tauri::command]
+async fn start_portable_daemon() -> CmdResult<SetupRun> {
+    let daemon = sibling("socketguard-daemon")?;
+    let installed = service_status().await.map(|s| s.installed).unwrap_or(false);
+    if installed {
+        return Err(UiError {
+            code: "service_installed".into(),
+            message: "The SocketGuard service is installed on this computer. Portable mode does \
+                      not run beside it: remove the service first."
+                .into(),
+            details: None,
+        });
+    }
+    #[cfg(windows)]
+    {
+        let Some(sid) = current_user_sid() else {
+            return Err(internal("cannot tell which account this is".into()));
+        };
+        let args: Vec<String> = [
+            "--portable",
+            "--owner-pid",
+            &std::process::id().to_string(),
+            "--allow-user",
+            &sid,
+        ]
+        .map(String::from)
+        .to_vec();
+        let command = format!("socketguard-daemon {}", args.join(" "));
+        let launched = {
+            let (d, a) = (daemon.clone(), args.clone());
+            tokio::task::spawn_blocking(move || {
+                shell_execute_runas(&d, &a, false).map(|h| h.0 as isize)
+            })
+            .await
+            .map_err(|e| internal(e.to_string()))?
+        };
+        let process = match launched {
+            Ok(p) => p,
+            Err(other) => return Ok(setup_run(other, command)),
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(40);
+        let code = loop {
+            if client().status().await.is_ok() {
+                break Some(0);
+            }
+            if let Some(code) = process_exit_code(process) {
+                break Some(code);
+            }
+            if std::time::Instant::now() > deadline {
+                break None;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+        close_process(process);
+        Ok(setup_run(ElevatedRun::Done(code), command))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = daemon;
+        Err(UiError {
+            code: "invalid".into(),
+            message: "portable mode exists on Windows only".into(),
+            details: None,
+        })
+    }
+}
+
+/// The exit code of a process started above, if it has ended.
+#[cfg(windows)]
+fn process_exit_code(process: isize) -> Option<i32> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Threading::GetExitCodeProcess;
+    const STILL_ACTIVE: u32 = 259;
+    let mut code = 0u32;
+    // SAFETY: the handle came from ShellExecuteEx and is open until `close_process`.
+    let got = unsafe { GetExitCodeProcess(HANDLE(process as *mut _), &mut code) }.is_ok();
+    (got && code != STILL_ACTIVE).then_some(code as i32)
+}
+
+#[cfg(windows)]
+fn close_process(process: isize) {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    // SAFETY: closes the handle once.
+    let _ = unsafe { CloseHandle(HANDLE(process as *mut _)) };
 }
 
 fn main() {
+    // Portable mode (ADR 0054): a `portable` file next to this program, or `--portable`. The
+    // window's browser data then stays in the folder too, not under the user's profile.
+    if std::env::args().any(|a| a == socketguard_core::portable::FLAG) {
+        socketguard_core::portable::request();
+    }
+    if socketguard_core::portable::is_portable() {
+        if let Some(dir) = socketguard_core::portable::exe_dir() {
+            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join("ui-data"));
+        }
+    }
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
+        // Portable mode: closing the window must stop the daemon first. Keep the window open
+        // and let the frontend run the close flow; it ends the app with `quit_app`.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if socketguard_core::portable::is_portable() {
+                    api.prevent_close();
+                    let _ = window.emit("portable_close_requested", ());
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
-            list_sockets,
-            get_socket,
-            allow_ip,
-            remove_acl_entry,
-            set_policy,
-            set_backend_policy,
-            allow_backend_ip,
-            // ACL groups (ADR 0018)
-            list_acl_groups,
-            create_acl_group,
-            get_acl_group,
-            update_acl_group,
-            delete_acl_group,
-            add_to_acl_group,
-            remove_from_acl_group,
-            add_acl_group_entry,
-            remove_acl_group_entry,
-            // Socket groups (ADR 0018)
-            list_socket_groups,
-            create_socket_group,
-            update_socket_group,
-            delete_socket_group,
-            add_socket_to_socket_group,
-            remove_socket_from_socket_group,
-            set_socket_group_address_policy,
-            add_socket_group_acl_entry,
-            remove_socket_group_acl_entry,
-            set_socket_group_acl_group,
-            // Config, backends, events
-            get_config,
-            update_config,
-            list_interfaces,
-            list_backend_instances,
-            add_backend,
-            remove_backend,
+            status,
+            list_apps,
+            get_app,
+            delete_app,
+            move_app,
+            share_app,
+            list_peers,
+            create_peer,
+            get_peer,
+            update_peer,
+            delete_peer,
+            parse_credentials,
+            add_credential,
+            remove_credential,
+            generate_tor_key,
+            list_groups,
+            create_group,
+            get_group,
+            update_group,
+            delete_group,
+            set_group_members,
+            list_grants,
+            create_grant,
+            delete_grant,
+            changes,
+            list_tags,
+            create_tag,
+            get_tag,
+            update_tag,
+            delete_tag,
+            add_tag_member,
+            remove_tag_member,
+            list_port_groups,
+            create_port_group,
+            get_port_group,
+            update_port_group,
+            delete_port_group,
+            attach_port_group,
+            detach_port_group,
+            list_networks,
+            network_setup,
+            exposure,
+            add_network,
+            set_network_peers,
+            delete_network,
+            list_addresses,
+            list_reservations,
+            get_reservation,
+            create_reservation,
+            rename_reservation,
+            release_reservation,
+            add_binding,
+            remove_binding,
+            reserve_address,
+            get_settings,
+            set_protect_host,
+            activity,
+            export_state,
+            apply_state,
+            enable,
+            disable,
+            shutdown,
+            portable_info,
+            portable_last_exit,
+            start_portable_daemon,
             subscribe_events,
             start_daemon,
+            install_service,
+            service_status,
+            current_account,
+            allow_my_account,
+            remove_socketguard,
+            clear_local_ui_settings,
+            quit_app,
         ])
         .run(tauri::generate_context!())
         .expect("error running SocketGuard UI");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sibling_candidates;
+    use std::path::Path;
+
+    #[test]
+    fn the_executable_directory_comes_first() {
+        let c = sibling_candidates(Some(Path::new("/opt/sg")), "socketguard-daemon");
+        assert_eq!(c[0], Path::new("/opt/sg").join("socketguard-daemon"));
+        // /usr/local/bin is a fallback on macOS only, where the app sits in a bundle.
+        assert_eq!(c.len(), if cfg!(target_os = "macos") { 2 } else { 1 });
+        if cfg!(target_os = "macos") {
+            assert_eq!(c[1], Path::new("/usr/local/bin/socketguard-daemon"));
+        }
+    }
 }

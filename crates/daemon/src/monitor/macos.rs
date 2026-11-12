@@ -29,6 +29,9 @@ impl SocketMonitor for MacosSocketMonitor {
         let stdout = String::from_utf8_lossy(&output.stdout);
         parse_lsof_output(&stdout, Protocol::Udp, &exe_map, &mut sockets);
 
+        // Command lines (and a better executable path) from sysinfo.
+        super::procinfo::apply(&mut sockets, true);
+
         Ok(sockets)
     }
 }
@@ -80,15 +83,8 @@ fn parse_lsof_name(
         addr_str.parse().ok()?
     };
 
-    Some(ListeningSocket {
-        pid,
-        process_name: process_name.to_string(),
-        port,
-        protocol,
-        bind_address,
-        exe_path: None, // filled in by caller from exe_map
-        cmdline: None,
-    })
+    // exe_path comes from the caller's exe_map, the rest from sysinfo.
+    Some(ListeningSocket::new(pid, port, protocol, bind_address).with_process_name(process_name))
 }
 
 /// Build a PID→exe_path map using `ps` (single call for all processes).

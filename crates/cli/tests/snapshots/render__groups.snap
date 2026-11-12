@@ -1,0 +1,6 @@
+---
+source: crates/cli/tests/render.rs
+expression: "render::groups(&[group()], &n)"
+---
+ID        LABEL  MEMBERS
+group-te  team   alice

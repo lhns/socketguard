@@ -1,0 +1,57 @@
+[Unit]
+Description=SocketGuard daemon (applies the stored firewall state before networking comes up)
+# The rules must be in force before any interface is configured (ADR 0026).
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target
+Wants=network-pre.target
+# A node must not start before the rules that close it (ADR 0051). Yggdrasil's own unit
+# ordering was not checked against its packaging (only the unit name `yggdrasil`, as
+# `networks setup` uses it); this makes the order explicit. A unit that does not exist is
+# ignored.
+Before=yggdrasil.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/socketguard-daemon
+Restart=on-failure
+RestartSec=2
+
+# Config and setup log live in /etc/socketguard, the database in /var/lib/socketguard
+# (ADR 0050); nothing depends on a working directory. `service install` creates both
+# directories itself and records that. The API socket is in /run.
+StateDirectory=socketguard
+ConfigurationDirectory=socketguard
+ReadWritePaths=/run /etc/socketguard
+
+# nftables, interface addresses and the NFLOG netlink socket need CAP_NET_ADMIN (nothing
+# opens a raw or packet socket: DHCPv6 is a plain UDP socket). CAP_SYS_PTRACE reads other
+# users' /proc entries to identify listening processes; CAP_CHOWN/CAP_FOWNER set the API
+# socket's group and mode. The managed Tor and Yggdrasil (ADR 0052) run as the account
+# `socketguard-net`: CAP_SETUID/CAP_SETGID let the daemon start them as that user,
+# CAP_DAC_OVERRIDE lets it write their generated configuration into the directories that
+# account owns (mode 0700), CAP_KILL lets it stop them. Found by the first run under systemd.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID CAP_KILL
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+# The managed Yggdrasil creates its adapter through /dev/net/tun; the device sandbox that
+# comes with the Protect* options above would answer "operation not permitted" (found by the
+# first run of the Linux package test under systemd).
+DeviceAllow=/dev/net/tun rw
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -2,6 +2,12 @@
 name = "socketguard-daemon"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+
+[features]
+# Mocks for the firewall, interfaces, monitor and networks, and a ready-made daemon. Enabled
+# for the daemon's own tests (below) and by other crates' tests; not part of the product.
+test-support = []
 
 [dependencies]
 socketguard-core = { workspace = true }
@@ -9,27 +15,71 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+ipnet = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 axum = "0.8"
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["trace"] }
+http = "1"
+sha2 = "0.10"
+hmac = "0.12"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 rand = "0.8"
 socket2 = "0.6"
-sha2 = "0.10"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
+# OpenTelemetry: these crates are version-locked to each other (0.33 / tracing-opentelemetry 0.34).
+# OTLP over HTTP/protobuf (reqwest-blocking, on the SDK export threads) avoids the
+# tonic/protoc toolchain, which is the harder build on Windows.
+opentelemetry = "0.33"
+opentelemetry_sdk = { version = "0.33", features = ["logs", "metrics"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "logs", "metrics"] }
+opentelemetry-appender-tracing = "0.33"
+tracing-opentelemetry = "0.34"
+curve25519-dalek = "4"
+sha3 = "0.10"
+base64 = "0.22"
+data-encoding = { workspace = true }
+
+[dev-dependencies]
+socketguard-daemon = { path = ".", features = ["test-support"] }
+# A paused clock for the supervisor's backoff tests.
+tokio = { workspace = true, features = ["test-util"] }
+insta = { workspace = true }
+socketguard-client = { path = "../client" }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+opentelemetry_sdk = { version = "0.33", features = ["testing"] }
+
+# Command lines on Windows and macOS (Linux reads /proc directly).
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
+# The service control manager and the service entry point (ADR 0050).
+windows-service = "0.8"
+windows ={ version = "0.62", features = [
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
+    "Win32_System_Rpc",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+    "Win32_System_Memory",
+    "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

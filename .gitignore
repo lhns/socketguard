@@ -4,3 +4,13 @@ dist/
 *.db
 *.db-journal
 frontend.hash
+ui/src-tauri/gen/
+
+# Claude Code: local settings and agent worktrees
+.claude/settings.local.json
+.claude/worktrees/
+
+# Third-party files fetched for the installers (installer/payload/README.md) and their download cache
+/installer/payload/*/*
+!/installer/payload/*/.gitkeep
+/.bundle-cache/

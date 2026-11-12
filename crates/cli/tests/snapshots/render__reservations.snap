@@ -1,0 +1,11 @@
+---
+source: crates/cli/tests/render.rs
+expression: "render::reservations(&[r.clone()], &n)"
+---
+web  (r1111111aaaa)
+  bindings   nginx:80/tcp, redis-server:80/tcp
+  addresses  ygg  300:1:2:3::9  up
+             ygg: leaves out 6000-6010/tcp (another app listens there)
+             tor  300:1:2:3::9  closed
+             tor: port 80 is bound to two apps
+  conflict   80/tcp claimed by nginx:80/tcp, redis-server:80/tcp: served for nginx

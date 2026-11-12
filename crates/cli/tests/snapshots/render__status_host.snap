@@ -1,0 +1,17 @@
+---
+source: crates/cli/tests/render.rs
+expression: "render::status(&s)"
+---
+socketguard daemon 0.1.0
+enforcement   on
+protect-host  off
+apps          2, 3 addresses
+peers         1, groups 1, grants 3
+config        /etc/socketguard/socketguard.json
+database      /var/lib/socketguard/socketguard.db
+socket        /run/socketguard/socketguard.sock
+service       not installed
+bundled       none (managed networks not included in this build)
+
+Networks
+  no networks

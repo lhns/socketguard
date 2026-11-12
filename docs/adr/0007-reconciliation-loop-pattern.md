@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted (stale-socket deletion superseded by ADR 0027)
 
 ## Date
 

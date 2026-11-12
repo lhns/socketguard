@@ -1,0 +1,8 @@
+---
+source: crates/cli/tests/render.rs
+expression: "render::lockout_risks(&risks)"
+---
+whole-host protection would cut off remote administration:
+  sshd on :::22/tcp has no grant
+
+Grant each of them to a peer first (socketguard grant <app>:<port> <peer>), or repeat with --force to accept the lockout.

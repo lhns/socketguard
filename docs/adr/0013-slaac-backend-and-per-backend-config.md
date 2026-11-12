@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. Note: the legacy single-backend string form (`"backend": "ula"`) was removed in the redesign; use the `backends` list.
 
 ## Context
 

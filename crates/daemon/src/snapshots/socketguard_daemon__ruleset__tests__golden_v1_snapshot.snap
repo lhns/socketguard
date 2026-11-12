@@ -1,0 +1,75 @@
+---
+source: crates/daemon/src/ruleset.rs
+expression: build(&s)
+---
+DesiredRuleset {
+    scopes: [
+        Scope {
+            id: "managed",
+            kind: ManagedAddresses,
+            matcher: Destinations(
+                [
+                    300:1:2:3::100,
+                    2001:db8:1:2::100,
+                    fd00::1,
+                ],
+            ),
+        },
+        Scope {
+            id: "overlay:ygg0",
+            kind: Overlay,
+            matcher: Interface {
+                name: "ygg0",
+                families: Both,
+            },
+        },
+        Scope {
+            id: "host:eth0",
+            kind: WholeHost,
+            matcher: Interface {
+                name: "eth0",
+                families: Both,
+            },
+        },
+    ],
+    rules: [
+        Rule {
+            id: "a:an:8080:tcp:g2:eth0",
+            iif: Some(
+                "eth0",
+            ),
+            dst: Addr(
+                2001:db8:1:2::100,
+            ),
+            ports: PortRange {
+                start: 8080,
+                end: 8080,
+                proto: Tcp,
+            },
+            sources: Nets(
+                [
+                    fd00:5a::2/128,
+                ],
+            ),
+        },
+        Rule {
+            id: "a:ay:8080:tcp:g1:ygg0",
+            iif: Some(
+                "ygg0",
+            ),
+            dst: Addr(
+                300:1:2:3::100,
+            ),
+            ports: PortRange {
+                start: 8080,
+                end: 8080,
+                proto: Tcp,
+            },
+            sources: Nets(
+                [
+                    200:8af8:ba35:56ae:bef0:6284:981f:5972/128,
+                ],
+            ),
+        },
+    ],
+}

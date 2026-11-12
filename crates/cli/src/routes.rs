@@ -1,0 +1,93 @@
+//! Which client method, and so which API route, each command uses. The coverage test
+//! (tests/coverage.rs) looks the method and path up in the client's `CLIENT_ROUTES`, checks
+//! that every route of the daemon's `api::ROUTES` is used here and that every command named
+//! here exists, so a route cannot be added without a command (ADR 0033).
+
+pub struct CliRoute {
+    /// The subcommand path, e.g. `peers cred add`.
+    pub command: &'static str,
+    /// The `socketguard_client::Client` method it calls.
+    pub client_method: &'static str,
+}
+
+const fn r(command: &'static str, client_method: &'static str) -> CliRoute {
+    CliRoute {
+        command,
+        client_method,
+    }
+}
+
+pub const CLI_ROUTES: &[CliRoute] = &[
+    r("status", "status"),
+    r("init", "status"),
+    r("watch", "events"),
+    r("apps list", "list_apps"),
+    r("apps show", "get_app"),
+    r("share", "get_app"),
+    r("share", "share_app"),
+    r("apps rm", "delete_app"),
+    r("apps move", "move_app"),
+    r("reservations list", "list_reservations"),
+    r("reservations list", "get_reservation"),
+    r("reservations add", "create_reservation"),
+    r("reservations rename", "rename_reservation"),
+    r("reservations bind", "add_binding"),
+    r("reservations unbind", "remove_binding"),
+    r("reservations release", "release_reservation"),
+    r("addresses list", "list_addresses"),
+    r("addresses reserve", "reserve_address"),
+    r("peers list", "list_peers"),
+    r("peers add", "create_peer"),
+    r("peers show", "get_peer"),
+    r("peers rename", "update_peer"),
+    r("peers rm", "delete_peer"),
+    r("peers parse", "parse_credentials"),
+    r("peers cred add", "add_credential"),
+    r("peers cred rm", "remove_credential"),
+    r("peers tor-key", "generate_tor_key"),
+    r("groups list", "list_groups"),
+    r("groups add", "create_group"),
+    r("groups show", "get_group"),
+    r("groups rename", "update_group"),
+    r("groups rm", "delete_group"),
+    r("groups members", "set_group_members"),
+    r("grants", "list_grants"),
+    r("tags list", "list_tags"),
+    r("tags show", "get_tag"),
+    r("tags add", "create_tag"),
+    r("tags rename", "update_tag"),
+    r("tags patterns", "update_tag"),
+    r("tags rm", "delete_tag"),
+    r("tags members add", "add_tag_member"),
+    r("tags members rm", "remove_tag_member"),
+    r("port-groups list", "list_port_groups"),
+    r("port-groups list", "get_port_group"),
+    r("port-groups add", "create_port_group"),
+    r("port-groups set", "update_port_group"),
+    r("port-groups rm", "delete_port_group"),
+    r("port-groups attach", "attach_port_group"),
+    r("port-groups detach", "detach_port_group"),
+    r("grant", "create_grant"),
+    r("revoke", "delete_grant"),
+    r("grant", "changes"),
+    r("revoke", "changes"),
+    r("networks list", "list_networks"),
+    r("networks detect", "network_setup"),
+    r("networks add", "add_network"),
+    r("init", "add_network"),
+    r("networks peers", "set_peers"),
+    r("networks rm", "delete_network"),
+    r("networks rm", "exposure"),
+    r("exposure", "exposure"),
+    r("disable", "exposure"),
+    r("settings show", "get_settings"),
+    r("protect-host status", "get_settings"),
+    r("protect-host on", "set_protect_host"),
+    r("protect-host off", "set_protect_host"),
+    r("activity", "activity"),
+    r("export", "export"),
+    r("apply", "apply"),
+    r("disable", "disable"),
+    r("enable", "enable"),
+    r("shutdown", "shutdown"),
+];

@@ -1,379 +1,273 @@
+// Typed wrappers over the Tauri commands (src-tauri/src/main.rs). Types come from the
+// daemon's Rust types via ts-rs (see ./generated).
 import { invoke } from "@tauri-apps/api/core";
-import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { ActivityKind } from "./generated/ActivityKind";
+import type { ActivityQuery } from "./generated/ActivityQuery";
+import type { ActivityRecord } from "./generated/ActivityRecord";
+import type { Address } from "./generated/Address";
+import type { App } from "./generated/App";
+import type { AppDetail } from "./generated/AppDetail";
+import type { ApplyRequest } from "./generated/ApplyRequest";
+import type { ApplyResponse } from "./generated/ApplyResponse";
+import type { ChangeOp } from "./generated/ChangeOp";
+import type { ChangesRequest } from "./generated/ChangesRequest";
+import type { ChangesResponse } from "./generated/ChangesResponse";
+import type { Credential } from "./generated/Credential";
+import type { Enforcement } from "./generated/Enforcement";
+import type { ExportDocument } from "./generated/ExportDocument";
+import type { ExposureResponse } from "./generated/ExposureResponse";
+import type { GrantView } from "./generated/GrantView";
+import type { LockoutRiskInfo } from "./generated/LockoutRiskInfo";
+import type { MoveAppRequest } from "./generated/MoveAppRequest";
+import type { Network } from "./generated/Network";
+import type { NewBinding } from "./generated/NewBinding";
+import type { NewCredential } from "./generated/NewCredential";
+import type { NewGrant } from "./generated/NewGrant";
+import type { NewGroup } from "./generated/NewGroup";
+import type { NewNetwork } from "./generated/NewNetwork";
+import type { NewPeer } from "./generated/NewPeer";
+import type { NewReservation } from "./generated/NewReservation";
+import type { NewTag } from "./generated/NewTag";
+import type { ParsedCredential } from "./generated/ParsedCredential";
+import type { Peer } from "./generated/Peer";
+import type { PeerGroup } from "./generated/PeerGroup";
+import type { ReservationView } from "./generated/ReservationView";
+import type { ReserveRequest } from "./generated/ReserveRequest";
+import type { PortRef } from "./generated/PortRef";
+import type { ProtectHostRequest } from "./generated/ProtectHostRequest";
+import type { ProtectHostResponse } from "./generated/ProtectHostResponse";
+import type { AttachPortGroup } from "./generated/AttachPortGroup";
+import type { NewPortGroup } from "./generated/NewPortGroup";
+import type { Scope } from "./generated/Scope";
+import type { PortGroup } from "./generated/PortGroup";
+import type { UpdatePortGroup } from "./generated/UpdatePortGroup";
+import type { Settings } from "./generated/Settings";
+import type { ShareResponse } from "./generated/ShareResponse";
+import type { StatusResponse } from "./generated/StatusResponse";
+import type { Tag } from "./generated/Tag";
+import type { TagMember } from "./generated/TagMember";
+import type { Target } from "./generated/Target";
+import type { TorKeyResponse } from "./generated/TorKeyResponse";
+import type { NetworkSetup } from "./generated/NetworkSetup";
+import type { UpdateTag } from "./generated/UpdateTag";
 
-export interface SocketAddress {
-  backend_id: string;
-  backend_type: string;
-  address: string;
-  interface: string;
-  prefix_len: number;
-  keypair_id: string | null;
-  policy: string;
+export type {
+  ActivityKind, ActivityQuery, ActivityRecord, Address, App, AppDetail, ApplyRequest, ApplyResponse,
+  ChangeOp, ChangesRequest, ChangesResponse, Credential, Enforcement, ExportDocument, GrantView,
+  LockoutRiskInfo, MoveAppRequest, Network, NewBinding, NewCredential, NewGrant, NewGroup, NewNetwork, NewPeer,
+  NewReservation, NewTag, ReservationView, ReserveRequest, ParsedCredential, Peer, PeerGroup, PortRef, ProtectHostRequest, ProtectHostResponse,
+  AttachPortGroup, NewPortGroup, Scope, PortGroup, UpdatePortGroup,
+  Settings, ShareResponse, StatusResponse, Tag, TagMember, Target, TorKeyResponse,
+  UpdateTag,
+};
+export type { NetworkSetup, ExposureResponse };
+export type { KindSetup } from "./generated/KindSetup";
+export type { ManagedInfo } from "./generated/ManagedInfo";
+export type { ManagedOffer } from "./generated/ManagedOffer";
+export type { NetworkExposure } from "./generated/NetworkExposure";
+export type { ExposedListener } from "./generated/ExposedListener";
+export type { YggdrasilBlock } from "./generated/YggdrasilBlock";
+export type { LanCandidate } from "./generated/LanCandidate";
+export type { SetupState } from "./generated/SetupState";
+export type { SetupStatus } from "./generated/SetupStatus";
+export type { AccessOrigin } from "./generated/AccessOrigin";
+
+/** How an elevated command ended: `launched` false means the elevated command did not start
+ * (`command` is what to run by hand); `cancelled` is a declined prompt, not an error. */
+export interface SetupRun {
+  launched: boolean;
+  cancelled: boolean;
+  exit_code: number | null;
+  command: string;
+}
+/** Whether the SocketGuard service is installed and running (`service_status`). */
+export interface ServiceStatus {
+  installed: boolean;
+  running: boolean;
+}
+/** Portable mode (ADR 0054): `portable_last_exit`, written by the daemon at the end of its teardown;
+ * `left` lists what could not be removed (empty: everything was). */
+export interface PortableExit {
+  at: number;
+  left: string[];
+}
+export type { PortRange }from "./generated/PortRange";
+export type { AddrFamily } from "./generated/AddrFamily";
+export type { Binding } from "./generated/Binding";
+export type { BindingTarget } from "./generated/BindingTarget";
+export type { PortConflict } from "./generated/PortConflict";
+export type { Reservation } from "./generated/Reservation";
+export type { AppPort } from "./generated/AppPort";
+export type { BatchChange } from "./generated/BatchChange";
+export type { Change } from "./generated/Change";
+export type { EffectiveAccess } from "./generated/EffectiveAccess";
+export type { Protocol } from "./generated/Protocol";
+export type { Reach } from "./generated/Reach";
+export type { CredentialKind } from "./generated/CredentialKind";
+export type { Subject } from "./generated/Subject";
+export type { GrantReach } from "./generated/GrantReach";
+export type { NetworkReach } from "./generated/NetworkReach";
+export type { NetworkKind } from "./generated/NetworkKind";
+export type { TorShare } from "./generated/TorShare";
+
+/** Error from a command: the daemon's `{code, message, details}` or a `connection` error. */
+export class DaemonError extends Error {
+  code: string;
+  details: unknown;
+  constructor(code: string, message: string, details?: unknown) {
+    super(message);
+    this.code = code;
+    this.details = details;
+  }
 }
 
-export interface ManagedSocket {
-  id: string;
-  pid: number;
-  process_name: string;
-  port: number;
-  protocol: string;
-  addresses: SocketAddress[];
-  policy: string;
-  exe_path: string | null;
-  cmdline: string | null;
-  first_seen: string;
-  last_seen: string;
-  acl_group_id?: string | null;
-  socket_group_ids: string[];
+export function toDaemonError(e: unknown): DaemonError {
+  if (e instanceof DaemonError) return e;
+  if (e && typeof e === "object" && "code" in e && "message" in e) {
+    const o = e as { code: string; message: string; details?: unknown };
+    return new DaemonError(o.code, o.message, o.details ?? undefined);
+  }
+  return new DaemonError("unknown", String(e));
 }
 
-export interface AclEntry {
-  id: number;
-  socket_id: string;
-  backend_id: string;
-  allowed_ip: string;
-  label: string | null;
-  created_at: string;
+async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    throw toDaemonError(e);
+  }
 }
 
-// ACL Group types (ADR 0018)
-export interface AclGroup {
-  id: string;
-  label: string;
-  policy: string;
-  created_at: string;
+/** A change's answer: its value, plus the daemon's "saved, not yet enforced" notice after an
+ * HTTP 202 (ADR 0042). */
+interface Done<T> {
+  value: T;
+  enforcement: Enforcement | null;
 }
 
-export interface AclGroupResponse {
-  group: AclGroup;
-  entries: AclEntry[];
-  members: string[];
+const noticeListeners = new Set<(n: Enforcement) => void>();
+
+/** Be told whenever the daemon answers a change with `enforcement: pending`. */
+export function onEnforcementNotice(cb: (n: Enforcement) => void): () => void {
+  noticeListeners.add(cb);
+  return () => {
+    noticeListeners.delete(cb);
+  };
 }
 
-// Socket Group types (ADR 0018)
-export interface SocketGroup {
-  id: string;
-  label: string;
-  app_name: string;
-  created_at: string;
+async function callSaved<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const done = await call<Done<T>>(cmd, args);
+  if (done.enforcement) for (const cb of noticeListeners) cb(done.enforcement);
+  return done.value;
 }
 
-export interface SocketGroupAddress {
-  group_id: string;
-  backend_id: string;
-  address: string;
-  interface: string;
-  prefix_len: number;
-  keypair_id: string | null;
-  policy: string;
+export const api = {
+  status: () => call<StatusResponse>("status"),
+  listApps: () => call<App[]>("list_apps"),
+  getApp: (id: string) => call<AppDetail>("get_app", { id }),
+  deleteApp: (id: string) => callSaved<null>("delete_app", { id }),
+  moveApp: (id: string, req: MoveAppRequest) => callSaved<AppDetail>("move_app", { id, req }),
+  shareApp: (id: string) => call<ShareResponse>("share_app", { id }),
+  listPeers: () => call<Peer[]>("list_peers"),
+  createPeer: (req: NewPeer) => call<Peer>("create_peer", { req }),
+  getPeer: (id: string) => call<Peer>("get_peer", { id }),
+  updatePeer: (id: string, label: string) => call<Peer>("update_peer", { id, label }),
+  deletePeer: (id: string) => callSaved<null>("delete_peer", { id }),
+  parseCredentials: (text: string) => call<ParsedCredential[]>("parse_credentials", { text }),
+  addCredential: (peerId: string, req: NewCredential) =>
+    callSaved<Credential>("add_credential", { peerId, req }),
+  removeCredential: (peerId: string, credentialId: string) =>
+    callSaved<null>("remove_credential", { peerId, credentialId }),
+  generateTorKey: (peerId: string) => callSaved<TorKeyResponse>("generate_tor_key", { peerId }),
+  listGroups: () => call<PeerGroup[]>("list_groups"),
+  createGroup: (req: NewGroup) => call<PeerGroup>("create_group", { req }),
+  updateGroup: (id: string, label: string) => call<PeerGroup>("update_group", { id, label }),
+  deleteGroup: (id: string) => callSaved<null>("delete_group", { id }),
+  setGroupMembers: (id: string, peerIds: string[]) =>
+    callSaved<PeerGroup>("set_group_members", { id, peerIds }),
+  listGrants: () => call<GrantView[]>("list_grants"),
+  createGrant: (req: NewGrant) => callSaved<GrantView>("create_grant", { req }),
+  deleteGrant: (id: string) => callSaved<null>("delete_grant", { id }),
+  changes: (req: ChangesRequest) => callSaved<ChangesResponse>("changes", { req }),
+  listTags: () => call<Tag[]>("list_tags"),
+  createTag: (req: NewTag) => callSaved<Tag>("create_tag", { req }),
+  updateTag: (id: string, req: UpdateTag) => callSaved<Tag>("update_tag", { id, req }),
+  deleteTag: (id: string) => callSaved<null>("delete_tag", { id }),
+  addTagMember: (tagId: string, member: TagMember, confirmOpen = false) =>
+    callSaved<Tag>("add_tag_member", { tagId, member, confirmOpen }),
+  removeTagMember: (tagId: string, appId: string, scope: Scope) =>
+    callSaved<Tag>("remove_tag_member", { tagId, appId, scope }),
+  listPortGroups: () => call<PortGroup[]>("list_port_groups"),
+  getPortGroup: (id: string) => call<PortGroup>("get_port_group", { id }),
+  createPortGroup: (req: NewPortGroup) => callSaved<PortGroup>("create_port_group", { req }),
+  updatePortGroup: (id: string, req: UpdatePortGroup) =>
+    callSaved<PortGroup>("update_port_group", { id, req }),
+  deletePortGroup: (id: string) => callSaved<null>("delete_port_group", { id }),
+  attachPortGroup: (id: string, appId: string, req: AttachPortGroup) =>
+    callSaved<PortGroup>("attach_port_group", { id, appId, req }),
+  detachPortGroup: (id: string, appId: string) =>
+    callSaved<PortGroup>("detach_port_group", { id, appId }),
+  listNetworks: () => call<Network[]>("list_networks"),
+  networkSetup: () => call<NetworkSetup>("network_setup"),
+  addNetwork: (req: NewNetwork) => callSaved<Network>("add_network", { req }),
+  deleteNetwork: (id: string, force: boolean, confirmExposed = false) =>
+    call<void>("delete_network", { id, force, confirmExposed }),
+  /** What becomes reachable without the block of one network (or all of them): ADR 0051. */
+  exposure: (without: string | null) => call<ExposureResponse>("exposure", { without }),
+  /** Replace the peers of a managed Yggdrasil network; its node restarts. */
+  setNetworkPeers: (id: string, peers: string[]) => callSaved<Network>("set_network_peers", { id, peers }),
+  listAddresses: () => call<Address[]>("list_addresses"),
+  listReservations: () => call<ReservationView[]>("list_reservations"),
+  getReservation: (id: string) => call<ReservationView>("get_reservation", { id }),
+  createReservation: (req: NewReservation) =>
+    callSaved<ReservationView>("create_reservation", { req }),
+  renameReservation: (id: string, label: string) =>
+    callSaved<ReservationView>("rename_reservation", { id, label }),
+  releaseReservation: (id: string) => callSaved<null>("release_reservation", { id }),
+  addBinding: (id: string, req: NewBinding) =>
+    callSaved<ReservationView>("add_binding", { id, req }),
+  removeBinding: (id: string, bindingId: string) =>
+    callSaved<ReservationView>("remove_binding", { id, bindingId }),
+  reserveAddress: (id: string, req: ReserveRequest) =>
+    callSaved<ReservationView>("reserve_address", { id, req }),
+  getSettings: () => call<Settings>("get_settings"),
+  setProtectHost: (req: ProtectHostRequest) =>
+    call<ProtectHostResponse>("set_protect_host", { req }),
+  activity: (query: Partial<ActivityQuery>) =>
+    call<ActivityRecord[]>("activity", {
+      query: { since: null, kind: null, app_id: null, peer_id: null, before: null, limit: null, ...query },
+    }),
+  exportState: () => call<ExportDocument>("export_state"),
+  applyState: (req: ApplyRequest) => call<ApplyResponse>("apply_state", { req }),
+  enable: () => call<void>("enable"),
+  disable: () => call<void>("disable", { confirm: true }),
+  serviceStatus: () => call<ServiceStatus>("service_status"),
+  startDaemon: () => call<SetupRun>("start_daemon"),
+  installService: () => call<SetupRun>("install_service"),
+  currentAccount: () => call<string>("current_account"),
+  allowMyAccount: () => call<SetupRun>("allow_my_account"),
+  removeSocketguard: (purge: boolean) => call<SetupRun>("remove_socketguard", { purge }),
+  clearLocalUiSettings: () => call<void>("clear_local_ui_settings"),
+  /** Answers without the daemon: whether this copy runs from a folder (ADR 0054). */
+  portableInfo: () => call<{ portable: boolean }>("portable_info"),
+  startPortableDaemon: () => call<SetupRun>("start_portable_daemon"),
+  shutdown: () => call<void>("shutdown"),
+  portableLastExit: () => call<PortableExit | null>("portable_last_exit"),
+  quitApp: () => call<void>("quit_app"),
+  subscribeEvents: () => call<void>("subscribe_events"),
+};
+
+/** Subscribe to a daemon event re-emitted by the Tauri backend (same names as the SSE events, plus
+ * the UI-local `daemon_connected` / `daemon_disconnected`). */
+export function onDaemonEvent(name: string, cb: () => void): Promise<UnlistenFn> {
+  return listen(name, () => cb());
 }
 
-export interface SocketGroupAclEntry {
-  id: number;
-  group_id: string;
-  backend_id: string;
-  allowed_ip: string;
-  label: string | null;
-  created_at: string;
-}
-
-export interface SocketGroupResponse {
-  group: SocketGroup;
-  addresses: SocketGroupAddress[];
-  members: string[];
-  acl_entries: SocketGroupAclEntry[];
-  acl_group_id?: string | null;
-}
-
-export interface SocketListResponse {
-  sockets: ManagedSocket[];
-  acl_groups: AclGroupResponse[];
-  socket_groups: SocketGroupResponse[];
-}
-
-export interface SocketDetailResponse {
-  socket: ManagedSocket;
-  acl: AclEntry[];
-  acl_group_id: string | null;
-}
-
-export type BackendConfig =
-  | { type: "ula"; interface: string }
-  | { type: "yggdrasil"; interface: string }
-  | { type: "slaac"; interface: string; prefix?: string }
-  | { type: "dhcpv6"; interface: string };
-
-export interface BackendInstanceConfig {
-  id: string;
-  type: string;
-  interface: string;
-  prefix?: string;
-}
-
-export interface BackendInfo {
-  name: string;
-  description: string;
-  available: boolean;
-  singleton: boolean;
-}
-
-export interface BackendsResponse {
-  available_types: BackendInfo[];
-  active_instances: BackendInstanceConfig[];
-}
-
-export interface ProcessFilter {
-  mode: "allowlist" | "denylist";
-  patterns: string[];
-}
-
-export interface ConfigResponse {
-  listen_addr: string;
-  listen_port: number;
-  backends: BackendInstanceConfig[];
-  poll_interval_secs: number;
-  process_filter: ProcessFilter;
-}
-
-export interface UpdateConfigRequest {
-  backends?: BackendInstanceConfig[];
-  poll_interval_secs?: number;
-  process_filter?: ProcessFilter;
-}
-
-export interface AddBackendRequest {
-  id?: string;
-  type: string;
-  interface: string;
-  prefix?: string;
-}
-
-// ======== Socket functions ========
-
-export async function listSockets(): Promise<SocketListResponse> {
-  return invoke("list_sockets");
-}
-
-export async function getSocket(id: string): Promise<SocketDetailResponse> {
-  return invoke("get_socket", { id });
-}
-
-export async function allowIp(
-  socketId: string,
-  ip: string,
-  label?: string
-): Promise<void> {
-  return invoke("allow_ip", { socketId, ip, label });
-}
-
-export async function removeAclEntry(
-  socketId: string,
-  entryId: number
-): Promise<void> {
-  return invoke("remove_acl_entry", { socketId, entryId });
-}
-
-export async function setPolicy(
-  socketId: string,
-  policy: string
-): Promise<void> {
-  return invoke("set_policy", { socketId, policy });
-}
-
-export async function setBackendPolicy(
-  socketId: string,
-  backendId: string,
-  policy: string
-): Promise<void> {
-  return invoke("set_backend_policy", { socketId, backendId, policy });
-}
-
-export async function allowBackendIp(
-  socketId: string,
-  backendId: string,
-  ip: string,
-  label?: string
-): Promise<void> {
-  return invoke("allow_backend_ip", { socketId, backendId, ip, label });
-}
-
-// ======== ACL Group functions (ADR 0018) ========
-
-export async function listAclGroups(): Promise<AclGroupResponse[]> {
-  return invoke("list_acl_groups");
-}
-
-export async function createAclGroup(label: string): Promise<AclGroupResponse> {
-  return invoke("create_acl_group", { label });
-}
-
-export async function getAclGroup(id: string): Promise<AclGroupResponse> {
-  return invoke("get_acl_group", { id });
-}
-
-export async function updateAclGroup(
-  id: string,
-  label?: string,
-  policy?: string
-): Promise<void> {
-  return invoke("update_acl_group", { id, label, policy });
-}
-
-export async function deleteAclGroup(id: string): Promise<void> {
-  return invoke("delete_acl_group", { id });
-}
-
-export async function addToAclGroup(
-  groupId: string,
-  socketIds: string[]
-): Promise<void> {
-  return invoke("add_to_acl_group", { groupId, socketIds });
-}
-
-export async function removeFromAclGroup(
-  groupId: string,
-  socketId: string
-): Promise<void> {
-  return invoke("remove_from_acl_group", { groupId, socketId });
-}
-
-export async function addAclGroupEntry(
-  groupId: string,
-  backendId: string,
-  ip: string,
-  label?: string
-): Promise<void> {
-  return invoke("add_acl_group_entry", { groupId, backendId, ip, label });
-}
-
-export async function removeAclGroupEntry(
-  groupId: string,
-  entryId: number
-): Promise<void> {
-  return invoke("remove_acl_group_entry", { groupId, entryId });
-}
-
-// ======== Socket Group functions (ADR 0018) ========
-
-export async function listSocketGroups(): Promise<SocketGroupResponse[]> {
-  return invoke("list_socket_groups");
-}
-
-export async function createSocketGroup(
-  label: string,
-  appName: string
-): Promise<SocketGroupResponse> {
-  return invoke("create_socket_group", { label, appName });
-}
-
-export async function updateSocketGroup(
-  id: string,
-  label: string
-): Promise<void> {
-  return invoke("update_socket_group", { id, label });
-}
-
-export async function deleteSocketGroup(id: string): Promise<void> {
-  return invoke("delete_socket_group", { id });
-}
-
-export async function addSocketToSocketGroup(
-  groupId: string,
-  socketIds: string[]
-): Promise<void> {
-  return invoke("add_socket_to_socket_group", { groupId, socketIds });
-}
-
-export async function removeSocketFromSocketGroup(
-  groupId: string,
-  socketId: string
-): Promise<void> {
-  return invoke("remove_socket_from_socket_group", { groupId, socketId });
-}
-
-export async function setSocketGroupAddressPolicy(
-  groupId: string,
-  backendId: string,
-  policy: string
-): Promise<void> {
-  return invoke("set_socket_group_address_policy", { groupId, backendId, policy });
-}
-
-export async function addSocketGroupAclEntry(
-  groupId: string,
-  backendId: string,
-  ip: string,
-  label?: string
-): Promise<void> {
-  return invoke("add_socket_group_acl_entry", { groupId, backendId, ip, label });
-}
-
-export async function removeSocketGroupAclEntry(
-  groupId: string,
-  entryId: number
-): Promise<void> {
-  return invoke("remove_socket_group_acl_entry", { groupId, entryId });
-}
-
-export async function setSocketGroupAclGroup(
-  groupId: string,
-  aclGroupId: string | null
-): Promise<void> {
-  return invoke("set_socket_group_acl_group", { groupId, aclGroupId });
-}
-
-// ======== Config functions ========
-
-export async function getConfig(): Promise<ConfigResponse> {
-  return invoke("get_config");
-}
-
-export async function updateConfig(config: UpdateConfigRequest): Promise<void> {
-  return invoke("update_config", { config });
-}
-
-export interface InterfacesResponse {
-  interfaces: string[];
-}
-
-export async function listInterfaces(): Promise<InterfacesResponse> {
-  return invoke("list_interfaces");
-}
-
-export async function listBackendInstances(): Promise<BackendsResponse> {
-  return invoke("list_backend_instances");
-}
-
-export async function addBackend(req: AddBackendRequest): Promise<BackendInstanceConfig> {
-  return invoke("add_backend", { req });
-}
-
-export async function removeBackend(id: string): Promise<void> {
-  return invoke("remove_backend", { id });
-}
-
-// ======== Events ========
-
-export function onSocketsChanged(callback: () => void): Promise<UnlistenFn> {
-  return listen("sockets_changed", callback);
-}
-
-export function onConfigChanged(callback: () => void): Promise<UnlistenFn> {
-  return listen("config_changed", callback);
-}
-
-export function onDaemonConnected(callback: () => void): Promise<UnlistenFn> {
-  return listen("daemon_connected", callback);
-}
-
-export function onDaemonDisconnected(callback: () => void): Promise<UnlistenFn> {
-  return listen("daemon_disconnected", callback);
-}
-
-export async function initSSE(): Promise<void> {
-  return invoke("subscribe_events");
-}
-
-export async function startDaemon(): Promise<void> {
-  return invoke("start_daemon");
+/** Be told when the user closes the window in portable mode. The Rust side already keeps the window open and emits `portable_close_requested`; `preventDefault` is a no-op kept for the shape. Does nothing
+ * outside Tauri (tests, vite dev). */
+export async function onCloseRequested(cb: (e: { preventDefault: () => void }) => void | Promise<void>): Promise<UnlistenFn> {
+  const internals = typeof window === "undefined" ? undefined : (window as { __TAURI_INTERNALS__?: { metadata?: unknown } }).__TAURI_INTERNALS__;
+  if (!internals?.metadata) return () => {};
+  return listen("portable_close_requested", () => void cb({ preventDefault: () => {} }));
 }

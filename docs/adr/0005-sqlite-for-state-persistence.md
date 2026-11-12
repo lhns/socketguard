@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted (schema and migrations superseded by ADR 0027)
 
 ## Date
 

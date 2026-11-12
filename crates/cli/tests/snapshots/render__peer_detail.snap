@@ -1,0 +1,16 @@
+---
+source: crates/cli/tests/render.rs
+expression: "render::peer_detail(&p, &n, &grants()[..2])"
+---
+alice  (peer-alice-1)
+  groups      team
+  created     2026-11-02 10:00:00
+
+Credentials
+  ID        KIND     VALUE                                                             LABEL
+  credpeer  ygg_key  ba83a2e554a8a087cebdb3f053468cd3ff915b5dd94bf11b7a5fc2e36f13158b  laptop
+
+Grants (own and through groups)
+  ID        APP    PORT       NETWORK  WHO         REACH
+  g1111111  nginx  80/tcp     ygg      alice       ygg: verified
+  g2222222  nginx  All ports  all      group:team  ygg: whole subnet, lan: IP only

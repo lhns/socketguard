@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted
+Accepted (extended by ADR 0035)
+
+Since renamed: `NetworkInterface` is `InterfaceManager` in `iface/` (`create_network_interface()`
+is `iface::create()`), and `MockNetworkInterface` is `MockInterfaceManager`.
 
 ## Context
 

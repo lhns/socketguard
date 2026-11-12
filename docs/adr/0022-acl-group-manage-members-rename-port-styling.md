@@ -1,7 +1,7 @@
 # ADR 0022: ACL Group Manage Members, Rename Groups, Port/Protocol Styling
 
 ## Status
-Accepted
+Superseded by ADR 0027
 
 ## Date
 2026-03-15

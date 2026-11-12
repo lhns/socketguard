@@ -1,156 +1,121 @@
-use anyhow::Result;
-use socketguard_core::config::DaemonConfig;
-use socketguard_daemon::*;
-use std::sync::Arc;
-use tokio::sync::broadcast;
-use tracing::{error, info};
+use socketguard_daemon::args::{self, Command, ServiceCmd};
+use socketguard_daemon::{commands, portable, run};
+use std::process::ExitCode;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Load config first so we can use its log_level for tracing
-    let config = load_config_sync();
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("cannot start the async runtime")
+}
 
-    let log_directive = format!("socketguard={}", config.log_level);
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(log_directive.parse().unwrap_or_else(|_| {
-                    "socketguard=info".parse().unwrap()
-                })),
-        )
-        .init();
-    info!("Starting SocketGuard daemon");
-    for inst in &config.backends {
-        info!("Backend '{}': {} on interface {}", inst.id, inst.backend.backend_type(), inst.backend.interface());
+fn main() -> ExitCode {
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    // `--portable` (ADR 0054) is read before anything else, like the marker file.
+    socketguard_core::portable::strip_flag(&mut argv);
+    let cmd = match args::parse(&argv) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(e) = socketguard_core::portable::ensure_supported() {
+        eprintln!("socketguard-daemon: {e}");
+        return ExitCode::from(2);
     }
-
-    let api_token = auth::generate_and_store_token()?;
-
-    let db = state::Database::new(&config.db_path).await?;
-    db.migrate().await?;
-    info!("Database initialized at {}", config.db_path);
-
-    let engine = engine::Engine::new(&config)?;
-
-    let (events_tx, _) = broadcast::channel::<api::DaemonEvent>(64);
-
-    let state = Arc::new(AppState {
-        config: tokio::sync::RwLock::new(config.clone()),
-        db,
-        engine: tokio::sync::RwLock::new(engine),
-        firewall_lock: tokio::sync::Mutex::new(()),
-        events: events_tx,
-        api_token,
-    });
-
-    // Shutdown signal channel
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-    // Start the API server FIRST so the UI can connect immediately
-    let listen_addr = format!("{}:{}", config.listen_addr, config.listen_port);
-    info!("API listening on {listen_addr}");
-    let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
-    let app = api::router(state.clone());
-
-    // Start serving in a background task
-    let api_handle = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await
-    });
-
-    // Startup reconciliation runs AFTER the API is available
-    {
-        let engine = state.engine.read().await;
-        engine.startup_reconcile(&state).await;
+    if socketguard_core::portable::is_portable() {
+        if let Some(why) = args::portable_refusal(&cmd) {
+            eprintln!("socketguard-daemon: {why}");
+            return ExitCode::from(2);
+        }
     }
-
-    // Start the reconciliation loop with panic recovery
-    let engine_state = state.clone();
-    let recon_handle = tokio::spawn(async move {
-        loop {
-            let s = engine_state.clone();
-            let rx = shutdown_rx.clone();
-            let result = tokio::spawn(async move {
-                engine::run_loop(s, rx).await;
-            })
-            .await;
-
-            match result {
-                Ok(()) => break,
+    let code = match cmd {
+        Command::Help => {
+            print!("{}", args::USAGE);
+            0
+        }
+        Command::Run(opts) => {
+            let rt = runtime();
+            let started = portable::prepare(&opts).and_then(|()| {
+                let resolved = run::resolve_for_run()?;
+                if socketguard_core::portable::is_portable() {
+                    rt.block_on(run::run(resolved, portable::stop_requested()))
+                } else {
+                    rt.block_on(run::run(resolved, run::signal_shutdown()))
+                }
+            });
+            match started {
+                Ok(()) => 0,
                 Err(e) => {
-                    error!("Reconciliation loop panicked: {e}, restarting in 5s...");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    eprintln!("socketguard-daemon: {e:#}");
+                    1
                 }
             }
         }
+        Command::ChildGuard {
+            pid_file,
+            program,
+            args,
+        } => child_guard(pid_file.as_deref(), &program, &args),
+        Command::Service(ServiceCmd::Run) => service_run(),
+        Command::Service(c) => commands::service_cmd(c),
+        Command::Disable { force } => runtime().block_on(commands::disable_cmd(force)),
+        Command::Access(c) => commands::access_cmd(c),
+        Command::Uninstall {
+            purge,
+            keep_data,
+            yes,
+            force,
+            export,
+        } => runtime().block_on(commands::uninstall_cmd(
+            socketguard_daemon::uninstall::UninstallOptions {
+                purge,
+                keep_data,
+                yes,
+                force,
+                export,
+            },
+        )),
+    };
+    ExitCode::from(code as u8)
+}
+
+#[cfg(unix)]
+fn child_guard(pid_file: Option<&std::path::Path>, program: &str, args: &[String]) -> i32 {
+    socketguard_daemon::children::guard::run(pid_file, program, args)
+}
+
+#[cfg(not(unix))]
+fn child_guard(_: Option<&std::path::Path>, _: &str, _: &[String]) -> i32 {
+    eprintln!("`child-guard` is for Unix; Windows uses a job object");
+    2
+}
+
+/// Started by the Windows service control manager: the daemon runs until the control
+/// manager asks it to stop, and then shuts down exactly as on Ctrl+C. Nothing depends on
+/// the working directory (System32 for a service). It does not run beside a portable
+/// daemon (ADR 0054).
+#[cfg(windows)]
+fn service_run() -> i32 {
+    let result = socketguard_daemon::service::windows_scm::dispatch(|mut stop| {
+        portable::refuse_beside_portable(portable::portable_daemon_running())?;
+        let resolved = run::resolve_for_run()?;
+        runtime().block_on(run::run(resolved, async move {
+            let _ = stop.wait_for(|s| *s).await;
+        }))
     });
-
-    // Wait for the API server to finish (shutdown signal received)
-    if let Err(e) = api_handle.await? {
-        error!("API server error: {e}");
-    }
-
-    // Signal the reconciliation loop to stop
-    info!("Shutdown signal received, cleaning up...");
-    let _ = shutdown_tx.send(true);
-
-    // Wait for reconciliation loop to finish
-    let _ = tokio::time::timeout(
-        tokio::time::Duration::from_secs(5),
-        recon_handle,
-    )
-    .await;
-
-    // Graceful cleanup: remove firewall rules and IPv6 addresses
-    {
-        let engine = state.engine.read().await;
-        engine.shutdown_cleanup(&state).await;
-    }
-
-    auth::cleanup_token_file();
-
-    info!("SocketGuard daemon stopped");
-    Ok(())
-}
-
-async fn shutdown_signal() {
-    let ctrl_c = tokio::signal::ctrl_c();
-
-    #[cfg(unix)]
-    {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler");
-        tokio::select! {
-            _ = ctrl_c => {}
-            _ = sigterm.recv() => {}
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("socketguard-daemon: {e:#}");
+            1
         }
-    }
-
-    #[cfg(not(unix))]
-    {
-        ctrl_c.await.expect("failed to install Ctrl+C handler");
     }
 }
 
-/// Load config before tracing is initialized, so we can't use tracing macros here.
-fn load_config_sync() -> DaemonConfig {
-    let config_path =
-        std::env::var("SOCKETGUARD_CONFIG").unwrap_or_else(|_| "socketguard.json".to_string());
-    if let Ok(content) = std::fs::read_to_string(&config_path) {
-        match serde_json::from_str(&content) {
-            Ok(config) => {
-                eprintln!("[socketguard] Loaded config from {config_path}");
-                config
-            }
-            Err(e) => {
-                eprintln!("[socketguard] Failed to parse config {config_path}: {e}, using defaults");
-                DaemonConfig::default()
-            }
-        }
-    } else {
-        eprintln!("[socketguard] No config file found, using defaults");
-        DaemonConfig::default()
-    }
+#[cfg(not(windows))]
+fn service_run() -> i32 {
+    eprintln!("`service run` is the Windows service entry point; use `service start` here");
+    2
 }

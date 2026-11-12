@@ -2,14 +2,42 @@
 name = "socketguard-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "socketguard_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "socketguard"
+path = "src/main.rs"
 
 [dependencies]
 socketguard-core = { workspace = true }
-clap = { version = "4", features = ["derive"] }
+socketguard-client = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
-reqwest = { version = "0.12", features = ["json"] }
+comfy-table = "7"
+toml = "0.8"
 tokio = { workspace = true }
+anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-anyhow = { workspace = true }
-tabled = "0.17"
+chrono = { workspace = true }
+futures-util = "0.3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+socketguard-daemon = { path = "../daemon", features = ["test-support"] }
+assert_cmd = "2"
+insta = { workspace = true }
+uuid = { workspace = true }

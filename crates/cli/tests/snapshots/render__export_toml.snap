@@ -1,0 +1,63 @@
+---
+source: crates/cli/tests/render.rs
+expression: toml_text
+---
+version = 1
+port_groups = []
+
+[settings]
+protect_host_interfaces = ["eth0"]
+
+[[peers]]
+label = "alice"
+
+[[peers.credentials]]
+kind = "ygg_key"
+value = "ba83"
+
+[[groups]]
+label = "team"
+members = ["alice"]
+
+[[grants]]
+network = "ygg"
+
+[grants.app]
+id = "5c0d"
+name = "nginx"
+
+[grants.scope]
+kind = "port"
+port = 80
+proto = "tcp"
+
+[grants.subject]
+peer = "alice"
+
+[[grants]]
+subject = "anyone"
+
+[grants.app]
+id = "5c0d"
+name = "nginx"
+
+[grants.scope]
+kind = "all"
+
+[[reservations]]
+label = "web"
+
+[[reservations.bindings]]
+kind = "app"
+
+[reservations.bindings.app]
+id = "5c0d"
+name = "nginx"
+
+[reservations.bindings.scope]
+kind = "all"
+
+[[reservations.grants]]
+
+[reservations.grants.subject]
+peer = "alice"

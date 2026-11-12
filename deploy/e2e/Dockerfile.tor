@@ -1,0 +1,5 @@
+# Test node for the Tor e2e: tor, a client with python's cryptography (x25519 keys) and curl.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl iproute2 jq netcat-openbsd nftables procps python3 python3-cryptography tor \
+ && rm -rf /var/lib/apt/lists/*

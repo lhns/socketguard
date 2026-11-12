@@ -1,0 +1,17 @@
+---
+source: crates/cli/tests/render.rs
+expression: "render::app_detail(&d, &names())"
+---
+redis-server  (9e8d7c6b00112233)
+  first seen  2026-11-09 09:00:00
+  last seen   2026-11-09 12:30:00
+
+Ports
+  PORT      LISTENING
+  6379/tcp  yes
+
+Addresses
+  none yet: a row gets an address when a grant names it
+
+Who can reach it
+  nobody (closed)

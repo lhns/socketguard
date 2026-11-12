@@ -1,0 +1,33 @@
+name: setup wix
+description: >-
+  WiX v5 as a dotnet global tool, with the UI and Util extensions the installer uses.
+
+# WINDOWS RUNNERS ONLY (WiX loads anywhere .NET does and works only on Windows). Pinned in one
+# place: the extension version has to match the toolset version.
+inputs:
+  version:
+    description: WiX toolset version
+    required: false
+    default: "5.0.2"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: "8.0.x"
+
+    # pwsh, so the tools directory is a native path and not an MSYS one.
+    - shell: pwsh
+      run: |
+        dotnet tool install --global wix --version "${{ inputs.version }}"
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+        # GITHUB_PATH takes effect from the next step; this one also needs wix now.
+        $tools = Join-Path $HOME '.dotnet/tools'
+        Add-Content -Path $env:GITHUB_PATH -Value $tools
+        $env:PATH = $env:PATH + [IO.Path]::PathSeparator + $tools
+        wix extension add -g "WixToolset.UI.wixext/${{ inputs.version }}"
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+        wix extension add -g "WixToolset.Util.wixext/${{ inputs.version }}"
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+        wix --version

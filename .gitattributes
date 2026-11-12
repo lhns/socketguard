@@ -1,0 +1,21 @@
+# Normalize all text to LF in the repo and the working tree, regardless of core.autocrlf.
+* text=auto eol=lf
+
+# Windows-only scripts need CRLF.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binary assets.
+*.png  binary
+*.ico  binary
+*.icns binary
+*.jpg  binary
+*.gif  binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+
+# Generated lockfiles: collapsed in forge diffs.
+Cargo.lock        linguist-generated
+package-lock.json linguist-generated

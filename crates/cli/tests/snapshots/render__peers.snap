@@ -1,0 +1,6 @@
+---
+source: crates/cli/tests/render.rs
+expression: "render::peers(std::slice::from_ref(&p), &n)"
+---
+ID        LABEL  CREDENTIALS  GROUPS
+peer-ali  alice  ygg_key      team

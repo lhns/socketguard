@@ -1,51 +1,94 @@
 use super::SocketMonitor;
 use anyhow::Result;
-use socketguard_core::{ListeningSocket, Protocol};
+use socketguard_core::{normalize_exe_path, ListeningSocket, Platform, Protocol};
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::debug;
 
 pub struct LinuxSocketMonitor;
 
+/// A listening socket from /proc/net before its owner is known.
+struct RawSocket {
+    inode: u64,
+    port: u16,
+    protocol: Protocol,
+    bind_address: IpAddr,
+}
+
+/// Set once the first unattributable socket was logged.
+static LOGGED_UNATTRIBUTABLE: AtomicBool = AtomicBool::new(false);
+
 impl SocketMonitor for LinuxSocketMonitor {
     fn list_listening_sockets(&self) -> Result<Vec<ListeningSocket>> {
+        let mut raw = Vec::new();
+        for (file, protocol) in [
+            ("/proc/net/tcp6", Protocol::Tcp),
+            ("/proc/net/tcp", Protocol::Tcp),
+            ("/proc/net/udp6", Protocol::Udp),
+            ("/proc/net/udp", Protocol::Udp),
+        ] {
+            if let Ok(content) = std::fs::read_to_string(file) {
+                raw.extend(
+                    content
+                        .lines()
+                        .skip(1)
+                        .filter_map(|l| parse_proc_net_line(l, protocol)),
+                );
+            }
+        }
+
+        let wanted: HashSet<u64> = raw.iter().map(|r| r.inode).collect();
+        let holders = socket_holders(&wanted);
+        let mut procs: HashMap<u32, Proc> = HashMap::new();
         let mut sockets = Vec::new();
-
-        if let Ok(content) = std::fs::read_to_string("/proc/net/tcp6") {
-            for line in content.lines().skip(1) {
-                if let Some(socket) = parse_proc_net_line(line, Protocol::Tcp) {
-                    sockets.push(socket);
-                }
+        for r in raw {
+            let pids = holders.get(&r.inode).map(Vec::as_slice).unwrap_or_default();
+            for pid in pids {
+                procs.entry(*pid).or_insert_with(|| read_proc(*pid));
             }
-        }
-
-        if let Ok(content) = std::fs::read_to_string("/proc/net/tcp") {
-            for line in content.lines().skip(1) {
-                if let Some(socket) = parse_proc_net_line(line, Protocol::Tcp) {
-                    sockets.push(socket);
+            let candidates: Vec<&Proc> = pids
+                .iter()
+                .map(|pid| &procs[pid])
+                .filter(|p| p.valid)
+                .collect();
+            let Some(p) = pick_owner(&candidates) else {
+                // Not attributable to one program: it becomes an app of its own,
+                // `unknown:<proto>/<port>` (ADR 0046), instead of a gap.
+                if !LOGGED_UNATTRIBUTABLE.swap(true, Ordering::Relaxed) {
+                    debug!(
+                        "Socket on port {} {} has no single owner: {} (listed as an unknown app; further ones are not logged)",
+                        r.port,
+                        r.protocol,
+                        if candidates.is_empty() {
+                            "no process holds it"
+                        } else {
+                            "processes of different programs or users hold it"
+                        }
+                    );
                 }
-            }
+                let mut unknown = ListeningSocket::new(0, r.port, r.protocol, r.bind_address)
+                    .with_process_name("unknown");
+                unknown.unidentified = true;
+                sockets.push(unknown);
+                continue;
+            };
+            sockets.push(
+                ListeningSocket::new(p.pid, r.port, r.protocol, r.bind_address)
+                    .with_process_name(p.name.clone())
+                    .with_exe_path(p.exe_path.clone())
+                    .with_cmdline(p.cmdline.clone())
+                    .with_uid(p.uid.clone())
+                    .with_foreign_mntns(p.foreign_mntns)
+                    .with_cwd(p.cwd.clone())
+                    .with_in_service_unit(p.in_service_unit),
+            );
         }
-
-        if let Ok(content) = std::fs::read_to_string("/proc/net/udp6") {
-            for line in content.lines().skip(1) {
-                if let Some(socket) = parse_proc_net_line(line, Protocol::Udp) {
-                    sockets.push(socket);
-                }
-            }
-        }
-
-        if let Ok(content) = std::fs::read_to_string("/proc/net/udp") {
-            for line in content.lines().skip(1) {
-                if let Some(socket) = parse_proc_net_line(line, Protocol::Udp) {
-                    sockets.push(socket);
-                }
-            }
-        }
-
         Ok(sockets)
     }
 }
 
-fn parse_proc_net_line(line: &str, protocol: Protocol) -> Option<ListeningSocket> {
+fn parse_proc_net_line(line: &str, protocol: Protocol) -> Option<RawSocket> {
     let fields: Vec<&str> = line.split_whitespace().collect();
     if fields.len() < 10 {
         return None;
@@ -59,21 +102,11 @@ fn parse_proc_net_line(line: &str, protocol: Protocol) -> Option<ListeningSocket
 
     let local = fields[1];
     let (addr_hex, port_hex) = local.rsplit_once(':')?;
-    let port = u16::from_str_radix(port_hex, 16).ok()?;
-
-    let bind_address = parse_hex_addr(addr_hex)?;
-
-    let inode: u64 = fields[9].parse().ok()?;
-    let proc_info = find_pid_by_inode(inode);
-
-    Some(ListeningSocket {
-        pid: proc_info.pid,
-        process_name: proc_info.name,
-        port,
+    Some(RawSocket {
+        inode: fields[9].parse().ok()?,
+        port: u16::from_str_radix(port_hex, 16).ok()?,
         protocol,
-        bind_address,
-        exe_path: proc_info.exe_path,
-        cmdline: proc_info.cmdline,
+        bind_address: parse_hex_addr(addr_hex)?,
     })
 }
 
@@ -102,56 +135,235 @@ fn parse_hex_addr(hex: &str) -> Option<IpAddr> {
     }
 }
 
-struct ProcInfo {
-    pid: u32,
-    name: String,
-    exe_path: Option<String>,
-    cmdline: Option<String>,
+/// Split /proc/pid/cmdline (NUL-terminated arguments) into argv.
+fn parse_cmdline(raw: &[u8]) -> Vec<String> {
+    let raw = raw.strip_suffix(&[0]).unwrap_or(raw);
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    raw.split(|b| *b == 0)
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .collect()
 }
 
-fn find_pid_by_inode(inode: u64) -> ProcInfo {
-    let target = format!("socket:[{inode}]");
-    if let Ok(entries) = std::fs::read_dir("/proc") {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let pid_str = name.to_string_lossy();
-            if let Ok(pid) = pid_str.parse::<u32>() {
-                let fd_dir = format!("/proc/{pid}/fd");
-                if let Ok(fds) = std::fs::read_dir(&fd_dir) {
-                    for fd in fds.flatten() {
-                        if let Ok(link) = std::fs::read_link(fd.path()) {
-                            if link.to_string_lossy() == target {
-                                let process_name = std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                                    .unwrap_or_default()
-                                    .trim()
-                                    .to_string();
+/// What the daemon knows about a process holding a socket.
+struct Proc {
+    pid: u32,
+    /// False when the process vanished or cannot be read.
+    valid: bool,
+    name: String,
+    exe_path: Option<String>,
+    cmdline: Option<Vec<String>>,
+    uid: Option<String>,
+    foreign_mntns: bool,
+    cwd: Option<String>,
+    /// Runs in a systemd service unit (`/proc/<pid>/cgroup`).
+    in_service_unit: bool,
+}
 
-                                let exe_path = std::fs::read_link(format!("/proc/{pid}/exe"))
-                                    .ok()
-                                    .map(|p| p.to_string_lossy().to_string());
-
-                                let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-                                    .ok()
-                                    .map(|s| s.replace('\0', " ").trim().to_string())
-                                    .filter(|s| !s.is_empty());
-
-                                return ProcInfo {
-                                    pid,
-                                    name: process_name,
-                                    exe_path,
-                                    cmdline,
-                                };
-                            }
-                        }
-                    }
+/// One pass over /proc: which processes hold each of the `wanted` socket inodes.
+fn socket_holders(wanted: &HashSet<u64>) -> HashMap<u64, Vec<u32>> {
+    let mut holders: HashMap<u64, Vec<u32>> = HashMap::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return holders;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            let Ok(link) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            let inode = link
+                .to_str()
+                .and_then(|l| l.strip_prefix("socket:["))
+                .and_then(|l| l.strip_suffix(']'))
+                .and_then(|l| l.parse::<u64>().ok());
+            if let Some(inode) = inode.filter(|i| wanted.contains(i)) {
+                let pids = holders.entry(inode).or_default();
+                if !pids.contains(&pid) {
+                    pids.push(pid);
                 }
             }
         }
     }
-    ProcInfo {
-        pid: 0,
-        name: "unknown".to_string(),
-        exe_path: None,
-        cmdline: None,
+    for pids in holders.values_mut() {
+        pids.sort_unstable();
+    }
+    holders
+}
+
+fn read_proc(pid: u32) -> Proc {
+    let name = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|n| n.trim().to_string())
+        .ok();
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok();
+    let (Some(name), Some(status)) = (name, status) else {
+        return Proc {
+            pid,
+            valid: false,
+            name: String::new(),
+            exe_path: None,
+            cmdline: None,
+            uid: None,
+            foreign_mntns: false,
+            cwd: None,
+            in_service_unit: false,
+        };
+    };
+    // A binary replaced by an upgrade shows as "... (deleted)".
+    let exe_path = std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .map(|p| normalize_exe_path(&p.to_string_lossy(), Platform::Linux));
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
+        .ok()
+        .map(|raw| parse_cmdline(&raw))
+        .filter(|args| !args.is_empty());
+    // Another mount namespace can show any file under a trusted path. When either side
+    // cannot be read, assume the worst.
+    let own = std::fs::read_link("/proc/self/ns/mnt").ok();
+    let theirs = std::fs::read_link(format!("/proc/{pid}/ns/mnt")).ok();
+    let foreign_mntns = own.is_none() || theirs.is_none() || own != theirs;
+    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+    Proc {
+        pid,
+        valid: true,
+        name,
+        exe_path,
+        cmdline,
+        uid: parse_status_uid(&status),
+        foreign_mntns,
+        cwd,
+        in_service_unit: std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+            .is_ok_and(|c| cgroup_has_service_unit(&c)),
+    }
+}
+
+/// Whether the cgroup file of a process names a systemd service unit (`.../ssh.service`).
+fn cgroup_has_service_unit(cgroup: &str) -> bool {
+    cgroup
+        .lines()
+        .filter_map(|l| l.splitn(3, ':').nth(2))
+        .any(|path| path.split('/').any(|c| c.ends_with(".service")))
+}
+
+/// The effective uid from /proc/pid/status (`Uid: real effective saved fs`): what the
+/// process runs as, which is what its grants must be tied to.
+fn parse_status_uid(status: &str) -> Option<String> {
+    let line = status.lines().find_map(|l| l.strip_prefix("Uid:"))?;
+    let mut fields = line.split_whitespace();
+    let real = fields.next()?;
+    Some(fields.next().unwrap_or(real).to_string())
+}
+
+/// The process to attribute a socket to. Several processes may share a socket (a forked
+/// server); that is fine when they are the same program under the same user, and
+/// otherwise the socket cannot be attributed.
+fn pick_owner<'a>(holders: &[&'a Proc]) -> Option<&'a Proc> {
+    let first = holders.first()?;
+    holders
+        .iter()
+        .all(|p| {
+            p.exe_path == first.exe_path
+                && p.uid == first.uid
+                && p.foreign_mntns == first.foreign_mntns
+        })
+        .then_some(*first)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proc(pid: u32, exe: Option<&str>, uid: &str) -> Proc {
+        Proc {
+            pid,
+            valid: true,
+            name: "x".into(),
+            exe_path: exe.map(Into::into),
+            cmdline: None,
+            uid: Some(uid.into()),
+            foreign_mntns: false,
+            cwd: None,
+            in_service_unit: false,
+        }
+    }
+
+    #[test]
+    fn service_units_are_read_from_the_cgroup() {
+        assert!(cgroup_has_service_unit(
+            "0::/system.slice/ssh.service
+"
+        ));
+        assert!(cgroup_has_service_unit(
+            "12:cpu:/system.slice/docker.service
+0::/system.slice/docker.service
+"
+        ));
+        assert!(!cgroup_has_service_unit(
+            "0::/user.slice/user-1000.slice/session-3.scope
+"
+        ));
+        assert!(!cgroup_has_service_unit(
+            "0::/
+"
+        ));
+        assert!(!cgroup_has_service_unit(""));
+    }
+
+    #[test]
+    fn cmdline_is_split_on_nul() {
+        assert_eq!(
+            parse_cmdline(b"python3\0-m\0http.server\08080\0"),
+            ["python3", "-m", "http.server", "8080"]
+        );
+        // An empty argument in the middle survives; a trailing NUL does not add one.
+        assert_eq!(parse_cmdline(b"a\0\0b\0"), ["a", "", "b"]);
+        assert!(parse_cmdline(b"").is_empty());
+        assert!(parse_cmdline(b"\0").is_empty());
+    }
+
+    #[test]
+    fn status_uid_is_the_effective_one() {
+        let status = "Name:\tx\nUid:\t1000\t0\t0\t0\nGid:\t1000\t1000\t1000\t1000\n";
+        assert_eq!(parse_status_uid(status).as_deref(), Some("0"));
+        assert_eq!(parse_status_uid("Uid:\t7\n").as_deref(), Some("7"));
+        assert_eq!(parse_status_uid("Name:\tx\n"), None);
+    }
+
+    #[test]
+    fn shared_sockets_need_one_program_and_user() {
+        let a = proc(10, Some("/usr/sbin/nginx"), "0");
+        let b = proc(11, Some("/usr/sbin/nginx"), "0");
+        assert_eq!(pick_owner(&[&a, &b]).map(|p| p.pid), Some(10));
+        // Another program or user holding the same socket: ambiguous.
+        let other_exe = proc(12, Some("/tmp/evil"), "0");
+        assert!(pick_owner(&[&a, &other_exe]).is_none());
+        let other_uid = proc(13, Some("/usr/sbin/nginx"), "1000");
+        assert!(pick_owner(&[&a, &other_uid]).is_none());
+        let mut foreign = proc(14, Some("/usr/sbin/nginx"), "0");
+        foreign.foreign_mntns = true;
+        assert!(pick_owner(&[&a, &foreign]).is_none());
+        // Nobody: unattributable.
+        assert!(pick_owner(&[]).is_none());
+    }
+
+    #[test]
+    fn proc_net_lines_are_parsed_without_an_owner() {
+        let line = "   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1 0000000000000000 100 0 0 10 0";
+        let r = parse_proc_net_line(line, Protocol::Tcp).unwrap();
+        assert_eq!((r.inode, r.port), (12345, 8080));
+        assert!(r.bind_address.is_loopback());
+        assert!(parse_proc_net_line(&line.replace(" 0A ", " 01 "), Protocol::Tcp).is_none());
     }
 }

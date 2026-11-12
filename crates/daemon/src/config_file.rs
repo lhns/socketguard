@@ -1,0 +1,183 @@
+//! The daemon's config file: where it is, and writing the network list back to it.
+
+use socketguard_core::config::{BackendInstanceConfig, DaemonConfig};
+use std::path::{Path, PathBuf};
+
+/// `SOCKETGUARD_CONFIG`, else the fixed location of this system (ADR 0050); never the
+/// working directory.
+pub fn config_path() -> PathBuf {
+    socketguard_core::paths::config_path()
+}
+
+/// Whether the config file is in the default place (no `SOCKETGUARD_CONFIG`).
+pub fn is_default_location(path: &Path) -> bool {
+    path == socketguard_core::paths::default_config_path()
+}
+
+/// The config as the daemon uses it: where it is, what it says and the database it names.
+pub struct Resolved {
+    pub config_path: PathBuf,
+    /// Loaded from the file, else the defaults; `db_path` is the resolved absolute path.
+    pub config: DaemonConfig,
+    pub file_exists: bool,
+    pub db_path: PathBuf,
+}
+
+/// Load the config at `path` (defaults when there is no file) and resolve its database
+/// path: absolute as is, relative to the config file's directory, empty the fixed default.
+pub fn resolve_at(path: &Path) -> anyhow::Result<Resolved> {
+    let (mut config, file_exists) = match load(path)? {
+        Some(c) => (c, true),
+        None => (DaemonConfig::default(), false),
+    };
+    let db_path = socketguard_core::paths::resolve_db_path(path, &config.db_path);
+    config.db_path = db_path.to_string_lossy().into_owned();
+    Ok(Resolved {
+        config_path: path.to_path_buf(),
+        config,
+        file_exists,
+        db_path,
+    })
+}
+
+/// [`resolve_at`] for the config in use (`SOCKETGUARD_CONFIG`, else the fixed location).
+pub fn resolve() -> anyhow::Result<Resolved> {
+    resolve_at(&config_path())
+}
+
+/// The file's text without a leading UTF-8 BOM, which Windows tools (PowerShell 5.1's
+/// `Set-Content -Encoding utf8`, Notepad) write and serde_json rejects.
+pub fn read(path: &Path) -> std::io::Result<String> {
+    let text = std::fs::read_to_string(path)?;
+    Ok(match text.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_string(),
+        None => text,
+    })
+}
+
+/// Running on defaults instead would act on the wrong networks and state (even `--disable`).
+const FIX_HINT: &str = "fix it, or point SOCKETGUARD_CONFIG at the right file";
+
+/// The config at `path`; None if there is no file. A file that cannot be read or parsed is
+/// an error.
+pub fn load(path: &Path) -> anyhow::Result<Option<DaemonConfig>> {
+    use anyhow::Context;
+    let text = match read(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("cannot read config {}; {FIX_HINT}", path.display()))
+        }
+    };
+    let config: DaemonConfig = serde_json::from_str(&text)
+        .with_context(|| format!("invalid config {}; {FIX_HINT}", path.display()))?;
+    if socketguard_core::portable::is_portable() {
+        refuse_for_portable(&config).with_context(|| {
+            format!("config {} cannot be used in portable mode", path.display())
+        })?;
+    }
+    Ok(Some(config))
+}
+
+/// Portable mode takes no network that needs trusted configuration (ADR 0054): an entry the
+/// folder's writer could aim at software outside it fails the load, not just the add.
+pub fn refuse_for_portable(config: &DaemonConfig) -> anyhow::Result<()> {
+    for inst in &config.backends {
+        socketguard_core::portable::allowed_in_portable(&inst.backend)
+            .map_err(|m| anyhow::anyhow!("network '{}': {m}", inst.id))?;
+    }
+    Ok(())
+}
+
+/// Write `config.backends` to the `backends` key of the file at `path`, keeping its other
+/// keys. A missing file is created from the full `config`. The write goes to a temp file
+/// in the same directory and is renamed over the original, so a crash leaves either the
+/// old or the new file. A file that is not a JSON object is left alone and reported.
+pub fn persist_backends(path: &Path, config: &DaemonConfig) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let mut doc = match read(path) {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) if v.is_object() => v,
+            _ => anyhow::bail!(
+                "{} is not a JSON object; not overwriting it",
+                path.display()
+            ),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut v = serde_json::to_value(config)?;
+            // The resolved database path is not a setting: leave it to the default.
+            if let Some(o) = v.as_object_mut() {
+                o.remove("db_path");
+            }
+            v
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    // On load `backends` wins over the legacy `backend` and `interface` keys, which stay.
+    doc.as_object_mut().expect("checked above").insert(
+        "backends".to_string(),
+        serde_json::to_value::<&[BackendInstanceConfig]>(&config.backends)?,
+    );
+
+    // Unique per call: concurrent writers in one process must not share a temp file.
+    let tmp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut text = serde_json::to_string_pretty(&doc)?;
+    text.push('\n');
+    let result = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.with_context(|| format!("writing {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_config_with_a_bom_is_read() {
+        let dir = std::env::temp_dir().join(format!("sg-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("socketguard.json");
+        std::fs::write(&path, "\u{feff}{\"poll_interval_secs\": 7}").unwrap();
+        let config = load(&path).unwrap().unwrap();
+        assert_eq!(config.poll_interval_secs, 7);
+        persist_backends(&path, &config).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn portable_mode_refuses_configs_with_an_existing_tor_or_yggdrasil() {
+        let ok: DaemonConfig = serde_json::from_str(
+            r#"{"backends":[{"id":"lan","type":"slaac","interface":"Ethernet"}]}"#,
+        )
+        .unwrap();
+        assert!(refuse_for_portable(&ok).is_ok());
+        let bad: DaemonConfig = serde_json::from_str(
+            r#"{"backends":[{"id":"lan","type":"slaac","interface":"Ethernet"},{"id":"tor","type":"tor"}]}"#,
+        )
+        .unwrap();
+        let msg = format!("{:#}", refuse_for_portable(&bad).unwrap_err());
+        assert!(
+            msg.contains("network 'tor'") && msg.contains("portable"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn a_missing_config_is_none_and_an_invalid_one_an_error() {
+        let dir = std::env::temp_dir().join(format!("sg-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("socketguard.json");
+        assert!(load(&path).unwrap().is_none());
+        std::fs::write(&path, "{\"backends\": [{\"type\": \"nope\"}]}").unwrap();
+        let err = load(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid config"), "{err:#}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

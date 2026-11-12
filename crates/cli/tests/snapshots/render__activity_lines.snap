@@ -1,0 +1,6 @@
+---
+source: crates/cli/tests/render.rs
+expression: "render::activity(&records, &names())"
+---
+2026-11-09 12:00:01  app_discovered        nginx  New app nginx is listening
+2026-11-09 12:00:01  blocked               nginx  :80/tcp  from 300:9::1  x3  blocked

@@ -2,6 +2,7 @@
 name = "socketguard-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 serde = { workspace = true }
@@ -9,4 +10,15 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+ipnet = { workspace = true }
+data-encoding = { workspace = true }
+sha2 = "0.10"
 
+ts-rs = { version = "11", optional = true, features = ["chrono-impl", "serde-json-impl"] }
+
+[features]
+# Derive TypeScript bindings; see docs/api.md.
+ts = ["dep:ts-rs"]
+
+[dev-dependencies]
+insta = { workspace = true }

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by ADR 0029 and ADR 0030
 
 ## Date
 

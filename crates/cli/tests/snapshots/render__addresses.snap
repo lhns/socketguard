@@ -1,0 +1,10 @@
+---
+source: crates/cli/tests/render.rs
+expression: "render::addresses(&r.addresses, &n)"
+---
+ID        NETWORK  ADDRESS       OWNER            PORTS      STATE
+e5f6a1b2  ygg      300:1:2:3::9  reservation web  All ports  up
+f6a1b2c3  tor      300:1:2:3::9  reservation web  All ports  closed
+
+e5f6a1b2: leaves out 6000-6010/tcp (another app listens there)
+f6a1b2c3: port 80 is bound to two apps
