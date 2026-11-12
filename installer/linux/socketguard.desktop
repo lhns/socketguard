@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=SocketGuard
+Comment=Per-application firewall and addresses
+Exec=/usr/bin/socketguard-ui
+Icon=socketguard
+Terminal=false
+Categories=System;Security;Network;

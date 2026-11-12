@@ -1,0 +1,68 @@
+# Release (ADR 0050): on a tag v<version>, build and test every package (packages.yml), then put
+# the MSI, deb, rpm, pkg and SHA256SUMS on a DRAFT GitHub release. workflow_dispatch is a dry
+# run: same builds, the files and SHA256SUMS are uploaded as a workflow artifact and no release
+# is made. Packages are unsigned; docs/packaging.md lists the secrets and where signing goes.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag equals the workspace version
+        run: |
+          ws=$(bash deploy/ci/version.sh)
+          echo "workspace version: $ws"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            [ "${GITHUB_REF_NAME#v}" = "$ws" ] || { echo "tag $GITHUB_REF_NAME does not match version $ws" >&2; exit 1; }
+          else
+            echo "not a tag (dry run): nothing to compare"
+          fi
+          bash deploy/ci/check-version.sh
+
+  packages:
+    needs: version
+    uses: ./.github/workflows/packages.yml
+    # SIGNING: secrets reach the called workflow only with `secrets: inherit` (docs/packaging.md
+    # names APPLE_* and WINDOWS_* secrets). Unsigned today, so nothing is passed.
+
+  release:
+    needs: packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '{msi,linux-packages,macos-pkg}'
+          path: release
+          merge-multiple: true
+      - name: SHA256SUMS
+        working-directory: release
+        run: |
+          ls -l
+          sha256sum SocketGuard-*.msi socketguard_*.deb socketguard-*.rpm SocketGuard-*.pkg | tee SHA256SUMS
+      # SIGNING (not done): sign SHA256SUMS or the files here, e.g. with cosign:
+      #   - run: cosign sign-blob --yes release/SHA256SUMS --output-signature release/SHA256SUMS.sig
+      - name: Draft release (tag) or workflow artifact (dry run)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* --draft --title "SocketGuard ${GITHUB_REF_NAME#v}" \
+            --notes "Unsigned packages: see the Install section of the README for what each system shows. Verify with SHA256SUMS."
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type != 'tag'
+        with:
+          name: release-dry-run
+          path: release/*
+          if-no-files-found: error

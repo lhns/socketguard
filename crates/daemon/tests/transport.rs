@@ -210,7 +210,10 @@ mod unix {
         std::env::set_var("SOCKETGUARD_SOCKET", "/tmp/custom.sock");
         assert_eq!(Client::from_env().endpoint(), "/tmp/custom.sock");
         std::env::remove_var("SOCKETGUARD_SOCKET");
-        assert_eq!(Client::from_env().endpoint(), "/run/socketguard.sock");
+        assert_eq!(
+            Client::from_env().endpoint(),
+            socketguard_core::config::DEFAULT_API_SOCKET
+        );
     }
 }
 
