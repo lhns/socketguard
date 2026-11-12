@@ -48,6 +48,11 @@ mainpid() { systemctl show -p MainPID --value socketguard; }
 
 step "install"
 sudo apt-get install -y "$deb"
+# Type=notify (ADR 0051): the start returned only after the first ruleset, so the table exists
+# now, with no waiting in between.
+[ "$(systemctl show socketguard -p Type --value)" = notify ] || fail "the unit is not Type=notify"
+systemctl is-active --quiet socketguard || fail "the unit is not active right after install"
+sudo nft list table inet socketguard >/dev/null || fail "no nft table at the moment the install returned"
 wait_active || fail "the unit is not active after install"
 wait_answers || fail "socketguard status does not answer over the socket"
 sudo socketguard status --json | head -c 400; echo
@@ -67,6 +72,7 @@ inode=$(sudo stat -c %i "$db"); pid1=$(mainpid)
 
 step "upgrade"
 sudo apt-get install -y "$next"
+sudo nft list table inet socketguard >/dev/null || fail "no nft table at the moment the upgrade returned"
 wait_active || fail "the unit is not active after the upgrade"
 wait_answers || fail "no answer after the upgrade"
 pid2=$(mainpid)

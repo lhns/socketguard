@@ -66,6 +66,9 @@ test -x /usr/local/bin/socketguard-daemon && test -x /usr/local/bin/socketguard 
 test -x /Applications/SocketGuard.app/Contents/MacOS/socketguard-ui || fail "the app is missing"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' /Applications/SocketGuard.app/Contents/Info.plist
 sudo pfctl -a socketguard -sr 2>&1 | head -5
+# What the system loads at boot (docs/footprint.md, the macOS gap): the stock pfctl job.
+echo "--- com.apple.pfctl.plist ---"
+plutil -p /System/Library/LaunchDaemons/com.apple.pfctl.plist 2>&1 || cat /System/Library/LaunchDaemons/com.apple.pfctl.plist 2>&1 || echo "(absent)"
 grep -q 'anchor "socketguard"' /etc/pf.conf || fail "no anchor line in /etc/pf.conf"
 sudo $fp expect-present --require pf-conf-anchor-line
 for d in /Applications/SocketGuard.app/Contents/Resources /usr/local/share/doc/socketguard; do

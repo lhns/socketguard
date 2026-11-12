@@ -169,7 +169,7 @@ directory) override; nothing uses the working directory. A daemon that finds sta
 and none at the fixed place moves it once. For a test run without installing, set `SOCKETGUARD_CONFIG`
 and start `socketguard-daemon` yourself as root / Administrator.
 
-The service applies the stored state before networking comes up (the systemd unit is `deploy/systemd/socketguard.service`).
+The service applies the stored state before networking comes up (the systemd unit is `deploy/systemd/socketguard.service`). On Linux the unit is `Type=notify`: the service is ready, and `systemctl start` returns, once its rules are applied, so the network comes up behind them.
 
 It serves the local API on `/run/socketguard.sock` (macOS: `/var/run/socketguard.sock`) or the named pipe `\.\pipe\socketguard`.
 To use the CLI or UI without elevation, join the `socketguard` group (Unix) or the local group

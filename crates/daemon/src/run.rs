@@ -189,10 +189,21 @@ pub async fn run(
     // Start serving in a background task
     let api_handle = tokio::spawn(async move { server.serve(app, shutdown).await });
 
-    // Startup reconciliation runs AFTER the API is available
+    // Startup reconciliation runs AFTER the API is available. Under systemd (`Type=notify`,
+    // ordered before the network) the service is ready after the first ruleset apply
+    // attempt, success or failure: a broken ruleset shows in the status and the log but
+    // must not hang the boot. The first ruleset is built from stored state; Tor and
+    // Yggdrasil start after it (ADR 0051).
     {
         let engine = state.engine.read().await;
-        engine.startup_reconcile(&state).await;
+        engine
+            .startup_reconcile_with(&state, |failure| match failure {
+                None => notify::ready("Rules applied"),
+                Some(why) => {
+                    notify::ready(&format!("Running, but the first ruleset failed: {why}"))
+                }
+            })
+            .await;
     }
 
     // Start the reconciliation loop with panic recovery
@@ -221,6 +232,7 @@ pub async fn run(
         error!("API server error: {e}");
     }
 
+    notify::stopping();
     // Signal the reconciliation loop to stop
     info!("Shutdown signal received, cleaning up...");
     let _ = shutdown_tx.send(true);

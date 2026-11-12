@@ -636,6 +636,11 @@ mod tests {
         let t = unit_text(Path::new("/opt/sg/socketguard-daemon"));
         assert!(t.contains("ExecStart=/opt/sg/socketguard-daemon\n"));
         assert!(t.contains("Restart=on-failure"));
+        // Ready only after the first ruleset, before the network (ADR 0051).
+        assert!(t.contains("Type=notify\n"));
+        assert!(t.contains("NotifyAccess=main\n"));
+        assert!(t.contains("TimeoutStartSec="));
+        assert!(t.contains("Before=network-pre.target\n"));
         assert!(!t.contains("/usr/local/bin"));
         assert!(
             !t.contains("WorkingDirectory"),
