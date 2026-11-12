@@ -114,8 +114,8 @@ echo "pf before: $pf_before, after: $pf_after"
 [ "$pf_before" = "$pf_after" ] || fail "pf was $pf_before before the install and is $pf_after after the purge"
 
 step "the files a pkg cannot remove"
-sudo $fp expect-absent
 sudo rm -rf /Applications/SocketGuard.app /usr/local/bin/socketguard-daemon /usr/local/bin/socketguard /usr/local/lib/socketguard /usr/local/share/doc/socketguard
+sudo $fp expect-absent
 sudo pkgutil --forget de.lhns.socketguard
 ! pkgutil --pkg-info de.lhns.socketguard >/dev/null 2>&1 || fail "the receipt is still there"
 echo OK

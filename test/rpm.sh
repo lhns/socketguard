@@ -31,6 +31,7 @@ docker run --rm -v "$rpmfile:/pkg.rpm:ro" fedora:latest bash -euxo pipefail -c '
     grep -qx /usr/share/doc/socketguard/THIRD_PARTY_NOTICES.md /tmp/files
     rpm -qR socketguard | grep -qx zlib
     LD_LIBRARY_PATH=$TP/tor ldd $TP/tor/tor | tee /tmp/ldd; ! grep -q "not found" /tmp/ldd
+    command -v setpriv >/dev/null || dnf install -y -q util-linux-core util-linux >/dev/null
     setpriv --reuid=65534 --regid=65534 --clear-groups env LD_LIBRARY_PATH=$TP/tor $TP/tor/tor --version
     setpriv --reuid=65534 --regid=65534 --clear-groups $TP/yggdrasil/yggdrasil -version
     cat $TP/VERSIONS
