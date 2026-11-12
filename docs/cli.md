@@ -169,5 +169,6 @@ uninstall [--purge | --keep-data] [--yes] [--export FILE] [--force]
 ```
 
 `--owner-pid` and `--allow-user` belong to portable mode (the app passes them) and go with no other
-command. A file named `portable` next to the program also selects portable mode. In portable mode
+command. `--allow-user` takes the SID of one account (`S-1-5-21-...` or `S-1-12-1-...`), not a group
+such as Everyone. A file named `portable` next to the program also selects portable mode. In portable mode
 `service` (except `status`), `access` and `uninstall` are refused. `child-guard` is internal.
