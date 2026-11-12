@@ -10,6 +10,26 @@ pub const THIRD_PARTY_ENV: &str = "SOCKETGUARD_THIRD_PARTY";
 
 const EXE: &str = if cfg!(windows) { ".exe" } else { "" };
 
+/// Where packages put the files, when they are not next to the executable (Windows: only
+/// next to it).
+const PACKAGED: Option<&str> = if cfg!(target_os = "linux") {
+    Some("/usr/lib/socketguard/third_party")
+} else if cfg!(target_os = "macos") {
+    Some("/usr/local/lib/socketguard/third_party")
+} else {
+    None
+};
+
+/// The places to look, in order.
+fn candidates(exe_dir: Option<&Path>, env: Option<PathBuf>) -> Vec<PathBuf> {
+    exe_dir
+        .map(|d| d.join("third_party"))
+        .into_iter()
+        .chain(PACKAGED.map(PathBuf::from))
+        .chain(env)
+        .collect()
+}
+
 /// The Tor files: the binary, and the directory it lives in (its libraries and data).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TorFiles {
@@ -31,17 +51,20 @@ pub struct Bundled {
 }
 
 impl Bundled {
-    /// `<daemon executable directory>/third_party`, else `$SOCKETGUARD_THIRD_PARTY`.
+    /// The first existing of [`candidates`]: next to the daemon executable, the packaged
+    /// location of the platform, `$SOCKETGUARD_THIRD_PARTY`.
     pub fn locate() -> Self {
-        let beside = std::env::current_exe()
+        let exe_dir = std::env::current_exe()
             .ok()
-            .and_then(|e| e.parent().map(|d| d.join("third_party")))
-            .filter(|d| d.is_dir());
-        let from_env = std::env::var_os(THIRD_PARTY_ENV)
-            .map(PathBuf::from)
-            .filter(|d| d.is_dir());
+            .and_then(|e| e.parent().map(Path::to_path_buf));
+        let env = std::env::var_os(THIRD_PARTY_ENV).map(PathBuf::from);
+        Self::first_existing(&candidates(exe_dir.as_deref(), env))
+    }
+
+    /// The first of `list` that is a directory.
+    fn first_existing(list: &[PathBuf]) -> Self {
         Self {
-            dir: beside.or(from_env),
+            dir: list.iter().find(|d| d.is_dir()).cloned(),
         }
     }
 
@@ -126,6 +149,26 @@ mod tests {
     fn touch(p: &Path) {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, b"x").unwrap();
+    }
+
+    #[test]
+    fn the_lookup_order_is_beside_the_executable_then_packaged_then_the_variable() {
+        let list = candidates(Some(Path::new("/opt/sg")), Some("/dev/tp".into()));
+        assert_eq!(list[0], Path::new("/opt/sg").join("third_party"));
+        assert_eq!(list.last().unwrap(), Path::new("/dev/tp"));
+        match PACKAGED {
+            Some(p) => assert_eq!(list[1], Path::new(p)),
+            None => assert_eq!(list.len(), 2, "Windows: next to the executable only"),
+        }
+        assert_eq!(candidates(None, None).len(), usize::from(PACKAGED.is_some()));
+
+        let (a, b) = (temp(), temp());
+        let missing = a.join("nope");
+        // The first that exists wins; missing ones are skipped.
+        let pick = |l: &[PathBuf]| Bundled::first_existing(l).dir().map(Path::to_path_buf);
+        assert_eq!(pick(&[missing.clone(), a.clone(), b.clone()]), Some(a));
+        assert_eq!(pick(&[missing.clone(), b.clone()]), Some(b));
+        assert_eq!(pick(&[missing]), None);
     }
 
     #[test]

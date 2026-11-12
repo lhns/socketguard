@@ -10,7 +10,7 @@ them:
 | `installer/payload/linux/` | `/usr/lib/socketguard/third_party/` (deb and rpm) |
 | `installer/payload/macos/` | `/usr/local/lib/socketguard/third_party/` |
 
-Sub-directories are kept. `README.md` and `.gitkeep` are not installed. The directories are empty
+The daemon looks next to its executable first, then in the Linux and macOS locations above, then in `$SOCKETGUARD_THIRD_PARTY`. Sub-directories are kept. `README.md` and `.gitkeep` are not installed. The directories are empty
 today, so the packages contain no `third_party` folder (the MSI declares the empty directory; it is
 not created on disk).
 

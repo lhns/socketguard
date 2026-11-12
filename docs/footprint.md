@@ -95,7 +95,7 @@ SocketGuard ships Tor, Yggdrasil and (Windows) `wintun.dll` and runs them as chi
 | System account `socketguard-net` | Linux, macOS | yes | `service install` creates it if missing and records it; `uninstall` removes it only when it was created by SocketGuard. Without it children run as the daemon's account and `status` says so |
 | Adapter `SocketGuard` (Windows), `sgygg0` (Linux), a `utun` (macOS, named by the system; SocketGuard finds it by the node's address) | all | no: it disappears when `yggdrasil` exits | stopping the child; the footprint check lists a leftover `SocketGuard` or `sgygg0` (a leftover `utun` is not named, the check sees the process instead) |
 | Wintun driver in the driver store | Windows | yes | **shared with other software.** The install record keeps whether it was present before the first managed start (read from `pnputil /enum-drivers` and recorded before Yggdrasil first starts); `uninstall --purge` removes it (`pnputil /delete-driver`, never `/force`) only if it was absent before and Windows accepts the removal, otherwise it is reported as *kept*, "shared with other software" |
-| Shipped third-party files (`third_party/` next to the daemon, with `licenses/` and `VERSIONS`) | all | yes | the package (`uninstall`, `apt purge`, `msiexec /x`) |
+| Shipped third-party files (`third_party/` next to the daemon or in the package location, with `licenses/` and `VERSIONS`) | all | yes | the package (`uninstall`, `apt purge`, `msiexec /x`) |
 
 What privilege cannot be dropped:
 
