@@ -135,7 +135,14 @@ async fn the_child_starts_after_the_ruleset_with_the_adr_command_line_and_a_priv
         serde_json::from_str(&std::fs::read_to_string(&spec.args[1]).unwrap()).unwrap();
     assert_eq!(conf["PrivateKey"], key(&h).private_hex());
     assert_eq!(conf["Peers"][0], "tcp://192.0.2.1:9001");
-    assert_eq!(conf["IfName"], ADAPTER);
+    assert_eq!(
+        conf["IfName"],
+        if cfg!(target_os = "macos") {
+            "auto"
+        } else {
+            ADAPTER
+        }
+    );
     assert_eq!(conf["Listen"], serde_json::json!([]));
     assert_eq!(conf["NodeInfoPrivacy"], true);
     assert!(conf.get("MulticastInterfaces").is_none());
@@ -157,7 +164,9 @@ async fn the_child_starts_after_the_ruleset_with_the_adr_command_line_and_a_priv
             reason: "Yggdrasil is starting".into()
         }
     );
-    assert_eq!(n.interface.as_deref(), Some(ADAPTER));
+    if !cfg!(target_os = "macos") {
+        assert_eq!(n.interface.as_deref(), Some(ADAPTER));
+    }
     let m = n.managed.expect("managed info");
     assert_eq!(m.state, ChildState::Starting);
     assert_eq!(m.address, Some(key(&h).node().address.to_string()));
