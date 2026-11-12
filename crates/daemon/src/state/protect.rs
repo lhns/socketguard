@@ -188,9 +188,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let path = temp_db_path("perms");
         let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         db.set_setting("k", "v").await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         for suffix in ["", "-wal", "-shm"] {
             let f = with_suffix(&path, suffix);
             if let Ok(m) = std::fs::metadata(&f) {

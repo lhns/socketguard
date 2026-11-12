@@ -114,7 +114,7 @@ pub async fn run(
     }
 
     let db = state::Database::new(&config.db_path).await?;
-    db.migrate().await?;
+    db.init_schema().await?;
     info!("Database initialized at {}", config.db_path);
 
     let ula_global_id = db.ula_global_id().await?;

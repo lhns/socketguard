@@ -482,7 +482,7 @@ fn a_tag_grant_covers_a_new_matching_listener_for_the_granted_peer_only() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let tags = rt.block_on(async {
         let db = Database::new(":memory:").await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         db.insert_app(&snap.catalog.apps[0]).await.unwrap();
         db.apply_writes(&[Write::InsertTag(tag)]).await.unwrap();
         assert_eq!(

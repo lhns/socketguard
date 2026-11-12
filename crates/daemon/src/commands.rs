@@ -279,7 +279,7 @@ pub async fn uninstall_cmd(opts: UninstallOptions) -> i32 {
 /// daemon's database to `file`. Onion private keys are not in it.
 async fn export_to(r: &Resolved, file: &Path) -> Result<()> {
     let db = state::Database::open_existing(&r.db_path.to_string_lossy()).await?;
-    db.migrate().await?;
+    db.init_schema().await?;
     let eng = engine::Engine::new(&r.config, db.ula_global_id().await?)?;
     let st = crate::AppState {
         config: tokio::sync::RwLock::new(r.config.clone()),

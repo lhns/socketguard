@@ -363,7 +363,7 @@ pub async fn disable_command(
         let db = Database::open_existing(&path)
             .await
             .map_err(|e| format!("{e:#}"))?;
-        let ula = match db.migrate().await {
+        let ula = match db.init_schema().await {
             Ok(()) => db.ula_global_id().await,
             Err(e) => Err(e),
         };
@@ -441,7 +441,7 @@ mod tests {
 
     async fn db() -> Database {
         let db = Database::new(":memory:").await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         db
     }
 
@@ -618,7 +618,7 @@ mod tests {
         let d = tmp();
         let (cfg, dbp) = (d.join("socketguard.json"), d.join("socketguard.db"));
         let db = Database::new(&dbp.to_string_lossy()).await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         db.close().await;
         let calls = Arc::new(Mutex::new(vec![]));
         let fw = Arc::new(MockFirewall::new(calls));

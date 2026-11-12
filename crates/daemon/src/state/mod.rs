@@ -183,7 +183,7 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 impl Database {
-    /// Open (creating if needed) the database at `path`. Call [`Database::migrate`] next.
+    /// Open (creating if needed) the database at `path`. Call [`Database::init_schema`] next.
     pub async fn new(path: &str) -> Result<Self> {
         // sqlx maps ":memory:" to a uniquely named shared-cache in-memory DB, so every
         // pooled connection sees the same data (covered by memory_pool_tests).
@@ -211,7 +211,7 @@ impl Database {
     }
 
     /// Open the database at `path` only if it exists: never creates a file (`--disable`,
-    /// uninstall). Call [`Database::migrate`] next.
+    /// uninstall). Call [`Database::init_schema`] next.
     pub async fn open_existing(path: &str) -> Result<Self> {
         anyhow::ensure!(
             path != ":memory:" && Path::new(path).is_file(),
@@ -1178,7 +1178,7 @@ mod test_util {
 
     pub(super) async fn db() -> Database {
         let db = Database::new(":memory:").await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         db
     }
 

@@ -282,7 +282,7 @@ pub(crate) mod tests {
     async fn windows_database_files_have_a_protected_dacl() {
         let path = temp_db_path("acl");
         let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         db.insert_app(&app("a1")).await.unwrap();
         for suffix in ["", "-wal", "-shm"] {
             let file = with_suffix(&path, suffix);
@@ -406,7 +406,7 @@ pub(crate) mod tests {
         std::fs::write(&path, b"").unwrap();
         assert!(!dacl_sddl(&path).starts_with("D:P"));
         let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         assert!(dacl_sddl(&path).starts_with("D:P"), "{}", dacl_sddl(&path));
         db.pool.close().await;
         for suffix in ["", "-wal", "-shm"] {

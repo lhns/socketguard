@@ -182,7 +182,7 @@ impl Database {
     /// Create the schema in a new database. Any other database is refused: one from
     /// another `user_version`, and one with tables but no version (the layout from before
     /// the schema was versioned).
-    pub async fn migrate(&self) -> Result<()> {
+    pub async fn init_schema(&self) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&mut *tx)
@@ -304,14 +304,14 @@ mod tests {
                 "system"
             ]
         );
-        db.migrate().await.expect("migrate is idempotent");
+        db.init_schema().await.expect("init_schema is idempotent");
     }
 
     #[tokio::test]
     async fn a_database_of_another_version_is_refused_with_its_path() {
         let path = temp_db_path("other-version");
         let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         sqlx::query("PRAGMA user_version = 10")
             .execute(&db.pool)
             .await
@@ -325,7 +325,7 @@ mod tests {
             } else {
                 Database::new(p).await.unwrap()
             };
-            let err = format!("{:#}", db.migrate().await.unwrap_err());
+            let err = format!("{:#}", db.init_schema().await.unwrap_err());
             assert!(err.contains(p), "{err}");
             assert!(err.contains("earlier development build"), "{err}");
             db.pool.close().await;
@@ -350,7 +350,7 @@ mod tests {
             conn.close().await.unwrap();
         }
         let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        let err = format!("{:#}", db.migrate().await.unwrap_err());
+        let err = format!("{:#}", db.init_schema().await.unwrap_err());
         assert!(err.contains(path.to_str().unwrap()), "{err}");
         assert!(err.contains("earlier development build"), "{err}");
         assert_eq!(names(&db, "table").await, ["sockets"], "nothing was added");
@@ -365,11 +365,11 @@ mod tests {
     async fn a_reopened_database_is_kept() {
         let path = temp_db_path("reopen");
         let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         db.insert_app(&app("a1")).await.unwrap();
         db.pool.close().await;
         let db = Database::new(path.to_str().unwrap()).await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         assert!(db.get_app("a1").await.unwrap().is_some());
         db.pool.close().await;
         for suffix in ["", "-wal", "-shm"] {

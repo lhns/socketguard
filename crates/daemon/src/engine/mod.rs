@@ -775,7 +775,7 @@ mod tests {
     #[tokio::test]
     async fn disable_everything_tears_down_networks_even_when_an_address_stays() {
         let db = Database::new(":memory:").await.unwrap();
-        db.migrate().await.unwrap();
+        db.init_schema().await.unwrap();
         let addr: Ipv6Addr = "fd00::1".parse().unwrap();
         db.claim_address(addr, "lo", Some("local")).await.unwrap();
         let net = MockInterfaceManager::new(Arc::new(Mutex::new(vec![])));
