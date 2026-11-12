@@ -20,45 +20,46 @@ use tracing::{debug, error, warn};
 /// The settings key of a Yggdrasil network's last known node addresses.
 pub(super) const NODE_KEY_PREFIX: &str = "ygg_node:";
 
+impl Catalog {
+    /// Read the stored state: what a mutation plans against and the snapshot is built on.
+    /// The reads are independent, so they run side by side on the pool.
+    pub(super) async fn load(state: &AppState) -> anyhow::Result<Self> {
+        let db = &state.db;
+        let (apps, peers, groups, tags, port_groups, grants, reservations, addresses) = tokio::try_join!(
+            db.list_apps(),
+            db.list_peers(),
+            db.list_groups(),
+            db.list_tags(),
+            db.list_port_groups(),
+            db.list_grants(),
+            db.list_reservations(),
+            db.list_addresses(),
+        )?;
+        Ok(Self {
+            apps,
+            peers,
+            groups,
+            tags,
+            port_groups,
+            grants,
+            reservations,
+            addresses,
+        })
+    }
+}
+
 impl Engine {
     /// Gather the producer's input from the DB and the active networks.
     pub(super) async fn gather_snapshot(&self, state: &AppState) -> anyhow::Result<Snapshot> {
         let db = &state.db;
         // Independent reads, so they run side by side on the pool.
-        let (
-            protect_host,
-            apps,
-            addresses,
-            reservations,
-            peers,
-            groups,
-            grants,
-            tags,
-            port_groups,
-            owned,
-        ) = tokio::try_join!(
+        let (catalog, protect_host, owned) = tokio::try_join!(
+            Catalog::load(state),
             db.protect_host(),
-            db.list_apps(),
-            db.list_addresses(),
-            db.list_reservations(),
-            db.list_peers(),
-            db.list_groups(),
-            db.list_grants(),
-            db.list_tags(),
-            db.list_port_groups(),
             db.list_owned_addresses(),
         )?;
         Ok(Snapshot {
-            catalog: Catalog {
-                apps,
-                addresses,
-                reservations,
-                peers,
-                groups,
-                grants,
-                tags,
-                port_groups,
-            },
+            catalog,
             networks: self.networks(),
             ygg_nodes: self.known_nodes(state).await,
             v4_subnets: self.protected_v4_subnets(&protect_host),

@@ -1,7 +1,6 @@
 //! The apps, peers, groups, tags, grants, reservations and addresses as stored: the state a
 //! change is planned against and the ruleset is built from.
 
-use crate::AppState;
 use socketguard_core::{Address, App, Grant, Peer, PeerGroup, PortGroup, Reservation, Tag, Target};
 use std::collections::HashSet;
 
@@ -52,20 +51,6 @@ impl Catalog {
 
     pub fn reservation(&self, id: &str) -> Option<&Reservation> {
         self.reservations.iter().find(|r| r.id == id)
-    }
-
-    pub async fn load(state: &AppState) -> anyhow::Result<Self> {
-        let db = &state.db;
-        Ok(Self {
-            apps: db.list_apps().await?,
-            peers: db.list_peers().await?,
-            groups: db.list_groups().await?,
-            tags: db.list_tags().await?,
-            port_groups: db.list_port_groups().await?,
-            grants: db.list_grants().await?,
-            reservations: db.list_reservations().await?,
-            addresses: db.list_addresses().await?,
-        })
     }
 
     pub fn app(&self, id: &str) -> Option<&App> {
