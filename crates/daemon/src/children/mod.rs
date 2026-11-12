@@ -737,7 +737,7 @@ impl Task {
                         if failures < FAILURES_BEFORE_DETAIL {
                             debug!("{label}: health check failed ({failures}): {why}");
                         } else {
-                            if (failures - FAILURES_BEFORE_DETAIL) % REPEAT_WARN_EVERY == 0 {
+                            if (failures - FAILURES_BEFORE_DETAIL).is_multiple_of(REPEAT_WARN_EVERY) {
                                 warn!(
                                     "{label} is running but its health check has failed \
                                      {failures} times in a row: {why}"
