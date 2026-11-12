@@ -243,7 +243,7 @@ describe("Settings page", () => {
       expect(dialog).toHaveTextContent(/firewall rules/);
       expect(dialog).toHaveTextContent(/service/);
       expect(dialog).toHaveTextContent(/access group, if SocketGuard created it/);
-      expect(dialog).toHaveTextContent(/network setup/);
+      expect(dialog).toHaveTextContent(/own Tor and Yggdrasil/);
       expect(within(dialog).getByRole("checkbox", { name: "Also delete settings and keys?" })).not.toBeChecked();
       expect(dialog).toHaveTextContent("socketguard-daemon uninstall --yes --keep-data");
       expect(dialog).toHaveTextContent("Onion addresses cannot be recovered.");

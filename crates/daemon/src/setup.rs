@@ -507,6 +507,39 @@ mod tests {
         assert_eq!(s.local.state, SetupStatus::Added);
     }
 
+    /// SocketGuard's own (managed) Tor and Yggdrasil count as added, so a running node of its
+    /// own never shows up as an existing one that could be added again.
+    #[test]
+    fn managed_networks_count_as_added() {
+        use socketguard_core::{ChildState, ManagedInfo, Network, NetworkKind, NetworkStatus};
+        let net = |kind| Network {
+            id: format!("{kind:?}"),
+            kind,
+            name: String::new(),
+            interface: None,
+            grants_apply: true,
+            status: NetworkStatus::Up,
+            prefix: None,
+            vlan_id: None,
+            managed: Some(ManagedInfo {
+                state: ChildState::Up,
+                progress: None,
+                detail: None,
+                runs_as: None,
+                version: None,
+                address: None,
+                peers: vec![],
+                peers_connected: None,
+            }),
+        };
+        let existing =
+            Existing::from_networks(&[net(NetworkKind::Tor), net(NetworkKind::Yggdrasil)]);
+        let s = detect(&Fake::default(), &existing, None, &Bundled::none());
+        assert_eq!(s.tor.existing.state, SetupStatus::Added);
+        assert_eq!(s.yggdrasil.existing.state, SetupStatus::Added);
+        assert!(!s.yggdrasil.existing.exposed);
+    }
+
     fn tor_info(methods: &[&str], cookie: Option<&str>) -> ProtocolInfo {
         ProtocolInfo {
             methods: methods.iter().map(|m| m.to_string()).collect(),
