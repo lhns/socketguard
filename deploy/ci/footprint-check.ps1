@@ -241,7 +241,10 @@ function Invoke-SelfTest {
     Assert-Equal 'pipe-present' 'PRESENT' (Get-ListedState $pipes '(?i)\\socketguard$')
     Assert-Equal 'pipe-absent' 'ABSENT' (Get-ListedState @('\\.\pipe\lsass') '(?i)\\socketguard$')
 
-    $ledgerArr = '["fd00::1", "FD00:0:0:0:0:0:0:2/128"]'
+    Assert-Equal 'pipe-portable-is-not-the-service-pipe' 'ABSENT' (Get-ListedState @('\\.\pipe\socketguard-portable') '(?i)\\socketguard$')
+    Assert-Equal 'pipe-portable-present' 'PRESENT' (Get-ListedState @('\\.\pipe\socketguard-portable') '(?i)\\socketguard-portable$')
+
+    $ledgerArr ='["fd00::1", "FD00:0:0:0:0:0:0:2/128"]'
     $ledgerObj = '{"addresses": ["fd00::1"], "note": "x"}'
     $live = @('::1', 'fd00::1', 'fe80::1%12', 'fd00::2')
     Assert-Equal 'ledger-array' 'fd00::1 fd00::2' ((Get-LedgerStillPresent $ledgerArr $live) -join ' ')
@@ -299,6 +302,8 @@ function Invoke-Live {
 
     $pipes = @([System.IO.Directory]::GetFiles('\\.\pipe\'))
     $items += New-Item2 (Get-ListedState $pipes '(?i)\\socketguard$') 'named-pipe'
+    # Portable mode (ADR 0054): its own pipe, and it must be gone once the daemon has ended.
+    $items += New-Item2 (Get-ListedState $pipes '(?i)\\socketguard-portable$') 'named-pipe-portable'
 
     # Managed networks (ADR 0052).
     $exes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object { $_.ExecutablePath } | Where-Object { $_ })

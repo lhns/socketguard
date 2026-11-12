@@ -15,6 +15,9 @@ use tracing::{error, info};
 /// working directory (ADR 0050), then make sure the directories exist.
 pub fn resolve_for_run() -> Result<Resolved> {
     let path = config_file::config_path();
+    if socketguard_core::portable::is_portable() {
+        return resolve_portable(&path);
+    }
     if config_file::is_default_location(&path) {
         let db = socketguard_core::paths::default_db_path();
         if let Ok(cwd) = std::env::current_dir() {
@@ -52,6 +55,32 @@ pub fn resolve_for_run() -> Result<Resolved> {
     Ok(resolved)
 }
 
+/// Portable mode (ADR 0054): config and database are in `data\` next to the program, the
+/// API is on the portable pipe, no state is moved in and no install record is written.
+fn resolve_portable(path: &std::path::Path) -> Result<Resolved> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("no data folder for {}", path.display()))?;
+    crate::portable::prepare_data_dir(dir)?;
+    let mut resolved = config_file::resolve_at(path)?;
+    // Nothing outside the folder: the config cannot point the database or the pipe elsewhere.
+    let db = socketguard_core::paths::default_db_path();
+    if resolved.db_path != db {
+        eprintln!(
+            "[socketguard] db_path in the config is ignored in portable mode; using {}",
+            db.display()
+        );
+    }
+    resolved.config.db_path = db.to_string_lossy().into_owned();
+    resolved.db_path = db;
+    resolved.config.api_pipe = socketguard_core::portable::API_PIPE.to_string();
+    eprintln!(
+        "[socketguard] Portable mode: everything is in {}",
+        dir.display()
+    );
+    Ok(resolved)
+}
+
 /// Ctrl+C or SIGTERM.
 pub async fn signal_shutdown() {
     let ctrl_c = tokio::signal::ctrl_c();
@@ -77,7 +106,11 @@ pub async fn run(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let config = resolved.config;
-    install::set_record_path(&resolved.config_path);
+    let is_portable = socketguard_core::portable::is_portable();
+    // Portable mode writes no install record, not even in its own folder (ADR 0054).
+    if !is_portable {
+        install::set_record_path(&resolved.config_path);
+    }
 
     let log_directive = format!("socketguard={}", config.log_level);
     let telemetry = telemetry::init(
@@ -119,6 +152,20 @@ pub async fn run(
         bundled,
         events: events_tx,
     });
+
+    let data_dir = resolved
+        .config_path
+        .parent()
+        .map(std::path::Path::to_path_buf);
+    if is_portable {
+        // A kill leaves the addresses on their adapters with no filters to go with them:
+        // take every recorded one off before anything else runs (they are put back, with
+        // rules, by the first reconcile).
+        if let Some(dir) = &data_dir {
+            portable::write_session(dir, None);
+        }
+        state.engine.read().await.sweep_all_owned(&state).await;
+    }
 
     // A database migrated from v7 still has every address automatic; now that the networks
     // are known, the ones a grant covers without naming become reservations (ADR 0047).
@@ -188,13 +235,37 @@ pub async fn run(
         children.shutdown().await;
     }
 
-    // Stopping removes nothing: the ruleset and the addresses stay, so the host keeps its
-    // protection while the daemon is down (ADR 0026). `--disable` removes them.
-    info!("Firewall rules and addresses stay in place");
+    let mut left = Vec::new();
+    if is_portable {
+        // The one place portable mode tears down (ADR 0054): the same code as "turn off".
+        // Whatever it cannot remove goes away with the process (WFP objects are dynamic),
+        // except addresses, which the next start sweeps.
+        info!("Removing rules and addresses");
+        left = portable::teardown(&state).await;
+        if let Some(dir) = &data_dir {
+            portable::write_last_exit(dir, &left);
+        }
+        // Handlers that must not return before the teardown (close, logoff) may now.
+        portable::mark_done();
+        for l in &left {
+            error!("Left behind: {l}");
+        }
+    } else {
+        // Stopping removes nothing: the ruleset and the addresses stay, so the host keeps its
+        // protection while the daemon is down (ADR 0026). `--disable` removes them.
+        info!("Firewall rules and addresses stay in place");
+    }
 
     info!("SocketGuard daemon stopped");
     // Flush pending OTel data; the exporters block, so keep them off the runtime threads.
     let _ = tokio::task::spawn_blocking(move || telemetry.shutdown()).await;
+    if !left.is_empty() {
+        anyhow::bail!(
+            "portable teardown left {} thing(s) behind: {}",
+            left.len(),
+            left.join("; ")
+        );
+    }
     Ok(())
 }
 

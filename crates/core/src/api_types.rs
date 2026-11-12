@@ -123,6 +123,22 @@ pub struct StatusResponse {
     /// The third-party files this build ships (ADR 0052); no `dir` when it has none.
     #[serde(default)]
     pub bundled: crate::setup::BundledInfo,
+    /// Portable mode (ADR 0054): everything is in the program's folder and the rules and
+    /// addresses end with the daemon's process.
+    #[serde(default)]
+    pub portable: bool,
+    /// The database file is restricted to SYSTEM and Administrators. False only in portable
+    /// mode on a volume without access control lists.
+    #[serde(default = "yes")]
+    pub db_protected: bool,
+    /// Blocked connections are being logged. False in portable mode when the system's
+    /// net-event option is off (portable mode does not change it).
+    #[serde(default = "yes")]
+    pub drop_events: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 // ─── Apps ────────────────────────────────────────────────────────────────────

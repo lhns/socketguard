@@ -19,10 +19,15 @@ mod winacl;
 
 #[cfg(windows)]
 pub use protect::protect_service_dir;
-pub use protect::{protect_dir, ALLOW_UNPROTECTED_DB_ENV};
+pub use protect::system_volume_flags;
+pub use protect::{
+    db_protected, give_up_protection, protect_dir, volume_supports_acls, ALLOW_UNPROTECTED_DB_ENV,
+};
 pub use schema::SCHEMA_VERSION;
 pub use settings::parse_protect_host;
 pub use tags::Write;
+#[cfg(windows)]
+pub use winacl::protect_portable_dir;
 
 use protect::{precreate_protected, protect_files};
 use schema::{archive_pre_v1, is_pre_v1};

@@ -234,10 +234,67 @@ pub(crate) fn plan(desired: &DesiredRuleset) -> Vec<FilterSpec> {
     out
 }
 
+/// How long the WFP objects live (ADR 0054). The installed product makes them persistent, so
+/// they survive the daemon and a reboot; portable mode opens a dynamic session and adds them
+/// without the persistent flags, so Windows deletes them when the engine handle is closed or
+/// the process ends, however it ends. The values are those of the SDK headers
+/// (`FWPM_SESSION_FLAG_DYNAMIC`, `FWPM_*_FLAG_PERSISTENT`); the native module checks them
+/// against the bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Lifetime {
+    /// `FWPM_SESSION0.flags` of the engine handle.
+    pub session: u32,
+    /// `flags` of the provider.
+    pub provider: u32,
+    /// `flags` of the sublayer.
+    pub sublayer: u32,
+    /// `flags` of every filter, before the permit action adds its own.
+    pub filter: u32,
+}
+
+pub(crate) const SESSION_FLAG_DYNAMIC: u32 = 0x1;
+pub(crate) const PERSISTENT_FLAG: u32 = 0x1;
+
+pub(crate) fn lifetime(dynamic: bool) -> Lifetime {
+    if dynamic {
+        Lifetime {
+            session: SESSION_FLAG_DYNAMIC,
+            provider: 0,
+            sublayer: 0,
+            filter: 0,
+        }
+    } else {
+        Lifetime {
+            session: 0,
+            provider: PERSISTENT_FLAG,
+            sublayer: PERSISTENT_FLAG,
+            filter: PERSISTENT_FLAG,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::firewall::{Rule, Scope, ScopeKind};
+
+    #[test]
+    fn installed_objects_are_persistent_and_portable_ones_are_dynamic() {
+        let installed = lifetime(false);
+        assert_eq!(installed.session, 0);
+        assert_eq!(
+            (installed.provider, installed.sublayer, installed.filter),
+            (PERSISTENT_FLAG, PERSISTENT_FLAG, PERSISTENT_FLAG)
+        );
+        // A dynamic session may not hold persistent objects (WFP refuses them).
+        let portable = lifetime(true);
+        assert_eq!(portable.session, SESSION_FLAG_DYNAMIC);
+        assert_eq!(
+            (portable.provider, portable.sublayer, portable.filter),
+            (0, 0, 0)
+        );
+    }
+
     use socketguard_core::{PortRange, PortRef};
 
     fn ip(s: &str) -> IpAddr {

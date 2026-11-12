@@ -107,6 +107,17 @@ service is restarted. Uninstall: Apps & features, or `msiexec /x`; this **keeps*
 keys. To delete them too run `socketguard-daemon uninstall --purge` first (an administrator
 terminal), or use the app's "Remove SocketGuard...".
 
+**Portable (Windows)** (`SocketGuard-portable-windows-x64.zip`, ADR 0054). Unzip anywhere, even to a
+removable drive, and run `socketguard-ui.exe`; it asks for administrator rights at every start.
+Everything it keeps is in the `data` folder next to the programs; nothing is installed and no
+service or group is created. **Protection ends with the window**: the rules and addresses are
+removed when you close SocketGuard, sign out or shut down, and a crash or a kill leaves the
+machine open, as it was before SocketGuard started, not closed. Use the MSI to protect a computer
+permanently. It does not start beside the installed service. Remove it by deleting the folder.
+Only Local and LAN networks (and the managed Tor and Yggdrasil) are offered; an existing Tor or
+Yggdrasil node cannot be added. The folder is writable by you, so anything running as you can change
+what then runs with administrator rights: keep it where only you can write.
+
 **Debian, Ubuntu** (`socketguard_<version>-1_amd64.deb`): `sudo apt install ./socketguard_*.deb`.
 **Fedora, RHEL** (`socketguard-<version>-1.x86_64.rpm`): `sudo dnf install ./socketguard-*.rpm`.
 Both need systemd and pull in nftables, iproute2, conntrack, WebKitGTK and GTK. Nobody is added to
@@ -116,7 +127,7 @@ restarted onto it. `apt remove socketguard` / `dnf remove socketguard` stops the
 removes the rules and the unit but **keeps** settings and keys; `apt purge socketguard` deletes
 them too. rpm has no purge: run `sudo socketguard-daemon uninstall --purge` before erasing it.
 
-**macOS** (`SocketGuard-<version>-<arch>.pkg`). Installs `socketguard-daemon` and `socketguard` in
+**macOS** (`SocketGuard-<version>-arm64.pkg` for Apple silicon, `-x86_64.pkg` for Intel). Installs `socketguard-daemon` and `socketguard` in
 `/usr/local/bin` and `SocketGuard.app` in `/Applications`, and starts the launchd daemon. *Unsigned:*
 macOS refuses to open a downloaded pkg; use *Open* from its context menu, or *System Settings >
 Privacy & Security > Open Anyway*. Run `sudo socketguard-daemon access allow $USER` (or the app's

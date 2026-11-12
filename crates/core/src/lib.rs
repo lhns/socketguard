@@ -6,6 +6,7 @@ pub mod identity;
 pub mod install_log;
 pub mod model;
 pub mod paths;
+pub mod portable;
 pub mod reach;
 pub mod scope;
 pub mod setup;

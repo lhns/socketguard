@@ -165,12 +165,13 @@ and the Yggdrasil assertions are SKIPPED with that reason, not faked); Tor needs
 - **deb** (Ubuntu 22.04 VM with systemd): install, unit active and enabled, socket answers, nft
   table, upgrade restarts onto the new binary and keeps the database inode and state, remove, purge.
 - **rpm**: dependency resolution, file list, scriptlets and library check in a Fedora container
-  without systemd. The service steps of the rpm are not run. It also checks that the bundled `tor` and
-  `yggdrasil` are in the package, run as an unprivileged user (`setpriv`) and find their libraries.
-- **pkg** (macOS runner): install, launchd daemon answering, pf anchor line, upgrade restart,
+  without systemd, plus the full life cycle in one that runs systemd. It also checks that the bundled
+  `tor` and `yggdrasil` are in the package, run as an unprivileged user (`setpriv`) and find their libraries.
+- **rpm on systemd** (`rpm-systemd` job, Fedora container with systemd as PID 1 on the Ubuntu VM, `test/rpm-systemd.sh`): install, unit active, socket, nft table, upgrade restart, `dnf remove`, then purge by command and erase.
+- **pkg** (macOS runners `macos-latest` = arm64 and `macos-15-intel` = x86_64, per GitHub's runner table; same test on both): install, launchd daemon answering, pf anchor line, upgrade restart,
   `uninstall --purge` restores `/etc/pf.conf`, then the manual removal.
 
 Not covered: the installer dialogs (CI installs silently; the access dialog, the WebView2 note and
 the `FORCEREMOVE` path are built but never clicked or run), a standard user elevating with an
 administrator's credentials, Windows 10, Linux distributions other than Ubuntu 22.04 and Fedora,
-Intel Macs, signing.
+signing, and every dialog (see docs/manual-checks.md for the checklist a person runs once).

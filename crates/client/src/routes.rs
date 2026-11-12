@@ -113,6 +113,7 @@ routes! {
     APPLY = apply: POST "/api/apply",
     DISABLE = disable: POST "/api/disable",
     ENABLE = enable: POST "/api/enable",
+    SHUTDOWN = shutdown: POST "/api/shutdown",
 }
 
 #[cfg(test)]

@@ -33,3 +33,11 @@ The owner wants to run SocketGuard on Windows without installing it, from a fold
 - Protection in portable mode ends with the process. The UI says "portable" wherever it says the daemon is running.
 - Two firewall code paths exist on Windows: persistent objects for the installed product and session objects for portable mode.
 - Every start asks for administrator rights.
+
+## Amendment (2026-11-12): what the first real runs showed
+
+- **Rules after a kill:** none remain; Windows removes the session's objects. Verified on a real machine in CI.
+- **Addresses after a kill:** Windows offers no choice of store. Addresses added this way do not survive a reboot, but they stay on the adapter after a kill until the next start from the same folder sweeps them, or the machine restarts.
+- **The folder's data** is readable, not writable, by the account that started the UI: a writable database would let that account change what the elevated daemon trusts.
+- **Logoff and shutdown** are handled through a hidden window, as Windows recommends for processes that load the user interface libraries. Only the owner-process and kill paths are exercised in CI.
+- **Besides `data\`** the folder holds `ui-data\` for the UI's own storage.

@@ -4,6 +4,11 @@
 //! of maximum weight, so the state survives daemon exit and reboot (frozen state) and is
 //! removed only by [`Firewall::disable`], never touching other filters.
 //!
+//! Portable mode (ADR 0054) is the exception: one engine handle, opened with
+//! `FWPM_SESSION_FLAG_DYNAMIC` and kept open for the life of the process, and the same
+//! objects added without the persistent flags (`plan::lifetime`). Windows deletes them when
+//! the handle closes or the process ends, so a kill leaves no filter behind.
+//!
 //! Layers: `ALE_AUTH_RECV_ACCEPT_V4/V6` see only *new* inbound flows. Established traffic
 //! is therefore never re-evaluated, which covers "established/related" for free.
 //! ICMPv6 NDP/MLD/PMTU messages are not classified at ALE recv-accept, so they need no

@@ -35,6 +35,9 @@ export function createQueryClient(): QueryClient {
 
 export const useStatus = () =>
   useQuery({ queryKey: ["status"], queryFn: api.status, refetchInterval: (q) => (q.state.error ? 5_000 : false) });
+/** Whether this copy runs in portable mode (ADR 0054); undefined until known. Needs no daemon. */
+export const usePortable = () =>
+  useQuery({ queryKey: ["portable"], queryFn: () => api.portableInfo().then((i) => i.portable).catch(() => false), staleTime: Infinity }).data;
 export const useApps = () => useQuery({ queryKey: ["apps"], queryFn: api.listApps });
 /** The detail before it arrives: what the loaded lists already know (`isPlaceholderData`).
  * Grants, access and counters are empty until the real detail comes. */

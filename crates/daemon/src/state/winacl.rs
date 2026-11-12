@@ -86,6 +86,23 @@ pub fn dir_sddl() -> String {
     s
 }
 
+/// The data folder of portable mode (ADR 0054): as [`dir_sddl`], and `user` (a SID string)
+/// may also read and list it, and read what is created in it (`last-exit.log`), so the
+/// unelevated window can tell what an ended run left. The database file gets its own
+/// SYSTEM-and-Administrators-only DACL and does not inherit this one.
+pub fn portable_dir_sddl(user: Option<&str>) -> String {
+    let mut s = dir_sddl();
+    if let Some(sid) = user {
+        s.push_str(&format!("(A;OICI;FRFX;;;{sid})"));
+    }
+    s
+}
+
+/// Replace the DACL of the portable data folder.
+pub fn protect_portable_dir(path: &Path, user: Option<&str>) -> anyhow::Result<()> {
+    protect_with(path, &portable_dir_sddl(user))
+}
+
 struct Descriptor(PSECURITY_DESCRIPTOR);
 
 impl Descriptor {
@@ -292,6 +309,35 @@ mod tests {
         std::fs::write(&file, b"{}").unwrap();
         let sddl = dacl_sddl(&file);
         assert!(sddl.contains(";;;SY)") && sddl.contains(";;;BA)"), "{sddl}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_portable_folder_admits_the_user_to_read_only() {
+        let sddl = portable_dir_sddl(Some("S-1-5-21-1-2-3-1001"));
+        assert!(
+            sddl.starts_with("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"),
+            "{sddl}"
+        );
+        assert!(
+            sddl.ends_with("(A;OICI;FRFX;;;S-1-5-21-1-2-3-1001)"),
+            "{sddl}"
+        );
+        assert!(!portable_dir_sddl(None).contains("FRFX"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_the_portable_folder_is_readable_by_the_named_user() {
+        let dir = std::env::temp_dir().join(format!("sg-pdir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        // Everyone (S-1-1-0) stands in for the account.
+        super::protect_portable_dir(&dir, Some("S-1-1-0")).unwrap();
+        let file = dir.join("last-exit.log");
+        std::fs::write(&file, b"x").unwrap();
+        let sddl = dacl_sddl(&file);
+        assert!(sddl.contains(";;;SY)") && sddl.contains(";;;BA)"), "{sddl}");
+        assert!(sddl.contains("FRFX") || sddl.contains(";;;WD)"), "{sddl}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

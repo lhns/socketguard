@@ -39,4 +39,19 @@ service_installed?: boolean,
 /**
  * The third-party files this build ships (ADR 0052); no `dir` when it has none.
  */
-bundled: BundledInfo, };
+bundled: BundledInfo, 
+/**
+ * Portable mode (ADR 0054): everything is in the program's folder and the rules and
+ * addresses end with the daemon's process.
+ */
+portable: boolean, 
+/**
+ * The database file is restricted to SYSTEM and Administrators. False only in portable
+ * mode on a volume without access control lists.
+ */
+db_protected: boolean, 
+/**
+ * Blocked connections are being logged. False in portable mode when the system's
+ * net-event option is off (portable mode does not change it).
+ */
+drop_events: boolean, };

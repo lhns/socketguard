@@ -48,3 +48,10 @@ Facts established for this decision (2026-11-11):
 - **The account is decided once, before anything depends on it.** On Windows the daemon tries the LocalService logon first; on failure the child runs as the daemon's account, and the data-directory ACL, the expected owner of the cookie and the status all follow that answer.
 - **Unix: `child-guard`.** `-user` clears the parent-death signal, so Yggdrasil is started through `socketguard-daemon child-guard -- <program> <args>`: a root parent that holds the daemon's pipe as its stdin and ends the program when the pipe closes (the daemon died, `kill -9` included) or its parent changes. The pid file names the guard, whose executable is the daemon's.
 - **A node that never answers on its admin socket** is restarted without one after a deadline (20 s), so a network does not stay "starting"; its card then says peer information is unavailable.
+## Amendment (2026-11-12): what the implementation showed
+
+- **How Tor is tied to the daemon.** Not through `TAKEOWNERSHIP`: that ties Tor to one control connection, and SocketGuard's are short. Tor is started with `__OwningControllerProcess` and, per system, a job object or the parent-death signal.
+- **Dropping privileges** is done by the daemon before it starts the child, not by a `User` line in Tor's configuration.
+- **Yggdrasil on Linux and macOS can outlive a killed daemon**, because dropping privileges clears the parent-death link. The rules stay in force, and the next start ends the leftover process. Closing this gap is wanted; until then it is listed in `docs/footprint.md`.
+- **The signing key** that is pinned is the Tor Browser Developers primary key; the fingerprint on the signatures is its subkey.
+- **No location database** is shipped: Tor bootstraps and serves onion services without it.

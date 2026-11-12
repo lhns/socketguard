@@ -247,6 +247,9 @@ fn status() {
         socket: None,
         service_installed: None,
         bundled: Default::default(),
+        portable: false,
+        db_protected: true,
+        drop_events: true,
     };
     insta::assert_snapshot!("status", render::status(&s));
     s.disabled = true;

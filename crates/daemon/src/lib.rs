@@ -17,6 +17,7 @@ pub mod legacy;
 pub mod metrics;
 pub mod monitor;
 pub mod networks;
+pub mod portable;
 pub mod report;
 pub mod ruleset;
 pub mod run;

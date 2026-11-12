@@ -79,6 +79,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Disable(a) => disable(&c, a).await,
         Command::Enable => enable(&c).await,
+        Command::Shutdown => shutdown(&c).await,
+        Command::Access(_) if socketguard_core::portable::is_portable() => {
+            bail!("`access` changes the host (a group); portable mode has no access group")
+        }
         Command::Access(cmd) => access(cmd),
         Command::Completions { .. } => unreachable!("handled above"),
     }
@@ -1887,6 +1891,11 @@ async fn disable(c: &Ctx, a: DisableArgs) -> Result<()> {
 async fn enable(c: &Ctx) -> Result<()> {
     c.client.enable().await?;
     c.done("enabled: rules and addresses restored")
+}
+
+async fn shutdown(c: &Ctx) -> Result<()> {
+    c.client.shutdown().await?;
+    c.done("shutting down: the daemon removes its rules and addresses and exits")
 }
 
 #[cfg(test)]

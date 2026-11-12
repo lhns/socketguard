@@ -147,6 +147,7 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::POST, "/api/apply"),
     (Method::POST, "/api/disable"),
     (Method::POST, "/api/enable"),
+    (Method::POST, "/api/shutdown"),
 ];
 
 type Shared = Arc<AppState>;
@@ -217,6 +218,7 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("POST", "/api/apply") => post(apply_post),
         ("POST", "/api/disable") => post(disable_post),
         ("POST", "/api/enable") => post(enable_post),
+        ("POST", "/api/shutdown") => post(shutdown_post),
         _ => unreachable!("route {method} {path} has no handler"),
     }
 }
@@ -443,6 +445,9 @@ async fn status(State(state): State<Shared>) -> ApiResult<Json<StatusResponse>> 
         }),
         service_installed: crate::service::installed_hint(),
         bundled: state.bundled.info(),
+        portable: socketguard_core::portable::is_portable(),
+        db_protected: crate::state::db_protected(),
+        drop_events: crate::portable::drop_events(),
     }))
 }
 
@@ -957,6 +962,9 @@ async fn network_create(
         return Err(ApiErr::invalid("\"setup\" is not a usable network id"));
     }
     check_managed(&state, &req.backend)?;
+    if socketguard_core::portable::is_portable() {
+        socketguard_core::portable::allowed_in_portable(&req.backend).map_err(ApiErr::invalid)?;
+    }
     check_tor_settings(&state, &req.backend).await?;
     let inst = BackendInstanceConfig {
         id,
@@ -1190,5 +1198,19 @@ async fn disable_post(
 
 async fn enable_post(State(state): State<Shared>) -> ApiResult<StatusCode> {
     state.engine.read().await.enable(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Portable mode only (ADR 0054): end the daemon. The answer is sent first; `run` then stops
+/// serving and runs the one teardown, which writes `last-exit.log`.
+async fn shutdown_post() -> ApiResult<StatusCode> {
+    if !socketguard_core::portable::is_portable() {
+        return Err(ApiErr::new(
+            StatusCode::NOT_FOUND,
+            error_code::NOT_FOUND,
+            "no such route",
+        ));
+    }
+    crate::portable::request_stop();
     Ok(StatusCode::NO_CONTENT)
 }

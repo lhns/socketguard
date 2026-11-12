@@ -8,7 +8,7 @@ import RemoveDialog from "../components/RemoveDialog";
 import { useToast } from "../components/Toast";
 import { errorText } from "../lib";
 import { useNav } from "../nav";
-import { useExposure, useNetworks, useSetEnabled, useSetProtectHost, useSettings, useStatus } from "../queries";
+import { useExposure, useNetworks, useSetEnabled, useSetProtectHost, usePortable, useSettings, useStatus } from "../queries";
 
 export default function SettingsPage() {
   const nav = useNav();
@@ -40,6 +40,7 @@ function DangerZone() {
   const [confirmOff, setConfirmOff] = useState(false);
   const [removing, setRemoving] = useState(false);
   const exposure = useExposure("all", confirmOff);
+  const portable = usePortable();
   const s = status.data;
 
   const turnOff = () => {
@@ -62,6 +63,11 @@ function DangerZone() {
           <p>
             SocketGuard is <strong>{s.disabled ? "off" : s.unadopted ? "waiting" : "on"}</strong>.
           </p>
+          {s.portable && <p>Portable: protection ends when you close SocketGuard.</p>}
+          {s.db_protected === false && <p className="hint" role="note">The database is not protected: this drive has no access control.</p>}
+          {s.portable && s.drop_events === false && (
+            <p className="hint" role="note">Blocked connections are not logged: the system&apos;s net-event setting is off.</p>
+          )}
           {s.unadopted && !s.disabled && (
             <p>Rules from an earlier install are active, but this database doesn&apos;t know them. Adopt them?</p>
           )}
@@ -96,9 +102,13 @@ function DangerZone() {
         <p className="muted">Daemon not reachable.</p>
       )}
       {/* Removal runs the daemon's own uninstall, so it does not need the API. */}
-      <div className="actions">
-        <button className="btn btn-danger" onClick={() => setRemoving(true)}>Remove SocketGuard…</button>
-      </div>
+      {portable ? (
+        <p>Portable: delete this folder to remove SocketGuard. Your settings are in the data folder.</p>
+      ) : (
+        <div className="actions">
+          <button className="btn btn-danger" onClick={() => setRemoving(true)}>Remove SocketGuard…</button>
+        </div>
+      )}
       {removing && <RemoveDialog onCancel={() => setRemoving(false)} />}
       {confirmOff && (
         <ConfirmDialog

@@ -72,10 +72,26 @@ unsafe impl Send for Engine {}
 unsafe impl Sync for Engine {}
 
 impl Engine {
+    /// A short-lived handle on the engine, as the installed product uses.
     fn open() -> Result<Self> {
         let mut h = HANDLE::default();
         check("FwpmEngineOpen0", unsafe {
             FwpmEngineOpen0(PCWSTR::null(), AUTHN_DEFAULT, None, None, &mut h)
+        })?;
+        Ok(Engine(h))
+    }
+
+    /// A dynamic session (`FWPM_SESSION_FLAG_DYNAMIC`): everything added through this handle
+    /// is deleted when it is closed or the process ends (ADR 0054). It must stay open for as
+    /// long as the objects are to exist.
+    fn open_dynamic() -> Result<Self> {
+        let mut name = wide("SocketGuard portable");
+        let mut session: FWPM_SESSION0 = unsafe { std::mem::zeroed() };
+        session.displayData.name = PWSTR(name.as_mut_ptr());
+        session.flags = plan::lifetime(true).session;
+        let mut h = HANDLE::default();
+        check("FwpmEngineOpen0 (dynamic session)", unsafe {
+            FwpmEngineOpen0(PCWSTR::null(), AUTHN_DEFAULT, None, Some(&session), &mut h)
         })?;
         Ok(Engine(h))
     }
@@ -293,7 +309,7 @@ struct CallbackCtx {
 }
 
 struct DropSubscription {
-    engine: Engine,
+    engine: Arc<Engine>,
     handle: HANDLE,
     ctx: *mut CallbackCtx,
 }
@@ -316,22 +332,85 @@ pub struct WfpFirewall {
     applied_luids: Mutex<HashMap<String, Option<u64>>>,
     filters: Arc<Mutex<HashMap<u64, Option<String>>>>,
     sub: Mutex<Option<DropSubscription>>,
+    /// Portable mode (ADR 0054): the one dynamic session of the process, opened on first
+    /// use. Everything, including the drop subscription, goes through it, because a dynamic
+    /// object cannot be referenced from another session and ends with its own. The lock
+    /// also serialises transactions (a session has one at a time). None: the installed
+    /// product, which opens a short-lived handle per call and adds persistent objects.
+    dynamic: Option<Mutex<Option<Arc<Engine>>>>,
+}
+
+/// A handle on the engine for one operation. In portable mode it is the shared dynamic
+/// session and holds its lock; otherwise a handle of its own.
+struct Session<'a> {
+    engine: Arc<Engine>,
+    _lock: Option<std::sync::MutexGuard<'a, Option<Arc<Engine>>>>,
+}
+
+impl std::ops::Deref for Session<'_> {
+    type Target = Engine;
+    fn deref(&self) -> &Engine {
+        &self.engine
+    }
 }
 
 impl WfpFirewall {
     pub fn new() -> Self {
-        Self::with_keys(Keys {
-            provider: PROVIDER_KEY,
-            sublayer: SUBLAYER_KEY,
-        })
+        Self::with_keys(
+            Keys {
+                provider: PROVIDER_KEY,
+                sublayer: SUBLAYER_KEY,
+            },
+            false,
+        )
     }
 
-    fn with_keys(keys: Keys) -> Self {
+    /// The firewall of portable mode: dynamic session, non-persistent objects.
+    pub fn new_dynamic() -> Self {
+        Self::with_keys(
+            Keys {
+                provider: PROVIDER_KEY,
+                sublayer: SUBLAYER_KEY,
+            },
+            true,
+        )
+    }
+
+    fn with_keys(keys: Keys, dynamic: bool) -> Self {
         WfpFirewall {
             keys,
             applied_luids: Mutex::default(),
             filters: Arc::default(),
             sub: Mutex::new(None),
+            dynamic: dynamic.then(|| Mutex::new(None)),
+        }
+    }
+
+    fn lifetime(&self) -> plan::Lifetime {
+        plan::lifetime(self.dynamic.is_some())
+    }
+
+    fn session(&self) -> Result<Session<'_>> {
+        match &self.dynamic {
+            None => Ok(Session {
+                engine: Arc::new(Engine::open()?),
+                _lock: None,
+            }),
+            Some(slot) => {
+                let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
+                let engine = match &*guard {
+                    Some(e) => e.clone(),
+                    None => {
+                        let e = Arc::new(Engine::open_dynamic()?);
+                        *guard = Some(e.clone());
+                        e
+                    }
+                };
+                Ok(Session {
+                    engine,
+                    _lock: Some(guard),
+                })
+            }
         }
     }
 
@@ -344,7 +423,7 @@ impl WfpFirewall {
         let mut p: FWPM_PROVIDER0 = unsafe { std::mem::zeroed() };
         p.providerKey = self.keys.provider;
         p.displayData.name = PWSTR(pn.as_mut_ptr());
-        p.flags = FWPM_PROVIDER_FLAG_PERSISTENT;
+        p.flags = self.lifetime().provider;
         check_or(
             "FwpmProviderAdd0",
             unsafe { FwpmProviderAdd0(e.0, &p, None) },
@@ -355,7 +434,7 @@ impl WfpFirewall {
         let mut s: FWPM_SUBLAYER0 = unsafe { std::mem::zeroed() };
         s.subLayerKey = self.keys.sublayer;
         s.displayData.name = PWSTR(sn.as_mut_ptr());
-        s.flags = FWPM_SUBLAYER_FLAG_PERSISTENT;
+        s.flags = self.lifetime().sublayer;
         s.providerKey = self.provider_ptr();
         s.weight = 0xFFFF; // evaluated before every other sublayer
         check_or(
@@ -424,7 +503,7 @@ impl WfpFirewall {
         f.weight.Anonymous.uint8 = spec.weight;
         f.numFilterConditions = conds.len() as u32;
         f.filterCondition = conds.as_mut_ptr();
-        f.flags = FWPM_FILTER_FLAG_PERSISTENT;
+        f.flags = FWPM_FILTER_FLAGS(self.lifetime().filter);
         match spec.action {
             Action::Permit => {
                 f.action.r#type = FWP_ACTION_PERMIT;
@@ -463,7 +542,7 @@ impl WfpFirewall {
     /// Test helper: (our filter count, sublayer exists, provider exists).
     #[allow(dead_code)]
     pub fn state(&self) -> Result<(usize, bool, bool)> {
-        let e = Engine::open()?;
+        let e = self.session()?;
         let n = self.enum_filters(&e)?.len();
         let mut sl: *mut FWPM_SUBLAYER0 = std::ptr::null_mut();
         let rc = unsafe { FwpmSubLayerGetByKey0(e.0, &self.keys.sublayer, &mut sl) };
@@ -515,7 +594,7 @@ impl Firewall for WfpFirewall {
         }
         let specs = plan::drop_unresolved(specs, &luids);
 
-        let e = Engine::open()?;
+        let e = self.session()?;
         {
             let txn = Txn::begin(&e)?;
             self.ensure_provider_and_sublayer(&e)?;
@@ -535,7 +614,7 @@ impl Firewall for WfpFirewall {
     fn verify(&self) -> Result<bool> {
         // `apply` always creates the provider and `disable` removes it, so its presence is
         // the sign that SocketGuard's state is installed (an empty ruleset has no filters).
-        let e = Engine::open()?;
+        let e = self.session()?;
         let mut pr: *mut FWPM_PROVIDER0 = std::ptr::null_mut();
         let rc = unsafe { FwpmProviderGetByKey0(e.0, &self.keys.provider, &mut pr) };
         if rc == 0 {
@@ -555,7 +634,7 @@ impl Firewall for WfpFirewall {
     }
 
     fn disable(&self) -> Result<()> {
-        let e = Engine::open()?;
+        let e = self.session()?;
         let txn = Txn::begin(&e)?;
         self.delete_our_filters(&e)?;
         check_or(
@@ -582,12 +661,27 @@ impl Firewall for WfpFirewall {
         if slot.is_some() {
             bail!("drop events already subscribed");
         }
-        // Dedicated handle, kept for the lifetime of the subscription.
-        let engine = Engine::open()?;
-        // The option was not ours before: remember its value (once) so uninstall can put it
-        // back. A value that cannot be read is recorded as unknown and never restored.
-        crate::install::record_wfp_option_once(read_collect_net_events(&engine));
-        set_collect_net_events(&engine, 1)?;
+        let engine = if self.dynamic.is_none() {
+            // Dedicated handle, kept for the lifetime of the subscription.
+            let engine = Arc::new(Engine::open()?);
+            // The option was not ours before: remember its value (once) so uninstall can put
+            // it back. A value that cannot be read is recorded as unknown, never restored.
+            crate::install::record_wfp_option_once(read_collect_net_events(&engine));
+            set_collect_net_events(&engine, 1)?;
+            engine
+        } else {
+            // Portable mode (ADR 0054): the option outlives the process, so it is read and
+            // never changed. Off: no drop events, and the status says so.
+            let engine = self.session()?.engine.clone();
+            if read_collect_net_events(&engine) != Some(1) {
+                crate::portable::drop_events_unavailable();
+                bail!(
+                    "the system's net-event collection (FWPM_ENGINE_COLLECT_NET_EVENTS) is off \
+                     and portable mode does not change it, so blocked connections are not logged"
+                );
+            }
+            engine
+        };
         if let Err(err) = self.refresh_filter_map(&engine) {
             tracing::warn!("could not load drop attribution map: {err:#}");
         }
@@ -743,6 +837,16 @@ mod tests {
         let c = raw_cond(&mut store, &Cond::NotArrivalIf("ygg0".into()), &luids).unwrap();
         assert_eq!(c.matchType, FWP_MATCH_NOT_EQUAL);
         assert!(raw_cond(&mut store, &Cond::ArrivalIf("nope".into()), &luids).is_err());
+    }
+
+    /// The plan's lifetime flags are the SDK's (they are plain numbers there so the plan
+    /// compiles everywhere). No engine is opened.
+    #[test]
+    fn lifetime_flags_are_the_sdk_constants() {
+        assert_eq!(plan::SESSION_FLAG_DYNAMIC, FWPM_SESSION_FLAG_DYNAMIC);
+        assert_eq!(plan::PERSISTENT_FLAG, FWPM_PROVIDER_FLAG_PERSISTENT);
+        assert_eq!(plan::PERSISTENT_FLAG, FWPM_SUBLAYER_FLAG_PERSISTENT);
+        assert_eq!(plan::PERSISTENT_FLAG, FWPM_FILTER_FLAG_PERSISTENT.0);
     }
 
     #[test]

@@ -91,6 +91,8 @@ pub enum Command {
     Disable(DisableArgs),
     /// Undo `disable`: put the rules and addresses back
     Enable,
+    /// Portable mode: stop the daemon, removing its rules and addresses (ADR 0054)
+    Shutdown,
     /// Who may use the service: allow or deny an account, list the allowed ones. Runs
     /// `socketguard-daemon access`, which needs administrator rights (ADR 0050)
     #[command(subcommand)]
