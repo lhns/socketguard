@@ -75,7 +75,8 @@ impl Catalog {
         out
     }
 
-    fn peer_or_group_label(&self, s: &Subject) -> String {
+    /// How a change names who a grant is for.
+    pub(super) fn subject_label(&self, s: &Subject) -> String {
         match s {
             Subject::Anyone => "Anyone".to_string(),
             Subject::Peer(id) => self
@@ -109,7 +110,7 @@ impl Catalog {
             };
             out.push(format!(
                 "the grant to {} on {on}",
-                self.peer_or_group_label(&g.subject)
+                self.subject_label(&g.subject)
             ));
         }
         for t in &self.tags {

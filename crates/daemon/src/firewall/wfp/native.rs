@@ -538,30 +538,6 @@ impl WfpFirewall {
         *self.filters.lock().unwrap() = map;
         Ok(())
     }
-
-    /// Test helper: (our filter count, sublayer exists, provider exists).
-    #[allow(dead_code)]
-    pub fn state(&self) -> Result<(usize, bool, bool)> {
-        let e = self.session()?;
-        let n = self.enum_filters(&e)?.len();
-        let mut sl: *mut FWPM_SUBLAYER0 = std::ptr::null_mut();
-        let rc = unsafe { FwpmSubLayerGetByKey0(e.0, &self.keys.sublayer, &mut sl) };
-        let sublayer = rc == 0;
-        if sublayer {
-            unsafe { FwpmFreeMemory0(&mut sl as *mut _ as *mut *mut c_void) };
-        } else {
-            check_or("FwpmSubLayerGetByKey0", rc, &[FWP_E_SUBLAYER_NOT_FOUND])?;
-        }
-        let mut pr: *mut FWPM_PROVIDER0 = std::ptr::null_mut();
-        let rc = unsafe { FwpmProviderGetByKey0(e.0, &self.keys.provider, &mut pr) };
-        let provider = rc == 0;
-        if provider {
-            unsafe { FwpmFreeMemory0(&mut pr as *mut _ as *mut *mut c_void) };
-        } else {
-            check_or("FwpmProviderGetByKey0", rc, &[FWP_E_PROVIDER_NOT_FOUND])?;
-        }
-        Ok((n, sublayer, provider))
-    }
 }
 
 impl Default for WfpFirewall {

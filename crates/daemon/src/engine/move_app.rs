@@ -55,10 +55,9 @@ impl Engine {
                 "an app cannot be moved onto itself".into(),
             ));
         }
-        let from_app = cat
-            .app(from)
-            .ok_or_else(|| EngineError::NotFound(format!("app {from}")))?
-            .clone();
+        if cat.app(from).is_none() {
+            return Err(EngineError::NotFound(format!("app {from}")));
+        }
         let to_app = cat
             .app(to)
             .ok_or_else(|| EngineError::NotFound(format!("app {to}")))?
@@ -247,7 +246,6 @@ impl Engine {
                 }
             }
         }
-        let _ = from_app;
         plan.widened = cat.widened_since(&before, &[to.to_string()]);
         ensure_confirmed(plan.opens_to_anyone(), confirm_open)?;
         Ok(plan)

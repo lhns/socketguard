@@ -134,17 +134,7 @@ impl Plan {
     pub(super) fn who(&self, grants: &[Grant]) -> Vec<String> {
         grants
             .iter()
-            .map(|g| match &g.subject {
-                Subject::Anyone => "Anyone".to_string(),
-                Subject::Peer(id) => self
-                    .cat
-                    .peer(id)
-                    .map_or_else(|| id.clone(), |p| p.label.clone()),
-                Subject::Group(id) => self
-                    .cat
-                    .group(id)
-                    .map_or_else(|| id.clone(), |g| format!("group {}", g.label)),
-            })
+            .map(|g| self.cat.subject_label(&g.subject))
             .collect()
     }
 
@@ -201,21 +191,7 @@ impl Plan {
             .flat_map(|g| self.grant_reach(g))
             .collect();
         self.changes_reach |= lets_in(&reach);
-        let who: Vec<String> = gp
-            .widened
-            .iter()
-            .map(|g| match &g.subject {
-                Subject::Anyone => "Anyone".to_string(),
-                Subject::Peer(id) => self
-                    .cat
-                    .peer(id)
-                    .map_or_else(|| id.clone(), |p| p.label.clone()),
-                Subject::Group(id) => self
-                    .cat
-                    .group(id)
-                    .map_or_else(|| id.clone(), |g| format!("group {}", g.label)),
-            })
-            .collect();
+        let who = self.who(&gp.widened);
         self.changes.push(BatchChange {
             change: Change {
                 kind,
