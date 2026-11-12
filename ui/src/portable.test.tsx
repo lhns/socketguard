@@ -118,7 +118,7 @@ describe("closing the window in portable mode", () => {
       cb = c;
       return Promise.resolve(() => {});
     };
-    renderWithProviders(<PortableClose subscribe={subscribe} pollMs={10} limitMs={limitMs} />);
+    renderWithProviders(<PortableClose subscribe={subscribe} pollMs={10} limitMs={limitMs} goneGraceMs={40} />);
     const preventDefault = vi.fn();
     const close = () => act(() => void cb({ preventDefault }));
     return { d, close, preventDefault };
@@ -140,6 +140,18 @@ describe("closing the window in portable mode", () => {
     await waitFor(() => expect(d.count("quit_app")).toBe(1));
   });
 
+  it("waits for the record after the pipe is gone, and shows what was left", async () => {
+    // The daemon stops serving first and writes last-exit.log after the teardown.
+    const t0 = Date.now();
+    const { d, close } = setup({
+      portable_last_exit: () =>
+        Date.now() - t0 < 25 ? { at: Date.now() / 1000 - 3600, left: [] } : { at: Date.now() / 1000, left: ["address fd00::1"] },
+    });
+    await close();
+    expect(await screen.findByText("address fd00::1")).toBeInTheDocument();
+    expect(d.count("quit_app")).toBe(0);
+  });
+
   it("lists what could not be removed and quits only on Close anyway", async () => {
     const { d, close } = setup({ portable_last_exit: () => ({ at: Date.now() / 1000, left: ["firewall rule 12", "address fd00::1"] }) });
     const user = userEvent.setup();
@@ -159,12 +171,11 @@ describe("closing the window in portable mode", () => {
   });
 
   it("times out when the daemon keeps answering", async () => {
-    const { d, close } = setup({ shutdown: () => undefined }, 100);
+    const { d, close } = setup({ shutdown: () => undefined, portable_last_exit: () => null }, 100);
     const user = userEvent.setup();
     await close();
     expect(await screen.findByText("SocketGuard did not stop in time. Its rules are removed when the process ends.")).toBeInTheDocument();
     expect(d.count("quit_app")).toBe(0);
-    expect(d.count("portable_last_exit")).toBe(0);
     await user.click(screen.getByRole("button", { name: "Close anyway" }));
     await waitFor(() => expect(d.count("quit_app")).toBe(1));
   });

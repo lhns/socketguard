@@ -9,18 +9,37 @@ type Phase =
 
 type Subscribe = typeof onCloseRequested;
 
+type Outcome = { kind: "record"; left: string[] } | { kind: "none" } | { kind: "timeout" };
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** Wait until the daemon no longer answers; false when it still does after `limitMs`. */
-async function daemonGone(pollMs: number, limitMs: number): Promise<boolean> {
+/**
+ * Wait for the daemon's verdict. The daemon answers the shutdown request, stops serving, and only
+ * then tears down and writes `last-exit.log`, so the pipe going away does not mean it is done:
+ * wait for a record newer than the close. A daemon that is gone and leaves no record within
+ * `goneGraceMs` is taken as nothing known to be left.
+ */
+async function verdict(started: number, pollMs: number, limitMs: number, goneGraceMs: number): Promise<Outcome> {
   const until = Date.now() + limitMs;
+  let goneSince: number | null = null;
   for (;;) {
+    try {
+      const exit = await api.portableLastExit();
+      // A record from an earlier run does not count; allow for clock and rounding slack.
+      if (exit && exit.at >= started / 1000 - 5) return { kind: "record", left: exit.left };
+    } catch {
+      // Unreadable: treated as no record yet.
+    }
+    let answering = true;
     try {
       await api.status();
     } catch (e) {
-      if (toDaemonError(e).code === "connection") return true;
+      answering = toDaemonError(e).code !== "connection";
     }
-    if (Date.now() >= until) return false;
+    if (answering) goneSince = null;
+    else if (goneSince === null) goneSince = Date.now();
+    else if (Date.now() - goneSince >= goneGraceMs) return { kind: "none" };
+    if (Date.now() >= until) return { kind: "timeout" };
     await sleep(pollMs);
   }
 }
@@ -34,15 +53,17 @@ export default function PortableClose({
   subscribe = onCloseRequested,
   pollMs = 400,
   limitMs = 15_000,
+  goneGraceMs = 2_500,
 }: {
   subscribe?: Subscribe;
   pollMs?: number;
   limitMs?: number;
+  goneGraceMs?: number;
 }) {
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const closing = useRef(false);
-  const opts = useRef({ pollMs, limitMs });
-  opts.current = { pollMs, limitMs };
+  const opts = useRef({ pollMs, limitMs, goneGraceMs });
+  opts.current = { pollMs, limitMs, goneGraceMs };
 
   useEffect(() => {
     let off: (() => void) | undefined;
@@ -58,19 +79,15 @@ export default function PortableClose({
       } catch {
         // Already unreachable: nothing to stop.
       }
-      if (!(await daemonGone(opts.current.pollMs, opts.current.limitMs))) {
+      const o = opts.current;
+      const result = await verdict(started, o.pollMs, o.limitMs, o.goneGraceMs);
+      if (result.kind === "timeout") {
         setPhase({ kind: "timeout" });
         return;
       }
-      try {
-        const exit = await api.portableLastExit();
-        // A record from an earlier run does not count; allow for clock and rounding slack.
-        if (exit && exit.at >= started / 1000 - 5 && exit.left.length > 0) {
-          setPhase({ kind: "left", left: exit.left });
-          return;
-        }
-      } catch {
-        // No record: nothing known to be left.
+      if (result.kind === "record" && result.left.length > 0) {
+        setPhase({ kind: "left", left: result.left });
+        return;
       }
       void api.quitApp();
     }).then((u) => {

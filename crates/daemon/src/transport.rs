@@ -65,7 +65,13 @@ impl Server {
             r = serving => r,
             _ = async {
                 let _ = signal.await;
-                tokio::time::sleep(SHUTDOWN_GRACE).await;
+                // Portable mode has a few seconds in all before Windows ends it at logoff.
+                let grace = if socketguard_core::portable::is_portable() {
+                    std::time::Duration::from_secs(1)
+                } else {
+                    SHUTDOWN_GRACE
+                };
+                tokio::time::sleep(grace).await;
             } => {
                 info!("Closing API connections that are still open");
                 Ok(())

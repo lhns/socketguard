@@ -2,7 +2,6 @@
 // daemon's Rust types via ts-rs (see ./generated).
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { ActivityKind } from "./generated/ActivityKind";
 import type { ActivityQuery } from "./generated/ActivityQuery";
 import type { ActivityRecord } from "./generated/ActivityRecord";
@@ -266,10 +265,10 @@ export function onDaemonEvent(name: string, cb: () => void): Promise<UnlistenFn>
   return listen(name, () => cb());
 }
 
-/** Be told when the user closes the window; `e.preventDefault()` keeps it open. Does nothing
+/** Be told when the user closes the window in portable mode. The Rust side already keeps the window open and emits `portable_close_requested`; `preventDefault` is a no-op kept for the shape. Does nothing
  * outside Tauri (tests, vite dev). */
 export async function onCloseRequested(cb: (e: { preventDefault: () => void }) => void | Promise<void>): Promise<UnlistenFn> {
   const internals = typeof window === "undefined" ? undefined : (window as { __TAURI_INTERNALS__?: { metadata?: unknown } }).__TAURI_INTERNALS__;
   if (!internals?.metadata) return () => {};
-  return getCurrentWindow().onCloseRequested(cb);
+  return listen("portable_close_requested", () => void cb({ preventDefault: () => {} }));
 }

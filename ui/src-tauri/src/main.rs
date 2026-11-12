@@ -1073,6 +1073,16 @@ fn main() {
         }
     }
     tauri::Builder::default()
+        // Portable mode: closing the window must stop the daemon first. Keep the window open
+        // and let the frontend run the close flow; it ends the app with `quit_app`.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if socketguard_core::portable::is_portable() {
+                    api.prevent_close();
+                    let _ = window.emit("portable_close_requested", ());
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             status,
             list_apps,
