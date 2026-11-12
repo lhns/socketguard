@@ -41,3 +41,11 @@ Facts established for this decision (2026-11-11):
 - Installers grow by roughly 15 to 25 MB.
 - Without pluggable transports the managed Tor cannot use bridges.
 - The package-install flow of ADR 0048 lasted one day; its detection and cards remain.
+
+## Amendment (2026-11-12): what the implementation showed
+
+- **How Tor is tied to the daemon.** Not through `TAKEOWNERSHIP`: that ties Tor to one control connection, and SocketGuard's are short. Tor is started with `__OwningControllerProcess` and, per system, a job object or the parent-death signal.
+- **Dropping privileges** is done by the daemon before it starts the child, not by a `User` line in Tor's configuration.
+- **Yggdrasil on Linux and macOS can outlive a killed daemon**, because dropping privileges clears the parent-death link. The rules stay in force, and the next start ends the leftover process. Closing this gap is wanted; until then it is listed in `docs/footprint.md`.
+- **The signing key** that is pinned is the Tor Browser Developers primary key; the fingerprint on the signatures is its subkey.
+- **No location database** is shipped: Tor bootstraps and serves onion services without it.

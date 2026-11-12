@@ -40,3 +40,11 @@ Accepted. Fulfils the uninstaller that ADR 0026 names as a release blocker. Chan
 - **Owned directories.** When SocketGuard later runs Tor or Yggdrasil itself, the data directory it creates for that child process is recorded as `owned_directory`. `uninstall --purge` may remove such a directory as a tree, but only if its path is strictly inside the state directory; a recorded path outside it is refused and reported. A keep-data uninstall leaves it. Every other deletion is by name.
 - **Disable reports per item** (`removed`, `already absent`, `kept`, `LEFT` with the reason) and exits non-zero when anything is LEFT. `--disable` needs the database at the resolved path and refuses, changing nothing, when it is missing; a missing config file alone only produces a note. `--disable --force` removes the rules by name.
 - **Exit codes** of the daemon commands: 0 done, 1 something failed or is LEFT, 2 usage error.
+
+## Amendment (2026-11-12): what the first real installs showed
+
+- **macOS socket.** The default API socket on macOS is `/var/run/socketguard.sock`; `/run` does not exist there.
+- **An upgrade restarts the daemon** onto the new binary on every system; `service install` does that when the service is already present.
+- **The state directory's protection is inherited** by the files created in it on Windows, so the administrator who uninstalls can read what the service wrote.
+- **Packages pass the choice explicitly:** removal calls `uninstall --keep-data`, and only `apt purge` or `uninstall --purge` deletes data.
+- **Verified by CI on real machines:** MSI on Windows Server, deb on Ubuntu, pkg on macOS (Apple Silicon). The rpm is only built and checked; its service steps have not run.
