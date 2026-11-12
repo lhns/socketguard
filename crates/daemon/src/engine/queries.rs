@@ -198,8 +198,8 @@ impl GrantFilter {
 impl Engine {
     pub async fn list_apps(&self, state: &AppState) -> Result<Vec<App>, EngineError> {
         let (views, snap) = self.address_views(state).await?;
-        let index = AddressIndex::new(&views, &snap.reservations, &snap.tags);
-        let mut apps = snap.apps.clone();
+        let index = AddressIndex::new(&views, &snap.catalog.reservations, &snap.catalog.tags);
+        let mut apps = snap.catalog.apps.clone();
         for app in &mut apps {
             app.addresses = index.of_app(&app.id);
             app.exe_missing = super::discovery::exe_missing(app);
@@ -211,16 +211,19 @@ impl Engine {
     pub async fn get_app(&self, state: &AppState, id: &str) -> Result<AppDetail, EngineError> {
         let (views, snap) = self.address_views(state).await?;
         let mut app = snap
+            .catalog
             .apps
             .iter()
             .find(|a| a.id == id)
             .cloned()
             .ok_or_else(|| EngineError::NotFound(format!("app {id}")))?;
-        app.addresses = AddressIndex::new(&views, &snap.reservations, &snap.tags).of_app(id);
+        app.addresses =
+            AddressIndex::new(&views, &snap.catalog.reservations, &snap.catalog.tags).of_app(id);
         app.exe_missing = super::discovery::exe_missing(&app);
         let ctx = Self::reach_ctx(&snap);
         let protected: Vec<String> = snap.v4_subnets.keys().cloned().collect();
         let grants = snap
+            .catalog
             .grants
             .iter()
             .filter(|g| g.target == Target::App(id.to_string()))
@@ -231,14 +234,21 @@ impl Engine {
             .collect();
         Ok(AppDetail {
             counters: self.metrics.app_counters(&app.id),
-            access: effective_access(&snap.grants, &ctx.targets, &app, &snap.port_groups),
+            access: effective_access(
+                &snap.catalog.grants,
+                &ctx.targets,
+                &app,
+                &snap.catalog.port_groups,
+            ),
             port_groups: snap
+                .catalog
                 .port_groups
                 .iter()
                 .filter(|g| g.is_attached_to(&app.id))
                 .cloned()
                 .collect(),
             tags: snap
+                .catalog
                 .tags
                 .iter()
                 .filter(|t| t.members.iter().any(|m| m.app_id == app.id))
@@ -251,12 +261,12 @@ impl Engine {
 
     pub(super) fn reach_ctx(snap: &ruleset::Snapshot) -> ReachCtx<'_> {
         ReachCtx::new(
-            &snap.apps,
-            &snap.peers,
-            &snap.groups,
-            &snap.tags,
-            &snap.port_groups,
-            &snap.reservations,
+            &snap.catalog.apps,
+            &snap.catalog.peers,
+            &snap.catalog.groups,
+            &snap.catalog.tags,
+            &snap.catalog.port_groups,
+            &snap.catalog.reservations,
         )
     }
 
@@ -295,9 +305,10 @@ impl Engine {
         let ctx = Self::reach_ctx(&snap);
         let protected: Vec<String> = snap.v4_subnets.keys().cloned().collect();
         Ok(snap
+            .catalog
             .grants
             .iter()
-            .filter(|g| filter.matches(g, &snap.groups))
+            .filter(|g| filter.matches(g, &snap.catalog.groups))
             .map(|g| GrantView {
                 reach: ctx.reach_of(g, &snap.networks, &protected),
                 grant: g.clone(),

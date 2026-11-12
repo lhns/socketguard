@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::api::DaemonEvent;
+use crate::catalog::Catalog;
 use crate::firewall::{self, DesiredRuleset, DropEvent};
 use crate::metrics::CounterKey;
 use crate::ruleset::{self, HostInterface, LockoutRisk, Snapshot};
@@ -48,15 +49,17 @@ impl Engine {
             db.list_owned_addresses(),
         )?;
         Ok(Snapshot {
-            apps,
-            addresses,
-            reservations,
+            catalog: Catalog {
+                apps,
+                addresses,
+                reservations,
+                peers,
+                groups,
+                grants,
+                tags,
+                port_groups,
+            },
             networks: self.networks(),
-            peers,
-            groups,
-            grants,
-            tags,
-            port_groups,
             ygg_nodes: self.known_nodes(state).await,
             v4_subnets: self.protected_v4_subnets(&protect_host),
             protect_host,
@@ -546,11 +549,13 @@ fn counter_keys(snap: &Snapshot, desired: &DesiredRuleset) -> HashMap<String, Co
     }
     let info = socketguard_core::Model::new(snap.world()).address_info();
     let peers: HashMap<&str, &str> = snap
+        .catalog
         .peers
         .iter()
         .map(|p| (p.id.as_str(), p.label.as_str()))
         .collect();
     let groups: HashMap<&str, &str> = snap
+        .catalog
         .groups
         .iter()
         .map(|g| (g.id.as_str(), g.label.as_str()))
@@ -567,7 +572,7 @@ fn counter_keys(snap: &Snapshot, desired: &DesiredRuleset) -> HashMap<String, Co
             continue;
         };
         let grant_id = rest.split(':').next().unwrap_or(rest);
-        let Some(address) = snap.addresses.iter().find(|x| x.id == address_id) else {
+        let Some(address) = snap.catalog.addresses.iter().find(|x| x.id == address_id) else {
             continue;
         };
         // A reservation's rule counts for the app that serves the rule's port.
@@ -585,10 +590,10 @@ fn counter_keys(snap: &Snapshot, desired: &DesiredRuleset) -> HashMap<String, Co
                 .map(|(id, _)| id.clone()),
             (None, None) => None,
         };
-        let Some(app) = owner.and_then(|id| snap.apps.iter().find(|a| a.id == id)) else {
+        let Some(app) = owner.and_then(|id| snap.catalog.apps.iter().find(|a| a.id == id)) else {
             continue;
         };
-        let Some(grant) = snap.grants.iter().find(|g| g.id == grant_id) else {
+        let Some(grant) = snap.catalog.grants.iter().find(|g| g.id == grant_id) else {
             continue;
         };
         let subject = match &grant.subject {

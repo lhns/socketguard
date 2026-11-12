@@ -579,7 +579,7 @@ impl Engine {
             }
         }
         let mut out = Vec::new();
-        for a in &snap.addresses {
+        for a in &snap.catalog.addresses {
             let mut a = a.clone();
             let i = info.get(&a.id);
             a.excluded = i.map(|i| i.excluded.ranges()).unwrap_or_default();
@@ -619,8 +619,9 @@ impl Engine {
         let ctx = Self::reach_ctx(&snap);
         let protected: Vec<String> = snap.v4_subnets.keys().cloned().collect();
         let mut out = Vec::new();
-        for res in &snap.reservations {
+        for res in &snap.catalog.reservations {
             let grants = snap
+                .catalog
                 .grants
                 .iter()
                 .filter(|g| g.target == Target::Reservation(res.id.clone()))

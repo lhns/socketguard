@@ -86,6 +86,7 @@ use socketguard_core::{
     Address, App, AppPort, Credential, CredentialKind, Grant, Locator, Network, NetworkKind,
     NetworkStatus, Peer, Protocol, Scope, Subject, Target,
 };
+use socketguard_daemon::catalog::Catalog;
 use socketguard_daemon::firewall::nftables::NftablesFirewall;
 use socketguard_daemon::firewall::{DesiredRuleset, DropEvent, Firewall};
 use socketguard_daemon::ruleset::{self, Snapshot};
@@ -347,31 +348,36 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
         )
     };
     Snapshot {
-        apps: vec![App {
-            id: "web".into(),
-            name: "web".into(),
-            process_name: "python3".into(),
-            exe_path: None,
-            interpreter_arg: None,
-            identity_note: None,
-            exe_missing: false,
-            system: false,
-            first_seen: now,
-            last_seen: now,
-            ports: vec![AppPort {
-                port: PORT,
-                proto: Protocol::Tcp,
-                listening: true,
+        catalog: Catalog {
+            apps: vec![App {
+                id: "web".into(),
+                name: "web".into(),
+                process_name: "python3".into(),
+                exe_path: None,
+                interpreter_arg: None,
+                identity_note: None,
+                exe_missing: false,
+                system: false,
+                first_seen: now,
                 last_seen: now,
-                family: Default::default(),
+                ports: vec![AppPort {
+                    port: PORT,
+                    proto: Protocol::Tcp,
+                    listening: true,
+                    last_seen: now,
+                    family: Default::default(),
+                }],
+                // Display only; the addresses are in `Catalog::addresses`.
+                addresses: vec![],
             }],
-            // Display only; the addresses are in `Snapshot::addresses`.
-            addresses: vec![],
-        }],
-        addresses: vec![
-            address("lan-addr", "lan", MANAGED),
-            address("ygg-addr", "ygg", MANAGED_YGG),
-        ],
+            addresses: vec![
+                address("lan-addr", "lan", MANAGED),
+                address("ygg-addr", "ygg", MANAGED_YGG),
+            ],
+            peers,
+            grants,
+            ..Default::default()
+        },
         // The fixture puts both addresses on the veths. An address is up only while a grant
         // names its row (ADR 0047), so without one it is dormant but still on the interface:
         // `owned` keeps it denied, as the daemon does for addresses it has not yet removed.
@@ -380,8 +386,6 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
             network("lan", NetworkKind::Lan, "sgv-a"),
             network("ygg", NetworkKind::Yggdrasil, "ygg0"),
         ],
-        peers,
-        grants,
         protect_host: vec!["sgv-a".into()],
         ..Snapshot::default()
     }
@@ -458,7 +462,7 @@ fn a_tag_grant_covers_a_new_matching_listener_for_the_granted_peer_only() {
     let mut snap = snapshot(&[(CredentialKind::Ip, "fd00:5a::2/128")]);
     // The grant is on a tag, not on the app; the tag matches by process name.
     let now = Utc::now();
-    snap.grants[0].target = Target::Tag("dev".into());
+    snap.catalog.grants[0].target = Target::Tag("dev".into());
     let tag = socketguard_core::Tag {
         id: "dev".into(),
         label: "dev".into(),
@@ -467,7 +471,7 @@ fn a_tag_grant_covers_a_new_matching_listener_for_the_granted_peer_only() {
         excluded: vec![],
         created_at: now,
     };
-    snap.tags = vec![tag.clone()];
+    snap.catalog.tags = vec![tag.clone()];
     fx.apply(&snap);
     assert!(
         !fx.reachable(MANAGED, None),
@@ -479,12 +483,15 @@ fn a_tag_grant_covers_a_new_matching_listener_for_the_granted_peer_only() {
     let tags = rt.block_on(async {
         let db = Database::new(":memory:").await.unwrap();
         db.migrate().await.unwrap();
-        db.insert_app(&snap.apps[0]).await.unwrap();
+        db.insert_app(&snap.catalog.apps[0]).await.unwrap();
         db.apply_writes(&[Write::InsertTag(tag)]).await.unwrap();
-        assert_eq!(db.auto_tag_app(&snap.apps[0]).await.unwrap(), ["dev"]);
+        assert_eq!(
+            db.auto_tag_app(&snap.catalog.apps[0]).await.unwrap(),
+            ["dev"]
+        );
         db.list_tags().await.unwrap()
     });
-    snap.tags = tags;
+    snap.catalog.tags = tags;
     fx.apply(&snap);
     assert!(fx.reachable(MANAGED, None), "B is granted through the tag");
     assert!(
@@ -863,13 +870,13 @@ fn a_segment_grant_admits_its_own_prefix_and_not_the_other_segment() {
             ..snap.networks[0].clone()
         },
     ];
-    snap.addresses = vec![
+    snap.catalog.addresses = vec![
         address("a-addr", "lan", MANAGED),
         address("b-addr", "segb", B_ADDR),
     ];
     snap.owned = vec![MANAGED.parse().unwrap(), B_ADDR.parse().unwrap()];
     snap.protect_host = vec!["sgv-a".into(), "sgc-a".into()];
-    snap.grants = vec![Grant {
+    snap.catalog.grants = vec![Grant {
         id: "seg".into(),
         target: Target::App("web".into()),
         scope: Scope::All,
@@ -1032,9 +1039,9 @@ fn a_router_cannot_deliver_another_segments_source_to_a_segment_grant() {
         prefix: Some("fd00:5a::".parse().unwrap()),
         ..snap.networks[0].clone()
     }];
-    snap.addresses.truncate(1);
+    snap.catalog.addresses.truncate(1);
     snap.owned.truncate(1);
-    snap.grants = vec![Grant {
+    snap.catalog.grants = vec![Grant {
         id: "seg".into(),
         target: Target::App("web".into()),
         scope: Scope::All,
