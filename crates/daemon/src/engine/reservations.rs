@@ -6,7 +6,7 @@
 //! addresses are created by [`Engine::ensure_addresses`] once a grant covers it.
 
 use super::batch::Plan;
-use super::mutations::Catalog;
+use super::mutations::{any_to_anyone, ensure_confirmed, Catalog};
 use super::*;
 use crate::networks;
 use crate::state::{NewActivity, Write};
@@ -35,7 +35,7 @@ pub(super) struct ResPlan {
 
 impl ResPlan {
     pub fn opens_to_anyone(&self) -> bool {
-        self.moves_anyone_grant || self.widened.iter().any(|g| g.subject == Subject::Anyone)
+        self.moves_anyone_grant || any_to_anyone(&self.widened)
     }
 }
 
@@ -205,9 +205,7 @@ impl Engine {
             widened: cat.widened_since(&before, &apps),
             ..Default::default()
         };
-        if plan.opens_to_anyone() && !confirm_open {
-            return Err(EngineError::ConfirmationRequired);
-        }
+        ensure_confirmed(plan.opens_to_anyone(), confirm_open)?;
         Ok((binding, plan))
     }
 
@@ -542,9 +540,7 @@ impl Engine {
         }
         let _ = from_app;
         plan.widened = cat.widened_since(&before, &[to.to_string()]);
-        if plan.opens_to_anyone() && !confirm_open {
-            return Err(EngineError::ConfirmationRequired);
-        }
+        ensure_confirmed(plan.opens_to_anyone(), confirm_open)?;
         Ok(plan)
     }
 

@@ -540,9 +540,7 @@ impl Engine {
         }
         let subject_label = match &req.subject {
             Subject::Anyone => {
-                if !req.confirm_open {
-                    return Err(EngineError::ConfirmationRequired);
-                }
+                ensure_confirmed(true, req.confirm_open)?;
                 "Anyone".to_string()
             }
             Subject::Peer(id) => cat
@@ -844,6 +842,22 @@ impl Engine {
         plan.event(DaemonEvent::GrantsChanged);
         Ok(())
     }
+}
+
+/// Whether one of `grants` is a grant to Anyone.
+pub(super) fn any_to_anyone(grants: &[Grant]) -> bool {
+    grants.iter().any(|g| g.subject == Subject::Anyone)
+}
+
+/// A change that opens something to Anyone is refused unless the caller confirmed it.
+pub(super) fn ensure_confirmed(
+    opens_to_anyone: bool,
+    confirm_open: bool,
+) -> Result<(), EngineError> {
+    if opens_to_anyone && !confirm_open {
+        return Err(EngineError::ConfirmationRequired);
+    }
+    Ok(())
 }
 
 /// Labels for the activity record of a new grant.

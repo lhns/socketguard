@@ -7,7 +7,7 @@
 //! refusal while a group is used, and the confirmation when a change opens an app to Anyone.
 
 use super::batch::Plan;
-use super::mutations::Catalog;
+use super::mutations::{any_to_anyone, ensure_confirmed, Catalog};
 use super::*;
 use crate::api::DaemonEvent;
 use crate::state::{NewActivity, Write};
@@ -33,7 +33,7 @@ pub(super) struct GroupPlan {
 impl GroupPlan {
     /// A grant to Anyone now covers ports it did not.
     pub fn opens_to_anyone(&self) -> bool {
-        self.widened.iter().any(|g| g.subject == Subject::Anyone)
+        any_to_anyone(&self.widened)
     }
 }
 
@@ -264,9 +264,7 @@ impl Engine {
             widened: cat.widened_since(&before, &attached),
             removed: vec![],
         };
-        if plan.opens_to_anyone() && !confirm_open {
-            return Err(EngineError::ConfirmationRequired);
-        }
+        ensure_confirmed(plan.opens_to_anyone(), confirm_open)?;
         Ok((group, plan))
     }
 
@@ -317,9 +315,7 @@ impl Engine {
             widened: cat.widened_since(&before, &current.apps),
             removed: vec![],
         };
-        if plan.opens_to_anyone() && !confirm_open {
-            return Err(EngineError::ConfirmationRequired);
-        }
+        ensure_confirmed(plan.opens_to_anyone(), confirm_open)?;
         Ok((updated, plan))
     }
 
@@ -394,9 +390,7 @@ impl Engine {
             widened: cat.widened_since(&before, &[app_id.to_string()]),
             removed: vec![],
         };
-        if plan.opens_to_anyone() && !confirm_open {
-            return Err(EngineError::ConfirmationRequired);
-        }
+        ensure_confirmed(plan.opens_to_anyone(), confirm_open)?;
         Ok((attached, plan))
     }
 

@@ -2,6 +2,7 @@
 //! (`mutations`); the ruleset expands them.
 
 use super::batch::{lets_in, Plan};
+use super::mutations::{any_to_anyone, ensure_confirmed};
 use super::*;
 use crate::api::DaemonEvent;
 use crate::state::{NewActivity, Write};
@@ -119,14 +120,9 @@ impl Engine {
             let mut probe = tag.clone();
             probe.patterns = p.clone();
             let apps = state.db.list_apps().await?;
-            if !probe.pattern_candidates(&apps).is_empty()
-                && super::mutations::Catalog::load(state)
-                    .await?
-                    .grants_through_tag(id)
-                    .iter()
-                    .any(|g| g.subject == socketguard_core::Subject::Anyone)
-            {
-                return Err(EngineError::ConfirmationRequired);
+            if !probe.pattern_candidates(&apps).is_empty() {
+                let cat = super::mutations::Catalog::load(state).await?;
+                ensure_confirmed(any_to_anyone(&cat.grants_through_tag(id)), confirm_open)?;
             }
         }
         if !state
@@ -348,10 +344,8 @@ impl Engine {
         // What the tag's grants, and those of a reservation that binds the tag, let in
         // on this app.
         let grants = plan.cat.grants_through_tag(&tag_id);
-        let opens = grants.iter().any(|g| g.subject == Subject::Anyone);
-        if is_new && opens && !confirm_open {
-            return Err(EngineError::ConfirmationRequired);
-        }
+        let opens = any_to_anyone(&grants);
+        ensure_confirmed(is_new && opens, confirm_open)?;
         let tag = plan
             .cat
             .tags
