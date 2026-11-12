@@ -37,7 +37,8 @@ before it applies. Silent install: `msiexec /i SocketGuard-<version>-x64.msi /qn
 
 **Debian, Ubuntu** (`socketguard_<version>-1_amd64.deb`): `sudo apt install ./socketguard_*.deb`.
 **Fedora, RHEL** (`socketguard-<version>-1.x86_64.rpm`): `sudo dnf install ./socketguard-*.rpm`.
-Both need systemd. Nobody is added to the `socketguard` group: run
+Both need systemd. The unit is `Type=notify` and ordered before the network: the service is ready,
+and `systemctl start` returns, once its rules are applied. Nobody is added to the `socketguard` group: run
 `sudo socketguard-daemon access allow $USER` (or use the app's "allow my account"), then **sign out
 and in again**.
 
@@ -312,8 +313,9 @@ Not built, and not promised. Each item is recorded in an ADR.
 - Port remapping on a reserved address, and per-client access on one onion address
   ([ADR 0047](docs/adr/0047-addresses-on-demand-reservations-port-groups.md)). Inside a reservation,
   Tor access is all or nothing.
-- Keeping the last ruleset across a reboot, loaded before the daemon: if the daemon cannot start,
-  nothing is filtered (ADR 0051).
+- Keeping the last ruleset across a reboot, loaded before the daemon. By choice (ADR 0051): if the
+  daemon cannot start, nothing is filtered and the machine stays reachable for repair. On Linux the
+  network waits for the daemon's first ruleset; on macOS the gap at boot stays.
 - Signed installers: no Authenticode, Developer ID or notarization yet
   ([docs/packaging.md](docs/packaging.md)). No Linux aarch64 or Windows arm64 packages.
 

@@ -14,7 +14,12 @@ Conflicts=shutdown.target
 Before=shutdown.target
 
 [Service]
-Type=simple
+# Ready means the first ruleset apply attempt is done (the daemon sends READY=1 then), and
+# the unit is ordered before the network, so the network waits for the rules (ADR 0051). A
+# start that takes longer than the timeout fails visibly instead of holding the boot.
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=90
 ExecStart=/usr/local/bin/socketguard-daemon
 Restart=on-failure
 RestartSec=2
