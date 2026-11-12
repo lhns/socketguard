@@ -1,39 +1,28 @@
-//! What a host offers for each kind of network (ADR 0048, ADR 0052): the types of
+//! What a host offers for each kind of network (ADR 0048, ADR 0052, ADR 0056): the types of
 //! `GET /api/networks/setup` and `GET /api/status`'s `bundled`. Detection only reads;
 //! nothing here installs or changes software.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Whether an existing node can be used as it is. Installing or configuring one is not
-/// SocketGuard's business (ADR 0052).
+/// Whether a network exists already (Local).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum SetupStatus {
-    /// Running and usable without changes: can be added as it is.
+    /// Can be added.
     Ready,
     /// Already one of the daemon's networks.
     Added,
-    /// Nothing usable was found.
-    Absent,
 }
 
-/// An existing, system-wide node of one kind.
+/// The Local network on this host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SetupState {
     pub state: SetupStatus,
-    /// What was detected: `interface`, `address`, `version`, `control`, `cookie_path`, ...
+    /// What was detected: `interface`.
     pub found: BTreeMap<String, String>,
-    /// A node runs that SocketGuard does not manage (ADR 0051): the host may be reachable
-    /// over it. Only set for Yggdrasil.
-    #[serde(default)]
-    pub exposed: bool,
-    /// A plain sentence to show above the Add button.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub warning: Option<String>,
 }
 
 impl SetupState {
@@ -41,18 +30,21 @@ impl SetupState {
         Self {
             state,
             found: BTreeMap::new(),
-            exposed: false,
-            warning: None,
         }
     }
 }
 
-/// Whether SocketGuard can run its own copy (ADR 0052).
+/// The reason shown when the build carries no third-party files.
+pub const NOT_INCLUDED: &str = "Not included in this build";
+
+/// Tor or Yggdrasil on this host: SocketGuard's own copy (ADR 0056).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-pub struct ManagedOffer {
+pub struct KindSetup {
+    /// It can be added. False when the build does not include the files or they are unusable.
     pub available: bool,
-    /// Why not: the build does not include the files, or the files are unusable.
+    /// Something to tell the user: why it cannot be added, or (still available) that it
+    /// will wait, e.g. while another Yggdrasil node runs on this computer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub reason: Option<String>,
@@ -60,17 +52,8 @@ pub struct ManagedOffer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub version: Option<String>,
-}
-
-/// The reason shown when the build carries no third-party files.
-pub const NOT_INCLUDED: &str = "Not included in this build";
-
-/// One kind of network on this host: SocketGuard's own copy, and an existing node.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-pub struct KindSetup {
-    pub managed: ManagedOffer,
-    pub existing: SetupState,
+    /// Already one of the daemon's networks.
+    pub added: bool,
 }
 
 /// A host interface that a LAN network could use.
@@ -96,8 +79,7 @@ pub struct LanCandidate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct YggdrasilBlock {
-    /// The ruleset in force denies the node by destination on any interface: the whole
-    /// range `200::/7` for an existing node, the node's own addresses for a managed one.
+    /// The ruleset in force denies the node's own addresses by destination on any interface.
     pub closed: bool,
     /// The same as `closed`.
     pub address_blocked: bool,

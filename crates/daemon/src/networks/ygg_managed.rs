@@ -29,7 +29,7 @@ use tracing::warn;
 pub const DIR: &str = "yggdrasil";
 
 /// The reason shown while another Yggdrasil node runs on the host (one node per host).
-pub const OTHER_NODE: &str = "another Yggdrasil node is running on this host; SocketGuard's own node cannot run next to it yet";
+pub const OTHER_NODE: &str = "Another Yggdrasil node is running on this computer. SocketGuard's Yggdrasil cannot run next to it.";
 
 /// A start that ends sooner than this counts as a failed start.
 const QUICK_EXIT: Duration = Duration::from_secs(10);
@@ -194,7 +194,7 @@ impl AdminValve {
 /// The admin valves of the managed networks by network id.
 pub type Valves = Arc<Mutex<HashMap<String, AdminValve>>>;
 
-fn in_yggdrasil_range(a: &Ipv6Addr) -> bool {
+pub fn in_yggdrasil_range(a: &Ipv6Addr) -> bool {
     a.segments()[0] & 0xfe00 == 0x0200
 }
 
@@ -429,6 +429,7 @@ impl ManagedYgg {
             quiet_patterns: vec![],
             start_deadline: Some(ADMIN_DEADLINE),
             on_deadline: Some(Arc::new(move || ygg.admin_deadline_passed())),
+            stall_limit: None,
             // On the drive of the admin socket path (see `YggPaths::admin_listen`); the
             // DLL of the tun driver is found next to the executable, not here.
             cwd: Some(paths.dir.clone()),

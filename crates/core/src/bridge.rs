@@ -1,7 +1,7 @@
 //! Tor bridge lines (ADR 0052), as strictly as ADR 0040 needs.
 //!
 //! A bridge line comes from outside (pasted by the user, sent through the API) and ends up
-//! in the `torrc` of the managed Tor. It must never be able to add another option there, so
+//! in the `torrc` of SocketGuard's Tor. It must never be able to add another option there, so
 //! it is not "sanitised": it is parsed token by token against the one form SocketGuard
 //! supports and written out again in a canonical form built from the parsed parts.
 //!

@@ -549,7 +549,7 @@ async fn networks_are_saved_to_the_config_file() {
     let mut v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     v["poll_interval_secs"] = json!(17);
-    v["something_else"] = json!({"kept": true});
+    v["log_level"] = json!("debug");
     std::fs::write(&path, v.to_string()).unwrap();
     assert_eq!(
         d.delete("/api/networks/lan2").await.0,
@@ -559,7 +559,7 @@ async fn networks_are_saved_to_the_config_file() {
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(v["poll_interval_secs"], 17);
-    assert_eq!(v["something_else"], json!({"kept": true}));
+    assert_eq!(v["log_level"], "debug");
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temp file");
 
     // The file loads back as a config.

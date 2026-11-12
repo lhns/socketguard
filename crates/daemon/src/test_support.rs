@@ -1,7 +1,6 @@
 use crate::firewall::{Counter, DesiredRuleset, DropEvent, DropSink, Firewall, Revocation};
 use crate::iface::{InterfaceInfo, InterfaceManager};
 use crate::monitor::SocketMonitor;
-use crate::networks::ip::yggdrasil::{NodeInfo, YggdrasilNode};
 use crate::networks::ip::{with_prefix64, AllocatedAddress, Ipv6Backend, Prefix};
 use crate::AppState;
 use anyhow::Result;
@@ -428,6 +427,12 @@ impl MockIpv6Backend {
 }
 
 impl Ipv6Backend for MockIpv6Backend {
+    /// A Yggdrasil config names no interface: the node's adapter is found at runtime, which
+    /// the mock stands in for.
+    fn interface(&self) -> Option<String> {
+        Some(self.interface.clone())
+    }
+
     fn node(&self) -> Option<crate::ruleset::OverlayNode> {
         self.inner.lock().unwrap().node
     }
@@ -455,70 +460,6 @@ impl Ipv6Backend for MockIpv6Backend {
             prefix_len: self.prefix_len,
             backend: BackendType::Ula,
         })
-    }
-}
-
-// ─── MockYggdrasilNode ───────────────────────────────────────────────────────
-
-/// Fake `yggdrasilctl getSelf`. Cloning shares state.
-#[derive(Clone)]
-pub struct MockYggdrasilNode {
-    state: Arc<Mutex<MockNodeState>>,
-}
-
-struct MockNodeState {
-    info: NodeInfo,
-    failing: bool,
-    calls: usize,
-}
-
-impl MockYggdrasilNode {
-    /// `subnet` like "300:1:2:3::/64".
-    pub fn new(subnet: &str) -> Self {
-        let node = Self {
-            state: Arc::new(Mutex::new(MockNodeState {
-                info: NodeInfo {
-                    key: "00".repeat(32),
-                    address: "200::1".parse().unwrap(),
-                    subnet: Prefix::new(Ipv6Addr::UNSPECIFIED, 64),
-                },
-                failing: false,
-                calls: 0,
-            })),
-        };
-        node.set_subnet(subnet);
-        node
-    }
-
-    pub fn set_subnet(&self, subnet: &str) {
-        let (net, len) = subnet.split_once('/').unwrap();
-        self.state.lock().unwrap().info.subnet =
-            Prefix::new(net.parse().unwrap(), len.parse().unwrap());
-    }
-
-    pub fn set_failing(&self, failing: bool) {
-        self.state.lock().unwrap().failing = failing;
-    }
-
-    /// The node's own address, which the adapter should hold.
-    pub fn set_address(&self, address: &str) {
-        self.state.lock().unwrap().info.address = address.parse().unwrap();
-    }
-
-    /// Number of `get_self` calls so far.
-    pub fn calls(&self) -> usize {
-        self.state.lock().unwrap().calls
-    }
-}
-
-impl YggdrasilNode for MockYggdrasilNode {
-    fn get_self(&self) -> Result<NodeInfo> {
-        let mut st = self.state.lock().unwrap();
-        st.calls += 1;
-        if st.failing {
-            anyhow::bail!("yggdrasil is not running");
-        }
-        Ok(st.info.clone())
     }
 }
 
@@ -735,12 +676,7 @@ pub fn ygg_net() -> Net {
     mock.set_prefix("300:1:2:3::");
     Net {
         id: "ygg",
-        config: socketguard_core::config::BackendConfig::Yggdrasil {
-            interface: Some("ygg0".into()),
-            managed: false,
-            peers: vec![],
-            admin_endpoint: None,
-        },
+        config: socketguard_core::config::BackendConfig::yggdrasil(vec![]),
         mock,
     }
 }
@@ -844,11 +780,8 @@ pub async fn standard_daemon(
 // ─── MockTorControl ──────────────────────────────────────────────────────────
 
 /// How the mock control port authenticates its clients.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub enum MockAuth {
-    /// `METHODS=NULL`: any AUTHENTICATE succeeds.
-    #[default]
-    None,
     /// SAFECOOKIE and COOKIE with this cookie, reported at `cookie_path`. With
     /// `wrong_server_hash` the server cannot prove it knows the cookie (a rogue one).
     SafeCookie {
@@ -871,7 +804,6 @@ struct MockConn {
     server_nonce: Vec<u8>,
 }
 
-#[derive(Default)]
 struct MockTorState {
     auth: MockAuth,
     commands: Vec<String>,
@@ -881,27 +813,66 @@ struct MockTorState {
     down: bool,
 }
 
-/// A scripted Tor control port on 127.0.0.1 (no authentication unless given a
-/// [`MockAuth`]). It records every command and keeps the set of detached onion services like Tor would. `ADD_ONION` with
+impl MockTorState {
+    fn new(auth: MockAuth) -> Self {
+        Self {
+            auth,
+            commands: Vec::new(),
+            services: Default::default(),
+            created: 0,
+            down: false,
+        }
+    }
+}
+
+/// A scripted Tor control port on 127.0.0.1 that authenticates with SAFECOOKIE (a fresh
+/// cookie file of its own, unless given a [`MockAuth`]). It records every command and keeps the set of detached onion services like Tor would. `ADD_ONION` with
 /// `NEW:ED25519-V3` creates service `mocksvc<N>` with key `ED25519-V3:mocksvc<N>`; a
 /// given key `ED25519-V3:<name>` runs service `<name>`.
 pub struct MockTorControl {
     addr: std::net::SocketAddr,
     state: Arc<Mutex<MockTorState>>,
+    /// The scratch directory of the cookie `start` made.
+    dir: Option<std::path::PathBuf>,
+}
+
+impl Drop for MockTorControl {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.dir {
+            std::fs::remove_dir_all(dir).ok();
+        }
+    }
 }
 
 impl MockTorControl {
     pub fn start() -> Self {
-        Self::start_with(MockAuth::None)
+        let dir =
+            std::env::temp_dir().join(format!("sg-mock-tor-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("control_auth_cookie");
+        let cookie = [0x5a; 32];
+        std::fs::write(&path, cookie).unwrap();
+        // Explicit modes: a permissive umask would make the file writable by others,
+        // which the cookie check refuses.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut mock = Self::start_with(MockAuth::SafeCookie {
+            cookie,
+            cookie_path: path.to_string_lossy().into_owned(),
+            wrong_server_hash: false,
+        });
+        mock.dir = Some(dir);
+        mock
     }
 
     pub fn start_with(auth: MockAuth) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let state = Arc::new(Mutex::new(MockTorState {
-            auth,
-            ..MockTorState::default()
-        }));
+        let state = Arc::new(Mutex::new(MockTorState::new(auth)));
         let shared = state.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -910,7 +881,11 @@ impl MockTorControl {
                 std::thread::spawn(move || Self::serve(stream, state));
             }
         });
-        Self { addr, state }
+        Self {
+            addr,
+            state,
+            dir: None,
+        }
     }
 
     /// The control address to configure (`host:port`).
@@ -918,23 +893,18 @@ impl MockTorControl {
         self.addr.to_string()
     }
 
-    /// Client options that fit this mock: a password (which the open mock accepts; `none`
-    /// is refused over TCP) for an open one, SAFECOOKIE pinned to the mock's cookie file
-    /// otherwise.
+    /// Client options that fit this mock: the cookie file it reports, owned by the account
+    /// running the test.
     pub fn auth_options(&self) -> crate::networks::tor_control::AuthOptions {
         use crate::networks::tor_control::AuthOptions;
-        use socketguard_core::config::TorAuth;
-        match &self.state.lock().unwrap().auth {
-            MockAuth::None => AuthOptions::new(TorAuth::Password("mock".into())),
-            MockAuth::SafeCookie { cookie_path, .. } | MockAuth::CookieOnly { cookie_path, .. } => {
-                AuthOptions {
-                    cookie_path: Some(cookie_path.clone()),
-                    // The test's cookie file belongs to the account running the test.
-                    #[cfg(windows)]
-                    cookie_owner: crate::networks::tor_control::winacl::current_user_sid().ok(),
-                    ..AuthOptions::new(TorAuth::Cookie)
-                }
-            }
+        let (MockAuth::SafeCookie { cookie_path, .. } | MockAuth::CookieOnly { cookie_path, .. }) =
+            &self.state.lock().unwrap().auth;
+        AuthOptions {
+            cookie_path: Some(cookie_path.clone()),
+            // The test's cookie file belongs to the account running the test.
+            #[cfg(windows)]
+            cookie_owner: crate::networks::tor_control::winacl::current_user_sid().ok(),
+            ..AuthOptions::default()
         }
     }
 
@@ -1022,7 +992,6 @@ impl MockTorControl {
             format!("250-PROTOCOLINFO 1\r\n250-AUTH METHODS={methods}{file}\r\n250-VERSION Tor=\"0.4.8.0\"\r\n250 OK\r\n")
         };
         match (&st.auth, cmd) {
-            (MockAuth::None, "PROTOCOLINFO") => info("NULL", None),
             (MockAuth::SafeCookie { cookie_path, .. }, "PROTOCOLINFO") => {
                 info("COOKIE,SAFECOOKIE", Some(cookie_path))
             }
@@ -1076,12 +1045,7 @@ impl MockTorControl {
                     "515 Authentication failed: bad cookie\r\n".into()
                 }
             }
-            (MockAuth::None, "AUTHENTICATE") => {
-                conn.authed = true;
-                "250 OK\r\n".into()
-            }
             (_, "QUIT") => "250 closing connection\r\n".into(),
-            (MockAuth::None, _) => Self::command(st, cmd, rest, line),
             _ if conn.authed => Self::command(st, cmd, rest, line),
             _ => "514 Authentication required.\r\n".into(),
         }

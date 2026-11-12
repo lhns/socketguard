@@ -270,7 +270,7 @@ fn status() {
     assert!(!render::status(&s).contains("config"));
     assert!(!render::status(&s).contains("service"));
     // What the build ships, or that it ships nothing.
-    assert!(render::status(&s).contains("bundled       none (managed networks not included"));
+    assert!(render::status(&s).contains("bundled       none (Tor and Yggdrasil are not included"));
     s.bundled = socketguard_core::setup::BundledInfo {
         dir: Some("/opt/socketguard/third_party".into()),
         versions: socketguard_core::setup::BundledInfo::parse_versions(
@@ -319,11 +319,13 @@ fn managed_networks_in_the_table() {
         ),
         net("tor2", NetworkKind::Tor, None),
     ]);
-    assert!(out.contains("tor (managed)"), "{out}");
+    assert!(
+        !out.contains("managed") && !out.contains("your own"),
+        "{out}"
+    );
     assert!(out.contains("bootstrapping 40%"), "{out}");
     assert!(out.contains("up  2 peers"), "{out}");
     assert!(out.contains("200:1::5"), "{out}");
-    assert!(out.contains("tor (your own)"), "{out}");
     assert_eq!(
         render::network_peers("yggdrasil", &["tls://a.example:1".into()]),
         "peers of yggdrasil:\ntls://a.example:1"
@@ -343,32 +345,43 @@ fn managed_networks_in_the_table() {
 }
 
 #[test]
-fn network_setup_shows_both_forms() {
+fn network_setup_shows_what_each_kind_offers() {
     use socketguard_core::setup::*;
-    let kind = |available, reason: Option<&str>, state| KindSetup {
-        managed: ManagedOffer {
-            available,
-            reason: reason.map(str::to_string),
-            version: available.then(|| "16.0.1".to_string()),
-        },
-        existing: SetupState::new(state),
+    let kind = |available, reason: Option<&str>, added| KindSetup {
+        available,
+        reason: reason.map(str::to_string),
+        version: available.then(|| "16.0.1".to_string()),
+        added,
     };
     let s = NetworkSetup {
         lan: vec![],
-        yggdrasil: kind(false, Some(NOT_INCLUDED), SetupStatus::Absent),
-        tor: kind(true, None, SetupStatus::Ready),
+        yggdrasil: kind(false, Some(NOT_INCLUDED), false),
+        tor: kind(true, None, false),
         local: SetupState::new(SetupStatus::Ready),
         yggdrasil_block: None,
         config_path: None,
     };
     let out = render::network_setup(&s);
     assert!(
-        out.contains("managed: not available (Not included in this build)"),
+        out.contains("Yggdrasil: not available (Not included in this build)"),
         "{out}"
     );
-    assert!(out.contains("managed: available (version 16.0.1)"), "{out}");
-    assert!(out.contains("your own: ready to add"), "{out}");
-    assert!(out.contains("your own: none found"), "{out}");
+    assert!(out.contains("Tor: available (version 16.0.1)"), "{out}");
+    // Available, with something to say: another node runs here.
+    let waiting = NetworkSetup {
+        yggdrasil: kind(true, Some("Another Yggdrasil node is running"), false),
+        tor: kind(true, None, true),
+        ..s
+    };
+    let out = render::network_setup(&waiting);
+    assert!(
+        out.contains(
+            "Yggdrasil: available (version 16.0.1)
+  Another Yggdrasil node is running"
+        ),
+        "{out}"
+    );
+    assert!(out.contains("Tor: added"), "{out}");
 }
 
 #[test]
@@ -516,39 +529,6 @@ fn share_onion_addresses() {
             "https://abcdefghijklmnop.onion",
             "http://abcdefghijklmnop.onion:8080",
         ]
-    );
-}
-
-#[test]
-fn tor_network_config_from_flags() {
-    use socketguard_core::config::{BackendConfig, TorAuth};
-    assert_eq!(
-        socketguard_cli::commands::tor_config(None, None),
-        BackendConfig::Tor {
-            control: "127.0.0.1:9051".into(),
-            auth: TorAuth::Cookie,
-            cookie_path: None,
-            cookie_dir: None,
-            expect_tor_uid: None,
-            cookie_owner: None,
-            allow_remote_control: false,
-            managed: false,
-            bridges: vec![],
-        }
-    );
-    assert_eq!(
-        socketguard_cli::commands::tor_config(Some("unix:/run/tor/c".into()), Some("pw".into())),
-        BackendConfig::Tor {
-            control: "unix:/run/tor/c".into(),
-            auth: TorAuth::Password("pw".into()),
-            cookie_path: None,
-            cookie_dir: None,
-            expect_tor_uid: None,
-            cookie_owner: None,
-            allow_remote_control: false,
-            managed: false,
-            bridges: vec![],
-        }
     );
 }
 

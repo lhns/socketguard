@@ -5,8 +5,7 @@
  */
 export type YggdrasilBlock = { 
 /**
- * The ruleset in force denies the node by destination on any interface: the whole
- * range `200::/7` for an existing node, the node's own addresses for a managed one.
+ * The ruleset in force denies the node's own addresses by destination on any interface.
  */
 closed: boolean, 
 /**

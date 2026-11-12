@@ -13,11 +13,12 @@ use axum::http::{Method, StatusCode};
 use axum::Router;
 use common::{call, listener};
 use serde_json::{json, Value};
-use socketguard_core::config::{BackendConfig, BackendInstanceConfig, DaemonConfig, TorAuth};
+use socketguard_core::config::{BackendConfig, BackendInstanceConfig, DaemonConfig};
 use socketguard_core::{ListeningSocket, Protocol};
 use socketguard_daemon::api;
 use socketguard_daemon::engine::{ActiveBackend, Engine};
 use socketguard_daemon::networks::tor::TorNetwork;
+use socketguard_daemon::networks::tor_managed::ManagedTor;
 use socketguard_daemon::test_support::*;
 use socketguard_daemon::AppState;
 use std::collections::HashMap;
@@ -109,25 +110,14 @@ impl Rig {
         }
         let tor_cfg = BackendInstanceConfig {
             id: "tor".into(),
-            backend: BackendConfig::Tor {
-                control: tor.addr(),
-                auth: TorAuth::None,
-                cookie_path: None,
-                cookie_dir: None,
-                expect_tor_uid: None,
-                cookie_owner: None,
-                allow_remote_control: false,
-                managed: false,
-                bridges: vec![],
-            },
+            backend: BackendConfig::tor(),
         };
         backends.insert(
             "tor".to_string(),
             ActiveBackend {
                 config: tor_cfg.clone(),
-                network: Arc::new(TorNetwork::with_options(
-                    &tor.addr(),
-                    tor.auth_options(),
+                network: Arc::new(TorNetwork::new(
+                    ManagedTor::with_control(tor.addr(), tor.auth_options()),
                     Duration::ZERO,
                 )),
             },

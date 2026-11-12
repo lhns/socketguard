@@ -81,12 +81,6 @@ pub enum Command {
     Export(ExportArgs),
     /// Apply an exported file: show the diff, confirm, apply
     Apply(ApplyArgs),
-    /// What becomes reachable over Yggdrasil when SocketGuard stops blocking it
-    Exposure {
-        /// A network id [default: all networks]
-        #[arg(long, value_name = "NETWORK")]
-        without: Option<String>,
-    },
     /// Remove all rules and addresses and keep them off until `enable`
     Disable(DisableArgs),
     /// Undo `disable`: put the rules and addresses back
@@ -449,46 +443,23 @@ pub struct GrantsArgs {
 pub enum NetworksCmd {
     /// List networks
     List,
-    /// What can be added on this host: LAN interfaces, SocketGuard's own Tor and Yggdrasil,
-    /// and existing nodes
+    /// What can be added on this host: LAN interfaces, Tor and Yggdrasil
     Detect,
-    /// Add a network (saved to the daemon's config file). Tor and Yggdrasil are SocketGuard's
-    /// own copies unless --existing is given
+    /// Add a network (saved to the daemon's config file)
     Add {
         #[arg(value_enum, ignore_case = true)]
         r#type: NetworkType,
-        /// Tor or Yggdrasil: use the node that already runs on this PC instead of
-        /// SocketGuard's own copy
-        #[arg(long)]
-        existing: bool,
-        /// Managed Yggdrasil: a peer to connect to, e.g. tls://host:port (repeatable)
+        /// Yggdrasil: a peer to connect to, e.g. tls://host:port (repeatable)
         #[arg(long = "peer", value_name = "URI")]
         peers: Vec<String>,
+        /// The interface of a LAN or Local network
         #[arg(long)]
         interface: Option<String>,
         /// Defaults to the type (and interface)
         #[arg(long)]
         id: Option<String>,
-        /// Yggdrasil admin endpoint, e.g. unix:///var/run/yggdrasil.sock
-        #[arg(long)]
-        admin_endpoint: Option<String>,
-        /// Tor control port, `host:port` or `unix:/path` [default: 127.0.0.1:9051]; the daemon refuses
-        /// other values unless its config file has the same network (edit the file instead)
-        #[arg(long)]
-        control: Option<String>,
-        /// Tor control password; without it the cookie file named by Tor is used. Like --control,
-        /// refused unless the config file has the same network. WARNING: visible to other
-        /// users in the process list; prefer --password-env or --password-stdin
-        #[arg(long, conflicts_with_all = ["password_env", "password_stdin"])]
-        password: Option<String>,
-        /// Read the Tor control password from this environment variable
-        #[arg(long, value_name = "VAR", conflicts_with = "password_stdin")]
-        password_env: Option<String>,
-        /// Read the Tor control password from the first line of stdin
-        #[arg(long)]
-        password_stdin: bool,
     },
-    /// Show or change the peers of a managed Yggdrasil network
+    /// Show or change the peers of a Yggdrasil network
     Peers {
         id: String,
         /// Add a peer, e.g. tls://host:port (repeatable)
@@ -498,7 +469,7 @@ pub enum NetworksCmd {
         #[arg(long = "rm", value_name = "URI")]
         rm: Vec<String>,
     },
-    /// Show or change the obfs4 bridges of a managed Tor network (for a network where Tor is
+    /// Show or change the obfs4 bridges of a Tor network (for a network where Tor is
     /// blocked); changing them restarts Tor. Get bridge lines from bridges.torproject.org.
     Bridges {
         id: String,
@@ -518,10 +489,6 @@ pub enum NetworksCmd {
         /// Remove a Tor network even if Tor cannot confirm its onion services are gone
         #[arg(long)]
         force: bool,
-        /// Do not ask, also when the network's software keeps running and its programs
-        /// become reachable over it
-        #[arg(long, short = 'y')]
-        yes: bool,
     },
 }
 
@@ -833,15 +800,7 @@ mod tests {
 
     #[test]
     fn network_types_are_choices() {
-        let c = parse(&[
-            "networks",
-            "add",
-            "YGGDRASIL",
-            "--existing",
-            "--interface",
-            "ygg0",
-        ])
-        .unwrap();
+        let c = parse(&["networks", "add", "YGGDRASIL"]).unwrap();
         let Command::Networks(NetworksCmd::Add { r#type, .. }) = c.command else {
             panic!()
         };
@@ -861,14 +820,10 @@ mod tests {
             "tcp://b:2",
         ])
         .unwrap();
-        let Command::Networks(NetworksCmd::Add {
-            peers, existing, ..
-        }) = c.command
-        else {
+        let Command::Networks(NetworksCmd::Add { peers, .. }) = c.command else {
             panic!()
         };
         assert_eq!(peers, ["tls://a:1", "tcp://b:2"]);
-        assert!(!existing);
         let c = parse(&[
             "networks",
             "peers",
@@ -902,18 +857,6 @@ mod tests {
         assert!(parse(&["networks", "bridges", "tor", "--clear"]).is_ok());
         assert!(parse(&["networks", "bridges", "tor", "--clear", "--add", "x"]).is_err());
         assert!(parse(&["networks", "bridges", "tor"]).is_ok());
-    }
-
-    #[test]
-    fn the_tor_password_has_one_source() {
-        let add = ["networks", "add", "tor", "--existing"];
-        let with = |extra: &[&str]| parse(&[&add[..], extra].concat());
-        assert!(with(&["--password", "x"]).is_ok());
-        assert!(with(&["--password-env", "TOR_PW"]).is_ok());
-        assert!(with(&["--password-stdin"]).is_ok());
-        assert!(with(&["--password", "x", "--password-env", "TOR_PW"]).is_err());
-        assert!(with(&["--password", "x", "--password-stdin"]).is_err());
-        assert!(with(&["--password-env", "TOR_PW", "--password-stdin"]).is_err());
     }
 
     #[test]

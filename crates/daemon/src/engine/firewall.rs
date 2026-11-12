@@ -58,24 +58,11 @@ impl Engine {
             tags,
             port_groups,
             ygg_nodes: self.known_nodes(state).await,
-            ygg_existing: self.existing_yggdrasil(),
             v4_subnets: self.protected_v4_subnets(&protect_host),
             protect_host,
             // Owned addresses stay denied until they are really off their interface.
             owned: owned.into_iter().map(|o| IpAddr::V6(o.addr)).collect(),
         })
-    }
-
-    /// The Yggdrasil networks on a node the user runs: closed by the whole address range
-    /// (ADR 0051), so their node's address is not needed.
-    fn existing_yggdrasil(&self) -> std::collections::BTreeSet<String> {
-        self.backends
-            .iter()
-            .filter(|(_, b)| {
-                b.network.kind() == NetworkKind::Yggdrasil && !b.config.backend.is_managed()
-            })
-            .map(|(id, _)| id.clone())
-            .collect()
     }
 
     /// The node addresses of the managed Yggdrasil networks: what the node reports now,
@@ -84,9 +71,7 @@ impl Engine {
     async fn known_nodes(&self, state: &AppState) -> BTreeMap<String, ruleset::OverlayNode> {
         let mut out = BTreeMap::new();
         for (id, active) in &self.backends {
-            if active.network.kind() != NetworkKind::Yggdrasil
-                || !active.config.backend.is_managed()
-            {
+            if active.network.kind() != NetworkKind::Yggdrasil {
                 continue;
             }
             let key = format!("{NODE_KEY_PREFIX}{id}");

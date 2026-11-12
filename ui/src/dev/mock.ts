@@ -447,18 +447,16 @@ const networkSetup: NetworkSetup = {
     { interface: "Ethernet 3", description: "Intel(R) Ethernet Connection", has_ipv6_prefix: false, is_default_route: false, already_added: false },
     { interface: "eth0", has_ipv6_prefix: true, is_default_route: false, already_added: true },
   ],
+  // Another Yggdrasil node runs here: adding SocketGuard's own is still possible, it waits.
   yggdrasil: {
-    managed: { available: true, version: "0.5.12" },
-    existing: {
-      state: "ready",
-      found: { yggdrasilctl: "C:\\Program Files\\Yggdrasil\\yggdrasilctl.exe", address: "200:8af8:ba35:56ae:bef0:6284:981f:5972", interface: "Yggdrasil", peers: "2" },
-      exposed: true,
-      warning: "Yggdrasil is running but not managed: programs on this PC that listen on all addresses are reachable over it until you add it here.",
-    },
+    available: true,
+    version: "0.5.12",
+    reason: "Another Yggdrasil node is running on this computer. SocketGuard's Yggdrasil cannot run next to it.",
+    added: false,
   },
-  // A build without the Tor files: only an existing node could be used.
-  tor: { managed: { available: false, reason: "this build does not include the Tor files" }, existing: { state: "absent", found: {}, exposed: false } },
-  local: { state: "ready", found: {}, exposed: false },
+  // A build without the Tor files.
+  tor: { available: false, reason: "this build does not include the Tor files", added: false },
+  local: { state: "ready", found: {} },
   config_path: "C:\\ProgramData\\SocketGuard\\socketguard.json",
 };
 
@@ -541,15 +539,6 @@ export function installMock(kind?: string | null) {
         case "list_networks": return networks;
         // Data only: nothing here installs or starts anything.
         case "network_setup": return networkSetup;
-        case "exposure":
-          return {
-            networks: networks
-              .filter((n) => n.kind === "yggdrasil" && !n.managed && (a.without === "all" || a.without === n.id))
-              .map((n) => ({
-                network: n.id, kind: n.kind, interface: n.interface, node_running: true,
-                listeners: [{ app: "nginx", port: 8080, proto: "tcp" }, { app: "sshd", port: 22, proto: "tcp" }],
-              })),
-          };
         case "set_network_peers": {
           const n = networks.find((x) => x.id === a.id);
           if (n?.managed) n.managed = { ...n.managed, peers: a.peers as string[], state: "starting", peers_connected: undefined };
@@ -561,7 +550,7 @@ export function installMock(kind?: string | null) {
           return n;
         }
         case "open_link": return undefined;
-        case "add_network": return { id: a.req.type, kind: a.req.type === "slaac" ? "lan" : a.req.type, name: a.req.type, interface: a.req.interface ?? null, grants_apply: true, status: { state: "up" }, ...(a.req.managed ? { managed: { state: "starting", peers: a.req.peers ?? [] } } : {}) };
+        case "add_network": return { id: a.req.type, kind: a.req.type === "slaac" ? "lan" : a.req.type, name: a.req.type, interface: a.req.interface ?? null, grants_apply: true, status: { state: "up" }, ...(a.req.type === "yggdrasil" || a.req.type === "tor" ? { managed: { state: "starting", peers: a.req.peers ?? [] } } : {}) };
         case "get_settings": return { protect_host_interfaces: ["eth0"] };
         case "activity": return [];
         case "share_app": return { tor: [] };

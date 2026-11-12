@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test of bridges for the managed Tor network (ADR 0052) with real Tor in Docker:
+# End-to-end test of bridges for SocketGuard's Tor network (ADR 0052) with real Tor in Docker:
 # a bridge line (documentation-range address, made-up fingerprint and cert) makes the daemon
 # write the bridge lines into Tor's torrc and Tor start the obfs4 helper that ships with it;
 # the bridge does not exist, so Tor does not bootstrap through it; clearing the bridges makes
@@ -10,10 +10,10 @@
 # failed, 2 Tor could not bootstrap directly from this Docker network.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-IMAGE=sg-mbr-e2e-node
-NET=sg-mbr-e2e-net
-NODE_A=sg-mbr-e2e-a
-NODE_B=sg-mbr-e2e-b
+IMAGE=sg-tor-bridges-e2e-node
+NET=sg-tor-bridges-e2e-net
+NODE_A=sg-tor-bridges-e2e-a
+NODE_B=sg-tor-bridges-e2e-b
 DOCKERFILE=Dockerfile.tor
 BOOTSTRAP_SECS=${BOOTSTRAP_SECS:-240}
 NODE_ARGS="--init"
@@ -59,7 +59,7 @@ docker exec -i "$NODE_A" sh -c 'cat > /etc/sg.json' <<JSON
   "poll_interval_secs": 2,
   "db_path": "$STATE/sg.db", "log_level": "debug",
   "process_filter": {"mode": "allowlist", "patterns": ["python3*"]},
-  "backends": [{"id": "tor", "type": "tor", "managed": true}]
+  "backends": [{"id": "tor", "type": "tor"}]
 }
 JSON
 daemon_start() { docker exec -d "$NODE_A" sh -c "SOCKETGUARD_CONFIG=/etc/sg.json exec '$INSTALL/socketguard-daemon' >>/var/log/sg.log 2>&1"; }
@@ -134,11 +134,11 @@ step "Tor restarted without the helper" retry 60 tor_changed_from "$BRIDGE_TOR"
 step "the helper is gone" retry 30 helper_gone
 step "the status lists no bridges" is "$(bridges_json)" '[]'
 
-echo "      waiting for the managed Tor to bootstrap directly (up to ${BOOTSTRAP_SECS}s)"
+echo "      waiting for SocketGuard's Tor to bootstrap directly (up to ${BOOTSTRAP_SECS}s)"
 end=$((SECONDS + BOOTSTRAP_SECS))
 while ! net_up 2>/dev/null; do
   if [ "$SECONDS" -ge "$end" ]; then
-    if [ "$failures" -eq 0 ]; then skip "the managed Tor could not bootstrap from this Docker network (no route to the Tor network?); the bridge checks above passed."; fi
+    if [ "$failures" -eq 0 ]; then skip "SocketGuard's Tor could not bootstrap from this Docker network (no route to the Tor network?); the bridge checks above passed."; fi
     fail "normal bootstrap resumed after clearing the bridges"; break
   fi
   sleep 2

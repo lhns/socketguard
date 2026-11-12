@@ -209,7 +209,7 @@ pub struct NewNetwork {
     pub backend: BackendConfig,
 }
 
-/// Body of `PUT /api/networks/{id}/peers`: the peers of a managed Yggdrasil network (the
+/// Body of `PUT /api/networks/{id}/peers`: the peers of a Yggdrasil network (the
 /// node restarts to use them).
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,7 +217,7 @@ pub struct SetPeers {
     pub peers: Vec<String>,
 }
 
-/// Body of `PUT /api/networks/{id}/bridges`: the obfs4 bridge lines of a managed Tor network
+/// Body of `PUT /api/networks/{id}/bridges`: the obfs4 bridge lines of a Tor network
 /// (Tor restarts to use them). Empty turns bridges off. Lines are checked by
 /// `bridge::parse_bridge_line` and stored in canonical form.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -248,88 +248,6 @@ pub struct ProtectHostResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisableRequest {
     pub confirm: bool,
-}
-
-/// Query of `GET /api/exposure`.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ExposureQuery {
-    /// A network id, or `all` (the default): what becomes reachable without that block.
-    pub without: Option<String>,
-}
-
-// ─── Exposure (ADR 0051) ─────────────────────────────────────────────────────
-
-/// A program listening on all addresses, so reachable over a network once SocketGuard's
-/// block on it is gone.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExposedListener {
-    /// The app's name.
-    pub app: String,
-    pub port: u16,
-    pub proto: Protocol,
-}
-
-/// What stays reachable over one network when SocketGuard stops blocking it.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NetworkExposure {
-    /// The network's id.
-    pub network: String,
-    pub kind: crate::model::NetworkKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub interface: Option<String>,
-    /// The software behind the network keeps running when the block goes.
-    pub node_running: bool,
-    /// The programs listening on all addresses (what the block keeps off the network).
-    pub listeners: Vec<ExposedListener>,
-}
-
-impl NetworkExposure {
-    /// What stays reachable without the block, in plain words; None when the node does not
-    /// run (nothing is reachable over it).
-    pub fn sentence(&self) -> Option<String> {
-        if !self.node_running {
-            return None;
-        }
-        let programs = match self.listeners.len() {
-            0 => "no program listens on all addresses now".to_string(),
-            1 => "1 program on this PC is reachable over it".to_string(),
-            k => format!("{k} programs on this PC are reachable over it"),
-        };
-        let mut s = format!(
-            "{} keeps running. Without SocketGuard, {programs}",
-            self.network
-        );
-        if !self.listeners.is_empty() {
-            let list: Vec<String> = self
-                .listeners
-                .iter()
-                .map(|l| format!("{} (port {}/{})", l.app, l.port, l.proto))
-                .collect();
-            s.push_str(&format!(": {}", list.join(", ")));
-        }
-        s.push('.');
-        s.push_str(" Stop its service yourself to close it.");
-        Some(s)
-    }
-}
-
-impl ExposureResponse {
-    /// One sentence per network whose node keeps running.
-    pub fn sentences(&self) -> Vec<String> {
-        self.networks.iter().filter_map(|n| n.sentence()).collect()
-    }
-}
-
-/// Response of `GET /api/exposure` and the body of a `confirmation_required` answer to
-/// removing a network that stays reachable.
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExposureResponse {
-    /// Only the networks that are affected and whose node runs or has listeners.
-    pub networks: Vec<NetworkExposure>,
 }
 
 // ─── Export and apply ────────────────────────────────────────────────────────

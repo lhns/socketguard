@@ -330,7 +330,7 @@ fn host_lines(s: &StatusResponse) -> String {
 /// The third-party programs this build ships, or why there are none.
 fn bundled(b: &socketguard_core::setup::BundledInfo) -> String {
     if b.dir.is_none() && b.versions.is_empty() {
-        return "none (managed networks not included in this build)".to_string();
+        return "none (Tor and Yggdrasil are not included in this build)".to_string();
     }
     if b.versions.is_empty() {
         return "files found, no VERSIONS list".to_string();
@@ -372,47 +372,26 @@ pub fn status(s: &StatusResponse) -> String {
 
 /// `networks detect`: what each kind of network offers.
 pub fn network_setup(s: &socketguard_core::setup::NetworkSetup) -> String {
-    use socketguard_core::setup::{KindSetup, SetupState, SetupStatus};
-    let existing = |st: &SetupState| {
-        let label = match st.state {
-            SetupStatus::Ready => "ready to add",
-            SetupStatus::Added => "added",
-            SetupStatus::Absent => "none found",
-        };
-        let mut out = format!("  your own: {label}");
-        for (k, v) in &st.found {
-            out.push_str(&format!(
-                "
-    {k}: {v}"
-            ));
-        }
-        if let Some(w) = &st.warning {
-            out.push_str(&format!(
-                "
-    warning: {w}"
-            ));
-        }
-        out
-    };
+    use socketguard_core::setup::{KindSetup, SetupStatus};
     let kind = |name: &str, k: &KindSetup| {
-        let m = &k.managed;
-        let managed = if m.available {
-            match &m.version {
+        let state = if k.added {
+            "added".to_string()
+        } else if k.available {
+            match &k.version {
                 Some(v) => format!("available (version {v})"),
                 None => "available".to_string(),
             }
         } else {
             format!(
                 "not available ({})",
-                m.reason.as_deref().unwrap_or("unknown reason")
+                k.reason.as_deref().unwrap_or("unknown reason")
             )
         };
-        format!(
-            "{name}:
-  managed: {managed}
-{}",
-            existing(&k.existing)
-        )
+        let note = match (&k.reason, k.available) {
+            (Some(r), true) => format!("\n  {r}"),
+            _ => String::new(),
+        };
+        format!("{name}: {state}{note}")
     };
     let mut out = String::from("LAN interfaces:");
     if s.lan.is_empty() {
@@ -457,13 +436,7 @@ Local: {local}",
     )
 }
 
-/// What stays reachable when a block goes (ADR 0051): one paragraph per network whose node
-/// keeps running; empty when nothing does.
-pub fn exposure(e: &socketguard_core::api_types::ExposureResponse) -> String {
-    e.sentences().join("\n")
-}
-
-/// How a managed network's child process is doing, in a few words.
+/// How a network's child process is doing, in a few words.
 fn managed_status(kind: NetworkKind, m: &ManagedInfo) -> String {
     let detail = |what: &str| match &m.detail {
         Some(d) => format!("{what}: {d}"),
@@ -487,19 +460,6 @@ fn managed_status(kind: NetworkKind, m: &ManagedInfo) -> String {
         }
     }
     out
-}
-
-/// `tor (managed)`, `yggdrasil (your own)`; the other kinds are just named.
-fn kind_text(n: &Network) -> String {
-    match (n.kind, &n.managed) {
-        (NetworkKind::Tor | NetworkKind::Yggdrasil, Some(_)) => {
-            format!("{} (managed)", kind_label(n.kind))
-        }
-        (NetworkKind::Tor | NetworkKind::Yggdrasil, None) => {
-            format!("{} (your own)", kind_label(n.kind))
-        }
-        _ => kind_label(n.kind).to_string(),
-    }
 }
 
 pub fn networks(nets: &[Network]) -> String {
@@ -529,7 +489,7 @@ pub fn networks(nets: &[Network]) -> String {
                 }
                 vec![
                     n.id.clone(),
-                    kind_text(n),
+                    kind_label(n.kind).to_string(),
                     n.interface.clone().unwrap_or_else(|| "-".into()),
                     status,
                     notes.join("; "),
@@ -539,7 +499,7 @@ pub fn networks(nets: &[Network]) -> String {
     )
 }
 
-/// The peers of a managed Yggdrasil network, one per line.
+/// The peers of a Yggdrasil network, one per line.
 pub fn network_peers(id: &str, peers: &[String]) -> String {
     if peers.is_empty() {
         return format!("{id} has no peers");
@@ -547,7 +507,7 @@ pub fn network_peers(id: &str, peers: &[String]) -> String {
     format!("peers of {id}:\n{}", peers.join("\n"))
 }
 
-/// The bridges of a managed Tor network, one per line.
+/// The bridges of a Tor network, one per line.
 pub fn network_bridges(id: &str, bridges: &[String]) -> String {
     if bridges.is_empty() {
         return format!("{id} has no bridges (Tor connects directly)");

@@ -6,16 +6,14 @@
 //! `{"status": "success"|"error", "error": "..", "request": {..}, "response": {..}}` and,
 //! without `keepalive`, closes the connection. Names are case-insensitive. The node reads at
 //! most 1 MB of requests and waits 10 s for a request to arrive; the client enforces the
-//! same bounds on the answer.
-//!
-//! A TCP admin endpoint is deliberately not spoken here: other local users could reach it.
-//! Existing nodes that use one stay on `yggdrasilctl`.
+//! same bounds on the answer. Only SocketGuard's own node is spoken to (ADR 0056).
 
-use super::yggdrasil::{parse_get_self, NodeInfo, NodeProblem};
+use super::Prefix;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use socket2::{Domain, SockAddr, Socket, Type};
 use std::io::{Read, Write};
+use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -23,11 +21,42 @@ use std::time::Duration;
 const MAX_ANSWER: u64 = 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(10);
 
-/// The path of a `unix://` admin endpoint (`unix:///run/yggdrasil.sock`); None for any
-/// other kind (a TCP endpoint, a bare `host:port`).
-pub fn unix_endpoint(endpoint: &str) -> Option<PathBuf> {
-    let path = endpoint.strip_prefix("unix://")?;
-    (!path.is_empty()).then(|| PathBuf::from(path))
+/// What `getSelf` tells us about the node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeInfo {
+    /// Hex-encoded public key.
+    pub key: String,
+    /// The node's own `200::/7` address.
+    pub address: Ipv6Addr,
+    /// The routed `300::/64` subnet this node owns.
+    pub subnet: Prefix,
+}
+
+#[derive(Deserialize)]
+struct GetSelf {
+    key: String,
+    address: String,
+    subnet: String,
+}
+
+/// Parse the `response` of `getSelf`.
+pub fn parse_get_self(json: &str) -> Result<NodeInfo> {
+    let raw: GetSelf = serde_json::from_str(json).context("invalid getSelf JSON")?;
+    let address: Ipv6Addr = raw.address.parse().context("invalid node address")?;
+    let (net, len) = raw
+        .subnet
+        .split_once('/')
+        .with_context(|| format!("invalid subnet {:?}", raw.subnet))?;
+    let net: Ipv6Addr = net.parse().context("invalid subnet address")?;
+    let len: u8 = len.parse().context("invalid subnet length")?;
+    if len != 64 {
+        bail!("unexpected Yggdrasil subnet length /{len}");
+    }
+    Ok(NodeInfo {
+        key: raw.key,
+        address,
+        subnet: Prefix::new(net, len),
+    })
 }
 
 /// One peer of the node, as `getPeers` lists it.
@@ -124,27 +153,6 @@ pub fn parse_get_peers(json: &str) -> Result<Vec<PeerInfo>> {
 /// How many of `peers` are connected now.
 pub fn connected(peers: &[PeerInfo]) -> u32 {
     peers.iter().filter(|p| p.up).count() as u32
-}
-
-/// An existing node reached through a `unix://` admin endpoint.
-pub struct AdminNode {
-    client: AdminClient,
-}
-
-impl AdminNode {
-    pub fn new(path: PathBuf) -> Self {
-        Self {
-            client: AdminClient::new(path),
-        }
-    }
-}
-
-impl super::yggdrasil::YggdrasilNode for AdminNode {
-    fn get_self(&self) -> Result<NodeInfo> {
-        self.client
-            .get_self()
-            .map_err(|e| NodeProblem::NotRunning(format!("{e:#}")).into())
-    }
 }
 
 /// Real answers of the node, and a fake admin socket serving them: for the tests of this
@@ -345,13 +353,9 @@ mod tests {
     }
 
     #[test]
-    fn only_unix_endpoints_are_spoken_here() {
-        assert_eq!(
-            unix_endpoint("unix:///var/run/yggdrasil.sock"),
-            Some(PathBuf::from("/var/run/yggdrasil.sock"))
-        );
-        assert_eq!(unix_endpoint("tcp://localhost:9001"), None);
-        assert_eq!(unix_endpoint("localhost:9001"), None);
-        assert_eq!(unix_endpoint("unix://"), None);
+    fn rejects_malformed_get_self() {
+        assert!(parse_get_self("not json").is_err());
+        assert!(parse_get_self(r#"{"key":"aa","address":"200::1","subnet":"300::"}"#).is_err());
+        assert!(parse_get_self(r#"{"key":"aa","address":"200::1","subnet":"300::/48"}"#).is_err());
     }
 }

@@ -113,7 +113,7 @@ mn_tor() {
     mn_ok "the network card says it runs as $runs, version $(mn_field tor .managed.version)"
     mn_until 20 test -d "$STATE/tor" || mn_die "no $STATE/tor"
 
-    $SG networks rm tor --yes || mn_die "networks rm tor failed"
+    $SG networks rm tor || mn_die "networks rm tor failed"
     mn_until 60 mn_gone '/third_party/tor/tor' || mn_die "tor is still running 60 s after the network was removed"
     mn_ok "removing the network ends tor"
 

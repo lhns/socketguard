@@ -363,7 +363,7 @@ async fn errors_status_and_everything_else() {
     let e = env.fails(&["networks", "add", "slaac"]).await;
     assert!(e.stderr.contains("--interface is required"), "{}", e.stderr);
 
-    // Managed is the default form; this daemon ships no files, and says so.
+    // This daemon ships no files, and says so.
     let e = env.fails(&["networks", "add", "tor"]).await;
     assert!(
         e.stderr.contains("Not included in this build"),
@@ -384,19 +384,15 @@ async fn errors_status_and_everything_else() {
         "{}",
         e.stderr
     );
-    let e = env
-        .fails(&["networks", "add", "tor", "--control", "x:1"])
-        .await;
-    assert!(e.stderr.contains("--existing"), "{}", e.stderr);
-    let e = env.fails(&["networks", "peers", "ygg"]).await;
-    assert!(e.stderr.contains("not a managed Yggdrasil"), "{}", e.stderr);
+    let e = env.fails(&["networks", "peers", "local"]).await;
+    assert!(e.stderr.contains("not a Yggdrasil"), "{}", e.stderr);
     assert!(env
         .ok(&["status"])
         .await
         .stdout
-        .contains("managed networks not included"));
+        .contains("Tor and Yggdrasil are not included"));
     let detect = env.ok(&["networks", "detect", "--json"]).await.json();
-    assert_eq!(detect["tor"]["managed"]["available"], false);
+    assert_eq!(detect["tor"]["available"], false);
 
     // Protect-host: refused with the risks, then forced.
     env.daemon
@@ -690,42 +686,9 @@ async fn init_offers_a_grant_for_sshd_and_checks_protect_host_for_lockout() {
 }
 
 #[tokio::test]
-async fn exposure_is_shown_and_removing_or_disabling_needs_yes() {
+async fn removing_a_network_needs_no_confirmation_and_disabling_does() {
     let env = Env::start().await;
-    // The Yggdrasil network of the mock daemon has a node that runs.
-    let e = env.ok(&["exposure", "--json"]).await.json();
-    assert_eq!(e["networks"][0]["network"], "ygg");
-    assert_eq!(e["networks"][0]["node_running"], true);
-    assert!(env
-        .ok(&["exposure"])
-        .await
-        .stdout
-        .contains("ygg keeps running"));
-    let one = env
-        .ok(&["exposure", "--without", "ygg", "--json"])
-        .await
-        .json();
-    assert_eq!(one["networks"].as_array().unwrap().len(), 1);
-    env.fails(&["exposure", "--without", "nope"]).await;
-
-    // `networks rm` prints the exposure and refuses without --yes.
-    let out = env.fails(&["networks", "rm", "ygg"]).await;
-    assert!(out.stderr.contains("keeps running"), "{}", out.stderr);
-    assert!(out.stderr.contains("--yes"), "{}", out.stderr);
-    assert_eq!(
-        env.ok(&["networks", "list", "--json"])
-            .await
-            .json()
-            .as_array()
-            .unwrap()
-            .len(),
-        3
-    );
-    // Disable shows it too.
-    let out = env.fails(&["disable"]).await;
-    assert!(out.stderr.contains("keeps running"), "{}", out.stderr);
-
-    env.ok(&["networks", "rm", "ygg", "--yes"]).await;
+    env.ok(&["networks", "rm", "ygg"]).await;
     assert_eq!(
         env.ok(&["networks", "list", "--json"])
             .await
@@ -735,5 +698,8 @@ async fn exposure_is_shown_and_removing_or_disabling_needs_yes() {
             .len(),
         2
     );
+    let out = env.fails(&["disable"]).await;
+    assert!(out.stderr.contains("--yes"), "{}", out.stderr);
+    env.ok(&["disable", "--yes"]).await;
     env.stop().await;
 }

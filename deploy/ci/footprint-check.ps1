@@ -142,7 +142,7 @@ function Get-LedgerStillPresent([string]$Json, $InterfaceAddresses) {
 
 # ---- items and verdict ---------------------------------------------------------------------
 
-$DataItems = @('config-dir', 'config-json', 'database', 'database-wal', 'database-shm', 'setup-log', 'archived-database', 'temp-file', 'dir-tor', 'dir-yggdrasil', 'wintun-driver')
+$DataItems = @('config-dir', 'config-json', 'database', 'database-wal', 'database-shm', 'setup-log', 'temp-file', 'dir-tor', 'dir-yggdrasil', 'wintun-driver')
 $script:KeepData = $false
 $FileItems = @(
     @('config-json', '\\socketguard\.json$'),
@@ -150,7 +150,6 @@ $FileItems = @(
     @('database-wal', '\\socketguard\.db-wal$'),
     @('database-shm', '\\socketguard\.db-shm$'),
     @('setup-log', '\\setup-log\.json$'),
-    @('archived-database', '\.pre-v1'),
     @('temp-file', '\\socketguard\.tmp-'),
     @('dir-tor', '\\tor$'),
     @('dir-yggdrasil', '\\yggdrasil$')
@@ -218,12 +217,11 @@ function Invoke-SelfTest {
     Assert-Equal 'group-empty' 'ABSENT' (Get-GroupState '')
 
     $dir = 'C:\ProgramData\SocketGuard'
-    $files = @($dir, "$dir\socketguard.json", "$dir\socketguard.db-wal", "$dir\socketguard.db.pre-v1.2", "$dir\socketguard.tmp-9-abc", "$dir\setup-log.json")
+    $files = @($dir, "$dir\socketguard.json", "$dir\socketguard.db-wal", "$dir\socketguard.tmp-9-abc", "$dir\setup-log.json")
     Assert-Equal 'file-config' 'PRESENT' (Get-ListedState $files '\\socketguard\.json$')
     Assert-Equal 'file-db-not-wal' 'ABSENT' (Get-ListedState $files '\\socketguard\.db$')
     Assert-Equal 'file-wal' 'PRESENT' (Get-ListedState $files '\\socketguard\.db-wal$')
     Assert-Equal 'file-shm' 'ABSENT' (Get-ListedState $files '\\socketguard\.db-shm$')
-    Assert-Equal 'file-pre-v1' 'PRESENT' (Get-ListedState $files '\.pre-v1')
     Assert-Equal 'file-tmp' 'PRESENT' (Get-ListedState $files '\\socketguard\.tmp-')
     Assert-Equal 'file-setup-log' 'PRESENT' (Get-ListedState $files '\\setup-log\.json$')
     Assert-Equal 'file-empty' 'ABSENT' (Get-ListedState @() '\\socketguard\.json$')

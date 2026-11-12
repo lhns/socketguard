@@ -5,7 +5,7 @@ import { TOR_BRIDGES_URL, YGG_PUBLIC_PEERS_URL } from "../links";
 import { usePortable, useSetNetworkBridges, useSetNetworkPeers } from "../queries";
 import { useToast } from "./Toast";
 
-/** A managed network's child process, in words. */
+/** The child process of a Tor or Yggdrasil network, in words. */
 export function childStateText(m: ManagedInfo): string {
   switch (m.state) {
     case "starting":
@@ -94,13 +94,12 @@ function ExternalLink({ url, children }: { url: string; children: ReactNode }) {
   );
 }
 
-/** "Managed" or "your own", with the child's state for a managed one. */
+/** The state of the network's own Tor or Yggdrasil process, and what runs it. */
 export function NetworkOrigin({ network }: { network: Network }) {
   const m = network.managed;
-  if (!m) return <span className="muted">your own</span>;
+  if (!m) return null;
   return (
     <>
-      <span className="muted">managed</span>
       <span className="muted" aria-label={`${network.name} state`}>
         {childStateText(m)}
       </span>
@@ -110,7 +109,7 @@ export function NetworkOrigin({ network }: { network: Network }) {
   );
 }
 
-/** What is specific to a managed network: Yggdrasil's address and peers. */
+/** What is specific to Tor and Yggdrasil: Yggdrasil's address and peers, Tor's bridges. */
 export function ManagedDetails({ network }: { network: Network }) {
   const portable = usePortable();
   const m = network.managed;

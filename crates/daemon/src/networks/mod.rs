@@ -154,13 +154,12 @@ pub trait Network: Send + Sync {
 }
 
 /// Create the network for `config`.
-/// `id` is the network's id (the child process of a managed network is named after it),
-/// `ula_global_id` the installation's persisted ULA global ID, `managed` what managed
+/// `id` is the network's id (the child process of a Tor or Yggdrasil network is named after
+/// it), `ula_global_id` the installation's persisted ULA global ID, `managed` what those
 /// networks need from the daemon.
 ///
 /// Only an invalid configuration is an error. What depends on the system (a missing
-/// prefix, no DHCPv6 server, Yggdrasil or Tor not running, a build without the files of a
-/// managed network) is not: the network is created, reports `Down` and recovers when the
+/// prefix, no DHCPv6 server, a build without the files of Tor or Yggdrasil) is not: the network is created, reports `Down` and recovers when the
 /// system does.
 pub fn create(
     id: &str,
@@ -170,76 +169,24 @@ pub fn create(
     managed: &ManagedCtx,
 ) -> Result<Arc<dyn Network>> {
     match config {
-        BackendConfig::Tor {
-            control,
-            auth,
-            cookie_path,
-            cookie_dir,
-            expect_tor_uid,
-            cookie_owner,
-            allow_remote_control,
-            managed: managed_tor,
-            bridges: _,
-        } => {
-            if *managed_tor {
-                return Ok(Arc::new(tor::TorNetwork::managed(
-                    tor_managed::ManagedTor::new(id, managed),
-                    tor::CHECK_INTERVAL,
-                )));
-            }
-            let opts = tor_control::AuthOptions {
-                auth: auth.clone(),
-                cookie_path: cookie_path.clone(),
-                cookie_dir: cookie_dir.clone(),
-                expect_tor_uid: *expect_tor_uid,
-                cookie_owner: cookie_owner.clone(),
-                allow_remote_control: *allow_remote_control,
-            };
-            tor_control::check_endpoint(&tor_control::Endpoint::parse(control), &opts)?;
-            Ok(Arc::new(tor::TorNetwork::with_options(
-                control,
-                opts,
-                tor::CHECK_INTERVAL,
-            )))
-        }
+        BackendConfig::Tor { .. } => Ok(Arc::new(tor::TorNetwork::new(
+            tor_managed::ManagedTor::new(id, managed),
+            tor::CHECK_INTERVAL,
+        ))),
         BackendConfig::Ula { .. } => Ok(ip_network(
             config,
             ip::ula::UlaBackend::new(ula_global_id),
             net,
         )),
-        BackendConfig::Yggdrasil {
-            admin_endpoint,
-            interface,
-            managed: managed_ygg,
-            peers: _,
-        } => {
-            if *managed_ygg {
-                return Ok(ip_network(
-                    config,
-                    ip::yggdrasil_managed::ManagedYggBackend::new(ygg_managed::ManagedYgg::new(
-                        id,
-                        managed,
-                        net.clone(),
-                    )),
-                    net,
-                ));
-            }
-            // A Unix socket endpoint is spoken to directly; a TCP one, and a node without
-            // an endpoint, go through `yggdrasilctl`.
-            let node: Box<dyn ip::yggdrasil::YggdrasilNode> = match admin_endpoint
-                .as_deref()
-                .and_then(ip::ygg_admin::unix_endpoint)
-            {
-                Some(path) => Box::new(ip::ygg_admin::AdminNode::new(path)),
-                None => Box::new(ip::yggdrasil::YggdrasilctlNode::new(admin_endpoint.clone())),
-            };
-            Ok(ip_network(
-                config,
-                ip::yggdrasil::YggdrasilBackend::new(node)
-                    .with_host(net.clone(), interface.clone()),
-                net,
-            ))
-        }
+        BackendConfig::Yggdrasil { .. } => Ok(ip_network(
+            config,
+            ip::yggdrasil_managed::ManagedYggBackend::new(ygg_managed::ManagedYgg::new(
+                id,
+                managed,
+                net.clone(),
+            )),
+            net,
+        )),
         BackendConfig::Slaac { interface, prefix } => Ok(ip_network(
             config,
             ip::slaac::SlaacBackend::new(interface, prefix.as_deref(), net.clone())?,
@@ -476,8 +423,10 @@ mod tests {
     /// Whatever a network declares as verified must be Verified in core's reach table.
     #[test]
     fn declared_verification_agrees_with_reach() {
-        let tor =
-            tor::TorNetwork::with_options("127.0.0.1:1", Default::default(), tor::CHECK_INTERVAL);
+        let tor = tor::TorNetwork::new(
+            tor_managed::ManagedTor::with_control("127.0.0.1:1".into(), Default::default()),
+            tor::CHECK_INTERVAL,
+        );
         let ygg = IpNetwork::new(
             NetworkKind::Yggdrasil,
             true,

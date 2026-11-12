@@ -179,26 +179,7 @@ impl Engine {
             &self.managed,
         )
         .map_err(|e| EngineError::Invalid(format!("cannot create network: {e}")))?;
-        if matches!(
-            inst.backend,
-            BackendConfig::Yggdrasil { managed: false, .. }
-        ) {
-            // SocketGuard does not start software it did not ship, so an existing node is
-            // added only while it answers (ADR 0051). A config file entry for a node that is
-            // down is not checked: the range block applies anyway.
-            let probe = n.clone();
-            let answers = tokio::task::spawn_blocking(move || probe.node().is_some())
-                .await
-                .map_err(|e| EngineError::Internal(e.into()))?;
-            if !answers {
-                return Err(EngineError::Invalid(
-                    "the Yggdrasil node does not answer; start it first, or let SocketGuard run \
-                     its own node (managed)"
-                        .into(),
-                ));
-            }
-        }
-        if matches!(inst.backend, BackendConfig::Yggdrasil { managed: true, .. }) {
+        if matches!(inst.backend, BackendConfig::Yggdrasil { .. }) {
             // The node's addresses follow from its key: with them remembered, the first
             // ruleset already closes them, before any software runs (ADR 0051).
             self.ensure_managed_key(state, &inst.id, true)
@@ -214,7 +195,7 @@ impl Engine {
         Ok((network, applied))
     }
 
-    /// The API's `PUT /api/networks/{id}/peers`: replace the peers of a managed Yggdrasil
+    /// The API's `PUT /api/networks/{id}/peers`: replace the peers of a Yggdrasil
     /// network. The caller saves the config (`persist_networks`) while it holds the write
     /// lock, as for add and remove.
     pub async fn set_peers(
@@ -228,18 +209,14 @@ impl Engine {
         };
         let mut updated = active.config.backend.clone();
         match &mut updated {
-            BackendConfig::Yggdrasil {
-                managed: true,
-                peers: current,
-                ..
-            } => *current = peers,
+            BackendConfig::Yggdrasil { peers: current } => *current = peers,
             _ => {
                 return Err(EngineError::Invalid(format!(
-                    "network {id} is not a managed Yggdrasil network; an existing node has its own peers"
+                    "network {id} is not a Yggdrasil network"
                 )))
             }
         }
-        updated.validate_managed().map_err(EngineError::Invalid)?;
+        updated.validate().map_err(EngineError::Invalid)?;
         let count = updated.peers().len();
         active.config.backend = updated;
         // A changed spec restarts the child so that it connects to the new peers: the
@@ -263,7 +240,7 @@ impl Engine {
             .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))
     }
 
-    /// The API's `PUT /api/networks/{id}/bridges`: replace the bridge lines of a managed Tor
+    /// The API's `PUT /api/networks/{id}/bridges`: replace the bridge lines of a Tor
     /// network (ADR 0052). The lines are validated and stored in canonical form, duplicates
     /// dropped; setting any needs the obfs4 helper of this build. The caller saves the config
     /// while it holds the write lock.
@@ -280,14 +257,10 @@ impl Engine {
             socketguard_core::bridge::normalize_bridges(&bridges).map_err(EngineError::Invalid)?;
         let mut updated = active.config.backend.clone();
         match &mut updated {
-            BackendConfig::Tor {
-                managed: true,
-                bridges: current,
-                ..
-            } => *current = bridges,
+            BackendConfig::Tor { bridges: current } => *current = bridges,
             _ => {
                 return Err(EngineError::Invalid(format!(
-                    "network {id} is not a managed Tor network; an existing Tor has its own configuration"
+                    "network {id} is not a Tor network"
                 )))
             }
         }
@@ -297,7 +270,7 @@ impl Engine {
                 .obfs4_helper()
                 .map_err(EngineError::Conflict)?;
         }
-        updated.validate_managed().map_err(EngineError::Invalid)?;
+        updated.validate().map_err(EngineError::Invalid)?;
         let count = updated.bridges().len();
         active.config.backend = updated;
         // The bridge lines are part of the child's spec: a change restarts Tor.
@@ -455,7 +428,7 @@ impl Engine {
         let managed_ygg = self
             .backends
             .get(backend_id)
-            .is_some_and(|b| super::children::is_managed_yggdrasil(&b.config.backend));
+            .is_some_and(|b| super::children::is_yggdrasil(&b.config.backend));
         self.backends.remove(backend_id);
         if managed_ygg {
             // The node's key goes with the network, like the keys of its addresses.

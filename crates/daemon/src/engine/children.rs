@@ -5,10 +5,15 @@
 use super::firewall::NODE_KEY_PREFIX;
 use super::*;
 use crate::children::Desired;
+use crate::firewall::ScopeMatch;
 use crate::networks::ygg_key::{YggKey, KEY_PREFIX};
 use crate::networks::ygg_managed;
+use crate::ruleset::overlay_addr_scope_id;
 use anyhow::Context;
 use socketguard_core::config::BackendConfig;
+use socketguard_core::setup::YggdrasilBlock;
+use socketguard_core::NetworkKind;
+use std::sync::atomic::Ordering;
 
 /// Whether a managed network's child may start now.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,11 +24,67 @@ pub enum Gate {
     Held(String),
 }
 
-pub(super) fn is_managed_yggdrasil(backend: &BackendConfig) -> bool {
-    matches!(backend, BackendConfig::Yggdrasil { managed: true, .. })
+pub(super) fn is_yggdrasil(backend: &BackendConfig) -> bool {
+    matches!(backend, BackendConfig::Yggdrasil { .. })
 }
 
 impl Engine {
+    /// The Yggdrasil network the engine manages, if any.
+    fn yggdrasil_backend(&self) -> Option<(&String, &ActiveBackend)> {
+        self.backends
+            .iter()
+            .find(|(_, b)| b.network.kind() == NetworkKind::Yggdrasil)
+    }
+
+    /// Whether the block of the Yggdrasil network (the node's own address and subnet) is in
+    /// the ruleset last applied, and that apply succeeded (ADR 0051). None without a
+    /// Yggdrasil network.
+    pub async fn yggdrasil_block(&self, state: &AppState) -> Option<YggdrasilBlock> {
+        let (id, active) = self.yggdrasil_backend()?;
+        let iface = Self::interface_in_use(active);
+        // An interface rule holds for an adapter that is not there yet on nftables and pf,
+        // not on WFP, which can only bind a filter to an adapter that exists.
+        let adapter_ok = self.firewall.blocks_absent_interfaces()
+            || iface.as_ref().is_some_and(|name| {
+                self.ifaces
+                    .list_interfaces()
+                    .is_ok_and(|l| l.iter().any(|i| &i.name == name))
+            });
+        let applied = self.last_applied.lock().unwrap().clone();
+        let failed = self.apply_failed.load(Ordering::Relaxed);
+        let node_scope = overlay_addr_scope_id(id);
+        let (address_blocked, interface_blocked) = match (&applied, failed) {
+            (Some(rs), false) => (
+                rs.scopes.iter().any(|s| s.id == node_scope),
+                adapter_ok
+                    && rs.scopes.iter().any(|s| {
+                        matches!(&s.matcher, ScopeMatch::Interface { name, .. }
+                            if Some(name) == iface.as_ref())
+                    }),
+            ),
+            _ => (false, false),
+        };
+        let reason = if state.db.disabled().await {
+            Some("SocketGuard is turned off".to_string())
+        } else if failed {
+            Some("the last attempt to apply the firewall rules failed".to_string())
+        } else if applied.is_none() {
+            Some("the firewall rules are not applied yet".to_string())
+        } else if !address_blocked && !adapter_ok {
+            Some("the node's address is not known yet, and the firewall can only block an adapter that exists".to_string())
+        } else if !address_blocked {
+            Some("the node's address is not known yet".to_string())
+        } else {
+            None
+        };
+        Some(YggdrasilBlock {
+            closed: address_blocked,
+            address_blocked,
+            interface_blocked,
+            reason,
+        })
+    }
+
     /// The condition, beyond "SocketGuard is on, the network exists and is not unadopted",
     /// under which the child of `id` runs. Tor needs none. Managed Yggdrasil adds its own:
     /// the ruleset that blocks its address range must be applied and verified first (ADR
@@ -34,7 +95,7 @@ impl Engine {
     /// ruleset before it in force, which already closes the node), and the other-node
     /// check is meant for the moment before our own adapter exists.
     async fn child_gate(&self, state: &AppState, id: &str, backend: &BackendConfig) -> Gate {
-        if !is_managed_yggdrasil(backend) || self.managed.children.status(id).alive() {
+        if !is_yggdrasil(backend) || self.managed.children.status(id).alive() {
             return Gate::Open;
         }
         // Without a key there is no node to close; the spec says so.
@@ -104,7 +165,7 @@ impl Engine {
     /// that cannot be read leaves its network down and says so; it is never replaced.
     pub(super) async fn ensure_managed_keys(&self, state: &AppState) {
         for id in self.sorted_backend_ids() {
-            if !is_managed_yggdrasil(&self.backends[id].config.backend) {
+            if !is_yggdrasil(&self.backends[id].config.backend) {
                 continue;
             }
             if let Err(e) = self.ensure_managed_key(state, id, false).await {
@@ -145,7 +206,7 @@ impl Engine {
         let off = state.db.disabled().await || state.db.unadopted().await.unwrap_or(true);
         for id in self.sorted_backend_ids() {
             let backend = &self.backends[id].config.backend;
-            if !backend.is_managed() {
+            if !backend.runs_child() {
                 continue;
             }
             let wish = if off {
@@ -171,7 +232,7 @@ impl Engine {
     pub(super) async fn sync_children_and_wait(&self, state: &AppState) {
         if self.sync_children(state).await {
             for id in self.sorted_backend_ids() {
-                if self.backends[id].config.backend.is_managed() {
+                if self.backends[id].config.backend.runs_child() {
                     self.managed.children.wait_stopped(id).await;
                 }
             }
@@ -183,7 +244,7 @@ impl Engine {
         if self
             .backends
             .get(id)
-            .is_some_and(|b| b.config.backend.is_managed())
+            .is_some_and(|b| b.config.backend.runs_child())
         {
             self.managed.children.remove(id).await;
         }

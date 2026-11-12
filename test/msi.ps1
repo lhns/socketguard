@@ -341,7 +341,7 @@ function Invoke-ManagedNetworks {
   Mn-Ok "the network card says it runs as $($n.managed.runs_as)"
   if (-not (Wait-Until { Test-Path (Join-Path $DataDir 'tor') } 20 'tor dir')) { Mn-Fail "no $DataDir\tor" }
 
-  $r = Run $Cli @('networks', 'rm', 'tor', '--yes') 'mn-rm-tor'
+  $r = Run $Cli @('networks', 'rm', 'tor') 'mn-rm-tor'
   Write-Host $r.Text
   if ($r.Code -ne 0) { Mn-Fail "networks rm tor exited $($r.Code)" }
   if (-not (Wait-Until { (Mn-Procs 'tor.exe').Count -eq 0 } 60 'tor gone')) { Mn-Fail 'tor.exe still runs 60 s after the network was removed' }

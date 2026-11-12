@@ -20,11 +20,11 @@ use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use socketguard_core::api_types::{
     error_code, event_name, ApiError, ApplyRequest, AttachPortGroup, ChangesRequest, Counts,
-    DisableRequest, Enforcement, EnforcementNotice, EnforcementStatus, ExposureQuery,
-    LockoutRiskInfo, MemberQuery, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer,
-    NewPortGroup, NewReservation, NewTag, NewTagMember, ParseCredentialsRequest,
-    ProtectHostRequest, ProtectHostResponse, ReserveRequest, SetBridges, SetMembers, SetPeers,
-    StatusResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
+    DisableRequest, Enforcement, EnforcementNotice, EnforcementStatus, LockoutRiskInfo,
+    MemberQuery, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup,
+    NewReservation, NewTag, NewTagMember, ParseCredentialsRequest, ProtectHostRequest,
+    ProtectHostResponse, ReserveRequest, SetBridges, SetMembers, SetPeers, StatusResponse,
+    UpdateLabel, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
 use socketguard_core::{ActivityQuery, NewCredential, NewGrant};
@@ -140,7 +140,6 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::DELETE, "/api/networks/{id}"),
     (Method::PUT, "/api/networks/{id}/peers"),
     (Method::PUT, "/api/networks/{id}/bridges"),
-    (Method::GET, "/api/exposure"),
     (Method::GET, "/api/settings"),
     (Method::PUT, "/api/settings/protect-host"),
     (Method::GET, "/api/activity"),
@@ -212,7 +211,6 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("DELETE", "/api/networks/{id}") => delete(network_delete),
         ("PUT", "/api/networks/{id}/peers") => put(network_peers),
         ("PUT", "/api/networks/{id}/bridges") => put(network_bridges),
-        ("GET", "/api/exposure") => get(exposure_get),
         ("GET", "/api/settings") => get(settings_get),
         ("PUT", "/api/settings/protect-host") => put(protect_host_put),
         ("GET", "/api/activity") => get(activity_list),
@@ -963,11 +961,7 @@ async fn network_create(
     if id == "setup" {
         return Err(ApiErr::invalid("\"setup\" is not a usable network id"));
     }
-    check_managed(&state, &req.backend)?;
-    if socketguard_core::portable::is_portable() {
-        socketguard_core::portable::allowed_in_portable(&req.backend).map_err(ApiErr::invalid)?;
-    }
-    check_tor_settings(&state, &req.backend).await?;
+    check_files(&state, &req.backend)?;
     let inst = BackendInstanceConfig {
         id,
         backend: req.backend,
@@ -999,7 +993,7 @@ async fn network_create(
     Ok(saved(&engine, StatusCode::CREATED, Some(network)))
 }
 
-/// Replace the peers of a managed Yggdrasil network.
+/// Replace the peers of a Yggdrasil network.
 async fn network_peers(
     State(state): State<Shared>,
     Path(id): Path<String>,
@@ -1011,8 +1005,8 @@ async fn network_peers(
     Ok(Json(network).into_response())
 }
 
-/// Replace the bridge lines of a managed Tor network; Tor restarts. Like the peers, open to
-/// every API caller: the lines are parsed against one fixed form and written to the
+/// Replace the bridge lines of a Tor network; Tor restarts. Like the peers, open to every
+/// API caller: the lines are parsed against one fixed form and written to the
 /// `torrc` only in canonical form, so they cannot add a Tor option (ADR 0040).
 async fn network_bridges(
     State(state): State<Shared>,
@@ -1029,9 +1023,6 @@ async fn network_bridges(
 struct NetworkDeleteParams {
     #[serde(default)]
     force: bool,
-    /// Remove a Yggdrasil network although its node keeps running (ADR 0051).
-    #[serde(default)]
-    confirm_exposed: bool,
 }
 
 async fn network_delete(
@@ -1040,45 +1031,19 @@ async fn network_delete(
     ApiQuery(q): ApiQuery<NetworkDeleteParams>,
 ) -> ApiResult<StatusCode> {
     let mut engine = state.engine.write().await;
-    if !q.confirm_exposed && !state.db.disabled().await {
-        let exposure = engine.exposure(&state, Some(&id)).await?;
-        if exposure.networks.iter().any(|n| n.node_running) {
-            return Err(ApiErr {
-                status: StatusCode::CONFLICT,
-                body: ApiError {
-                    code: error_code::CONFIRMATION_REQUIRED.to_string(),
-                    message: "the network's software keeps running and its programs become \
-                              reachable over it; confirm with confirm_exposed"
-                        .to_string(),
-                    details: serde_json::to_value(exposure).ok(),
-                },
-            });
-        }
-    }
     engine.remove_network(&state, &id, q.force).await?;
     persist_networks(&state, &engine).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// What becomes reachable without the block of a network (`without` an id, else all).
-async fn exposure_get(
-    State(state): State<Shared>,
-    ApiQuery(q): ApiQuery<ExposureQuery>,
-) -> ApiResult<Response> {
-    let without = q.without.filter(|w| w != "all");
-    let engine = state.engine.read().await;
-    Ok(Json(engine.exposure(&state, without.as_deref()).await?).into_response())
-}
-
-/// A managed network (ADR 0052) needs the files of this build; any API caller may add one.
-fn check_managed(state: &AppState, backend: &BackendConfig) -> Result<(), ApiErr> {
-    if !backend.is_managed() {
-        return Ok(());
-    }
-    backend.validate_managed().map_err(ApiErr::invalid)?;
+/// A Tor or Yggdrasil network (ADR 0052, 0056) needs the files of this build and valid
+/// settings; any API caller may add one.
+fn check_files(state: &AppState, backend: &BackendConfig) -> Result<(), ApiErr> {
+    backend.validate().map_err(ApiErr::invalid)?;
     let files = match backend {
         BackendConfig::Tor { .. } => state.bundled.tor().map(|_| ()),
-        _ => state.bundled.yggdrasil().map(|_| ()),
+        BackendConfig::Yggdrasil { .. } => state.bundled.yggdrasil().map(|_| ()),
+        _ => return Ok(()),
     };
     files.map_err(ApiErr::invalid)?;
     // Bridges given when the network is made need the obfs4 helper just like `PUT .../bridges`.
@@ -1086,37 +1051,6 @@ fn check_managed(state: &AppState, backend: &BackendConfig) -> Result<(), ApiErr
         state.bundled.obfs4_helper().map_err(ApiErr::invalid)?;
     }
     Ok(())
-}
-
-/// The Tor settings the API accepts: the defaults, or exactly what the config file already
-/// has for a Tor network. Every `socketguard` group member may call the API, and the Tor
-/// control endpoint decides who receives the onion keys (a Unix socket or an
-/// authentication of their choosing would hand them over), so anything else is for the
-/// administrator who edits the file. The file is read afresh: `state.config` also holds
-/// what the API added itself.
-async fn check_tor_settings(state: &AppState, backend: &BackendConfig) -> Result<(), ApiErr> {
-    if !matches!(backend, BackendConfig::Tor { .. })
-        || *backend == BackendConfig::default_tor()
-        || (backend.is_managed() && backend.validate_managed().is_ok())
-    {
-        return Ok(());
-    }
-    let from_file = match &state.config_path {
-        Some(path) => tokio::fs::read_to_string(path).await.ok(),
-        None => None,
-    }
-    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-    .and_then(|doc| doc.get("backends").cloned())
-    .and_then(|b| serde_json::from_value::<Vec<BackendInstanceConfig>>(b).ok())
-    .unwrap_or_default();
-    if from_file.iter().any(|b| b.backend == *backend) {
-        return Ok(());
-    }
-    Err(ApiErr::invalid(
-        "a Tor network made through the API uses the default control port and authentication; \
-         other settings (control address, auth, cookie_path, ...) go in the config file, which \
-         only an administrator can edit",
-    ))
 }
 
 /// Save the network list to the config file so it survives a restart. The change is

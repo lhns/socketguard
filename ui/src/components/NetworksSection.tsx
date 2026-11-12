@@ -1,9 +1,8 @@
 import { useId, useState } from "react";
 import { toDaemonError, type Network, type NewNetwork } from "../api";
 import { errorText } from "../lib";
-import { useAddNetwork, useDeleteNetwork, useExposure, useNetworks, useNetworkSetup } from "../queries";
+import { useAddNetwork, useDeleteNetwork, useNetworks, useNetworkSetup } from "../queries";
 import ConfirmDialog from "./ConfirmDialog";
-import ExposureNotice, { exposedNetworks } from "./ExposureNotice";
 import { ManagedDetails, NetworkOrigin } from "./ManagedNetwork";
 import NetworkCards from "./NetworkCards";
 import { useToast } from "./Toast";
@@ -14,8 +13,8 @@ const KIND_HELP: Record<Kind, string> = {
   slaac: "A LAN or VLAN: apps get their own addresses from the prefix the router announces. Use an existing VLAN interface (such as eth0.20) for a VLAN; SocketGuard never creates one.",
   dhcpv6: "A LAN whose router hands out addresses by DHCPv6.",
   ula: "Local addresses (fd00::/8) on an interface. On the loopback interface they reach this machine only.",
-  yggdrasil: "The Yggdrasil overlay. One per host. Leave the interface empty to use the one that holds the node's address.",
-  tor: "Onion services through a Tor control port on this machine (127.0.0.1:9051, cookie authentication). Other control settings are edited in the config file. One per host.",
+  yggdrasil: "The Yggdrasil overlay, through SocketGuard's own Yggdrasil node. One per host.",
+  tor: "Onion services through SocketGuard's own Tor. One per host.",
 };
 
 export default function NetworksSection() {
@@ -25,13 +24,10 @@ export default function NetworksSection() {
   const [removing, setRemoving] = useState<Network | null>(null);
   const [force, setForce] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
-  // A managed node stops with its network: nothing stays reachable, so nothing to ask.
-  const exposure = useExposure(removing?.id ?? "", removing?.kind === "yggdrasil" && !removing.managed);
-  const exposed = exposedNetworks(exposure.data);
 
   const remove = (n: Network, forced: boolean) => {
     setRemoveError(null);
-    del.mutate({ id: n.id, force: forced, confirmExposed: !n.managed && exposed.length > 0 }, {
+    del.mutate({ id: n.id, force: forced }, {
       onSuccess: () => {
         toast.success(`Removed ${n.name}`);
         setRemoving(null);
@@ -97,10 +93,8 @@ export default function NetworksSection() {
           <p>
             Its addresses leave the interfaces and the grants that applied only there stop having an effect. Apps and peers stay.
           </p>
-          {removing.managed ? (
-            <p>SocketGuard&apos;s own {removing.kind === "tor" ? "Tor" : "Yggdrasil"} stops with it.</p>
-          ) : (
-            <ExposureNotice exposure={exposure.data} />
+          {(removing.kind === "tor" || removing.kind === "yggdrasil") && (
+            <p>SocketGuard&apos;s {removing.kind === "tor" ? "Tor" : "Yggdrasil"} stops with it.</p>
           )}
           {removeError && <div className="error-banner" role="alert">{removeError}</div>}
         </ConfirmDialog>
@@ -113,22 +107,17 @@ function AddNetworkForm() {
   const id = useId();
   const setup = useNetworkSetup();
   // Host interfaces to pick from; any other name can still be typed.
-  const hostInterfaces = [
-    ...new Set([
-      ...(setup.data?.lan.map((l) => l.interface) ?? []),
-      ...(setup.data?.yggdrasil.existing.found.interface ? [setup.data.yggdrasil.existing.found.interface] : []),
-    ]),
-  ];
+  const hostInterfaces = [...new Set(setup.data?.lan.map((l) => l.interface) ?? [])];
   const toast = useToast();
   const add = useAddNetwork();
   const [kind, setKind] = useState<Kind>("slaac");
   const [iface, setIface] = useState("");
   const [prefix, setPrefix] = useState("");
-  const [endpoint, setEndpoint] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   // An error that names the interface belongs to that field.
-  const interfaceError = error !== null && kind !== "tor" && /interface/i.test(error);
+  const hasInterface = kind !== "tor" && kind !== "yggdrasil";
+  const interfaceError = error !== null && hasInterface && /interface/i.test(error);
 
   const build = (): NewNetwork => {
     switch (kind) {
@@ -139,9 +128,9 @@ function AddNetworkForm() {
       case "ula":
         return { type: "ula", interface: iface.trim() };
       case "yggdrasil":
-        return { type: "yggdrasil", ...(iface.trim() ? { interface: iface.trim() } : {}), ...(endpoint.trim() ? { admin_endpoint: endpoint.trim() } : {}) };
+        return { type: "yggdrasil", peers: [] };
       case "tor":
-        return { type: "tor", control: "127.0.0.1:9051", auth: "cookie" };
+        return { type: "tor", bridges: [] };
     }
   };
 
@@ -153,7 +142,6 @@ function AddNetworkForm() {
         toast.success(`Added ${n.name}`);
         setIface("");
         setPrefix("");
-        setEndpoint("");
       },
       onError: (err) => setError(errorText(err)),
     });
@@ -173,7 +161,7 @@ function AddNetworkForm() {
             <option value="tor">Tor</option>
           </select>
         </div>
-        {kind !== "tor" && (
+        {hasInterface && (
           <div className="form-row">
             <label htmlFor={`${id}-i`}>Interface</label>
             <input
@@ -182,8 +170,8 @@ function AddNetworkForm() {
               list={`${id}-hosts`}
               value={iface}
               onChange={(e) => setIface(e.target.value)}
-              placeholder={kind === "yggdrasil" ? "found automatically" : "eth0 or eth0.20"}
-              required={kind !== "yggdrasil"}
+              placeholder="eth0 or eth0.20"
+              required
             />
             <datalist id={`${id}-hosts`}>
               {hostInterfaces.map((h) => <option key={h} value={h} />)}
@@ -195,12 +183,6 @@ function AddNetworkForm() {
           <div className="form-row">
             <label htmlFor={`${id}-p`}>Prefix (optional)</label>
             <input id={`${id}-p`} className="input mono" value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder="auto" />
-          </div>
-        )}
-        {kind === "yggdrasil" && (
-          <div className="form-row">
-            <label htmlFor={`${id}-e`}>Admin endpoint (optional)</label>
-            <input id={`${id}-e`} className="input mono" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="unix:///var/run/yggdrasil.sock" />
           </div>
         )}
         <button type="submit" className="btn btn-primary" disabled={add.isPending}>Add network</button>
