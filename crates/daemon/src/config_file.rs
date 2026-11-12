@@ -21,23 +21,57 @@ pub struct Resolved {
 /// Load the config at `path` (defaults when there is no file) and resolve its database
 /// path: absolute as is, relative to the config file's directory, empty the fixed default.
 pub fn resolve_at(path: &Path) -> anyhow::Result<Resolved> {
-    let (mut config, file_exists) = match load(path)? {
+    let (config, file_exists) = match load(path)? {
         Some(c) => (c, true),
         None => (DaemonConfig::default(), false),
     };
+    Ok(resolved(path, config, file_exists))
+}
+
+fn resolved(path: &Path, mut config: DaemonConfig, file_exists: bool) -> Resolved {
     let db_path = socketguard_core::paths::resolve_db_path(path, &config.db_path);
     config.db_path = db_path.to_string_lossy().into_owned();
-    Ok(Resolved {
+    Resolved {
         config_path: path.to_path_buf(),
         config,
         file_exists,
         db_path,
-    })
+    }
 }
 
 /// [`resolve_at`] for the config in use (`SOCKETGUARD_CONFIG`, else the fixed location).
 pub fn resolve() -> anyhow::Result<Resolved> {
     resolve_at(&config_path())
+}
+
+/// Like [`resolve_at`] for the commands that take SocketGuard off a host (`--disable`,
+/// `uninstall`), which must not depend on the config parsing: a file that cannot be read or
+/// parsed gives the built-in defaults at the same config path, and a warning to print. The
+/// daemon's own start stays strict ([`resolve_at`]).
+pub fn resolve_for_removal_at(path: &Path) -> (Resolved, Option<String>) {
+    match resolve_at(path) {
+        Ok(r) => (r, None),
+        Err(e) => {
+            let r = resolved(path, DaemonConfig::default(), true);
+            let warning = format!(
+                "warning: {e:#}
+                 Going on with the built-in default configuration (database {}, API socket {}).                  Networks, a database path and an API socket named only in {} are not known,                  so those networks cannot be listed and a database elsewhere is not found.                  What the database at the default path, the install record and the address                  ledger name is still removed.",
+                r.db_path.display(),
+                r.config.api_socket,
+                path.display()
+            );
+            (r, Some(warning))
+        }
+    }
+}
+
+/// [`resolve_for_removal_at`] for the config in use; the warning is printed to stderr.
+pub fn resolve_for_removal() -> Resolved {
+    let (r, warning) = resolve_for_removal_at(&config_path());
+    if let Some(w) = warning {
+        eprintln!("socketguard-daemon: {w}");
+    }
+    r
 }
 
 /// The file's text without a leading UTF-8 BOM, which Windows tools (PowerShell 5.1's
@@ -50,7 +84,8 @@ pub fn read(path: &Path) -> std::io::Result<String> {
     })
 }
 
-/// Running on defaults instead would act on the wrong networks and state (even `--disable`).
+/// Running on defaults instead would act on the wrong networks and state; only the commands
+/// that remove SocketGuard accept that ([`resolve_for_removal_at`]).
 const FIX_HINT: &str = "fix it, or point SOCKETGUARD_CONFIG at the right file";
 
 /// The config at `path`; None if there is no file. A file that cannot be read or parsed is
@@ -172,6 +207,37 @@ mod tests {
         }
         std::fs::write(&path, r#"{"backends": [{"type": "tor"}]}"#).unwrap();
         assert!(load(&path).unwrap().is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn taking_socketguard_off_goes_on_with_defaults_when_the_config_does_not_parse() {
+        let dir = std::env::temp_dir().join(format!("sg-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("socketguard.json");
+        // No file, or a good one: as `resolve_at`, no warning.
+        let (r, warning) = resolve_for_removal_at(&path);
+        assert!(warning.is_none() && !r.file_exists);
+        std::fs::write(&path, r#"{"poll_interval_secs": 7}"#).unwrap();
+        let (r, warning) = resolve_for_removal_at(&path);
+        assert!(warning.is_none() && r.file_exists && r.config.poll_interval_secs == 7);
+        // An unknown key: the defaults at the same paths, and a warning that names the file,
+        // the error and what cannot be known.
+        std::fs::write(&path, r#"{"stale_setting": 1}"#).unwrap();
+        assert!(resolve_at(&path).is_err());
+        let (r, warning) = resolve_for_removal_at(&path);
+        let warning = warning.expect("a warning");
+        assert!(warning.contains("socketguard.json"), "{warning}");
+        assert!(warning.contains("stale_setting"), "{warning}");
+        assert!(warning.contains("built-in default"), "{warning}");
+        assert!(warning.contains("networks"), "{warning}");
+        assert_eq!(r.config_path, path);
+        assert!(r.file_exists);
+        assert_eq!(r.config.backends, DaemonConfig::default().backends);
+        assert_eq!(
+            r.db_path,
+            socketguard_core::paths::resolve_db_path(&path, "")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

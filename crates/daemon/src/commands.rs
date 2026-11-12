@@ -24,6 +24,12 @@ fn resolved() -> Result<Resolved> {
     config_file::resolve()
 }
 
+/// The config for the commands that remove things: a file that does not parse falls back to
+/// the defaults with a warning, so `apt remove` does not fail on a stale key.
+fn resolved_for_removal() -> Resolved {
+    config_file::resolve_for_removal()
+}
+
 // ─── disable ────────────────────────────────────────────────────────────────
 
 /// Build every configured network; one that cannot be built is kept as its error.
@@ -76,10 +82,7 @@ pub async fn disable_cmd(force: bool) -> i32 {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
-    let r = match resolved() {
-        Ok(r) => r,
-        Err(e) => return fail(e),
-    };
+    let r = resolved_for_removal();
     match disable_report(&r, force, false).await {
         Ok(rep) => {
             socketguard_core::out!("{}", rep.render());
@@ -184,10 +187,8 @@ fn yn(b: bool) -> &'static str {
 
 pub fn access_cmd(cmd: AccessCmd) -> i32 {
     let mut host = SystemHost;
-    let record = match config_file::resolve() {
-        Ok(r) => Record::for_config(&r.config_path),
-        Err(e) => return fail(e),
-    };
+    // Only where the record is: `access deny` must work with a config that does not parse.
+    let record = Record::for_config(&config_file::config_path());
     let mut h2 = SystemHost;
     let mut groups = Tools { host: &mut h2 };
     let result = match cmd {
@@ -209,10 +210,7 @@ pub async fn uninstall_cmd(opts: UninstallOptions) -> i32 {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
-    let r = match resolved() {
-        Ok(r) => r,
-        Err(e) => return fail(e),
-    };
+    let r = resolved_for_removal();
     let paths = UninstallPaths {
         config: r.config_path.clone(),
         db: r.db_path.clone(),

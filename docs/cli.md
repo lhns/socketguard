@@ -172,3 +172,10 @@ uninstall [--purge | --keep-data] [--yes] [--export FILE] [--force]
 command. `--allow-user` takes the SID of one account (`S-1-5-21-...` or `S-1-12-1-...`), not a group
 such as Everyone. A file named `portable` next to the program also selects portable mode. In portable mode
 `service` (except `status`), `access` and `uninstall` are refused. `child-guard` is internal.
+
+The daemon refuses to start on a config file that does not parse (an unknown key is an error).
+`uninstall` and `--disable` must work anyway, so they print a warning naming the file and the error
+and go on with the built-in default configuration at the same paths: what the database, the install
+record and the address ledger name is removed; networks, a database path and an API socket named
+only in the unreadable file are not known (a database elsewhere is not found, so a plain run
+refuses, and `--force` removes the firewall rules by name).

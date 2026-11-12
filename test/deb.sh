@@ -107,7 +107,17 @@ sudo cp /etc/socketguard/setup-log.json "${RUNNER_TEMP:-/tmp}/setup-log.before-r
 sudo chmod 644 "${RUNNER_TEMP:-/tmp}/setup-log.before-remove.json"
 if mn_account_created "${RUNNER_TEMP:-/tmp}/setup-log.before-remove.json"; then account_created=1; else account_created=0; fi
 
-step "remove (data kept)"
+# A config that does not parse (a stale key) must not keep the rules on the host: the
+# prerm's `uninstall` goes on with the built-in defaults and says so.
+cfg=/etc/socketguard/socketguard.json
+if sudo test -s "$cfg"; then
+    sudo sed -i '0,/{/s/{/{"stale_setting": 1,/' "$cfg"
+else
+    echo '{"stale_setting": 1}' | sudo tee "$cfg" >/dev/null
+fi
+sudo grep -q stale_setting "$cfg" || fail "could not plant a stale key in $cfg"
+
+step "remove (data kept, config does not parse)"
 sudo apt-get remove -y socketguard
 systemctl is-active --quiet socketguard && fail "the service still runs after remove"
 test -e /etc/systemd/system/socketguard.service && fail "the unit file is still there"
