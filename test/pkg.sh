@@ -96,7 +96,10 @@ plist="/Library/LaunchDaemons/$label.plist"
 sudo /usr/libexec/PlistBuddy -c "Add :StandardErrorPath string /var/log/socketguard-ci.log" "$plist"
 sudo /usr/libexec/PlistBuddy -c "Add :StandardOutPath string /var/log/socketguard-ci.log" "$plist"
 sudo launchctl bootout "system/$label" || true
-sudo launchctl bootstrap system "$plist"
+# bootout returns before the job is gone, and bootstrap then fails with "Input/output error".
+for _ in $(seq 1 30); do sudo launchctl print "system/$label" >/dev/null 2>&1 || break; sleep 1; done
+for _ in $(seq 1 10); do sudo launchctl bootstrap system "$plist" && break; sleep 2; done
+sudo launchctl print "system/$label" >/dev/null || fail "the job could not be loaded again with a log file"
 wait_answers || fail "no answer after the job was given a log file"
 mn_step "Tor"
 mn_tor
