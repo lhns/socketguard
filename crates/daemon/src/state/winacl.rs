@@ -167,12 +167,23 @@ pub fn create_protected(path: &Path) -> anyhow::Result<()> {
 /// LocalService when the child runs as it, inherited by what is created inside (the child
 /// writes there). When neither SYSTEM nor an elevated administrator runs the daemon, its
 /// own account gets an entry too.
+///
+/// The DACL is protected, so a directory below the portable data folder (ADR 0054, which
+/// grants the unelevated window read access there) does not inherit that entry: the node
+/// key, Tor's keys and the control cookie stay unreadable for it. Portable mode asks for no
+/// LocalService entry (`local_service` false): the child runs as the elevated daemon account,
+/// which Administrators covers.
 pub fn service_dir_sddl(local_service: bool) -> String {
+    service_dir_sddl_for(local_service, extra_principal().as_deref())
+}
+
+/// [`service_dir_sddl`] with the account that needs an entry of its own given.
+fn service_dir_sddl_for(local_service: bool, extra: Option<&str>) -> String {
     let mut sddl = String::from("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
     if local_service {
         sddl.push_str("(A;OICI;FA;;;LS)");
     }
-    if let Some(sid) = extra_principal() {
+    if let Some(sid) = extra {
         sddl.push_str(&format!("(A;OICI;FA;;;{sid})"));
     }
     sddl
@@ -217,7 +228,7 @@ fn protect_with(path: &Path, sddl: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::state::test_util::*;
     use crate::state::*;
@@ -225,7 +236,7 @@ mod tests {
 
     /// The DACL of `path` as SDDL.
     #[cfg(windows)]
-    fn dacl_sddl(path: &Path) -> String {
+    pub(crate) fn dacl_sddl(path: &Path) -> String {
         use std::os::windows::ffi::OsStrExt;
         use windows::core::{PCWSTR, PWSTR};
         use windows::Win32::Foundation::{LocalFree, HLOCAL};
@@ -339,6 +350,52 @@ mod tests {
         assert!(sddl.contains(";;;SY)") && sddl.contains(";;;BA)"), "{sddl}");
         assert!(sddl.contains("FRFX") || sddl.contains(";;;WD)"), "{sddl}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_managed_directory_is_protected_and_names_nobody_from_the_portable_folder() {
+        let user = "S-1-5-21-1-2-3-1001";
+        // Portable: no LocalService, and the user of the window is never an entry.
+        let p = service_dir_sddl_for(false, None);
+        assert_eq!(p, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+        assert!(!p.contains(user) && !p.contains(";;;LS)") && !p.contains("FRFX"));
+        // The folder's own DACL names the user; the managed one is protected, so it does
+        // not inherit that entry.
+        assert!(portable_dir_sddl(Some(user)).contains(user));
+        assert!(p.starts_with("D:P"));
+        // Installed Tor as LocalService, and a daemon that is not an administrator.
+        assert_eq!(
+            service_dir_sddl_for(true, Some("S-1-5-21-9")),
+            "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LS)(A;OICI;FA;;;S-1-5-21-9)"
+        );
+    }
+
+    /// What a managed child's directory below the portable data folder ends up with: the
+    /// user's entry on `data\` is not inherited, by the directory or by what is created in it.
+    #[cfg(windows)]
+    #[test]
+    fn windows_a_managed_directory_below_the_portable_folder_does_not_inherit_the_users_read() {
+        let data = std::env::temp_dir().join(format!("sg-pdata-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&data).unwrap();
+        // Everyone (S-1-1-0) stands in for the allowed user.
+        super::protect_portable_dir(&data, Some("S-1-1-0")).unwrap();
+        let ygg = data.join("yggdrasil");
+        std::fs::create_dir(&ygg).unwrap();
+        assert!(dacl_sddl(&ygg).contains(";;;WD)") || dacl_sddl(&ygg).contains("FRFX"));
+        super::protect_service_dir(&ygg, false).unwrap();
+        let conf = ygg.join("yggdrasil.conf");
+        std::fs::write(&conf, b"key").unwrap();
+        for p in [&ygg, &conf] {
+            let sddl = dacl_sddl(p);
+            assert!(sddl.contains(";;;SY)") && sddl.contains(";;;BA)"), "{sddl}");
+            assert!(
+                !sddl.contains(";;;WD)") && !sddl.contains("FRFX"),
+                "{}: the user's read leaked in: {sddl}",
+                p.display()
+            );
+        }
+        assert!(dacl_sddl(&ygg).starts_with("D:P"));
+        std::fs::remove_dir_all(&data).unwrap();
     }
 
     #[cfg(windows)]

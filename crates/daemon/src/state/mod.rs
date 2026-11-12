@@ -15,7 +15,7 @@ mod schema;
 mod settings;
 mod tags;
 #[cfg(windows)]
-mod winacl;
+pub(crate) mod winacl;
 
 #[cfg(windows)]
 pub use protect::protect_service_dir;

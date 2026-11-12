@@ -85,6 +85,10 @@ pub enum RunAs {
     DropsTo { name: String },
     /// Windows: the LocalService account.
     LocalService,
+    /// Windows, portable mode (ADR 0054): there is no installer and so no account for the
+    /// child; it runs as the elevated account that runs the portable daemon. LocalService is
+    /// never tried (the daemon is not SYSTEM, and a logon attempt would only fail).
+    Portable,
 }
 
 impl RunAs {
@@ -95,6 +99,7 @@ impl RunAs {
             RunAs::Daemon { note: Some(n) } => format!("the daemon's account ({n})"),
             RunAs::Account { name, .. } | RunAs::DropsTo { name } => name.clone(),
             RunAs::LocalService => "LocalService".into(),
+            RunAs::Portable => "the account running portable SocketGuard".into(),
         }
     }
 }

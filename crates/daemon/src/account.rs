@@ -30,6 +30,11 @@ pub trait Accounts: Send + Sync {
     /// its files is expected, so those agree with how the child is started; asked often,
     /// so it is answered the same way for the daemon's run.
     fn local_service_logon(&self) -> Result<(), String>;
+    /// Portable mode (ADR 0054): no installer made an account for the children, so they run
+    /// as the daemon's own (elevated) account and no other is tried.
+    fn portable(&self) -> bool {
+        false
+    }
 }
 
 /// The accounts of this machine.
@@ -97,6 +102,10 @@ impl Accounts for SystemAccounts {
     fn local_service_logon(&self) -> Result<(), String> {
         Err("LocalService exists on Windows only".into())
     }
+
+    fn portable(&self) -> bool {
+        socketguard_core::portable::is_portable()
+    }
 }
 
 /// A scripted [`Accounts`] for tests.
@@ -107,6 +116,8 @@ pub struct FakeAccounts {
     pub root: bool,
     /// Windows: why logging LocalService on fails; None when it works.
     pub local_service_error: Option<String>,
+    /// Portable mode: the children run as the daemon's account.
+    pub portable: bool,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -118,6 +129,7 @@ impl FakeAccounts {
             daemon_uid: 0,
             root: true,
             local_service_error: None,
+            portable: false,
         }
     }
     pub fn absent() -> Self {
@@ -145,6 +157,7 @@ impl FakeAccounts {
             daemon_uid: ids.uid,
             root: true,
             local_service_error: None,
+            portable: false,
         }
     }
 }
@@ -159,6 +172,9 @@ impl Accounts for FakeAccounts {
     }
     fn local_service_logon(&self) -> Result<(), String> {
         self.local_service_error.clone().map_or(Ok(()), Err)
+    }
+    fn portable(&self) -> bool {
+        self.portable
     }
 }
 
