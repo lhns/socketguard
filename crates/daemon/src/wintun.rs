@@ -132,7 +132,13 @@ pub fn undo(host: &mut dyn Host, present_before: bool) -> Report {
             let deleted = host.run_ok("pnputil", &["/delete-driver", &published]);
             match (deleted, installed(host)) {
                 (Ok(_), Ok(None)) => r.removed(what),
-                _ => r.kept(what, "shared with other software"),
+                // Windows refuses (without /force) while a device or other software uses the
+                // driver: the reason pnputil gives is shown, it is what a real run needs.
+                (Err(e), _) => r.kept(what, format!("shared with other software ({e:#})")),
+                (Ok(_), _) => r.kept(
+                    what,
+                    "shared with other software (it is still in the driver store after the delete)",
+                ),
             }
         }
     }

@@ -154,6 +154,7 @@ mn_ygg_start() {
         if [ "$adapter" = 1 ] && [ -z "$adapter_at" ]; then
             adapter_at=$i
             [ -n "$addr" ] || mn_die "the adapter exists (poll $i) but the node's address is still unknown in the network card"
+            [ -n "$block_at" ] || { type mn_dump_rules >/dev/null 2>&1 && mn_dump_rules; }
             [ -n "$block_at" ] || mn_die "the adapter appeared (poll $i) before the node's address $MN_YGG_ADDR / $MN_YGG_SUBNET was in the firewall ruleset"
         fi
         [ -n "$adapter_at" ] && [ -n "$block_at" ] && break

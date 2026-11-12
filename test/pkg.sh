@@ -29,6 +29,7 @@ mn_daemon_log() {
 # The node's address on a utun interface (MN_YGG_ADDR is set once the network card shows it).
 mn_adapter_exists() { [ -n "${MN_YGG_ADDR:-}" ] && ifconfig 2>/dev/null | grep -qiF "inet6 $MN_YGG_ADDR "; }
 mn_block_in_force() { sudo pfctl -a socketguard -sr 2>/dev/null | grep -qiF -e "$1" -e "${2%/64}"; }
+mn_dump_rules() { echo "--- pf rules of the socketguard anchor ---"; sudo pfctl -a socketguard -sr 2>&1 | head -60; echo "--- pf info ---"; sudo pfctl -s info 2>&1 | head -5; ifconfig 2>&1 | grep -B2 -A3 inet6 | head -40; }
 # shellcheck source=test/managed.sh
 . "$here/test/managed.sh"
 
