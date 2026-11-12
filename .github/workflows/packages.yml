@@ -126,9 +126,19 @@ jobs:
             dist/*.deb
             dist/*.rpm
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-rpm-next
+          path: dist/next/*.rpm
+          if-no-files-found: error
 
   macos:
-    runs-on: macos-latest
+    # macos-latest is arm64; macos-15-intel is x86_64 (docs.github.com/en/actions/reference/runners/github-hosted-runners)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -158,6 +168,24 @@ jobs:
         run: bash test/pkg.sh dist/SocketGuard-*.pkg dist/next/SocketGuard-*.pkg
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-pkg
+          name: macos-pkg-${{ matrix.os }}
           path: dist/SocketGuard-*.pkg
           if-no-files-found: error
+
+  # The rpm's whole life cycle on a real systemd: a Fedora container with systemd as PID 1,
+  # privileged, on the Ubuntu VM (the container uses the host kernel's nftables).
+  rpm-systemd:
+    needs: linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-packages
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-rpm-next
+          path: dist/next
+      - run: bash test/rpm-systemd.sh dist/socketguard-*.x86_64.rpm dist/next/socketguard-*.x86_64.rpm
