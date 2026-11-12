@@ -855,7 +855,6 @@ mod tests {
         }
     }
 
-
     /// The Debian postrm cannot run the daemon (the binary is gone at purge) and deletes the
     /// same files by a list of its own: this keeps that list in step with `named_files`.
     #[test]

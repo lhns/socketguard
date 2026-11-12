@@ -23,8 +23,8 @@ use socketguard_core::api_types::{
     DisableRequest, Enforcement, EnforcementNotice, EnforcementStatus, ExposureQuery,
     LockoutRiskInfo, MemberQuery, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer,
     NewPortGroup, NewReservation, NewTag, NewTagMember, ParseCredentialsRequest,
-    ProtectHostRequest, ProtectHostResponse, ReserveRequest, SetMembers, SetPeers,
-    StatusResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
+    ProtectHostRequest, ProtectHostResponse, ReserveRequest, SetMembers, SetPeers, StatusResponse,
+    UpdateLabel, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
 use socketguard_core::{ActivityQuery, NewCredential, NewGrant};
