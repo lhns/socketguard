@@ -24,13 +24,6 @@ impl FakeProc {
         }
     }
 
-    /// The process prints `line` on stderr.
-    pub fn print_err(&self, line: &str) {
-        if let Some(out) = self.out.lock().unwrap().as_ref() {
-            let _ = out.try_send(Line::stderr(line));
-        }
-    }
-
     /// The process ends on its own.
     pub fn exit(&self, how: &str) {
         // Its output ends with it; what it printed is still read.

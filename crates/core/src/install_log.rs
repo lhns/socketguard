@@ -101,13 +101,6 @@ pub fn write_file(path: &std::path::Path, entries: &[Entry]) -> Result<(), Strin
         })
 }
 
-/// Append one entry to the log file.
-pub fn append(path: &std::path::Path, entry: Entry) -> Result<(), String> {
-    let mut all = read_file(path)?;
-    all.push(entry);
-    write_file(path, &all)
-}
-
 /// `text` without the lines `lines` that were appended to it: the last occurrence of each,
 /// everything else byte for byte.
 pub fn remove_lines(text: &str, lines: &[String]) -> String {

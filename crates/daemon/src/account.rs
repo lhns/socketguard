@@ -80,7 +80,8 @@ impl Accounts for SystemAccounts {
     /// as LocalService (a daemon started by hand from a user account may not).
     #[cfg(windows)]
     fn daemon(&self) -> (u32, bool) {
-        let system = socketguard_core::winsid::current_user_sid().is_some_and(|sid| sid == "S-1-5-18");
+        let system =
+            socketguard_core::winsid::current_user_sid().is_some_and(|sid| sid == "S-1-5-18");
         (0, system)
     }
 

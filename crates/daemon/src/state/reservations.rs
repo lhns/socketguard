@@ -4,7 +4,7 @@
 
 use super::{parse_ts, scope_columns, scope_from_columns, ts, Database, Tx};
 use anyhow::{bail, Result};
-use socketguard_core::{Address, Binding, BindingTarget, Reservation};
+use socketguard_core::{Binding, BindingTarget, Reservation};
 use sqlx::Row;
 use std::collections::HashMap;
 
@@ -134,30 +134,5 @@ impl Database {
             r.bindings = by_res.remove(&r.id).unwrap_or_default();
         }
         Ok(out)
-    }
-
-    /// Insert a reservation with its bindings.
-    pub async fn insert_reservation(&self, r: &Reservation) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        insert_reservation_in(&mut tx, r).await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// Insert the address of a reservation with its locator secret.
-    pub async fn insert_reservation_address(
-        &self,
-        a: &Address,
-        secret: Option<&str>,
-    ) -> Result<()> {
-        self.insert_address_with_secret(a, secret).await
-    }
-
-    /// Move an automatic address to a reservation, keeping the locator.
-    pub async fn assign_address(&self, address_id: &str, reservation_id: &str) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        assign_address_in(&mut tx, address_id, reservation_id).await?;
-        tx.commit().await?;
-        Ok(())
     }
 }

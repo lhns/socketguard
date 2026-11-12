@@ -5,19 +5,12 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
-use socketguard_core::config::DaemonConfig;
 use socketguard_core::{ListeningSocket, Protocol};
 use socketguard_daemon::test_support::*;
 use socketguard_daemon::{api, AppState};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
-
-/// Router over a fresh in-memory state. Keep the returned state to inspect the DB.
-pub async fn test_app(config: DaemonConfig) -> (Router, Arc<AppState>) {
-    let state = test_app_state(empty_engine(), config).await;
-    (api::router(state.clone()), state)
-}
 
 /// A daemon with a Local, a LAN and a Yggdrasil network (mocks) and a controllable set
 /// of listening sockets.

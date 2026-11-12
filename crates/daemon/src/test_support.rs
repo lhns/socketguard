@@ -25,8 +25,6 @@ pub enum FirewallCall {
 pub struct MockFirewall {
     pub calls: Arc<Mutex<Vec<FirewallCall>>>,
     fail_apply: AtomicBool,
-    /// Interface rules hold for adapters that do not exist yet (nftables, pf; not WFP).
-    absent_ok: AtomicBool,
     /// SocketGuard's ruleset is installed (applied, or planted by a test).
     installed: AtomicBool,
     /// The next `verify` reports the installed state as gone.
@@ -42,7 +40,6 @@ impl MockFirewall {
         Self {
             calls,
             fail_apply: AtomicBool::new(false),
-            absent_ok: AtomicBool::new(true),
             installed: AtomicBool::new(false),
             drifted: AtomicBool::new(false),
             verifies: AtomicUsize::new(0),
@@ -90,11 +87,6 @@ impl MockFirewall {
         self.installed.store(installed, Ordering::Relaxed);
     }
 
-    /// Act like WFP: an interface rule cannot be made for an adapter that is not there.
-    pub fn set_blocks_absent_interfaces(&self, holds: bool) {
-        self.absent_ok.store(holds, Ordering::Relaxed);
-    }
-
     /// Make `apply` fail (the call is still recorded).
     pub fn set_failing(&self, failing: bool) {
         self.fail_apply.store(failing, Ordering::Relaxed);
@@ -115,8 +107,9 @@ pub fn applied(calls: &Mutex<Vec<FirewallCall>>) -> Vec<DesiredRuleset> {
 }
 
 impl Firewall for MockFirewall {
+    /// Like nftables and pf: interface rules hold for adapters that do not exist yet.
     fn blocks_absent_interfaces(&self) -> bool {
-        self.absent_ok.load(Ordering::Relaxed)
+        true
     }
 
     fn apply(&self, desired: &DesiredRuleset) -> Result<()> {
@@ -369,10 +362,6 @@ struct MockBackendInner {
     base: Ipv6Addr,
     prefix: Option<Prefix>,
     failing: bool,
-    /// The node's addresses, when the mock stands in for a Yggdrasil node that answers.
-    node: Option<crate::ruleset::OverlayNode>,
-    /// Why the network is down, like a status reason of the real backend.
-    problem: Option<String>,
 }
 
 impl MockIpv6Backend {
@@ -383,8 +372,6 @@ impl MockIpv6Backend {
                 base: prefix.parse().unwrap(),
                 prefix: None,
                 failing: false,
-                node: None,
-                problem: None,
             })),
             prefix_len,
             interface: interface.to_string(),
@@ -398,23 +385,6 @@ impl MockIpv6Backend {
     /// Make `allocate` fail (e.g. Yggdrasil is down).
     pub fn set_failing(&self, failing: bool) {
         self.inner.lock().unwrap().failing = failing;
-    }
-
-    /// Report the node's addresses (`node()`), or none: the node does not answer.
-    pub fn set_node(&self, address: &str, subnet: &str) {
-        self.inner.lock().unwrap().node = Some(crate::ruleset::OverlayNode {
-            address: address.parse().unwrap(),
-            subnet: subnet.parse().unwrap(),
-        });
-    }
-
-    pub fn clear_node(&self) {
-        self.inner.lock().unwrap().node = None;
-    }
-
-    /// Make the network report itself down with `reason`, or up again.
-    pub fn set_problem(&self, reason: Option<&str>) {
-        self.inner.lock().unwrap().problem = reason.map(str::to_string);
     }
 
     /// Start (or change) reporting a /64 prefix; later allocations use it.
@@ -431,14 +401,6 @@ impl Ipv6Backend for MockIpv6Backend {
     /// the mock stands in for.
     fn interface(&self) -> Option<String> {
         Some(self.interface.clone())
-    }
-
-    fn node(&self) -> Option<crate::ruleset::OverlayNode> {
-        self.inner.lock().unwrap().node
-    }
-
-    fn problem(&self) -> Option<String> {
-        self.inner.lock().unwrap().problem.clone()
     }
 
     fn current_prefix(&self) -> Result<Option<Prefix>> {
@@ -533,7 +495,7 @@ pub async fn test_app_state_with(
     bundled: crate::bundled::Bundled,
 ) -> Arc<AppState> {
     let db = crate::state::Database::new(":memory:").await.unwrap();
-    db.migrate().await.unwrap();
+    db.init_schema().await.unwrap();
 
     let (events_tx, _) = tokio::sync::broadcast::channel(64);
     // The engine builds Tor and Yggdrasil networks from the same files the API checks.
