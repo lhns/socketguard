@@ -236,12 +236,25 @@ pub fn enforcement_for(
     secrets: &HashMap<AddressId, String>,
     binds: &HashMap<(AppId, PortRef), IpAddr>,
 ) -> NetworkEnforcement {
-    let peers: HashMap<&str, &socketguard_core::Peer> =
-        snap.peers.iter().map(|p| (p.id.as_str(), p)).collect();
-    let apps: HashMap<&str, &socketguard_core::App> =
-        snap.apps.iter().map(|a| (a.id.as_str(), a)).collect();
+    let peers: HashMap<&str, &socketguard_core::Peer> = snap
+        .catalog
+        .peers
+        .iter()
+        .map(|p| (p.id.as_str(), p))
+        .collect();
+    let apps: HashMap<&str, &socketguard_core::App> = snap
+        .catalog
+        .apps
+        .iter()
+        .map(|a| (a.id.as_str(), a))
+        .collect();
     let mut addresses = Vec::new();
-    for address in snap.addresses.iter().filter(|a| a.network_id == network.id) {
+    for address in snap
+        .catalog
+        .addresses
+        .iter()
+        .filter(|a| a.network_id == network.id)
+    {
         let mut out = EnforcedAddress {
             id: address.id.clone(),
             locator: address.locator.clone(),
@@ -281,10 +294,10 @@ pub fn enforcement_for(
             }) {
                 if let Some(rid) = reservation {
                     // Only grants on the reservation itself count for its onion address.
-                    let on_it = snap
-                        .grants
-                        .iter()
-                        .any(|x| x.id == g.grant.id && x.target == Target::Reservation(rid.into()));
+                    let on_it =
+                        snap.catalog.grants.iter().any(|x| {
+                            x.id == g.grant.id && x.target == Target::Reservation(rid.into())
+                        });
                     if !on_it {
                         continue;
                     }
@@ -294,7 +307,7 @@ pub fn enforcement_for(
                     subject: match &g.grant.subject {
                         Subject::Anyone => EnforcedSubject::Anyone,
                         s => EnforcedSubject::Credentials(
-                            subject_credentials(&snap.groups, &peers, s)
+                            subject_credentials(&snap.catalog.groups, &peers, s)
                                 .into_iter()
                                 .cloned()
                                 .collect(),
@@ -315,6 +328,7 @@ pub fn enforcement_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::Catalog;
     use crate::test_support::MockIpv6Backend;
     use socketguard_core::{reach, Reach};
 
@@ -382,19 +396,22 @@ mod tests {
             )
         };
         let snap = Snapshot {
-            apps: vec![app],
+            catalog: Catalog {
+                apps: vec![app],
+                addresses: vec![address],
+                port_groups: vec![group],
+                grants: vec![Grant {
+                    id: "g".into(),
+                    target: Target::App("a".into()),
+                    // The grant names the group's row, which is what gives it an address.
+                    scope: Scope::group("sg"),
+                    network_id: None,
+                    subject: Subject::Anyone,
+                    created_at: now,
+                }],
+                ..Default::default()
+            },
             networks: vec![info(NetworkKind::Tor)],
-            addresses: vec![address],
-            port_groups: vec![group],
-            grants: vec![Grant {
-                id: "g".into(),
-                target: Target::App("a".into()),
-                // The grant names the group's row, which is what gives it an address.
-                scope: Scope::group("sg"),
-                network_id: None,
-                subject: Subject::Anyone,
-                created_at: now,
-            }],
             ..Snapshot::default()
         };
         let secrets = HashMap::from([("ad".to_string(), "ED25519-V3:secret".to_string())]);

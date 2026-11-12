@@ -1,13 +1,15 @@
 //! Tags (ADR 0043): their lifecycle and membership. Grants on tags are ordinary grants
 //! (`mutations`); the ruleset expands them.
 
+use super::batch::{lets_in, Plan};
+use super::mutations::{any_to_anyone, ensure_confirmed};
 use super::*;
 use crate::api::DaemonEvent;
 use crate::state::{NewActivity, Write};
 use crate::AppState;
 use chrono::Utc;
-use socketguard_core::api_types::ChangeOp;
-use socketguard_core::{new_id, ActivityKind, App, Scope, Tag, TagMember};
+use socketguard_core::api_types::{BatchChange, Change, ChangeItem, ChangeKind, ChangeOp};
+use socketguard_core::{new_id, ActivityKind, App, GrantReach, Scope, Subject, Tag, TagMember};
 
 /// The patterns as stored: trimmed, no blanks, no duplicates.
 pub(super) fn clean_patterns(patterns: &[String]) -> Vec<String> {
@@ -118,14 +120,9 @@ impl Engine {
             let mut probe = tag.clone();
             probe.patterns = p.clone();
             let apps = state.db.list_apps().await?;
-            if !probe.pattern_candidates(&apps).is_empty()
-                && super::mutations::Catalog::load(state)
-                    .await?
-                    .grants_through_tag(id)
-                    .iter()
-                    .any(|g| g.subject == socketguard_core::Subject::Anyone)
-            {
-                return Err(EngineError::ConfirmationRequired);
+            if !probe.pattern_candidates(&apps).is_empty() {
+                let cat = crate::catalog::Catalog::load(state).await?;
+                ensure_confirmed(any_to_anyone(&cat.grants_through_tag(id)), confirm_open)?;
             }
         }
         if !state
@@ -280,5 +277,188 @@ impl Engine {
             Ok(_) => {}
             Err(e) => warn!("Could not tag the new app {}: {e:#}", app.name),
         }
+    }
+}
+
+impl Engine {
+    // Batch planning: one method per operation of `ChangeOp` (see `batch`).
+    pub(super) fn plan_op_create_tag(
+        &self,
+        plan: &mut Plan,
+        ref_: &Option<String>,
+        label: &str,
+        patterns: &[String],
+    ) -> Result<(), EngineError> {
+        let tag = Self::plan_tag(new_id(), label, patterns, &[], &plan.cat.apps)?;
+        if plan.cat.tags.iter().any(|t| t.label == tag.label) {
+            return Err(EngineError::Conflict(format!(
+                "tag {} already exists",
+                tag.label
+            )));
+        }
+        plan.define_ref(ref_, &tag.id)?;
+        plan.activities.push(NewActivity::new(
+            ActivityKind::TagAdded,
+            format!("Added tag {}", tag.label),
+        ));
+        plan.change(
+            ChangeKind::Create,
+            ChangeItem::Tag,
+            tag.label.clone(),
+            Some(tag.id.clone()),
+        );
+        plan.cat.tags.push(tag.clone());
+        plan.writes.push(Write::InsertTag(tag));
+        plan.event(DaemonEvent::TagsChanged);
+        Ok(())
+    }
+
+    pub(super) fn plan_op_add_tag_member(
+        &self,
+        plan: &mut Plan,
+        tag_id: &str,
+        app_id: &str,
+        scope: &Scope,
+        confirm_open: bool,
+    ) -> Result<(), EngineError> {
+        let scope = plan.resolve_scope(scope)?;
+        let tag_id = plan.resolve(tag_id)?;
+        let app = plan
+            .cat
+            .app(app_id)
+            .ok_or_else(|| EngineError::NotFound(format!("app {app_id}")))?
+            .clone();
+        Self::check_scope_on_app(&plan.cat, &app, &scope)?;
+        let member = TagMember {
+            app_id: app.id.clone(),
+            scope: scope.clone(),
+        };
+        let tag = plan
+            .cat
+            .tags
+            .iter()
+            .find(|t| t.id == tag_id)
+            .ok_or_else(|| EngineError::NotFound(format!("tag {tag_id}")))?;
+        let is_new = !tag.members.contains(&member);
+        let tag_label = tag.label.clone();
+        // What the tag's grants, and those of a reservation that binds the tag, let in
+        // on this app.
+        let grants = plan.cat.grants_through_tag(&tag_id);
+        let opens = any_to_anyone(&grants);
+        ensure_confirmed(is_new && opens, confirm_open)?;
+        let tag = plan
+            .cat
+            .tags
+            .iter_mut()
+            .find(|t| t.id == tag_id)
+            .ok_or_else(|| EngineError::NotFound(format!("tag {tag_id}")))?;
+        tag.excluded.retain(|a| *a != app.id);
+        if is_new {
+            tag.members.push(member);
+            // The reach depends on the covered ports, so it is read once the
+            // member is in the catalog.
+            let reach: Vec<GrantReach> = grants.iter().flat_map(|g| plan.grant_reach(g)).collect();
+            let who: Vec<String> = grants
+                .iter()
+                .map(|g| match &g.subject {
+                    Subject::Anyone => "Anyone".to_string(),
+                    Subject::Peer(id) => plan
+                        .cat
+                        .peer(id)
+                        .map_or_else(|| id.clone(), |p| p.label.clone()),
+                    Subject::Group(id) => plan
+                        .cat
+                        .group(id)
+                        .map_or_else(|| id.clone(), |g| format!("group {}", g.label)),
+                })
+                .collect();
+            plan.activities.push(
+                NewActivity::new(
+                    ActivityKind::TagChanged,
+                    format!("Added {} to tag {tag_label}", app.name),
+                )
+                .app(&app.id),
+            );
+            plan.changes_reach |= lets_in(&reach);
+            plan.changes.push(BatchChange {
+                change: Change {
+                    kind: ChangeKind::Create,
+                    item: ChangeItem::TagMember,
+                    name: format!("{} in tag {tag_label}", app.name),
+                    detail: (!who.is_empty()).then(|| format!("reachable by {}", who.join(", "))),
+                    opens_to_anyone: opens,
+                },
+                id: None,
+                reach,
+            });
+        }
+        plan.writes.push(Write::AddTagMember {
+            tag_id,
+            app_id: app.id,
+            scope,
+        });
+        plan.event(DaemonEvent::TagsChanged);
+        plan.event(DaemonEvent::GrantsChanged);
+        Ok(())
+    }
+
+    pub(super) async fn plan_op_remove_tag_member(
+        &self,
+        state: &AppState,
+        plan: &mut Plan,
+        tag_id: &str,
+        app_id: &str,
+        scope: &Scope,
+    ) -> Result<(), EngineError> {
+        let scope = plan.resolve_scope(scope)?;
+        let tag_id = plan.resolve(tag_id)?;
+        let tag = plan
+            .cat
+            .tags
+            .iter()
+            .find(|t| t.id == tag_id)
+            .ok_or_else(|| EngineError::NotFound(format!("tag {tag_id}")))?
+            .clone();
+        if !tag
+            .members
+            .iter()
+            .any(|m| m.app_id == *app_id && m.scope == scope)
+        {
+            return Err(EngineError::NotFound(format!(
+                "membership of app {app_id} in tag {}",
+                tag.label
+            )));
+        }
+        let exclude = Self::removal_excludes(state, &tag, app_id, &scope).await?;
+        let live = plan.cat.tags.iter_mut().find(|t| t.id == tag_id);
+        if let Some(live) = live {
+            live.members
+                .retain(|m| !(m.app_id == *app_id && m.scope == scope));
+            if exclude {
+                live.excluded.push(app_id.to_string());
+            }
+        }
+        plan.activities.push(
+            NewActivity::new(
+                ActivityKind::TagChanged,
+                format!("Removed an app from tag {}", tag.label),
+            )
+            .app(app_id),
+        );
+        plan.change(
+            ChangeKind::Delete,
+            ChangeItem::TagMember,
+            format!("{app_id} from tag {}", tag.label),
+            None,
+        );
+        plan.writes.push(Write::RemoveTagMember {
+            tag_id,
+            app_id: app_id.to_string(),
+            scope,
+            exclude,
+        });
+        plan.event(DaemonEvent::TagsChanged);
+        plan.event(DaemonEvent::GrantsChanged);
+        Ok(())
     }
 }

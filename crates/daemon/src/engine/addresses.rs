@@ -241,6 +241,7 @@ impl Engine {
         let snap = self.gather_snapshot(state).await?;
         let info = Model::new(snap.world()).address_info();
         Ok(snap
+            .catalog
             .addresses
             .iter()
             .filter(|a| info.get(&a.id).is_some_and(|i| i.up))
@@ -259,6 +260,7 @@ impl Engine {
         let mut wanted: Vec<(String, String, Address)> = Vec::new();
         for (nid, row) in model.missing_automatic() {
             let name = snap
+                .catalog
                 .apps
                 .iter()
                 .find(|a| a.id == row.app_id)
@@ -274,6 +276,7 @@ impl Engine {
         }
         for (rid, nid) in model.missing_reserved() {
             let name = snap
+                .catalog
                 .reservations
                 .iter()
                 .find(|r| r.id == rid)

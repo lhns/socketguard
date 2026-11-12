@@ -1,15 +1,15 @@
 //! Read-only queries. Each loads the state once ([`Engine::address_views`]) and works from
 //! that copy.
 
-use super::reservations::AddressIndex;
 use super::*;
+use crate::networks;
 use crate::ruleset;
 use crate::AppState;
 use socketguard_core::{
     covered_ports, effective_access, grant_reach, grant_targets, reservation_members,
-    ActivityQuery, ActivityRecord, App, AppDetail, Credential, Grant, GrantReach, GrantView,
-    Network, NetworkKind, Peer, PeerGroup, PortGroup, PortRangeSet, Reach, Reservation, Row,
-    Settings, Subject, Tag, Target, V4Context,
+    ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, Grant, GrantReach,
+    GrantView, Model, Network, NetworkKind, Peer, PeerGroup, PortGroup, PortRangeSet, Reach,
+    Reservation, Row, Settings, Subject, Tag, Target, V4Context,
 };
 use std::collections::HashMap;
 
@@ -196,10 +196,73 @@ impl GrantFilter {
 }
 
 impl Engine {
+    /// Every address with what is computed for the API: `up` (really on the interface, or
+    /// really published), `excluded` and the Tor `notes`.
+    pub(super) async fn address_views(
+        &self,
+        state: &AppState,
+    ) -> Result<(Vec<Address>, crate::ruleset::Snapshot), EngineError> {
+        let snap = self.gather_snapshot(state).await?;
+        let model = Model::new(snap.world());
+        let info = model.address_info();
+        let on_interface: HashSet<std::net::IpAddr> = state
+            .db
+            .list_owned_addresses()
+            .await?
+            .into_iter()
+            .filter(|o| !o.retiring)
+            .map(|o| std::net::IpAddr::V6(o.addr))
+            .collect();
+        let secrets = state.db.onion_keys().await?;
+        let binds = self.binds.lock().unwrap().clone();
+        let mut plans: HashMap<String, networks::tor::Plan> = HashMap::new();
+        for net in snap
+            .networks
+            .iter()
+            .filter(|n| n.kind == socketguard_core::NetworkKind::Tor)
+        {
+            for ea in
+                networks::enforcement_for(net, &snap, &model, &info, &secrets, &binds).addresses
+            {
+                plans.insert(ea.id.clone(), networks::tor::plan(&ea));
+            }
+        }
+        let mut out = Vec::new();
+        for a in &snap.catalog.addresses {
+            let mut a = a.clone();
+            let i = info.get(&a.id);
+            a.excluded = i.map(|i| i.excluded.ranges()).unwrap_or_default();
+            let wanted = i.is_some_and(|i| i.up);
+            a.up = match (&a.locator, plans.get(&a.id)) {
+                (socketguard_core::Locator::Ipv6 { addr }, _) => {
+                    wanted && on_interface.contains(&std::net::IpAddr::V6(*addr))
+                }
+                (_, Some(plan)) => wanted && plan.spec.is_some(),
+                (_, None) => false,
+            };
+            if let Some(plan) = plans.get(&a.id) {
+                a.notes = plan.notes.clone();
+            }
+            if a.reservation_id.is_some() && plans.contains_key(&a.id) {
+                a.notes.push(
+                    "on Tor only grants on the reservation itself admit clients; grants on \
+                     single bound ports have no effect"
+                        .to_string(),
+                );
+            }
+            out.push(a);
+        }
+        Ok((out, snap))
+    }
+
+    pub async fn list_addresses(&self, state: &AppState) -> Result<Vec<Address>, EngineError> {
+        Ok(self.address_views(state).await?.0)
+    }
+
     pub async fn list_apps(&self, state: &AppState) -> Result<Vec<App>, EngineError> {
         let (views, snap) = self.address_views(state).await?;
-        let index = AddressIndex::new(&views, &snap.reservations, &snap.tags);
-        let mut apps = snap.apps.clone();
+        let index = AddressIndex::new(&views, &snap.catalog.reservations, &snap.catalog.tags);
+        let mut apps = snap.catalog.apps.clone();
         for app in &mut apps {
             app.addresses = index.of_app(&app.id);
             app.exe_missing = super::discovery::exe_missing(app);
@@ -211,16 +274,19 @@ impl Engine {
     pub async fn get_app(&self, state: &AppState, id: &str) -> Result<AppDetail, EngineError> {
         let (views, snap) = self.address_views(state).await?;
         let mut app = snap
+            .catalog
             .apps
             .iter()
             .find(|a| a.id == id)
             .cloned()
             .ok_or_else(|| EngineError::NotFound(format!("app {id}")))?;
-        app.addresses = AddressIndex::new(&views, &snap.reservations, &snap.tags).of_app(id);
+        app.addresses =
+            AddressIndex::new(&views, &snap.catalog.reservations, &snap.catalog.tags).of_app(id);
         app.exe_missing = super::discovery::exe_missing(&app);
         let ctx = Self::reach_ctx(&snap);
         let protected: Vec<String> = snap.v4_subnets.keys().cloned().collect();
         let grants = snap
+            .catalog
             .grants
             .iter()
             .filter(|g| g.target == Target::App(id.to_string()))
@@ -231,14 +297,21 @@ impl Engine {
             .collect();
         Ok(AppDetail {
             counters: self.metrics.app_counters(&app.id),
-            access: effective_access(&snap.grants, &ctx.targets, &app, &snap.port_groups),
+            access: effective_access(
+                &snap.catalog.grants,
+                &ctx.targets,
+                &app,
+                &snap.catalog.port_groups,
+            ),
             port_groups: snap
+                .catalog
                 .port_groups
                 .iter()
                 .filter(|g| g.is_attached_to(&app.id))
                 .cloned()
                 .collect(),
             tags: snap
+                .catalog
                 .tags
                 .iter()
                 .filter(|t| t.members.iter().any(|m| m.app_id == app.id))
@@ -251,12 +324,12 @@ impl Engine {
 
     pub(super) fn reach_ctx(snap: &ruleset::Snapshot) -> ReachCtx<'_> {
         ReachCtx::new(
-            &snap.apps,
-            &snap.peers,
-            &snap.groups,
-            &snap.tags,
-            &snap.port_groups,
-            &snap.reservations,
+            &snap.catalog.apps,
+            &snap.catalog.peers,
+            &snap.catalog.groups,
+            &snap.catalog.tags,
+            &snap.catalog.port_groups,
+            &snap.catalog.reservations,
         )
     }
 
@@ -295,9 +368,10 @@ impl Engine {
         let ctx = Self::reach_ctx(&snap);
         let protected: Vec<String> = snap.v4_subnets.keys().cloned().collect();
         Ok(snap
+            .catalog
             .grants
             .iter()
-            .filter(|g| filter.matches(g, &snap.groups))
+            .filter(|g| filter.matches(g, &snap.catalog.groups))
             .map(|g| GrantView {
                 reach: ctx.reach_of(g, &snap.networks, &protected),
                 grant: g.clone(),
@@ -356,5 +430,43 @@ impl Engine {
         query: &ActivityQuery,
     ) -> Result<Vec<ActivityRecord>, EngineError> {
         Ok(state.db.list_activity(query).await?)
+    }
+}
+
+/// The addresses that serve the rows of an app: its automatic ones and those of the
+/// reservations it has a row bound in.
+pub(super) struct AddressIndex<'a> {
+    views: &'a [Address],
+    /// The reservations each app has a row bound in.
+    bound: HashMap<String, HashSet<&'a str>>,
+}
+
+impl<'a> AddressIndex<'a> {
+    pub(super) fn new(
+        views: &'a [Address],
+        reservations: &'a [Reservation],
+        tags: &[socketguard_core::Tag],
+    ) -> Self {
+        let mut bound: HashMap<String, HashSet<&str>> = HashMap::new();
+        for r in reservations {
+            for m in reservation_members(r, tags) {
+                bound.entry(m.app_id).or_default().insert(r.id.as_str());
+            }
+        }
+        Self { views, bound }
+    }
+
+    pub(super) fn of_app(&self, app_id: &str) -> Vec<Address> {
+        let bound = self.bound.get(app_id);
+        self.views
+            .iter()
+            .filter(|a| {
+                a.app_id.as_deref() == Some(app_id)
+                    || a.reservation_id
+                        .as_deref()
+                        .is_some_and(|r| bound.is_some_and(|b| b.contains(r)))
+            })
+            .cloned()
+            .collect()
     }
 }

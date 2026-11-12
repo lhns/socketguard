@@ -20,6 +20,7 @@ mod children;
 mod discovery;
 mod enforce;
 mod firewall;
+mod move_app;
 mod mutations;
 mod port_groups;
 mod queries;

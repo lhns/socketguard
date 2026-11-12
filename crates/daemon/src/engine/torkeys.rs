@@ -1,10 +1,10 @@
 //! Tor client keys the daemon generates for peers, and what a granted peer needs to use
 //! one (ADR 0045).
 
-use super::mutations::Catalog;
-use super::reservations::AddressIndex;
+use super::queries::AddressIndex;
 use super::*;
 use crate::api::DaemonEvent;
+use crate::catalog::Catalog;
 use crate::networks::tor_client_key;
 use crate::state::NewActivity;
 use crate::AppState;

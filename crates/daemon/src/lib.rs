@@ -4,6 +4,7 @@ pub mod api;
 pub mod apply;
 pub mod args;
 pub mod bundled;
+pub mod catalog;
 pub mod children;
 pub mod commands;
 pub mod config_file;

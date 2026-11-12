@@ -5,12 +5,13 @@
 //! The lockout guard for whole-host protection (ADR 0026) lives here too, since it asks
 //! "would the ruleset built with this setting still let remote admin in".
 
+use crate::catalog::Catalog;
 use crate::firewall::{DesiredRuleset, Dst, Families, Rule, Scope, ScopeKind, ScopeMatch, Sources};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use socketguard_core::{
-    app_identity, credential_source, valid_interface_name, Address, App, AppPort, Credential,
-    Grant, ListeningSocket, Model, Network, NetworkKind, Peer, PeerGroup, PortGroup, PortRange,
-    PortRef, Protocol, Reservation, ScopePorts, Subject, Tag, World,
+    app_identity, credential_source, valid_interface_name, App, AppPort, Credential, Grant,
+    ListeningSocket, Model, Network, NetworkKind, Peer, PeerGroup, PortRange, PortRef, Protocol,
+    ScopePorts, Subject, World,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
@@ -40,19 +41,11 @@ pub fn overlay_subnet_scope_id(network_id: &str) -> String {
 /// Everything the producer needs, gathered from the DB and the active networks.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
-    /// Apps with their ports.
-    pub apps: Vec<App>,
-    /// Every address, automatic and reserved. Which are up is decided by [`Model`].
-    pub addresses: Vec<Address>,
-    pub reservations: Vec<Reservation>,
+    /// The stored state: apps with their ports, every address (which are up is decided by
+    /// [`Model`]), reservations, peers, groups, grants, tags (ADR 0043) and port groups
+    /// (ADR 0047).
+    pub catalog: Catalog,
     pub networks: Vec<Network>,
-    pub peers: Vec<Peer>,
-    pub groups: Vec<PeerGroup>,
-    pub grants: Vec<Grant>,
-    /// Tags, to expand the grants that target them (ADR 0043).
-    pub tags: Vec<Tag>,
-    /// Port groups, for the ports of the scopes that name them (ADR 0047).
-    pub port_groups: Vec<PortGroup>,
     /// The known node addresses of the Yggdrasil networks, by network id (live, else the
     /// last ones remembered).
     pub ygg_nodes: BTreeMap<String, OverlayNode>,
@@ -72,14 +65,15 @@ fn sorted_unique<T: Ord>(v: impl IntoIterator<Item = T>) -> Vec<T> {
 impl Snapshot {
     /// The state as the address model reads it.
     pub fn world(&self) -> World<'_> {
+        let c = &self.catalog;
         World {
-            apps: &self.apps,
+            apps: &c.apps,
             networks: &self.networks,
-            grants: &self.grants,
-            tags: &self.tags,
-            reservations: &self.reservations,
-            port_groups: &self.port_groups,
-            addresses: &self.addresses,
+            grants: &c.grants,
+            tags: &c.tags,
+            reservations: &c.reservations,
+            port_groups: &c.port_groups,
+            addresses: &c.addresses,
         }
     }
 }
@@ -158,7 +152,7 @@ fn host_ipv4_rules(
     peers: &HashMap<&str, &Peer>,
     rules: &mut BTreeMap<String, Rule>,
 ) {
-    for app in &snap.apps {
+    for app in &snap.catalog.apps {
         let v4_ports: BTreeSet<PortRef> = app
             .ports
             .iter()
@@ -174,7 +168,7 @@ fn host_ipv4_rules(
                 .network_id
                 .as_deref()
                 .map(|id| networks.get(id).copied());
-            let creds = subject_credentials(&snap.groups, peers, &grant.subject);
+            let creds = subject_credentials(&snap.catalog.groups, peers, &grant.subject);
             let peer_nets = v4_sources(&creds);
             for (iface, subnets) in &snap.v4_subnets {
                 if !snap.protect_host.contains(iface) {
@@ -245,7 +239,12 @@ fn host_ipv4_rules(
 pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
     let networks: HashMap<&str, &Network> =
         snap.networks.iter().map(|n| (n.id.as_str(), n)).collect();
-    let peers: HashMap<&str, &Peer> = snap.peers.iter().map(|p| (p.id.as_str(), p)).collect();
+    let peers: HashMap<&str, &Peer> = snap
+        .catalog
+        .peers
+        .iter()
+        .map(|p| (p.id.as_str(), p))
+        .collect();
     let ygg_ifaces = sorted_unique(
         snap.networks
             .iter()
@@ -260,8 +259,13 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
 
     let model = Model::new(snap.world());
     let info = model.address_info();
-    let apps: HashMap<&str, &App> = snap.apps.iter().map(|a| (a.id.as_str(), a)).collect();
-    for address in &snap.addresses {
+    let apps: HashMap<&str, &App> = snap
+        .catalog
+        .apps
+        .iter()
+        .map(|a| (a.id.as_str(), a))
+        .collect();
+    for address in &snap.catalog.addresses {
         let Some(state) = info.get(&address.id).filter(|s| s.up) else {
             continue; // dormant: not on the interface, no rules
         };
@@ -299,7 +303,7 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
                     .is_none_or(|n| n == address.network_id)
             }) {
                 let grant = &app_grant.grant;
-                let creds = subject_credentials(&snap.groups, &peers, &grant.subject);
+                let creds = subject_credentials(&snap.catalog.groups, &peers, &grant.subject);
                 // Sources per interface binding; the same for every port of this grant.
                 let mut bound: BTreeMap<Option<String>, Vec<IpNet>> = BTreeMap::new();
                 if grant.subject != Subject::Anyone {
@@ -526,7 +530,7 @@ pub fn check_protect_host(
     let mut on_iface: BTreeSet<IpAddr> = interfaces.iter().flat_map(|i| i.addrs.clone()).collect();
     let mut app_of_dst: HashMap<IpAddr, Vec<&str>> = HashMap::new();
     let info = Model::new(snap.world()).address_info();
-    for a in &snap.addresses {
+    for a in &snap.catalog.addresses {
         let Some(state) = info.get(&a.id).filter(|s| s.up) else {
             continue;
         };
@@ -735,12 +739,15 @@ mod tests {
     /// One app "web" on 8080 with an address on every network; no grants yet.
     fn base() -> Snapshot {
         Snapshot {
-            apps: vec![app("web", &[8080])],
-            addresses: vec![
-                address("al", "web", "local", "fd00::1", Scope::All),
-                address("an", "web", "lan", "2001:db8:1:2::100", Scope::All),
-                address("ay", "web", "ygg", "300:1:2:3::100", Scope::All),
-            ],
+            catalog: Catalog {
+                apps: vec![app("web", &[8080])],
+                addresses: vec![
+                    address("al", "web", "local", "fd00::1", Scope::All),
+                    address("an", "web", "lan", "2001:db8:1:2::100", Scope::All),
+                    address("ay", "web", "ygg", "300:1:2:3::100", Scope::All),
+                ],
+                ..Default::default()
+            },
             networks: vec![local(), lan(), ygg()],
             ..Snapshot::default()
         }
@@ -778,7 +785,7 @@ mod tests {
         );
         // A grant names the row: the addresses on networks that take grants are managed.
         s.owned.clear();
-        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
         assert_eq!(managed(&build(&s)).len(), 3);
         let scope_ids: Vec<_> = rs.scopes.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(scope_ids, ["managed", "overlay:ygg0"]);
@@ -787,7 +794,7 @@ mod tests {
     #[test]
     fn anyone_is_open_on_every_network_that_takes_grants() {
         let mut s = base();
-        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
         assert_eq!(ids(&rs), ["a:an:8080:tcp:g:eth0", "a:ay:8080:tcp:g:ygg0"]);
         // Anyone is bound to the network's interface like any other rule.
@@ -801,8 +808,8 @@ mod tests {
     #[test]
     fn ygg_key_peer_gets_an_interface_bound_rule() {
         let mut s = base();
-        s.peers = vec![peer("b", &[(CredentialKind::YggKey, KEY)])];
-        s.grants = vec![grant("g", "web", Subject::Peer("b".into()))];
+        s.catalog.peers = vec![peer("b", &[(CredentialKind::YggKey, KEY)])];
+        s.catalog.grants = vec![grant("g", "web", Subject::Peer("b".into()))];
         let rs = build(&s);
         // Not reachable on the LAN, verified on Yggdrasil.
         assert_eq!(ids(&rs), ["a:ay:8080:tcp:g:ygg0"]);
@@ -815,8 +822,8 @@ mod tests {
     #[test]
     fn lan_ip_peer_gets_an_interface_bound_rule_only_on_the_lan() {
         let mut s = base();
-        s.peers = vec![peer("p", &[(CredentialKind::Ip, "fd00:5a::2/128")])];
-        s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
+        s.catalog.peers = vec![peer("p", &[(CredentialKind::Ip, "fd00:5a::2/128")])];
+        s.catalog.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
         let rs = build(&s);
         assert_eq!(ids(&rs), ["a:an:8080:tcp:g:eth0"]);
         assert_eq!(rs.rules[0].iif.as_deref(), Some("eth0"));
@@ -826,8 +833,8 @@ mod tests {
     #[test]
     fn credentials_merge_per_binding_and_split_across_bindings() {
         let mut s = base();
-        s.grants = vec![grant("g", "web", Subject::Group("grp".into()))];
-        s.peers = vec![
+        s.catalog.grants = vec![grant("g", "web", Subject::Group("grp".into()))];
+        s.catalog.peers = vec![
             peer(
                 "b",
                 &[
@@ -838,7 +845,7 @@ mod tests {
             ),
             peer("c", &[(CredentialKind::YggAddr, "200:1::5")]),
         ];
-        s.groups = vec![PeerGroup {
+        s.catalog.groups = vec![PeerGroup {
             id: "grp".into(),
             label: "grp".into(),
             members: vec!["c".into(), "b".into()],
@@ -867,8 +874,8 @@ mod tests {
     #[test]
     fn ip_suffix_follows_the_networks_prefix() {
         let mut s = base();
-        s.peers = vec![peer("p", &[(CredentialKind::IpSuffix, "::a:b:c:d")])];
-        s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
+        s.catalog.peers = vec![peer("p", &[(CredentialKind::IpSuffix, "::a:b:c:d")])];
+        s.catalog.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
         let rs = build(&s);
         assert_eq!(
             rs.rules[0].sources,
@@ -888,7 +895,7 @@ mod tests {
     #[test]
     fn not_reachable_credentials_produce_no_rule() {
         let mut s = base();
-        s.peers = vec![peer(
+        s.catalog.peers = vec![peer(
             "p",
             &[
                 (CredentialKind::WgKey, "AAAA"),
@@ -896,21 +903,21 @@ mod tests {
                 (CredentialKind::TorClientKey, "AAAA"),
             ],
         )];
-        s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
+        s.catalog.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
         assert!(build(&s).rules.is_empty());
         // A dangling subject grants nothing.
-        s.grants = vec![grant("g", "web", Subject::Peer("gone".into()))];
+        s.catalog.grants = vec![grant("g", "web", Subject::Peer("gone".into()))];
         assert!(build(&s).rules.is_empty());
     }
 
     #[test]
     fn grant_port_and_network_narrow_the_rules() {
         let mut s = base();
-        s.apps[0].ports = vec![
+        s.catalog.apps[0].ports = vec![
             app("x", &[8080, 9090]).ports[0].clone(),
             app("x", &[9090]).ports[0].clone(),
         ];
-        s.grants = vec![
+        s.catalog.grants = vec![
             Grant {
                 scope: Scope::port(tcp(9090)),
                 network_id: Some("ygg".into()),
@@ -923,25 +930,25 @@ mod tests {
         let rs = build(&s);
         assert_eq!(ids(&rs), ["a:ay:9090:tcp:narrow:ygg0"]);
         // A grant for a port the address does not serve gives no rule.
-        s.grants[0].scope = Scope::port(tcp(1));
+        s.catalog.grants[0].scope = Scope::port(tcp(1));
         assert!(build(&s).rules.is_empty());
     }
 
     #[test]
     fn an_all_address_also_serves_the_ports_that_have_their_own_address() {
         let mut s = base();
-        s.apps[0].ports = vec![
+        s.catalog.apps[0].ports = vec![
             app("x", &[80]).ports[0].clone(),
             app("x", &[443]).ports[0].clone(),
         ];
-        s.addresses.push(address(
+        s.catalog.addresses.push(address(
             "ay2",
             "web",
             "ygg",
             "300:1:2:3::200",
             Scope::port(tcp(443)),
         ));
-        s.grants = vec![
+        s.catalog.grants = vec![
             grant("g", "web", Subject::Anyone),
             names("n443", Scope::port(tcp(443))),
         ];
@@ -963,8 +970,8 @@ mod tests {
         );
         // A port address serves its port even before the app listens on it, and a grant
         // for that port covers it.
-        s.apps[0].ports.clear();
-        s.grants = vec![Grant {
+        s.catalog.apps[0].ports.clear();
+        s.catalog.grants = vec![Grant {
             scope: Scope::port(tcp(443)),
             ..grant("g", "web", Subject::Anyone)
         }];
@@ -997,9 +1004,9 @@ mod tests {
     #[test]
     fn a_port_group_range_is_a_range_rule_before_anything_listens() {
         let mut s = base();
-        s.apps[0].ports.clear();
-        s.port_groups = vec![group("passive", &["50000-51000/tcp", "21/tcp"], &["web"])];
-        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        s.catalog.apps[0].ports.clear();
+        s.catalog.port_groups = vec![group("passive", &["50000-51000/tcp", "21/tcp"], &["web"])];
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
         assert_eq!(rule_ports(&rs, "ay"), ["21/tcp", "50000-51000/tcp"]);
         assert!(rs
@@ -1010,17 +1017,17 @@ mod tests {
         // A single-port range keeps the id of a plain port.
         assert!(rs.rules.iter().any(|r| r.id == "a:ay:21:tcp:g:ygg0"));
         // Not attached to the app: no ports from it.
-        s.port_groups[0].apps.clear();
+        s.catalog.port_groups[0].apps.clear();
         assert!(build(&s).rules.is_empty());
     }
 
     #[test]
     fn ranges_leave_out_ports_another_app_listens_on() {
         let mut s = base();
-        s.apps[0].ports = app("x", &[50005]).ports;
-        s.apps.push(app("other", &[50003]));
-        s.port_groups = vec![group("passive", &["50000-50010/tcp"], &["web"])];
-        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        s.catalog.apps[0].ports = app("x", &[50005]).ports;
+        s.catalog.apps.push(app("other", &[50003]));
+        s.catalog.port_groups = vec![group("passive", &["50000-50010/tcp"], &["web"])];
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
         // 50003 is the other app's; 50005 is web's own and stays (as a port of its own).
         assert_eq!(
@@ -1033,7 +1040,7 @@ mod tests {
             ]
         );
         // The one exclusion rule holds for a named port too: 50003 is the other app's.
-        s.addresses.push(address(
+        s.catalog.addresses.push(address(
             "ap",
             "web",
             "ygg",
@@ -1041,7 +1048,7 @@ mod tests {
             Scope::port(tcp(50003)),
         ));
         let mut explicit = s.clone();
-        explicit.grants = vec![Grant {
+        explicit.catalog.grants = vec![Grant {
             id: "gp".into(),
             scope: Scope::port(tcp(50003)),
             ..grant("gp", "web", Subject::Anyone)
@@ -1049,10 +1056,10 @@ mod tests {
         assert!(rule_ports(&build(&explicit), "ap").is_empty());
         assert!(rule_ports(&build(&explicit), "ay").is_empty());
         // Once the other app lets go of it, the port address serves it again.
-        explicit.apps[1].ports[0].listening = false;
+        explicit.catalog.apps[1].ports[0].listening = false;
         assert_eq!(rule_ports(&build(&explicit), "ap"), ["50003/tcp"]);
         // The other app's port going quiet frees the range again.
-        s.apps[1].ports[0].listening = false;
+        s.catalog.apps[1].ports[0].listening = false;
         assert_eq!(
             rule_ports(&build(&s), "ay"),
             ["50000-50004/tcp", "50005/tcp", "50006-50010/tcp"]
@@ -1063,15 +1070,15 @@ mod tests {
     fn a_port_address_stops_serving_a_port_another_app_took_over() {
         // A had an address and a grant for 9000; it stopped listening there and B started.
         let mut s = base();
-        s.apps[0].ports = app("x", &[8080]).ports;
-        s.addresses = vec![address(
+        s.catalog.apps[0].ports = app("x", &[8080]).ports;
+        s.catalog.addresses = vec![address(
             "ap",
             "web",
             "ygg",
             "300:1:2:3::500",
             Scope::port(tcp(9000)),
         )];
-        s.grants = vec![Grant {
+        s.catalog.grants = vec![Grant {
             scope: Scope::port(tcp(9000)),
             ..grant("g", "web", Subject::Anyone)
         }];
@@ -1080,37 +1087,39 @@ mod tests {
             ["9000/tcp"],
             "nobody else has it"
         );
-        s.apps.push(app("other", &[9000]));
+        s.catalog.apps.push(app("other", &[9000]));
         assert!(rule_ports(&build(&s), "ap").is_empty());
         // Detected on its own app too, it stays.
-        s.apps[0].ports.push(app("x", &[9000]).ports[0].clone());
+        s.catalog.apps[0]
+            .ports
+            .push(app("x", &[9000]).ports[0].clone());
         assert_eq!(rule_ports(&build(&s), "ap"), ["9000/tcp"]);
         // A stale record (seen once, no longer listening) does not keep it.
-        s.apps[0].ports.last_mut().expect("port").listening = false;
+        s.catalog.apps[0].ports.last_mut().expect("port").listening = false;
         assert!(rule_ports(&build(&s), "ap").is_empty());
     }
 
     #[test]
     fn a_group_address_serves_only_its_group_and_a_group_grant_only_its_ranges() {
         let mut s = base();
-        s.apps[0].ports = app("x", &[8080]).ports;
-        s.port_groups = vec![group("passive", &["50000-50010/tcp"], &["web"])];
-        s.addresses = vec![address(
+        s.catalog.apps[0].ports = app("x", &[8080]).ports;
+        s.catalog.port_groups = vec![group("passive", &["50000-50010/tcp"], &["web"])];
+        s.catalog.addresses = vec![address(
             "ag",
             "web",
             "ygg",
             "300:1:2:3::300",
             Scope::group("passive"),
         )];
-        s.grants = vec![
+        s.catalog.grants = vec![
             grant("g", "web", Subject::Anyone),
             names("ng", Scope::group("passive")),
         ];
         // The group address serves the group's range, not the detected 8080.
         assert_eq!(rule_ports(&build(&s), "ag"), ["50000-50010/tcp"]);
         // A grant for the group on an All address covers the range only.
-        s.addresses = vec![address("ay", "web", "ygg", "300:1:2:3::100", Scope::All)];
-        s.grants = vec![
+        s.catalog.addresses = vec![address("ay", "web", "ygg", "300:1:2:3::100", Scope::All)];
+        s.catalog.grants = vec![
             Grant {
                 scope: Scope::group("passive"),
                 ..grant("g", "web", Subject::Anyone)
@@ -1123,12 +1132,12 @@ mod tests {
     #[test]
     fn a_tag_grant_by_group_meets_the_members_scope() {
         let mut s = base();
-        s.apps[0].ports = app("x", &[8080]).ports;
-        s.port_groups = vec![
+        s.catalog.apps[0].ports = app("x", &[8080]).ports;
+        s.catalog.port_groups = vec![
             group("passive", &["50000-50010/tcp"], &["web"]),
             group("wide", &["50005-60000/tcp"], &[]),
         ];
-        s.tags = vec![socketguard_core::Tag {
+        s.catalog.tags = vec![socketguard_core::Tag {
             id: "t".into(),
             label: "t".into(),
             patterns: vec![],
@@ -1139,7 +1148,7 @@ mod tests {
             excluded: vec![],
             created_at: Utc::now(),
         }];
-        s.grants = vec![
+        s.catalog.grants = vec![
             Grant {
                 target: Target::Tag("t".into()),
                 scope: Scope::group("wide"),
@@ -1154,8 +1163,8 @@ mod tests {
     #[test]
     fn unlistening_ports_stay_in_the_ruleset() {
         let mut s = base();
-        s.apps[0].ports[0].listening = false;
-        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        s.catalog.apps[0].ports[0].listening = false;
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
         assert_eq!(build(&s).rules.len(), 2);
     }
 
@@ -1164,7 +1173,7 @@ mod tests {
         let mut s = base();
         s.networks.retain(|n| n.id != "ygg");
         s.owned = vec![ip("300:1:2:3::100")];
-        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
         assert_eq!(ids(&rs), ["a:an:8080:tcp:g:eth0"]);
         assert!(managed(&rs).contains(&ip("300:1:2:3::100")));
@@ -1174,13 +1183,13 @@ mod tests {
     #[test]
     fn onion_locators_are_not_ip_rules() {
         let mut s = base();
-        s.addresses.push(Address {
+        s.catalog.addresses.push(Address {
             locator: Locator::Onion {
                 hostname: "x.onion".into(),
             },
             ..address("ao", "web", "tor", "::1", Scope::All)
         });
-        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
         assert_eq!(build(&s).rules.len(), 2);
     }
 
@@ -1303,7 +1312,7 @@ mod tests {
     fn granted_ports_are_still_admitted_beside_the_address_scopes() {
         let mut s = base();
         s.ygg_nodes = [("ygg".to_string(), node())].into();
-        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
         assert!(rs.rules.iter().any(|r| r.id == "a:ay:8080:tcp:g:ygg0"));
         assert!(rs.scopes.iter().any(|s| s.id == "overlay:ygg:addr"));
@@ -1355,7 +1364,7 @@ mod tests {
     #[test]
     fn ipv4_peer_is_allowed_on_a_protected_interface() {
         let mut s = protected_lan();
-        s.peers = vec![peer(
+        s.catalog.peers = vec![peer(
             "p",
             &[
                 (CredentialKind::Ip, "192.168.1.5/32"),
@@ -1363,7 +1372,7 @@ mod tests {
                 (CredentialKind::Ip, "fd00::7/128"),
             ],
         )];
-        s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
+        s.catalog.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
         let rs = build(&s);
         let v4 = v4_rules(&rs);
         assert_eq!(v4.len(), 1);
@@ -1389,7 +1398,7 @@ mod tests {
     #[test]
     fn ipv4_rules_follow_the_listener_family_and_the_grant_port() {
         let mut s = protected_lan();
-        s.apps[0].ports = vec![
+        s.catalog.apps[0].ports = vec![
             AppPort {
                 port: 8080,
                 proto: Protocol::Tcp,
@@ -1405,28 +1414,28 @@ mod tests {
                 family: socketguard_core::AddrFamily::Dual,
             },
         ];
-        s.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
-        s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
+        s.catalog.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
+        s.catalog.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
         let rs = build(&s);
         let ports: Vec<_> = v4_rules(&rs).iter().map(|r| r.ports.start).collect();
         assert_eq!(ports, [9090], "an IPv6-only port gets no IPv4 rule");
-        s.grants[0].scope = Scope::port(tcp(8080));
+        s.catalog.grants[0].scope = Scope::port(tcp(8080));
         assert!(v4_rules(&build(&s)).is_empty());
     }
 
     #[test]
     fn ipv4_needs_a_protected_interface_with_ipv4() {
         let mut s = protected_lan();
-        s.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
-        s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
+        s.catalog.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
+        s.catalog.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
         // Protected but no IPv4 subnet on it: nothing to allow.
         s.v4_subnets.clear();
         assert!(v4_rules(&build(&s)).is_empty());
         // Not protected: no rule, the interface is not filtered at all.
         let mut s = protected_lan();
         s.protect_host.clear();
-        s.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
-        s.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
+        s.catalog.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
+        s.catalog.grants = vec![grant("g", "web", Subject::Peer("p".into()))];
         assert!(v4_rules(&build(&s)).is_empty());
     }
 
@@ -1442,7 +1451,7 @@ mod tests {
             "eth1",
             Some("2001:db8:9::"),
         ));
-        s.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
+        s.catalog.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
         let mut g = grant("g", "web", Subject::Peer("p".into()));
         let ifaces = |s: &Snapshot| -> Vec<String> {
             v4_rules(&build(s))
@@ -1450,21 +1459,21 @@ mod tests {
                 .filter_map(|r| r.iif.clone())
                 .collect()
         };
-        s.grants = vec![g.clone()];
+        s.catalog.grants = vec![g.clone()];
         assert_eq!(ifaces(&s), ["eth0", "eth1"]);
         g.network_id = Some("lan2".into());
-        s.grants = vec![g.clone()];
+        s.catalog.grants = vec![g.clone()];
         assert_eq!(ifaces(&s), ["eth1"]);
         // Yggdrasil has no IPv4.
         g.network_id = Some("ygg".into());
-        s.grants = vec![g];
+        s.catalog.grants = vec![g];
         assert!(ifaces(&s).is_empty());
     }
 
     #[test]
     fn anyone_is_open_over_ipv4_on_protected_interfaces() {
         let mut s = protected_lan();
-        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
         let rs = build(&s);
         let v4 = v4_rules(&rs);
         assert_eq!(v4.len(), 1);
@@ -1476,7 +1485,7 @@ mod tests {
         let mut s = protected_lan();
         let mut g = grant("g", "web", Subject::Anyone);
         g.network_id = Some("lan".into());
-        s.grants = vec![g];
+        s.catalog.grants = vec![g];
         let rs = build(&s);
         let lan_rule = rs
             .rules
@@ -1506,7 +1515,7 @@ mod tests {
         let mut s = base();
         let mut g = grant("g", "web", Subject::Anyone);
         g.network_id = Some("lan".into());
-        s.grants = vec![g];
+        s.catalog.grants = vec![g];
         s.networks[1].prefix = Some("2001:db8:7:7::".parse().unwrap());
         let rs = build(&s);
         let Sources::Nets(n) = &rs.rules[0].sources else {
@@ -1515,7 +1524,7 @@ mod tests {
         assert!(n.contains(&"2001:db8:7:7::/64".parse().unwrap()));
         // Scoped to Yggdrasil, or to nothing, Anyone has no source restriction.
         for scope in [Some("ygg"), None] {
-            s.grants[0].network_id = scope.map(String::from);
+            s.catalog.grants[0].network_id = scope.map(String::from);
             let rs = build(&s);
             assert!(
                 rs.rules.iter().all(|r| r.sources == Sources::Any),
@@ -1527,7 +1536,7 @@ mod tests {
     #[test]
     fn lockout_check_counts_ipv4_rules() {
         let mut s = protected_lan();
-        s.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
+        s.catalog.peers = vec![peer("p", &[(CredentialKind::Ip, "192.168.1.5/32")])];
         let l = ListeningSocket::new(1, 22, Protocol::Tcp, ip("0.0.0.0")).with_process_name("sshd");
         let iface = HostInterface {
             name: "eth0".into(),
@@ -1535,26 +1544,26 @@ mod tests {
         };
         // The listener's app is identified by its socket, so grant the app that matches it.
         let app_id = app_identity(&l).id;
-        s.apps[0].id = app_id.clone();
-        s.apps[0].ports = vec![AppPort {
+        s.catalog.apps[0].id = app_id.clone();
+        s.catalog.apps[0].ports = vec![AppPort {
             port: 22,
             proto: Protocol::Tcp,
             listening: true,
             last_seen: Utc::now(),
             family: Default::default(),
         }];
-        s.addresses.clear();
+        s.catalog.addresses.clear();
         assert!(
             check_protect_host(&s, std::slice::from_ref(&l), std::slice::from_ref(&iface)).is_err()
         );
-        s.grants = vec![grant("g", &app_id, Subject::Peer("p".into()))];
+        s.catalog.grants = vec![grant("g", &app_id, Subject::Peer("p".into()))];
         assert!(check_protect_host(&s, &[l], &[iface]).is_ok());
     }
 
     #[test]
     fn output_is_deterministic() {
         let mut a = base();
-        a.peers = vec![
+        a.catalog.peers = vec![
             peer(
                 "b",
                 &[
@@ -1564,23 +1573,23 @@ mod tests {
             ),
             peer("c", &[(CredentialKind::YggAddr, "200:1::5")]),
         ];
-        a.groups = vec![PeerGroup {
+        a.catalog.groups = vec![PeerGroup {
             id: "grp".into(),
             label: "grp".into(),
             members: vec!["b".into(), "c".into()],
             created_at: Utc::now(),
         }];
-        a.grants = vec![
+        a.catalog.grants = vec![
             grant("g1", "web", Subject::Group("grp".into())),
             grant("g2", "web", Subject::Anyone),
         ];
         a.protect_host = vec!["eth0".into(), "eth1".into()];
         let mut b = a.clone();
-        b.addresses.reverse();
-        b.apps[0].ports.reverse();
-        b.peers.reverse();
-        b.grants.reverse();
-        b.groups[0].members.reverse();
+        b.catalog.addresses.reverse();
+        b.catalog.apps[0].ports.reverse();
+        b.catalog.peers.reverse();
+        b.catalog.grants.reverse();
+        b.catalog.groups[0].members.reverse();
         b.networks.reverse();
         b.protect_host.reverse();
         assert_eq!(build(&a), build(&b));
@@ -1598,11 +1607,11 @@ mod tests {
     #[test]
     fn golden_v1_snapshot() {
         let mut s = base();
-        s.peers = vec![
+        s.catalog.peers = vec![
             peer("laptop", &[(CredentialKind::YggKey, KEY)]),
             peer("nas", &[(CredentialKind::Ip, "fd00:5a::2/128")]),
         ];
-        s.grants = vec![
+        s.catalog.grants = vec![
             grant("g1", "web", Subject::Peer("laptop".into())),
             grant("g2", "web", Subject::Peer("nas".into())),
         ];
@@ -1610,7 +1619,7 @@ mod tests {
         insta::assert_debug_snapshot!(build(&s));
         // Reach is what the table says, for the record.
         assert_eq!(
-            socketguard_core::best_reach(&s.peers[0].credentials, &ygg()),
+            socketguard_core::best_reach(&s.catalog.peers[0].credentials, &ygg()),
             Reach::Verified
         );
     }
@@ -1618,7 +1627,7 @@ mod tests {
     #[test]
     fn overlapping_sources_are_aggregated() {
         let mut s = base();
-        s.peers = vec![
+        s.catalog.peers = vec![
             peer(
                 "p",
                 &[
@@ -1630,13 +1639,13 @@ mod tests {
             ),
             peer("q", &[(CredentialKind::Ip, "fd00:1::/32")]),
         ];
-        s.groups = vec![PeerGroup {
+        s.catalog.groups = vec![PeerGroup {
             id: "grp".into(),
             label: "grp".into(),
             members: vec!["p".into(), "q".into()],
             created_at: Utc::now(),
         }];
-        s.grants = vec![grant("g", "web", Subject::Group("grp".into()))];
+        s.catalog.grants = vec![grant("g", "web", Subject::Group("grp".into()))];
         let rs = build(&s);
         assert_eq!(
             rs.rules[0].sources,
@@ -1654,7 +1663,7 @@ mod tests {
         s.protect_host = vec![evil.clone(), "eth1".into()];
         s.networks[1].interface = Some(evil.clone());
         s.networks[2].interface = Some(format!("ygg0{}x", char::from(10u8)));
-        s.grants = vec![grant("g", "web", Subject::Anyone)];
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
         let (rs, warnings) = build_with_warnings(&s);
         assert!(!warnings.is_empty());
         assert!(rs.validate().is_ok());
@@ -1708,17 +1717,20 @@ mod tests {
         let id = app_identity(&listener("sshd", 22, "::")).id;
         let a = app(&id, &[22]);
         Snapshot {
-            apps: vec![a],
-            addresses: vec![address("ad", &id, "lan", "2001:db8:1:2::22", Scope::All)],
+            catalog: Catalog {
+                apps: vec![a],
+                addresses: vec![address("ad", &id, "lan", "2001:db8:1:2::22", Scope::All)],
+                grants: grants
+                    .into_iter()
+                    .map(|g| Grant {
+                        target: Target::App(id.clone()),
+                        ..g
+                    })
+                    .collect(),
+                peers: vec![peer("admin", &[(CredentialKind::Ip, "fd00:5a::2/128")])],
+                ..Default::default()
+            },
             networks: vec![lan()],
-            grants: grants
-                .into_iter()
-                .map(|g| Grant {
-                    target: Target::App(id.clone()),
-                    ..g
-                })
-                .collect(),
-            peers: vec![peer("admin", &[(CredentialKind::Ip, "fd00:5a::2/128")])],
             ..Snapshot::default()
         }
     }
@@ -1773,7 +1785,7 @@ mod tests {
     fn lockout_not_cleared_by_an_unreachable_credential() {
         let mut s = sshd_snap(vec![grant("g", "", Subject::Peer("admin".into()))]);
         // A key credential does not identify anyone on a LAN.
-        s.peers = vec![peer("admin", &[(CredentialKind::YggKey, KEY)])];
+        s.catalog.peers = vec![peer("admin", &[(CredentialKind::YggKey, KEY)])];
         assert!(check_protect_host(&s, &[listener("sshd", 22, "::")], &eth0()).is_err());
     }
 
@@ -1781,9 +1793,9 @@ mod tests {
     fn lockout_grant_for_another_app_or_interface_does_not_help() {
         // A grant on another app's port 22 address.
         let mut s = sshd_snap(vec![grant("g", "", Subject::Anyone)]);
-        s.apps[0].id = "someone-else".into();
-        s.addresses[0].app_id = Some("someone-else".into());
-        s.grants[0].target = Target::App("someone-else".into());
+        s.catalog.apps[0].id = "someone-else".into();
+        s.catalog.addresses[0].app_id = Some("someone-else".into());
+        s.catalog.grants[0].target = Target::App("someone-else".into());
         assert!(check_protect_host(&s, &[listener("sshd", 22, "::")], &eth0()).is_err());
         // The address is on a network whose interface is not the protected one.
         let mut s = sshd_snap(vec![grant("g", "", Subject::Anyone)]);
@@ -1796,14 +1808,17 @@ mod tests {
         let id = app_identity(&listener("sshd", 22, "::")).id;
         let a = app(&id, &[22]);
         let s = Snapshot {
-            apps: vec![a],
-            addresses: vec![address("ad", &id, "ygg", "300:1:2:3::22", Scope::All)],
+            catalog: Catalog {
+                apps: vec![a],
+                addresses: vec![address("ad", &id, "ygg", "300:1:2:3::22", Scope::All)],
+                peers: vec![peer("admin", &[(CredentialKind::YggKey, KEY)])],
+                grants: vec![Grant {
+                    target: Target::App(id),
+                    ..grant("g", "", Subject::Peer("admin".into()))
+                }],
+                ..Default::default()
+            },
             networks: vec![ygg()],
-            peers: vec![peer("admin", &[(CredentialKind::YggKey, KEY)])],
-            grants: vec![Grant {
-                target: Target::App(id),
-                ..grant("g", "", Subject::Peer("admin".into()))
-            }],
             ..Snapshot::default()
         };
         // The only rule is bound to ygg0 and sits on a different interface than eth0.
