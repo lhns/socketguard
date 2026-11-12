@@ -29,6 +29,7 @@ pub mod telemetry;
 pub mod test_support;
 pub mod transport;
 pub mod uninstall;
+pub mod wintun;
 
 use tokio::sync::{broadcast, Mutex, RwLock};
 

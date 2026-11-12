@@ -28,10 +28,7 @@ pub fn generate() -> OnionKey {
 
 /// The key of an Ed25519 seed (expanded as RFC 8032 does).
 pub fn from_seed(seed: &[u8; 32]) -> OnionKey {
-    let mut expanded: [u8; 64] = Sha512::digest(seed).into();
-    expanded[0] &= 248;
-    expanded[31] &= 63;
-    expanded[31] |= 64;
+    let expanded = expand(seed);
     OnionKey {
         secret: format!(
             "{PREFIX}{}",
@@ -39,6 +36,20 @@ pub fn from_seed(seed: &[u8; 32]) -> OnionKey {
         ),
         service_id: service_id_of(&public_key(&expanded)),
     }
+}
+
+/// RFC 8032 key expansion: SHA-512 of the seed, the first half clamped.
+fn expand(seed: &[u8; 32]) -> [u8; 64] {
+    let mut expanded: [u8; 64] = Sha512::digest(seed).into();
+    expanded[0] &= 248;
+    expanded[31] &= 63;
+    expanded[31] |= 64;
+    expanded
+}
+
+/// The Ed25519 public key of a seed (Yggdrasil's node key is the same kind of key).
+pub fn public_key_of_seed(seed: &[u8; 32]) -> [u8; 32] {
+    public_key(&expand(seed))
 }
 
 /// The service id of a stored `ED25519-V3:` secret, whoever generated it (Tor's own are

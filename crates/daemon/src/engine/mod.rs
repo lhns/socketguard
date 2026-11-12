@@ -482,6 +482,8 @@ impl Engine {
         if let Err(e) = networks::ledger::adopt_stored_keys(&state.db).await {
             warn!("Could not adopt existing onion services: {e:#}");
         }
+        // Before the first ruleset: the node's addresses are known from its key.
+        self.ensure_managed_keys(state).await;
         self.detect_unadopted(state).await;
         match self.apply_firewall(state).await {
             Ok(()) => self.purge_states(),

@@ -1,9 +1,11 @@
 //! What managed networks (ADR 0052) share: the context the engine hands to the networks it
 //! builds, and the choice of the child to run for a network's configuration.
 
+use super::ygg_key::KeyRing;
 use crate::account::{Accounts, SystemAccounts};
 use crate::bundled::Bundled;
 use crate::children::{Desired, Supervisor};
+use crate::iface::InterfaceManager;
 use socketguard_core::config::BackendConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,6 +21,10 @@ pub struct ManagedCtx {
     pub daemon_pid: u32,
     pub children: Arc<Supervisor>,
     pub accounts: Arc<dyn Accounts>,
+    /// The keys of the managed Yggdrasil networks (loaded and created by the engine).
+    pub keys: KeyRing,
+    /// The admin valves of the managed Yggdrasil networks.
+    pub valves: super::ygg_managed::Valves,
 }
 
 impl ManagedCtx {
@@ -34,6 +40,8 @@ impl ManagedCtx {
             daemon_pid: std::process::id(),
             children,
             accounts,
+            keys: KeyRing::default(),
+            valves: Default::default(),
         }
     }
 
@@ -72,7 +80,12 @@ impl ManagedCtx {
 
 /// What the supervisor should do for the managed network `id` configured as `backend`, when
 /// nothing holds it back: run its child, or say why that cannot be.
-pub fn child_wish(ctx: &ManagedCtx, id: &str, backend: &BackendConfig) -> Desired {
+pub fn child_wish(
+    ctx: &ManagedCtx,
+    ifaces: &Arc<dyn InterfaceManager>,
+    id: &str,
+    backend: &BackendConfig,
+) -> Desired {
     match backend {
         BackendConfig::Tor { managed: true, .. } => {
             match super::tor_managed::ManagedTor::new(id, ctx).spec() {
@@ -80,10 +93,14 @@ pub fn child_wish(ctx: &ManagedCtx, id: &str, backend: &BackendConfig) -> Desire
                 Err(why) => Desired::Unavailable(why),
             }
         }
-        // The managed Yggdrasil node is added here (generated configuration, key, spec).
-        BackendConfig::Yggdrasil { managed: true, .. } => {
-            Desired::Unavailable("managed Yggdrasil is not part of this build yet".into())
-        }
+        BackendConfig::Yggdrasil {
+            managed: true,
+            peers,
+            ..
+        } => match super::ygg_managed::ManagedYgg::new(id, ctx, ifaces.clone()).spec(peers) {
+            Ok(spec) => Desired::Run(Box::new(spec)),
+            Err(why) => Desired::Unavailable(why),
+        },
         _ => Desired::Stopped,
     }
 }
