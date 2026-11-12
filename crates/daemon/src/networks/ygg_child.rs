@@ -191,7 +191,7 @@ impl AdminValve {
     }
 }
 
-/// The admin valves of the Tor and Yggdrasil networks by network id.
+/// The admin valves of the Yggdrasil networks by network id.
 pub type Valves = Arc<Mutex<HashMap<String, AdminValve>>>;
 
 pub fn in_yggdrasil_range(a: &Ipv6Addr) -> bool {

@@ -423,7 +423,7 @@ impl Engine {
         };
         self.remove_locators(state, backend_id, &deleted).await;
         // The child ends before its network disappears, so nothing of it outlives the
-        // network (a Tor takes its onion services with it).
+        // network (Tor takes its onion services with it).
         self.stop_child(backend_id).await;
         let ygg_network = self
             .backends

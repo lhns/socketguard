@@ -29,7 +29,7 @@ pub const BOOTSTRAP_STALL: Duration = Duration::from_secs(3 * 60);
 /// The same through bridges, whose bootstrap is slower.
 pub const BOOTSTRAP_STALL_BRIDGES: Duration = Duration::from_secs(10 * 60);
 
-/// Where the Tor keeps its files.
+/// Where Tor keeps its files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TorPaths {
     pub dir: PathBuf,
@@ -54,7 +54,7 @@ impl TorPaths {
     }
 }
 
-/// Who the Tor runs as: the unprivileged account when it exists and the daemon may
+/// Who Tor runs as: the unprivileged account when it exists and the daemon may
 /// start processes as it, else the daemon's own account, saying why.
 pub fn resolve_run_as(accounts: &dyn Accounts) -> RunAs {
     let (_, root) = accounts.daemon();
@@ -194,7 +194,7 @@ pub fn parse_port_file(text: &str) -> Option<String> {
         .filter(|a| !a.is_empty())
 }
 
-/// The Tor of one network: how to reach it, how to start it, how it stands.
+/// The Tor child of one network: how to reach it, how to start it, how it stands.
 #[derive(Clone)]
 pub struct TorChild {
     id: String,
@@ -970,7 +970,7 @@ mod tests {
         );
     }
 
-    /// A Tor in portable mode: the directory under the data folder is protected
+    /// Tor in portable mode: the directory under the data folder is protected
     /// (not inheriting the allowed user's read access), Tor's cookie is vetted as the
     /// daemon's own.
     #[cfg(windows)]
