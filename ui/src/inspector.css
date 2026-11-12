@@ -5,7 +5,7 @@
 .split-list { min-width: 0; }
 .split-inspector { position: sticky; top: 68px; max-height: calc(100vh - 84px); overflow-y: auto; overflow-x: hidden; border-radius: var(--radius); }
 
-.entity-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 0; }
+.entity-wrap { container-type: inline-size; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 0; }
 .entity-table { width: 100%; }
 .entity-table th, .entity-table td { padding: 7px 10px; }
 .check-col { width: 34px; padding-right: 0 !important; }
@@ -185,6 +185,26 @@ body.split-dragging { cursor: col-resize; user-select: none; }
 .entity-table .name-cell { max-width: 320px; }
 .address-controls { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
 .address-brief li { display: block; }
-.col-addresses { min-width: 220px; }
-.col-serves { min-width: 150px; }
+.col-addresses { min-width: 160px; }
+.col-serves { min-width: 110px; }
 .cred-item .cred-value { text-wrap: balance; }
+
+/* Narrow list: wrap whole pills and phrases, tighten the padding, shorten the name. Nothing
+ * breaks inside a pill, a badge or a port. */
+.col-tags { max-width: 260px; }
+.col-access { max-width: 200px; }
+.ports-cell .port { white-space: nowrap; }
+.name-line .row-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag-pill { margin-bottom: 2px; }
+@container (max-width: 680px) {
+  .entity-table th, .entity-table td { padding: 7px 6px; }
+  .entity-table .name-cell { max-width: 150px; min-width: 100px; }
+  .entity-table .badge { padding: 2px 8px; }
+  .col-tags { min-width: 90px; max-width: 170px; }
+  .col-access { min-width: 100px; max-width: 150px; }
+  .col-serves { min-width: 90px; }
+  .col-addresses { min-width: 120px; }
+  .ports-cell { min-width: 100px; }
+  .row-indent .name-cell { padding-left: 24px; }
+}
+.entity-table .badge { white-space: nowrap; }

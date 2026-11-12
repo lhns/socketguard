@@ -242,7 +242,7 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
         const attached = attachedTo(r.m.target.id);
         return (
           <>
-            {listening.length ? listening.map(portLabel).join(", ") : <span className="muted">not listening</span>}
+            {listening.length ? listening.map((p, i) => <span key={`${p.port}/${p.proto}`} className="port">{portLabel(p)}{i < listening.length - 1 ? ", " : ""}{" "}</span>) : <span className="muted">not listening</span>}
             {attached.length > 0 && <span className="muted"> {attached.map((g) => g.label).join(", ")}</span>}
           </>
         );
@@ -273,11 +273,10 @@ export default function AppsPage({ focus = { seq: 0 } }: { focus?: FocusMessage 
             {sum.direct + sum.viaTag === 0 ? (
               <span className="muted nowrap">closed</span>
             ) : (
-              <span className="muted nowrap">
-                {sum.direct > 0 && `${sum.direct} direct`}
-                {sum.direct > 0 && sum.viaTag > 0 && ", "}
-                {sum.viaTag > 0 && `${sum.viaTag} via tag`}
-              </span>
+              <>
+                {sum.direct > 0 && <span className="muted nowrap">{sum.direct} direct{sum.viaTag > 0 && ","}</span>}
+                {sum.viaTag > 0 && <span className="muted nowrap">{sum.viaTag} via tag</span>}
+              </>
             )}
           </span>
         );

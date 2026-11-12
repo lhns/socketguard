@@ -17,8 +17,8 @@ there (and next to its executable, then `$SOCKETGUARD_THIRD_PARTY`). Modes are s
 unprivileged account the children run as can run them: `socketguard-net` on Linux and macOS (the
 Linux packages depend on `zlib1g` / `zlib` for the `libz.so.1` Tor needs), LocalService on Windows
 (Program Files is readable by everyone). The CI builds Windows x86_64, Linux x86_64 (the nfpm file
-says `arch: amd64`) and macOS for the runner's architecture (Apple silicon); the other targets are
-fetchable (`fetch.sh linux-aarch64`, `macos-x86_64`) but no job builds or tests them.
+says `arch: amd64`) and macOS for both architectures (an Apple silicon and an Intel runner each build and test
+their own pkg). Linux aarch64 is fetchable (`fetch.sh linux-aarch64`) but no job builds or tests it.
 
 | | Install | Upgrade | Remove | Purge |
 |---|---|---|---|---|

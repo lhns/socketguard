@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// Schema v1 -> v2: the service keys of onion addresses (ADR 0037).
 const MIGRATION_1_TO_2: &str = r#"
@@ -314,8 +314,13 @@ ALTER TABLE addresses RENAME COLUMN socket_group TO port_group;
 ALTER TABLE reservation_bindings RENAME COLUMN socket_group TO port_group;
 "#;
 
+/// Schema v9 -> v10: the app review state is gone (ADR 0053), so its column is dropped.
+const MIGRATION_9_TO_10: &str = r#"
+ALTER TABLE apps DROP COLUMN reviewed;
+"#;
+
 /// `MIGRATIONS[n]` takes the schema from v(n+1) to v(n+2).
-const MIGRATIONS: [&str; 8] = [
+const MIGRATIONS: [&str; 9] = [
     MIGRATION_1_TO_2,
     MIGRATION_2_TO_3,
     MIGRATION_3_TO_4,
@@ -324,6 +329,7 @@ const MIGRATIONS: [&str; 8] = [
     MIGRATION_6_TO_7,
     MIGRATION_7_TO_8,
     MIGRATION_8_TO_9,
+    MIGRATION_9_TO_10,
 ];
 
 const SCHEMA: &str = r#"
@@ -1140,6 +1146,76 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(old, 0, "no table, index or column keeps the old name");
+        db.migrate().await.expect("idempotent");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn v9_database_migrates_to_v10_dropping_the_reviewed_column() {
+        let path = temp_db_path("v9-to-v10");
+        {
+            let opts = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true);
+            let mut c = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::raw_sql(SCHEMA).execute(&mut c).await.unwrap();
+            for sql in &MIGRATIONS[..8] {
+                sqlx::raw_sql(sql).execute(&mut c).await.unwrap();
+            }
+            sqlx::query("PRAGMA user_version = 9")
+                .execute(&mut c)
+                .await
+                .unwrap();
+            sqlx::raw_sql(
+                "INSERT INTO apps (id, name, process_name, reviewed, first_seen, last_seen) \
+                 VALUES ('a', 'n', 'p', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'); \
+                 INSERT INTO app_ports (app_id, port, proto, listening, last_seen) \
+                 VALUES ('a', 80, 'tcp', 1, '2026-01-01T00:00:00Z'); \
+                 INSERT INTO addresses (id, app_id, network_id, port, proto, port_group, \
+                                        locator_kind, locator, created_at) \
+                 VALUES ('ad', 'a', 'ygg', 80, 'tcp', NULL, 'ipv6', '300:1::1', '2026-01-01T00:00:00Z'); \
+                 INSERT INTO grants (id, target_kind, target_id, port, proto, port_group, \
+                                     network_id, subject_kind, subject_id, created_at) \
+                 VALUES ('g', 'app', 'a', 80, 'tcp', NULL, NULL, 'peer', 'p1', '2026-01-01T00:00:00Z'); \
+                 INSERT INTO tags (id, label, patterns, created_at) \
+                 VALUES ('t', 'dev', '[]', '2026-01-01T00:00:00Z'); \
+                 INSERT INTO tag_members (tag_id, app_id, port, proto, port_group) \
+                 VALUES ('t', 'a', NULL, NULL, NULL);",
+            )
+            .execute(&mut c)
+            .await
+            .unwrap();
+        }
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        let v: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+
+        let column: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('apps') WHERE name = 'reviewed'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(column, 0);
+        for (table, n) in [
+            ("apps", 1),
+            ("app_ports", 1),
+            ("addresses", 1),
+            ("grants", 1),
+            ("tags", 1),
+            ("tag_members", 1),
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!(count, n, "{table}");
+        }
         db.migrate().await.expect("idempotent");
         drop(db);
         let _ = std::fs::remove_file(&path);
