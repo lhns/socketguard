@@ -7,9 +7,10 @@
 //! refusal while a group is used, and the confirmation when a change opens an app to Anyone.
 
 use super::batch::Plan;
-use super::mutations::{any_to_anyone, ensure_confirmed, Catalog};
+use super::mutations::{any_to_anyone, ensure_confirmed};
 use super::*;
 use crate::api::DaemonEvent;
+use crate::catalog::Catalog;
 use crate::state::{NewActivity, Write};
 use crate::AppState;
 use chrono::Utc;

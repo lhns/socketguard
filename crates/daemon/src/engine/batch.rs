@@ -5,11 +5,11 @@
 //! plan is a list of database writes, applied in one transaction; a dry run applies them
 //! against the real constraints and rolls back.
 
-use super::mutations::Catalog;
 use super::port_groups::GroupPlan;
 use super::reservations::ResPlan;
 use super::*;
 use crate::api::DaemonEvent;
+use crate::catalog::Catalog;
 use crate::state::{NewActivity, Write};
 use crate::AppState;
 use socketguard_core::api_types::{

@@ -6,8 +6,9 @@
 //! addresses are created by [`Engine::ensure_addresses`] once a grant covers it.
 
 use super::batch::Plan;
-use super::mutations::{any_to_anyone, ensure_confirmed, Catalog};
+use super::mutations::{any_to_anyone, ensure_confirmed};
 use super::*;
+use crate::catalog::Catalog;
 use crate::networks;
 use crate::state::{NewActivity, Write};
 use crate::AppState;

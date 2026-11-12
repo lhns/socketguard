@@ -121,7 +121,7 @@ impl Engine {
             probe.patterns = p.clone();
             let apps = state.db.list_apps().await?;
             if !probe.pattern_candidates(&apps).is_empty() {
-                let cat = super::mutations::Catalog::load(state).await?;
+                let cat = crate::catalog::Catalog::load(state).await?;
                 ensure_confirmed(any_to_anyone(&cat.grants_through_tag(id)), confirm_open)?;
             }
         }
