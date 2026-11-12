@@ -4,6 +4,8 @@
 
 Accepted. Fulfils the uninstaller that ADR 0026 names as a release blocker. Changes where ADR 0038's config file lives by default.
 
+Amended below; read the amendments in order. ADR 0054 makes an exception for portable mode on Windows (no fixed locations, no service).
+
 ## Date
 
 2026-11-11

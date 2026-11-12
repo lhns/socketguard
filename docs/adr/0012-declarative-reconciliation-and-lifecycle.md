@@ -4,6 +4,8 @@
 
 Accepted (startup and shutdown cleanup superseded by ADR 0026)
 
+Superseded in part by ADR 0049: the reconcile pass takes `&self` and runs under the engine's read lock.
+
 ## Date
 
 2026-03-12

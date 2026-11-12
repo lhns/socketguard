@@ -4,7 +4,7 @@
 
 Accepted. Supersedes ADR 0004, and the startup and shutdown cleanup of ADR 0012.
 
-Amended below; read the amendments in order.
+Amended below; read the amendments in order. Amended by ADR 0044: IPv4 whole-host scopes return. ADR 0054 makes portable mode on Windows an exception to failing closed when the daemon stops.
 
 ## Date
 

@@ -4,6 +4,8 @@
 
 Accepted
 
+Amended below; read the amendments in order. Amended by ADR 0044 (IPv4 credentials) and ADR 0045 (one credential parser).
+
 ## Date
 
 2026-11-09

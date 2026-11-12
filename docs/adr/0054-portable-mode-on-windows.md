@@ -4,6 +4,8 @@
 
 Accepted. A scoped exception to ADR 0026 (fail closed when the daemon stops) and ADR 0050 (fixed locations, service); neither is changed for the installed product.
 
+Amended below.
+
 ## Date
 
 2026-11-12

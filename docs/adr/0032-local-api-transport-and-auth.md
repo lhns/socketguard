@@ -4,7 +4,7 @@
 
 Accepted. Supersedes ADR 0015; replaces the transport and endpoint list of ADR 0006.
 
-Amended below; read the amendments in order.
+Amended below; read the amendments in order. Amended by ADR 0050 (amendment of 2026-11-12): on macOS the socket is `/var/run/socketguard.sock`.
 
 ## Date
 

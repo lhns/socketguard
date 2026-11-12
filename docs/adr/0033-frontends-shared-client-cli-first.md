@@ -4,6 +4,8 @@
 
 Accepted. Amends ADR 0010. The UI-scope clause is superseded by ADR 0042.
 
+Superseded in part by ADR 0034 (amendment of 2026-11-10): the client crate does not propagate W3C trace context.
+
 ## Date
 
 2026-11-09

@@ -4,6 +4,8 @@
 
 Accepted. Amends ADR 0027 (the amendment on unattributable sockets).
 
+Superseded in part by ADR 0053: there is no pending state; a new unidentified app is just closed.
+
 ## Date
 
 2026-11-10

@@ -4,6 +4,8 @@
 
 Accepted. Supersedes the UI-scope clause of ADR 0033 (the shared client, CLI coverage and UI stack stand).
 
+Amended below; read the amendments in order. Superseded in part by ADR 0053: the review actions are removed.
+
 ## Date
 
 2026-11-10

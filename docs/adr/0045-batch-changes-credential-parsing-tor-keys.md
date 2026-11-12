@@ -4,6 +4,8 @@
 
 Accepted. Refines ADR 0028 and ADR 0040.
 
+Superseded in part by ADR 0053: the `Review` batch operation is removed.
+
 ## Date
 
 2026-11-10

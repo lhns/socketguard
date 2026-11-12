@@ -4,6 +4,8 @@
 
 Accepted. Supersedes the install and configure steps of ADR 0048 (detection and the zero-input add stay). Builds on ADR 0040, 0050 and 0051.
 
+Amended below; read the amendments in order.
+
 ## Date
 
 2026-11-11
