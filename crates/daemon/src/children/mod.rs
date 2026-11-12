@@ -209,7 +209,10 @@ pub struct ChildSpec {
     pub on_deadline: Option<OnDeadline>,
     /// A child that is not up yet and whose bootstrap progress has not advanced for this long
     /// is restarted (Tor stalls mid-bootstrap now and then). It only covers the start: once
-    /// the child has been up, losing its connectivity later never triggers it.
+    /// the child has been up, losing its connectivity later never triggers it. While
+    /// restarts bring no further progress (no internet: Tor never gets anywhere) the limit
+    /// doubles per restart, up to [`STALL_LIMIT_MAX`]; progress or an `Up` child starts it
+    /// over at this value.
     pub stall_limit: Option<Duration>,
     /// What else makes this a different launch although the command line is the same (a
     /// generated configuration file): a changed tag restarts the child.
@@ -535,11 +538,32 @@ impl Supervisor {
     }
 }
 
+/// The longest stall limit the backoff reaches (a child with a longer base keeps its own).
+const STALL_LIMIT_MAX: Duration = Duration::from_secs(30 * 60);
+
+/// What the stall watchdog remembers between the runs of one wish.
+#[derive(Default)]
+struct StallBackoff {
+    /// Runs in a row that stalled without getting further than the ones before.
+    streak: u32,
+    /// The highest bootstrap progress those runs reached: only more than this is progress.
+    best: Option<u8>,
+}
+
+impl StallBackoff {
+    /// `base`, doubled per stalled run, up to [`STALL_LIMIT_MAX`].
+    fn limit(&self, base: Duration) -> Duration {
+        base.saturating_mul(1 << self.streak.min(16))
+            .min(STALL_LIMIT_MAX.max(base))
+    }
+}
+
 struct Task {
     spawner: Arc<dyn Spawner>,
     timing: Timing,
     status: StatusHandle,
     rx: watch::Receiver<Desired>,
+    stall: StallBackoff,
 }
 
 enum End {
@@ -561,13 +585,17 @@ async fn supervise(
         timing,
         status,
         rx,
+        stall: StallBackoff::default(),
     };
     let mut backoff = timing.backoff_initial;
     loop {
         let desired = t.rx.borrow_and_update().clone();
         match desired {
             Desired::Run(spec) => match t.run_once(&spec).await {
-                End::Changed => backoff = timing.backoff_initial,
+                End::Changed => {
+                    backoff = timing.backoff_initial;
+                    t.stall = StallBackoff::default();
+                }
                 End::Exited { ran_for } => {
                     if ran_for >= timing.healthy_after {
                         backoff = timing.backoff_initial;
@@ -582,6 +610,7 @@ async fn supervise(
             },
             other => {
                 backoff = timing.backoff_initial;
+                t.stall = StallBackoff::default();
                 let (state, detail) = match other {
                     Desired::Waiting(d) => (ChildState::Waiting, Some(d)),
                     Desired::Unavailable(d) => (ChildState::Unavailable, Some(d)),
@@ -670,10 +699,12 @@ impl Task {
             .start_deadline
             .filter(|_| !up && spec.on_deadline.is_some())
             .map(|d| started + d);
-        // The highest bootstrap progress seen, and when the stall limit runs out unless it
-        // advances.
+        // The highest bootstrap progress of this run, and when the stall limit runs out unless
+        // it advances beyond what earlier stalled runs reached.
         let mut best: Option<u8> = None;
-        let mut stall_at = spec.stall_limit.filter(|_| !up).map(|l| started + l);
+        let floor = self.stall.best;
+        let stall_limit = spec.stall_limit.map(|base| self.stall.limit(base));
+        let mut stall_at = stall_limit.filter(|_| !up).map(|l| started + l);
 
         loop {
             tokio::select! {
@@ -738,15 +769,31 @@ impl Task {
                 _ = async { tokio::time::sleep_until(stall_at.expect("guarded")).await },
                     if !up && stall_at.is_some() =>
                 {
-                    let minutes = spec.stall_limit.map_or(0, |l| l.as_secs() / 60);
+                    let limit = stall_limit.expect("guarded");
+                    let minutes = limit.as_secs() / 60;
                     let last = match best {
                         Some(p) => format!("last progress {p}%"),
                         None => "no progress reported".to_string(),
                     };
-                    warn!(
-                        "{label} made no bootstrap progress for {minutes} min ({last}); \
-                         restarting it"
+                    let base = spec.stall_limit.expect("guarded");
+                    let first = self.stall.streak == 0;
+                    if best.is_some_and(|b| floor.is_none_or(|f| b > f)) {
+                        self.stall = StallBackoff { streak: 0, best };
+                    } else {
+                        self.stall.streak += 1;
+                    }
+                    let next = self.stall.limit(base);
+                    let message = format!(
+                        "{label} made no bootstrap progress for {minutes} min ({last});                          restarting it, the next start gets {} min",
+                        next.as_secs() / 60
                     );
+                    // A host without internet stalls every time: say so once, and again when
+                    // the limit stops growing.
+                    if first || (limit < next && next == STALL_LIMIT_MAX.max(base)) {
+                        warn!("{message}");
+                    } else {
+                        info!("{message}");
+                    }
                     stop(proc.as_ref(), &mut exit, self.timing.stop_grace).await;
                     relay_flush(&spec.name, &mut limiter);
                     let ran_for = started.elapsed();
@@ -794,6 +841,7 @@ impl Task {
                     match res {
                         ChildHealth::Up => {
                             up = true;
+                            self.stall = StallBackoff::default();
                             self.status.update(|s| {
                                 s.state = ChildState::Up;
                                 s.progress = None;
@@ -802,7 +850,9 @@ impl Task {
                         ChildHealth::Bootstrapping(p) => {
                             if best.is_none_or(|b| p > b) {
                                 best = Some(p);
-                                stall_at = spec.stall_limit.map(|l| Instant::now() + l);
+                                if floor.is_none_or(|f| p > f) {
+                                    stall_at = stall_limit.map(|l| Instant::now() + l);
+                                }
                             }
                             self.status.update(|s| {
                                 s.state = ChildState::Bootstrapping;

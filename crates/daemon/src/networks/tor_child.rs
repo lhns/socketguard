@@ -22,7 +22,9 @@ use std::time::Duration;
 pub const DIR: &str = "tor";
 
 /// Tor is restarted when its bootstrap has made no progress for this long (it sometimes stalls
-/// for good, e.g. while loading relay descriptors). Only the start is watched.
+/// for good, e.g. while loading relay descriptors). Only the start is watched. A host with no
+/// internet never gets anywhere: the supervisor lets the limit grow with each such restart
+/// (`ChildSpec::stall_limit`).
 pub const BOOTSTRAP_STALL: Duration = Duration::from_secs(3 * 60);
 /// The same through bridges, whose bootstrap is slower.
 pub const BOOTSTRAP_STALL_BRIDGES: Duration = Duration::from_secs(10 * 60);

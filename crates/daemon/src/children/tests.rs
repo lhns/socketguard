@@ -540,3 +540,90 @@ async fn a_child_that_never_reports_progress_is_restarted_too() {
         Some("Tor made no bootstrap progress for 3 min (no progress reported)")
     );
 }
+
+/// A health check whose answer the test changes: `NotReady` at 0, `Up` at 255, else that
+/// bootstrap progress.
+#[derive(Default)]
+struct Gauge(std::sync::atomic::AtomicU8);
+
+impl Gauge {
+    fn set(&self, to: u8) {
+        self.0.store(to, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl HealthCheck for Gauge {
+    fn check(&self) -> ChildHealth {
+        match self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => ChildHealth::NotReady("no route to the network".into()),
+            255 => ChildHealth::Up,
+            p => ChildHealth::Bootstrapping(p),
+        }
+    }
+}
+
+/// Minutes until the child has been started `n` times, from now, rounded (a restart pause
+/// of a second or two comes on top of the stall limit).
+async fn minutes_until_started(fake: &FakeSpawner, n: usize) -> u64 {
+    let from = tokio::time::Instant::now();
+    while fake.started() < n {
+        pass(Duration::from_secs(1)).await;
+    }
+    (from.elapsed().as_secs() + 30) / 60
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalls_without_progress_restart_with_a_doubling_limit_up_to_the_cap() {
+    let (sup, fake) = supervisor();
+    sup.set("t", Some(stalling(Arc::new(Gauge::default()))));
+    pass(TICK).await;
+    // Offline: the limit of each run is 3, 6, 12, 24 minutes, then 30 and 30 (the cap).
+    let mut limits = vec![];
+    for n in 2..=7 {
+        limits.push(minutes_until_started(&fake, n).await);
+    }
+    assert_eq!(limits, [3, 6, 12, 24, 30, 30]);
+    assert_eq!(sup.status("t").restarts, 6);
+}
+
+#[tokio::test(start_paused = true)]
+async fn progress_beyond_the_earlier_runs_starts_the_limit_over() {
+    let (sup, fake) = supervisor();
+    let gauge = Arc::new(Gauge::default());
+    sup.set("t", Some(stalling(gauge.clone())));
+    pass(TICK).await;
+    assert_eq!(minutes_until_started(&fake, 2).await, 3);
+    assert_eq!(minutes_until_started(&fake, 3).await, 6);
+    // The third run (limit 12 min) reaches 30% after a minute and then stalls: the limit
+    // counts from that advance.
+    pass(Duration::from_secs(60)).await;
+    gauge.set(30);
+    assert_eq!(minutes_until_started(&fake, 4).await, 12);
+    // The progress counted: the next run is watched for the base limit again, and 30% is
+    // not progress any more.
+    assert_eq!(minutes_until_started(&fake, 5).await, 3);
+    assert_eq!(minutes_until_started(&fake, 6).await, 6);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_that_got_up_starts_the_limit_over() {
+    let (sup, fake) = supervisor();
+    let gauge = Arc::new(Gauge::default());
+    sup.set("t", Some(stalling(gauge.clone())));
+    pass(TICK).await;
+    assert_eq!(minutes_until_started(&fake, 2).await, 3);
+    assert_eq!(minutes_until_started(&fake, 3).await, 6);
+    // The run with the 12-minute limit gets up and later ends on its own; offline again,
+    // the next run is watched for 3 minutes.
+    gauge.set(255);
+    pass(Duration::from_secs(10)).await;
+    assert_eq!(sup.status("t").state, ChildState::Up);
+    gauge.set(0);
+    fake.proc(2).exit("gone");
+    assert_eq!(
+        minutes_until_started(&fake, 4).await,
+        0,
+        "restarted after the pause"
+    );
+    assert_eq!(minutes_until_started(&fake, 5).await, 3);
+}
