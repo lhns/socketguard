@@ -477,7 +477,7 @@ function Assert-PrefixBlock([string]$NodeAddr) {
     & netsh wfp show netevents file=(Join-Path $Out 'wfp-netevents-prefix.xml') 2>&1 | Out-Null
     & netsh wfp show filters file=(Join-Path $Out 'wfp-filters-prefix.xml') 2>&1 | Out-Null
     if ($reach) { Mn-Fail "the connection to $listenAddr (inside the node's /64) succeeded: the prefix block did not drop it. See wfp-netevents-prefix.xml and the comment above Assert-PrefixBlock" }
-    Mn-Ok "the connection to $listenAddr inside the node's /64 was dropped"
+    Mn-Ok "the connection to $listenAddr inside the node's /64 was dropped (NOT proof of the /64 filter alone: the interface scope overlay:ygg0 of the same adapter drops it too; see footprint.md)"
     $ev = Join-Path $Out 'wfp-netevents-prefix.xml'
     if ((Test-Path $ev) -and ([IO.File]::ReadAllText($ev) -match 'overlay:ygg:subnet')) {
       Mn-Ok 'the WFP net events attribute a drop to the scope overlay:ygg:subnet'
