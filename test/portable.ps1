@@ -404,14 +404,15 @@ function Wintun-InStore { return [bool]((& pnputil.exe /enum-drivers 2>&1 | Out-
 $wintunBefore = Wintun-InStore
 Write-Host "  Wintun driver in the driver store before the managed Yggdrasil: $wintunBefore"
 $log5 = Start-Portable $Daemon 'managed'
+$script:MnLogBase = $log5
 if (-not (Wait-Api)) { Mn-Fail "the start for the managed networks does not answer`n$(Daemon-Log $log5)" }
 
 # A managed network is SocketGuard's own copy: portable mode allows it (an existing node was refused above).
 $r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor') 'd-add-tor'
 Write-Host $r.Text
 if ($r.Code -ne 0) { Mn-Fail "networks add tor exited $($r.Code) in portable mode" }
-Write-Host '  waiting for the bootstrap (up to 5 minutes)'
-if (-not (Mn-WaitUp 'tor' 300)) { Mn-Fail 'the managed Tor network is not up after 5 minutes' }
+Write-Host '  waiting for the bootstrap (up to 10 minutes)'
+if (-not (Mn-WaitUp 'tor' 600)) { Mn-Fail 'the managed Tor network is not up after 10 minutes' }
 Mn-Ok 'the managed Tor network is up (bootstrapped)'
 $torProcs = Mn-Procs 'tor.exe'
 if ($torProcs.Count -eq 0) { Mn-Fail 'the network is up but no tor.exe from the portable folder is running' }

@@ -23,14 +23,16 @@ SG="sudo /usr/local/bin/socketguard"
 TP=/usr/local/lib/socketguard/third_party
 STATE="/Library/Application Support/SocketGuard"
 mn_daemon_log() {
+    echo "--- the daemon's output (/var/log/socketguard-ci.log, last 150 lines) ---"
+    sudo tail -n 150 /var/log/socketguard-ci.log 2>&1 || true
     sudo log show --last 20m --style compact --predicate 'process == "socketguard-daemon"' 2>&1 | tail -n 100 || true
     echo "--- pf anchor socketguard ---"; sudo pfctl -a socketguard -sr 2>&1 | head -60 || true
 }
 # The node's address on a utun interface (MN_YGG_ADDR is set once the network card shows it).
-mn_adapter_exists() { [ -n "${MN_YGG_ADDR:-}" ] && ifconfig 2>/dev/null | grep -qiF "inet6 $MN_YGG_ADDR "; }
+mn_adapter_exists() { [ -n "${MN_YGG_ADDR:-}" ] && grep -qiF "inet6 $MN_YGG_ADDR " <<<"$(ifconfig 2>/dev/null)"; }
 # pf rules name tables (`block drop in log quick inet6 from any to <__automatic_xxx>`): look in them too.
-mn_block_in_force() { { sudo pfctl -a socketguard -sr; for t in $(sudo pfctl -a socketguard -sT 2>/dev/null); do sudo pfctl -a socketguard -t "$t" -T show; done; } 2>/dev/null | grep -qiF -e "$1" -e "${2%/64}"; }
-mn_dump_rules() { echo "--- pf rules of the socketguard anchor ---"; sudo pfctl -a socketguard -sr 2>&1 | head -60; echo "--- pf info ---"; sudo pfctl -s info 2>&1 | head -5; ifconfig 2>&1 | grep -B2 -A3 inet6 | head -40; }
+mn_block_in_force() { grep -qiF -e "$1" -e "${2%/64}" <<<"$({ sudo pfctl -a socketguard -sr; for t in $(sudo pfctl -a socketguard -sT 2>/dev/null); do sudo pfctl -a socketguard -t "$t" -T show; done; } 2>/dev/null)"; }
+mn_dump_rules() { echo "--- pf rules of the socketguard anchor ---"; sudo pfctl -a socketguard -sr 2>&1 | head -60 || true; echo "--- pf info ---"; sudo pfctl -s info 2>&1 | head -5 || true; ifconfig 2>&1 | grep -B2 -A3 inet6 | head -40 || true; }
 # shellcheck source=test/managed.sh
 . "$here/test/managed.sh"
 
@@ -51,7 +53,7 @@ fail() {
     exit 1
 }
 wait_answers() { for _ in $(seq 1 60); do sudo /usr/local/bin/socketguard status --json >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
-daemon_pid() { sudo launchctl print "system/$label" | awk '/^[[:space:]]*pid = /{print $3; exit}'; }
+daemon_pid() { awk '/^[[:space:]]*pid = /{print $3; exit}' <<<"$(sudo launchctl print "system/$label")"; }
 
 cp /etc/pf.conf "${RUNNER_TEMP:-/tmp}/pf.conf.before"
 pf_state() { sudo pfctl -s info 2>&1 | awk '/^Status:/ {print $2}'; }
@@ -61,11 +63,11 @@ step "install"
 sudo installer -pkg "$pkg" -target / -verbose
 sudo launchctl print "system/$label" >/dev/null || fail "the launchd daemon is not loaded"
 wait_answers || fail "socketguard status does not answer"
-sudo /usr/local/bin/socketguard status --json | head -c 400; echo
+status_json="$(sudo /usr/local/bin/socketguard status --json)"; printf '%s\n' "${status_json:0:400}"
 test -x /usr/local/bin/socketguard-daemon && test -x /usr/local/bin/socketguard || fail "binaries missing"
 test -x /Applications/SocketGuard.app/Contents/MacOS/socketguard-ui || fail "the app is missing"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' /Applications/SocketGuard.app/Contents/Info.plist
-sudo pfctl -a socketguard -sr 2>&1 | head -5
+sudo pfctl -a socketguard -sr 2>&1 | head -5 || true
 # What the system loads at boot (docs/footprint.md, the macOS gap): the stock pfctl job.
 echo "--- com.apple.pfctl.plist ---"
 plutil -p /System/Library/LaunchDaemons/com.apple.pfctl.plist 2>&1 || cat /System/Library/LaunchDaemons/com.apple.pfctl.plist 2>&1 || echo "(absent)"
@@ -84,10 +86,21 @@ wait_answers || fail "no answer after the upgrade"
 pid2=$(daemon_pid)
 [ -n "$pid2" ] && [ "$pid1" != "$pid2" ] || fail "the daemon was not restarted (pid '$pid1' -> '$pid2')"
 [ "$(sudo stat -f %i "$db")" = "$inode" ] || fail "the database was replaced"
-sudo /usr/local/bin/socketguard port-groups list | grep -q upgrade-marker || fail "the stored state is gone"
+grep -q upgrade-marker <<<"$(sudo /usr/local/bin/socketguard port-groups list)" || fail "the stored state is gone"
 [ "$(grep -c 'anchor "socketguard"' /etc/pf.conf)" = 1 ] || fail "the anchor line is there more than once"
 
 # ---- managed networks (ADR 0052): a Tor and a Yggdrasil run from the installed files ----------
+# launchd keeps the daemon's output nowhere: give the job a file, so that a failure below can
+# show what the daemon and the Tor it relays said (a Tor stuck mid-bootstrap leaves no other trace).
+plist="/Library/LaunchDaemons/$label.plist"
+sudo /usr/libexec/PlistBuddy -c "Add :StandardErrorPath string /var/log/socketguard-ci.log" "$plist"
+sudo /usr/libexec/PlistBuddy -c "Add :StandardOutPath string /var/log/socketguard-ci.log" "$plist"
+sudo launchctl bootout "system/$label" || true
+# bootout returns before the job is gone, and bootstrap then fails with "Input/output error".
+for _ in $(seq 1 30); do sudo launchctl print "system/$label" >/dev/null 2>&1 || break; sleep 1; done
+for _ in $(seq 1 10); do sudo launchctl bootstrap system "$plist" && break; sleep 2; done
+sudo launchctl print "system/$label" >/dev/null || fail "the job could not be loaded again with a log file"
+wait_answers || fail "no answer after the job was given a log file"
 mn_step "Tor"
 mn_tor
 mn_step "Yggdrasil"
@@ -96,7 +109,7 @@ mn_ygg_up
 ygg_pid=$(mn_ygg_pid)
 [ -n "$ygg_pid" ] || mn_die "the network is up but no yggdrasil from third_party is running"
 mn_note "yggdrasil runs as uid $(mn_uid "$ygg_pid") ($(ps -o user= -p "$ygg_pid" | tr -d ' ')); runs_as: $(mn_field ygg .managed.runs_as)"
-mn_ok "the node address $MN_YGG_ADDR is on a utun interface: $(ifconfig | awk -v a="$MN_YGG_ADDR" '/^[a-z0-9]+:/ { i = $1 } index($0, "inet6 " a " ") { print i; exit }')"
+mn_ok "the node address $MN_YGG_ADDR is on a utun interface: $(awk -v a="$MN_YGG_ADDR" '/^[a-z0-9]+:/ { i = $1 } index($0, "inet6 " a " ") { print i; exit }' <<<"$(ifconfig)")"
 mn_summary
 sudo cp "$STATE/setup-log.json" "${RUNNER_TEMP:-/tmp}/setup-log.before-uninstall.json"
 sudo chmod 644 "${RUNNER_TEMP:-/tmp}/setup-log.before-uninstall.json"

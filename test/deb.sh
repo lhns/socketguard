@@ -55,7 +55,7 @@ systemctl is-active --quiet socketguard || fail "the unit is not active right af
 sudo nft list table inet socketguard >/dev/null || fail "no nft table at the moment the install returned"
 wait_active || fail "the unit is not active after install"
 wait_answers || fail "socketguard status does not answer over the socket"
-sudo socketguard status --json | head -c 400; echo
+status_json="$(sudo socketguard status --json)"; printf '%s\n' "${status_json:0:400}"
 sudo nft list table inet socketguard >/dev/null || fail "no nft table inet socketguard"
 grep -q 'ExecStart=/usr/bin/socketguard-daemon' /etc/systemd/system/socketguard.service || fail "the unit does not name /usr/bin/socketguard-daemon"
 getent group socketguard >/dev/null || fail "no group socketguard"
@@ -64,7 +64,7 @@ systemctl is-enabled --quiet socketguard || fail "the unit is not enabled"
 sudo $fp expect-present --require nft-table-inet,socket
 test -f /usr/share/applications/socketguard.desktop || fail "no .desktop file"
 test -f /usr/share/doc/socketguard/THIRD_PARTY_NOTICES.md || fail "no THIRD_PARTY_NOTICES.md in /usr/share/doc/socketguard"
-dpkg-query -W -f='${Depends}\n' socketguard | grep -q zlib1g || fail "the package does not depend on zlib1g"
+grep -q zlib1g <<<"$(dpkg-query -W -f='${Depends}\n' socketguard)" || fail "the package does not depend on zlib1g"
 mn_bundled
 # A marker that only the data survives.
 sudo socketguard port-groups add 7000-7010/tcp --label upgrade-marker >/dev/null || fail "cannot create the marker port group"
@@ -78,7 +78,7 @@ wait_answers || fail "no answer after the upgrade"
 pid2=$(mainpid)
 [ "$pid1" != "$pid2" ] || fail "the daemon was not restarted by the upgrade (pid $pid1)"
 [ "$(sudo stat -c %i "$db")" = "$inode" ] || fail "the database file was replaced by the upgrade"
-sudo socketguard port-groups list | grep -q upgrade-marker || fail "the stored state is gone after the upgrade"
+grep -q upgrade-marker <<<"$(sudo socketguard port-groups list)" || fail "the stored state is gone after the upgrade"
 sudo nft list table inet socketguard >/dev/null || fail "the rules are gone after the upgrade"
 dpkg-query -W -f='${Version}\n' socketguard
 sudo $fp expect-present --require nft-table-inet,socket
@@ -97,7 +97,7 @@ if [ -e /dev/net/tun ]; then
     mn_until 30 ygg_dropped \
         || mn_die "yggdrasil (pid $ygg_pid) runs as uid $(mn_uid "$ygg_pid"), expected socketguard-net"
     mn_ok "yggdrasil runs as socketguard-net after creating $ADAPTER"
-    ip -6 addr show dev "$ADAPTER" | grep -qiF "$MN_YGG_ADDR" || mn_die "$ADAPTER does not hold $MN_YGG_ADDR"
+    grep -qiF "$MN_YGG_ADDR" <<<"$(ip -6 addr show dev "$ADAPTER")" || mn_die "$ADAPTER does not hold $MN_YGG_ADDR"
     mn_ok "$ADAPTER holds the node's address"
 else
     mn_skip "managed Yggdrasil: this runner has no /dev/net/tun"

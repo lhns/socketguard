@@ -83,7 +83,7 @@ active || fail "unit not active after the upgrade"
 answers || fail "no answer after the upgrade"
 [ "$pid1" != "$(mainpid)" ] || fail "daemon not restarted by the upgrade"
 [ "$(x "stat -c %i $db")" = "$inode" ] || fail "database replaced"
-x "socketguard port-groups list | grep -q upgrade-marker" || fail "state lost"
+x 'grep -q upgrade-marker <<<"$(socketguard port-groups list)"' || fail "state lost"
 x "nft list table inet socketguard >/dev/null"
 
 echo "== dnf remove (data kept)"

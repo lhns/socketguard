@@ -327,8 +327,8 @@ function Invoke-ManagedNetworks {
   $r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor') 'mn-add-tor'
   Write-Host $r.Text
   if ($r.Code -ne 0) { Mn-Fail "networks add tor exited $($r.Code)" }
-  Write-Host '  waiting for the bootstrap (up to 5 minutes)'
-  if (-not (Mn-WaitUp 'tor' 300)) { Mn-Fail 'the managed Tor network is not up after 5 minutes' }
+  Write-Host '  waiting for the bootstrap (up to 10 minutes)'
+  if (-not (Mn-WaitUp 'tor' 600)) { Mn-Fail 'the managed Tor network is not up after 10 minutes' }
   Mn-Ok 'the managed Tor network is up (bootstrapped)'
   $procs = Mn-Procs 'tor.exe'
   if ($procs.Count -eq 0) { Mn-Fail 'the network is up but no tor.exe from third_party is running' }

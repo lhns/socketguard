@@ -51,6 +51,10 @@ function Mn-Fail([string]$m) {
   Write-Host '--- tor, yggdrasil and the daemon ---'
   Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(tor|yggdrasil|socketguard)' } |
     Select-Object ProcessId, Name, ExecutablePath | Format-Table -AutoSize | Out-String | Write-Host
+  if ($script:MnLogBase) {
+    Write-Host '--- daemon log (last 120 lines; carries the Tor lines and the Tor health failures) ---'
+    Write-Host ((Daemon-Log $script:MnLogBase) -split "`n" | Select-Object -Last 120 | Out-String)
+  }
   Write-Host '--- adapters ---'
   Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Format-Table Name, InterfaceDescription, Status -AutoSize | Out-String | Write-Host
   Fail "managed networks: $m"

@@ -82,9 +82,9 @@ pub async fn disable_cmd(force: bool) -> i32 {
     };
     match disable_report(&r, force, false).await {
         Ok(rep) => {
-            print!("{}", rep.render());
+            socketguard_core::out!("{}", rep.render());
             if !r.file_exists {
-                println!(
+                socketguard_core::outln!(
                     "note            no config file at {}; default networks assumed",
                     r.config_path.display()
                 );
@@ -107,9 +107,9 @@ pub fn service_cmd(cmd: ServiceCmd) -> i32 {
             ServiceCmd::Status { json } => {
                 let st = crate::service::with_system_manager(host, |m| m.status())?;
                 if json {
-                    println!("{}", serde_json::to_string(&st)?);
+                    socketguard_core::outln!("{}", serde_json::to_string(&st)?);
                 } else {
-                    println!(
+                    socketguard_core::outln!(
                         "installed: {}\nrunning: {}",
                         yn(st.installed),
                         yn(st.running)
@@ -149,13 +149,13 @@ pub fn service_cmd(cmd: ServiceCmd) -> i32 {
             ServiceCmd::Start => {
                 require_admin(host, "starting the service")?;
                 crate::service::with_system_manager(host, |m| m.start())?;
-                println!("SocketGuard service started.");
+                socketguard_core::outln!("SocketGuard service started.");
                 Ok(0)
             }
             ServiceCmd::Stop => {
                 require_admin(host, "stopping the service")?;
                 crate::service::with_system_manager(host, |m| m.stop())?;
-                println!(
+                socketguard_core::outln!(
                     "SocketGuard service stopped. Firewall rules and addresses stay in place."
                 );
                 Ok(0)
@@ -163,7 +163,7 @@ pub fn service_cmd(cmd: ServiceCmd) -> i32 {
             ServiceCmd::Uninstall => {
                 require_admin(host, "removing the service")?;
                 crate::service::with_system_manager(host, |m| m.uninstall())?;
-                println!("SocketGuard service removed. Rules and addresses are not touched: use `uninstall`.");
+                socketguard_core::outln!("SocketGuard service removed. Rules and addresses are not touched: use `uninstall`.");
                 Ok(0)
             }
             ServiceCmd::Run => unreachable!("handled by main"),
@@ -263,9 +263,9 @@ pub async fn uninstall_cmd(opts: UninstallOptions) -> i32 {
     });
     match result.and_then(|x| x) {
         Ok(report) => {
-            print!("{}", report.render());
+            socketguard_core::out!("{}", report.render());
             if report.complete() {
-                println!("SocketGuard is uninstalled.");
+                socketguard_core::outln!("SocketGuard is uninstalled.");
                 0
             } else {
                 1

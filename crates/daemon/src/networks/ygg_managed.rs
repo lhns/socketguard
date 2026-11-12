@@ -314,7 +314,10 @@ impl ManagedYgg {
             ChildState::Stopped => "SocketGuard is turned off".into(),
             ChildState::Waiting => or(s.detail, "waiting"),
             ChildState::Unavailable => or(s.detail, "Yggdrasil is not available"),
-            ChildState::Starting | ChildState::Bootstrapping => "Yggdrasil is starting".into(),
+            // A detail here is what the health check could not do (see `children`).
+            ChildState::Starting | ChildState::Bootstrapping => {
+                or(s.detail, "Yggdrasil is starting")
+            }
             ChildState::Exited => or(s.detail, "Yggdrasil exited"),
         }
     }
@@ -449,12 +452,22 @@ impl HealthCheck for YggHealth {
             let ours = self.0.key().map(|k| k.public_hex());
             match client.get_self() {
                 Ok(info) if Some(&info.key) == ours.as_ref() => {}
-                _ => return ChildHealth::Starting,
+                Ok(_) => {
+                    return ChildHealth::NotReady(
+                        "the admin socket answers as another node than ours".into(),
+                    )
+                }
+                Err(e) => {
+                    return ChildHealth::NotReady(format!(
+                        "cannot ask Yggdrasil over its admin socket: {e:#}"
+                    ))
+                }
             }
         }
         if self.0.adapter_has_address() {
             ChildHealth::Up
         } else {
+            // Not an error: the node brings its adapter up a moment after it answers.
             ChildHealth::Starting
         }
     }
@@ -991,7 +1004,10 @@ mod tests {
             vec![("getself", theirs.into())],
         );
         if paths.admin_listen().is_some() {
-            assert_eq!(YggHealth(ygg(&c, &net)).check(), ChildHealth::Starting);
+            assert!(matches!(
+                YggHealth(ygg(&c, &net)).check(),
+                ChildHealth::NotReady(_)
+            ));
         }
     }
 }
