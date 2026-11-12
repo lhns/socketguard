@@ -110,20 +110,8 @@ JSON
 daemon_start
 
 # The pid of the running tor (a zombie does not count: it has ended).
-tor_pid() { docker exec "$NODE_A" sh -c "ps -eo pid=,stat=,comm= | awk '\$3 == \"tor\" && \$2 !~ /^Z/ { print \$1; exit }'" | grep .; }
 tor_gone() { ! tor_pid >/dev/null; }
-net_json() { docker exec "$NODE_A" $SG networks list --json; }
 net_up() { net_json | jq -e '.[0].kind == "tor" and .[0].status.state == "up"' >/dev/null; }
-net_reason() { net_json | jq -r '.[0] | (.status.reason // .status.state) + " [" + (.child.state // "-") + "]"'; }
-wait_up() { # wait_up SECONDS: net_up, printing each distinct reason on the way
-  local end=$((SECONDS + $1)) last="" now
-  while ! net_up 2>/dev/null; do
-    now="$(net_reason 2>/dev/null)"
-    [ "$now" != "$last" ] && { echo "      network: $now"; last="$now"; }
-    [ "$SECONDS" -ge "$end" ] && return 1
-    sleep 2
-  done
-}
 
 step "the daemon started a tor of its own" retry 60 tor_pid || exit 1
 step "tor runs as socketguard-net" sh -c "[ \"\$(docker exec $NODE_A ps -o user= -p $(tor_pid) | tr -d ' ')\" = socketguard-net ]"

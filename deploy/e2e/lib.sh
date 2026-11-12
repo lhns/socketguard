@@ -104,3 +104,17 @@ app_address() {
   local id; id="$(app_id)" \
     && A $SG apps show "$id" --json | jq -er --arg n "$1" --arg f "$2" '[.addresses[] | select(.network_id == $n) | .locator[$f]][0]'
 }
+
+# Networks and Tor on node A. A script defines net_up (what "up" means for its network).
+net_json() { docker exec "$NODE_A" $SG networks list --json; }
+net_reason() { net_json | jq -r '.[0] | (.status.reason // .status.state) + " [" + (.child.state // "-") + "]"'; }
+wait_up() { # wait_up SECONDS: net_up, printing each distinct reason on the way
+  local end=$((SECONDS + $1)) last="" now
+  while ! net_up 2>/dev/null; do
+    now="$(net_reason 2>/dev/null)"
+    [ "$now" != "$last" ] && { echo "      network: $now"; last="$now"; }
+    [ "$SECONDS" -ge "$end" ] && return 1
+    sleep 2
+  done
+}
+tor_pid() { docker exec "$NODE_A" sh -c "ps -eo pid=,stat=,comm= | awk '\$3 == \"tor\" && \$2 !~ /^Z/ { print \$1; exit }'" | grep .; }

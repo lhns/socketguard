@@ -85,18 +85,7 @@ daemon_start
 # The pid of the running yggdrasil of the daemon (a zombie has no command line).
 ygg_pid() { docker exec "$NODE_A" pgrep -f "^$TP/yggdrasil/yggdrasil -useconffile" | head -1 | grep .; }
 ygg_gone() { ! ygg_pid >/dev/null; }
-net_json() { docker exec "$NODE_A" $SG networks list --json; }
 net_up() { net_json | jq -e '.[0].kind == "yggdrasil" and .[0].status.state == "up"' >/dev/null; }
-net_reason() { net_json | jq -r '.[0] | (.status.reason // .status.state) + " [" + (.child.state // "-") + "]"'; }
-wait_up() { # wait_up SECONDS: net_up, printing each distinct reason on the way
-  local end=$((SECONDS + $1)) last="" now
-  while ! net_up 2>/dev/null; do
-    now="$(net_reason 2>/dev/null)"
-    [ "$now" != "$last" ] && { echo "      network: $now"; last="$now"; }
-    [ "$SECONDS" -ge "$end" ] && return 1
-    sleep 2
-  done
-}
 on_adapter() { A ip -6 -j addr show dev $ADAPTER | jq -e --arg a "$1" '[.[].addr_info[].local] | index($a)' >/dev/null; }
 in_subnet() { A python3 -c 'import ipaddress,sys; sys.exit(0 if ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv[2]) else 1)' "$1" "$2"; }
 table_exists() { A nft list table inet socketguard >/dev/null; }
