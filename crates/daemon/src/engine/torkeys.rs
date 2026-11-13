@@ -24,6 +24,7 @@ impl Engine {
         state: &AppState,
         peer_id: &str,
     ) -> Result<TorKeyResponse, EngineError> {
+        let change = self.change_lock.lock().await;
         let peer = self.get_peer(state, peer_id).await?;
         let key = tor_client_key::generate();
         let credential = Credential {
@@ -37,6 +38,7 @@ impl Engine {
             .replace_generated_tor_key(peer_id, &credential, &key.private)
             .await
             .map_err(|e| Self::conflict_or_internal(e, "this Tor client key"))?;
+        drop(change);
         let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::PeerChanged,

@@ -22,10 +22,18 @@ const ULA_GLOBAL_ID_KEY: &str = "ula_global_id";
 
 impl Database {
     pub async fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::get_setting_on(&mut conn, key).await
+    }
+
+    pub(super) async fn get_setting_on(
+        conn: &mut sqlx::SqliteConnection,
+        key: &str,
+    ) -> Result<Option<String>> {
         Ok(
             sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
                 .bind(key)
-                .fetch_optional(&self.pool)
+                .fetch_optional(conn)
                 .await?,
         )
     }
@@ -82,8 +90,15 @@ impl Database {
 
     /// Interfaces under whole-host protection; absent or invalid means off.
     pub async fn protect_host(&self) -> Result<Vec<String>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::protect_host_on(&mut conn).await
+    }
+
+    pub(super) async fn protect_host_on(conn: &mut sqlx::SqliteConnection) -> Result<Vec<String>> {
         Ok(parse_protect_host(
-            self.get_setting(PROTECT_HOST_KEY).await?.as_deref(),
+            Self::get_setting_on(conn, PROTECT_HOST_KEY)
+                .await?
+                .as_deref(),
         ))
     }
 

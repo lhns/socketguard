@@ -77,12 +77,20 @@ impl Database {
     }
 
     async fn load_port_groups(&self, only: Option<&str>) -> Result<Vec<PortGroup>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::load_port_groups_on(&mut conn, only).await
+    }
+
+    pub(super) async fn load_port_groups_on(
+        conn: &mut sqlx::SqliteConnection,
+        only: Option<&str>,
+    ) -> Result<Vec<PortGroup>> {
         let rows = sqlx::query(
             "SELECT id, label, ports, created_at FROM port_groups \
              WHERE (?1 IS NULL OR id = ?1) ORDER BY label",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut groups = Vec::with_capacity(rows.len());
         for r in rows {
@@ -99,7 +107,7 @@ impl Database {
              WHERE (?1 IS NULL OR group_id = ?1) ORDER BY rowid",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut by_group: HashMap<String, Vec<String>> = HashMap::new();
         for r in attached {

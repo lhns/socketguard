@@ -135,6 +135,13 @@ async fn polls_mutations_network_changes_and_disable_never_hang() {
                 if let Ok(g) = grant {
                     let _ = engine.delete_grant(&state, &g.grant.id).await;
                 }
+                // Changes that take the change lock (ADR 0062) beside the polls and the rest.
+                if let Ok(p) = engine.create_peer(&state, "", &[]).await {
+                    let _ = engine.delete_peer(&state, &p.id).await;
+                }
+                if let Ok(t) = engine.create_tag(&state, "stress", &[], &[]).await {
+                    let _ = engine.delete_tag(&state, &t.id, true).await;
+                }
                 let redis = state
                     .db
                     .list_apps()
@@ -218,6 +225,65 @@ async fn polls_mutations_network_changes_and_disable_never_hang() {
             stuck.join(", ")
         );
     }
+    drop(state);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A grant to Anyone on a tag and an unconfirmed join of the tag run at once (ADR 0062).
+/// Whichever way they interleave, the outcome is a serial one: the join is refused and the
+/// app is not a member, or it went first and the app is a member of the opened tag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_anyone_grant_on_a_tag_and_an_unconfirmed_join_end_in_a_serial_order() {
+    use socketguard_daemon::engine::EngineError;
+    let dir = std::env::temp_dir().join(format!("sg-locks-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (state, _sockets) = daemon(&dir.join("state.db")).await;
+    state.engine.read().await.reconcile(&state).await.unwrap();
+    let nginx = state.db.list_apps().await.unwrap()[0].id.clone();
+    let (mut refused, mut joined) = (0, 0);
+    for round in 0..12 {
+        let engine = state.engine.read().await;
+        let tag = engine
+            .create_tag(&state, &format!("t{round}"), &[], &[])
+            .await
+            .unwrap();
+        let grant = NewGrant {
+            target: Target::Tag(tag.id.clone()),
+            scope: Scope::All,
+            network_id: None,
+            subject: Subject::Anyone,
+            confirm_open: true,
+        };
+        let (g, j) = tokio::join!(
+            engine.create_grant(&state, &grant),
+            engine.add_tag_member(&state, &tag.id, &nginx, Scope::All, false),
+        );
+        let g = g.unwrap();
+        let member = engine
+            .get_tag(&state, &tag.id)
+            .await
+            .unwrap()
+            .members
+            .iter()
+            .any(|m| m.app_id == nginx);
+        match j {
+            Ok(_) => {
+                assert!(member, "joined but not a member");
+                joined += 1;
+            }
+            Err(EngineError::ConfirmationRequired) => {
+                assert!(
+                    !member,
+                    "refused but a member: opened without a confirmation"
+                );
+                refused += 1;
+            }
+            Err(e) => panic!("unexpected: {e:?}"),
+        }
+        engine.delete_grant(&state, &g.grant.id).await.unwrap();
+        engine.delete_tag(&state, &tag.id, true).await.unwrap();
+    }
+    eprintln!("joined first: {joined}, refused: {refused}");
     drop(state);
     let _ = std::fs::remove_dir_all(&dir);
 }

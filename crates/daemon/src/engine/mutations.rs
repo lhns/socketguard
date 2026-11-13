@@ -139,6 +139,7 @@ impl Engine {
         label: &str,
         credentials: &[NewCredential],
     ) -> Result<Peer, EngineError> {
+        let change = self.change_lock.lock().await;
         let mut creds: Vec<Credential> = Vec::new();
         for input in credentials {
             let c = self.new_credential(state, input).await?;
@@ -174,6 +175,7 @@ impl Engine {
             .insert_peer(&peer)
             .await
             .map_err(|e| Self::conflict_or_internal(e, &format!("peer {label}")))?;
+        drop(change);
         let activity =
             NewActivity::new(ActivityKind::PeerAdded, format!("Added peer {label}")).peer(&peer.id);
         self.commit(state, Ok(()), Some(activity), &[DaemonEvent::PeersChanged])
@@ -188,6 +190,7 @@ impl Engine {
         label: &str,
     ) -> Result<Peer, EngineError> {
         let label = Self::clean_label(label, "peer")?;
+        let change = self.change_lock.lock().await;
         if !state
             .db
             .rename_peer(id, &label)
@@ -196,6 +199,7 @@ impl Engine {
         {
             return Err(EngineError::NotFound(format!("peer {id}")));
         }
+        drop(change);
         let activity = NewActivity::new(
             ActivityKind::PeerChanged,
             format!("Renamed peer to {label}"),
@@ -208,8 +212,10 @@ impl Engine {
 
     /// Delete a peer; the grants that name it go with it, and with them their rules.
     pub async fn delete_peer(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
+        let change = self.change_lock.lock().await;
         let peer = self.get_peer(state, id).await?;
         state.db.delete_peer(id).await?;
+        drop(change);
         let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::PeerRemoved,
@@ -232,6 +238,7 @@ impl Engine {
         peer_id: &str,
         input: &NewCredential,
     ) -> Result<Credential, EngineError> {
+        let change = self.change_lock.lock().await;
         let peer = self.get_peer(state, peer_id).await?;
         let c = self.new_credential(state, input).await?;
         state
@@ -239,6 +246,7 @@ impl Engine {
             .add_credential(peer_id, &c)
             .await
             .map_err(|e| Self::conflict_or_internal(e, &format!("{} {}", c.kind, c.value)))?;
+        drop(change);
         let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::PeerChanged,
@@ -261,10 +269,12 @@ impl Engine {
         peer_id: &str,
         cred_id: &str,
     ) -> Result<(), EngineError> {
+        let change = self.change_lock.lock().await;
         let peer = self.get_peer(state, peer_id).await?;
         if !state.db.remove_credential(peer_id, cred_id).await? {
             return Err(EngineError::NotFound(format!("credential {cred_id}")));
         }
+        drop(change);
         let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::PeerChanged,
@@ -288,6 +298,7 @@ impl Engine {
         members: &[String],
     ) -> Result<PeerGroup, EngineError> {
         let label = Self::clean_label(label, "group")?;
+        let change = self.change_lock.lock().await;
         self.check_peers_exist(state, members).await?;
         let group = PeerGroup {
             id: new_id(),
@@ -305,6 +316,7 @@ impl Engine {
             .insert_group(&group)
             .await
             .map_err(|e| Self::conflict_or_internal(e, &format!("group {label}")))?;
+        drop(change);
         let activity = NewActivity::new(ActivityKind::GroupAdded, format!("Added group {label}"));
         self.commit(state, Ok(()), Some(activity), &[DaemonEvent::PeersChanged])
             .await?;
@@ -318,6 +330,7 @@ impl Engine {
         label: &str,
     ) -> Result<PeerGroup, EngineError> {
         let label = Self::clean_label(label, "group")?;
+        let change = self.change_lock.lock().await;
         if !state
             .db
             .rename_group(id, &label)
@@ -326,6 +339,7 @@ impl Engine {
         {
             return Err(EngineError::NotFound(format!("peer group {id}")));
         }
+        drop(change);
         let activity = NewActivity::new(
             ActivityKind::GroupChanged,
             format!("Renamed group to {label}"),
@@ -336,8 +350,10 @@ impl Engine {
     }
 
     pub async fn delete_group(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
+        let change = self.change_lock.lock().await;
         let group = self.get_group(state, id).await?;
         state.db.delete_group(id).await?;
+        drop(change);
         let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::GroupRemoved,
@@ -360,9 +376,11 @@ impl Engine {
         id: &str,
         peer_ids: &[String],
     ) -> Result<PeerGroup, EngineError> {
+        let change = self.change_lock.lock().await;
         let group = self.get_group(state, id).await?;
         self.check_peers_exist(state, peer_ids).await?;
         state.db.set_group_members(id, peer_ids).await?;
+        drop(change);
         let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::GroupChanged,
@@ -404,6 +422,7 @@ impl Engine {
         state: &AppState,
         req: &NewGrant,
     ) -> Result<GrantView, EngineError> {
+        let change = self.change_lock.lock().await;
         let cat = Catalog::load(state).await?;
         let info = self.check_new_grant(&cat, req)?;
         let grant = Grant {
@@ -420,6 +439,7 @@ impl Engine {
             .insert_grant(&grant)
             .await
             .map_err(|e| Self::conflict_or_internal(e, "this grant"))?;
+        drop(change);
         let applied = self.apply_and_ensure(state).await;
         let act = Self::grant_added_activity(&grant, &info);
         self.commit(state, applied, Some(act), &[DaemonEvent::GrantsChanged])
@@ -569,12 +589,14 @@ impl Engine {
     }
 
     pub async fn delete_grant(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
+        let change = self.change_lock.lock().await;
         let grant = state
             .db
             .get_grant(id)
             .await?
             .ok_or_else(|| EngineError::NotFound(format!("grant {id}")))?;
         state.db.delete_grant(id).await?;
+        drop(change);
         let applied = self.apply_and_ensure(state).await;
         let act = self.grant_removed_activity(state, &grant).await;
         self.commit(state, applied, Some(act), &[DaemonEvent::GrantsChanged])

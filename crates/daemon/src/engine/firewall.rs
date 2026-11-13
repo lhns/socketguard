@@ -21,43 +21,18 @@ use tracing::{debug, error, warn};
 pub(super) const NODE_KEY_PREFIX: &str = "ygg_node:";
 
 impl Catalog {
-    /// Read the stored state: what a mutation plans against and the snapshot is built on.
-    /// The reads are independent, so they run side by side on the pool.
+    /// Read the stored state: what a mutation plans against and the snapshot is built on,
+    /// in one read transaction.
     pub(super) async fn load(state: &AppState) -> anyhow::Result<Self> {
-        let db = &state.db;
-        let (apps, peers, groups, tags, port_groups, grants, reservations, addresses) = tokio::try_join!(
-            db.list_apps(),
-            db.list_peers(),
-            db.list_groups(),
-            db.list_tags(),
-            db.list_port_groups(),
-            db.list_grants(),
-            db.list_reservations(),
-            db.list_addresses(),
-        )?;
-        Ok(Self {
-            apps,
-            peers,
-            groups,
-            tags,
-            port_groups,
-            grants,
-            reservations,
-            addresses,
-        })
+        state.db.read_catalog().await
     }
 }
 
 impl Engine {
     /// Gather the producer's input from the DB and the active networks.
     pub(super) async fn gather_snapshot(&self, state: &AppState) -> anyhow::Result<Snapshot> {
-        let db = &state.db;
-        // Independent reads, so they run side by side on the pool.
-        let (catalog, protect_host, owned) = tokio::try_join!(
-            Catalog::load(state),
-            db.protect_host(),
-            db.list_owned_addresses(),
-        )?;
+        // One read transaction: a commit cannot land between the reads.
+        let (catalog, protect_host, owned) = state.db.read_snapshot().await?;
         Ok(Snapshot {
             catalog,
             networks: self.networks(),
@@ -279,6 +254,10 @@ impl Engine {
         force: bool,
     ) -> Result<Vec<LockoutRisk>, ProtectHostError> {
         let mut interfaces = interfaces;
+        // Held from the lockout check to the write, so the grants it looked at are the ones
+        // that stand. The check only lists sockets and interface addresses; nothing is
+        // changed under it.
+        let change = self.change_lock.lock().await;
         interfaces.retain(|i| !i.trim().is_empty());
         if let Some(bad) = interfaces.iter().find(|i| !valid_interface_name(i)) {
             return Err(ProtectHostError::Invalid(format!(
@@ -313,6 +292,7 @@ impl Engine {
             }
         }
         state.db.set_protect_host(&interfaces).await?;
+        drop(change);
         let applied = self.apply_firewall(state).await;
         let activity = NewActivity::new(
             ActivityKind::ProtectHostChanged,

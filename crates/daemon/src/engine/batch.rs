@@ -258,6 +258,9 @@ impl Engine {
         state: &AppState,
         req: &ChangesRequest,
     ) -> Result<ChangesResponse, EngineError> {
+        // From the first read of the state to the commit of the write, so a batch plans
+        // against the state it writes to (ADR 0062). Dropped before the ruleset is applied.
+        let change = self.change_lock.lock().await;
         // The confirmation is the first thing every frontend must handle, so it comes
         // before any other complaint.
         for op in &req.ops {
@@ -320,6 +323,7 @@ impl Engine {
             .apply_writes(&writes)
             .await
             .map_err(|e| Self::conflict_or_internal(e, "a change of this batch"))?;
+        drop(change);
         if !plan.removed.is_empty() {
             self.remove_app_locators(state, &plan.removed).await;
         }

@@ -298,12 +298,20 @@ impl Database {
     }
 
     async fn load_tags(&self, only: Option<&str>) -> Result<Vec<Tag>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::load_tags_on(&mut conn, only).await
+    }
+
+    pub(super) async fn load_tags_on(
+        conn: &mut sqlx::SqliteConnection,
+        only: Option<&str>,
+    ) -> Result<Vec<Tag>> {
         let rows = sqlx::query(
             "SELECT id, label, patterns, created_at FROM tags WHERE (?1 IS NULL OR id = ?1) \
              ORDER BY label",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut tags = Vec::with_capacity(rows.len());
         for r in rows {
@@ -321,7 +329,7 @@ impl Database {
              WHERE (?1 IS NULL OR tag_id = ?1) ORDER BY rowid",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut by_tag: HashMap<String, Vec<TagMember>> = HashMap::new();
         for r in members {
@@ -336,7 +344,7 @@ impl Database {
              ORDER BY rowid",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut ex_by_tag: HashMap<String, Vec<String>> = HashMap::new();
         for r in excluded {
