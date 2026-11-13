@@ -514,9 +514,6 @@ impl Engine {
     ) {
         // The API is already up: a `disable` must not interleave with putting addresses back.
         let _pass = self.poll_lock.lock().await;
-        if let Err(e) = networks::ledger::adopt_stored_keys(&state.db).await {
-            warn!("Could not adopt existing onion services: {e:#}");
-        }
         // Before the first ruleset: the node's addresses are known from its key.
         self.ensure_child_keys(state).await;
         self.detect_unadopted(state).await;

@@ -500,36 +500,6 @@ async fn tor_down_with_nothing_to_do_does_not_make_mutations_202() {
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
 }
 
-#[tokio::test]
-async fn services_from_before_the_ledger_are_adopted_and_swept() {
-    let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
-    h.reconcile().await;
-    let svc = h.svc().await;
-    // As before the ledger existed: the service runs, nothing recorded it.
-    h.tor.inject_service(&svc);
-    h.state
-        .db
-        .set_setting("tor_owned_services", "[]")
-        .await
-        .unwrap();
-    assert!(ledger(&h).await.owned.is_empty());
-
-    socketguard_daemon::networks::ledger::adopt_stored_keys(&h.state.db)
-        .await
-        .unwrap();
-    socketguard_daemon::networks::ledger::adopt_stored_keys(&h.state.db)
-        .await
-        .unwrap();
-    assert_eq!(ledger(&h).await.owned.len(), 1);
-    assert!(ledger(&h).await.owned.contains(&svc));
-
-    // Its address goes away behind the daemon's back: the service is swept.
-    let app = h.app().await;
-    h.state.db.delete_app(&app.id).await.unwrap();
-    h.reconcile().await;
-    assert!(h.tor.detached().is_empty());
-}
-
 // ─── Removing the network ────────────────────────────────────────────────────
 
 #[tokio::test]

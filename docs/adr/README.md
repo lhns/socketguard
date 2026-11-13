@@ -47,7 +47,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0037](0037-pluggable-networks-and-onion-backend.md) | Pluggable Networks and the Onion Backend | Accepted (refined by 0039, then 0040) |
 | [0038](0038-disabled-latch-and-persisted-networks.md) | Disabled Latch and Persisted Networks | Accepted; amended; superseded in part by 0050 (config file location) (refines 0026, 0032; extended by 0048) |
 | [0039](0039-onion-service-lifecycle.md) | Onion Service Lifecycle | Superseded by 0040 |
-| [0040](0040-onion-service-lifecycle-consolidated.md) | Onion Service Lifecycle (Consolidated) | Accepted; amended in part by 0047 (supersedes 0039; refines 0037; refined by 0045) |
+| [0040](0040-onion-service-lifecycle-consolidated.md) | Onion Service Lifecycle (Consolidated) | Accepted; amended in part by 0047 (supersedes 0039; refines 0037; refined by 0045; adoption removed by 0063) |
 | [0041](0041-unique-grants.md) | Grants Are Unique in the Database | Accepted; amended (refines 0027; refined by 0043; extended by 0047) |
 | [0042](0042-ui-covers-the-whole-api.md) | The UI Covers the Whole API | Accepted; amended; superseded in part by 0053 (review actions) (supersedes 0033's UI scope) |
 | [0043](0043-app-tags.md) | App Tags as Grant Targets | Accepted; amended (refines 0027, 0041; extended by 0047) |
@@ -70,6 +70,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0060](0060-yggdrasil-lan-discovery-is-off-unless-turned-on.md) | Yggdrasil LAN Discovery Is Off Unless Turned On | Accepted (amends 0052) |
 | [0061](0061-an-import-asks-before-it-changes-what-anyone-can-reach.md) | An Import Asks Before It Changes What Anyone Can Reach | Accepted (supersedes 0058 in part; refines 0047) |
 | [0062](0062-changes-are-planned-and-written-one-at-a-time-against-one-snapshot.md) | Changes Are Planned and Written One at a Time, Against One Snapshot | Accepted (refines 0045) |
+| [0063](0063-onion-services-from-before-the-ledger-are-not-adopted.md) | Onion Services from Before the Ledger Are Not Adopted | Accepted (refines 0055; removes the adoption of 0040) |
 
 ## Format
 
