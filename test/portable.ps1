@@ -144,6 +144,20 @@ $h = Run $Cli @('status') 'cli-before-start'
 if ($h.Text -notmatch '(?i)socketguard-portable|cannot reach|not reach|connect') { Write-Host "  note: unexpected CLI output without a daemon: $($h.Text)" }
 Ok 'the CLI without a daemon fails cleanly'
 
+Section '--allow-user takes one user, not a group'
+# The shape of a SID cannot tell a user from a group; the daemon looks the account up.
+$machine = $Sid.Substring(0, $Sid.LastIndexOf('-'))
+foreach ($case in @(
+    @{ Sid = 'S-1-5-32-545'; Why = 'the Users group (S-1-5-32-545)'; Message = 'shape|account' },
+    @{ Sid = "$machine-513"; Why = 'a -513 group of this machine'; Message = 'is a group' },
+    @{ Sid = "$machine-99999"; Why = 'a SID that resolves to nothing'; Message = 'does not resolve' })) {
+  $r = Run $Daemon @('--portable', '--allow-user', $case.Sid) 'allow-user-refused'
+  if ($r.Code -eq 0) { Fail "--allow-user $($case.Sid) ($($case.Why)) was accepted`n$($r.Text)" }
+  if ($r.Text -notmatch $case.Message) { Fail "--allow-user $($case.Sid) ($($case.Why)) was refused without saying why`n$($r.Text)" }
+  Ok "--allow-user is refused for $($case.Why)"
+}
+if (Test-Path $Data) { Fail 'a refused start left a data folder' }
+
 Section 'start (portable, owned by a helper process)'
 $log1 = Start-Portable $Daemon 'first'
 if (-not (Wait-Api)) { Fail "socketguard status --json does not answer over the portable pipe`n$(Daemon-Log $log1)" }
