@@ -27,7 +27,7 @@ none). The package builders wrap the stage and take nothing else:
 
 | Builder | Takes | Result |
 |---|---|---|
-| `installer/windows/build.ps1 -Version v -Stage dir -Out f.msi` | the three exes, `LICENSE`, `THIRD_PARTY_NOTICES.md`, every file of `third_party\` (a WiX fragment with one component per file is generated) | `C:\Program Files\SocketGuard\` with `third_party\` and `licenses\` |
+| `installer/windows/build.ps1 -Version v -Stage dir -Out f.msi` | the three exes, `LICENSE`, `THIRD_PARTY_NOTICES.md`, every file of `third_party\` (a WiX fragment with one component per file is generated) | `C:\Program Files\SocketGuard\` with `third_party\` and `licenses\`; the folder is fixed: no folder dialog, and `INSTALLFOLDER=` on the command line is ignored (ADR 0064) |
 | `installer/windows/portable.ps1 -Stage dir -Out f.zip` | the exes and `third_party\`; adds the `portable` marker, `LICENSE.txt`, `NOTICE.txt`, `README.txt` | the portable folder |
 | `installer/linux/build.sh version dir [outdir]` | the three programs, `LICENSE`, `THIRD_PARTY_NOTICES.md`, `third_party/` as a `type: tree` | deb and rpm; `/usr/lib/socketguard/third_party/`; the deb's postrm is generated here (below) |
 | `installer/macos/build.sh version dir [outdir]` | the same, into the pkg payload | `/Library/Application Support/SocketGuard/` (the daemon, the CLI and `third_party/`, root-owned, ADR 0065), the link `/usr/local/bin/socketguard` and the app |

@@ -23,7 +23,7 @@ db="/Library/Application Support/SocketGuard/socketguard.db"
 # The networks section (test/networks.sh): the installed files, and what it reads of the host.
 command -v jq >/dev/null 2>&1 || brew install jq
 SG="sudo /usr/local/bin/socketguard"
-TP=/usr/local/lib/socketguard/third_party
+TP="/Library/Application Support/SocketGuard/third_party"
 STATE="/Library/Application Support/SocketGuard"
 mn_daemon_log() {
     echo "--- the daemon's output (/var/log/socketguard-ci.log, last 150 lines) ---"
@@ -43,7 +43,7 @@ on_fail() {
     # launchd keeps the daemon's output nowhere: run it in the foreground for a few seconds.
     echo "--- the daemon in the foreground ---"
     sudo launchctl bootout "system/$label" 2>&1 || true
-    sudo /usr/local/bin/socketguard-daemon >/tmp/daemon-fg.log 2>&1 &
+    sudo "/Library/Application Support/SocketGuard/socketguard-daemon" >/tmp/daemon-fg.log 2>&1 &
     fgpid=$!
     sleep 8
     sudo kill "$fgpid" 2>/dev/null || true
@@ -59,12 +59,17 @@ cp /etc/pf.conf "${RUNNER_TEMP:-/tmp}/pf.conf.before"
 pf_state() { sudo pfctl -s info 2>&1 | awk '/^Status:/ {print $2}'; }
 pf_before=$(pf_state)
 
+# The IPv6 addresses SocketGuard could add, before the first install; every expect-absent below
+# fails if one is still on an interface afterwards (deploy/ci/footprint-check.sh, "Address baseline").
+addr_base="${RUNNER_TEMP:-/tmp}/sg-addrs-before.txt"
+bash "$here/deploy/ci/footprint-check.sh" --save-addresses "$addr_base"
+
 step "install"
 sudo installer -pkg "$pkg" -target / -verbose
 sudo launchctl print "system/$label" >/dev/null || fail "the launchd daemon is not loaded"
 wait_answers || fail "socketguard status does not answer"
 status_json="$(sudo /usr/local/bin/socketguard status --json)"; printf '%s\n' "${status_json:0:400}"
-test -x /usr/local/bin/socketguard-daemon && test -x /usr/local/bin/socketguard || fail "binaries missing"
+test -x "/Library/Application Support/SocketGuard/socketguard-daemon" && test -x /usr/local/bin/socketguard || fail "binaries missing"
 test -x /Applications/SocketGuard.app/Contents/MacOS/socketguard-ui || fail "the app is missing"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' /Applications/SocketGuard.app/Contents/Info.plist
 sudo pfctl -a socketguard -sr 2>&1 | head -5 || true
@@ -116,12 +121,12 @@ sudo chmod 644 "${RUNNER_TEMP:-/tmp}/setup-log.before-uninstall.json"
 if mn_account_created "${RUNNER_TEMP:-/tmp}/setup-log.before-uninstall.json"; then account_created=1; else account_created=0; fi
 
 step "uninstall (data kept)"
-sudo /usr/local/bin/socketguard-daemon uninstall --keep-data --yes
+sudo "/Library/Application Support/SocketGuard/socketguard-daemon" uninstall --keep-data --yes
 mn_children_stopped
 mn_data_kept
 
 step "uninstall --purge"
-sudo /usr/local/bin/socketguard-daemon uninstall --purge --yes
+sudo "/Library/Application Support/SocketGuard/socketguard-daemon" uninstall --purge --yes
 mn_data_purged
 mn_account_after_purge "$account_created"
 diff -u "${RUNNER_TEMP:-/tmp}/pf.conf.before" /etc/pf.conf || fail "/etc/pf.conf is not what it was before the install"
@@ -130,8 +135,8 @@ echo "pf before: $pf_before, after: $pf_after"
 [ "$pf_before" = "$pf_after" ] || fail "pf was $pf_before before the install and is $pf_after after the purge"
 
 step "the files a pkg cannot remove"
-sudo rm -rf /Applications/SocketGuard.app /usr/local/bin/socketguard-daemon /usr/local/bin/socketguard /usr/local/lib/socketguard /usr/local/share/doc/socketguard
-sudo $fp expect-absent
+sudo rm -rf /Applications/SocketGuard.app /usr/local/bin/socketguard "/Library/Application Support/SocketGuard" /usr/local/share/doc/socketguard
+sudo $fp expect-absent --baseline "$addr_base"
 sudo pkgutil --forget de.lhns.socketguard
 ! pkgutil --pkg-info de.lhns.socketguard >/dev/null 2>&1 || fail "the receipt is still there"
 echo OK

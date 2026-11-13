@@ -71,6 +71,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0061](0061-an-import-asks-before-it-changes-what-anyone-can-reach.md) | An Import Asks Before It Changes What Anyone Can Reach | Accepted (supersedes 0058 in part; refines 0047) |
 | [0062](0062-changes-are-planned-and-written-one-at-a-time-against-one-snapshot.md) | Changes Are Planned and Written One at a Time, Against One Snapshot | Accepted (refines 0045) |
 | [0063](0063-onion-services-from-before-the-ledger-are-not-adopted.md) | Onion Services from Before the Ledger Are Not Adopted | Accepted (refines 0055; removes the adoption of 0040) |
+| [0064](0064-the-msi-installs-to-a-fixed-folder.md) | The MSI Installs to a Fixed Folder | Accepted (refines 0050) |
 | [0065](0065-the-macos-programs-live-where-only-root-can-write.md) | The macOS Programs Live Where Only Root Can Write | Accepted (refines 0050) |
 
 ## Format
