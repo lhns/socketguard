@@ -262,7 +262,7 @@ mod tests {
         assert!(is_unique_violation(&err));
         assert!(!db.list_owned_addresses().await.unwrap()[0].retiring);
         // A dry run leaves nothing either.
-        db.try_writes(&[retire.clone()]).await.unwrap();
+        db.try_writes(std::slice::from_ref(&retire)).await.unwrap();
         assert!(!db.list_owned_addresses().await.unwrap()[0].retiring);
         db.apply_writes(&[retire]).await.unwrap();
         assert!(db.list_owned_addresses().await.unwrap()[0].retiring);
