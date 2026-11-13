@@ -14,6 +14,7 @@ HOST_ROOT="$(cd "$ROOT" && pwd -W 2>/dev/null || pwd)"
 TARGET_VOL=${TARGET_VOL:-sg-target}   # docker volume holding the Linux build
 DOCKERFILE=${DOCKERFILE:-Dockerfile}
 NODE_ARGS=${NODE_ARGS:-}
+NET_ARGS=${NET_ARGS:-}   # extra `docker network create` flags
 failures=0
 SKIPPED=0
 
@@ -88,7 +89,7 @@ build_binaries() {
 
 # start_nodes: the network and the nodes A and B, with the build mounted read-only.
 start_nodes() {
-  docker network create "$NET" >/dev/null || { fail "create network"; exit 1; }
+  docker network create $NET_ARGS "$NET" >/dev/null || { fail "create network"; exit 1; }
   local n
   for n in "$NODE_A" "$NODE_B"; do
     # NET_ADMIN: the daemon on A installs its nftables table like on any host.

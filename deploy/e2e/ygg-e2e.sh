@@ -15,6 +15,9 @@ NODE_B=sg-ygg-e2e-b
 GO_IMAGE=${GO_IMAGE:-golang:1.26}      # builds yggdrasil; fetch.sh needs git, curl, bash and Go
 PORT=8080
 OTHER_PORT=8081
+# Multicast discovery needs a link-local IPv6 address on an interface; Docker leaves IPv6 off on
+# a network created without --ipv6 (eth0 then has no fe80::), so the node would open no listener.
+NET_ARGS="--ipv6 --subnet fd00:5e:e2e::/64"
 NODE_ARGS="--device /dev/net/tun --init"   # tun for both nodes; pid 1 reaps what the daemon leaves
 STATE=/var/lib/sg                      # the daemon's state directory; Yggdrasil's is $STATE/yggdrasil
 TP=/target/debug/third_party           # beside the daemon binary, where it looks for them
@@ -132,6 +135,8 @@ step "turn LAN discovery on" A $SG networks lan-discovery ygg on -y
 step "the conf lists no MulticastInterfaces: the default applies" retry 30 lan_conf_default
 step "the status says LAN discovery is on" retry 30 lan_on
 step "the network comes back up after the restart" wait_up 90
+has_link_local() { docker exec "$NODE_A" sh -c "ip -6 addr show scope link | grep -q fe80"; }
+step "node A has a link-local IPv6 address (Yggdrasil's multicast listener binds to one)" has_link_local
 step "the yggdrasil process has a TCP listener while LAN discovery is on" retry 40 has_ygg_listener
 step "turn LAN discovery off" A $SG networks lan-discovery ygg off
 step "the conf turns multicast off again" retry 30 lan_conf_off
