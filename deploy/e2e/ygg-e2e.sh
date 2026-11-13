@@ -111,7 +111,11 @@ if ! wait_up 90; then
 fi
 pass "the network is up"
 # LAN discovery is off: the node opens no TCP port of its own (no multicast peering listener).
-no_ygg_listener() { ! docker exec "$NODE_A" sh -c "ss -ltnpH 2>/dev/null | grep -q yggdrasil"; }
+# The node runs as socketguard-net, the only process of that user. `ss -p` cannot name its sockets
+# (the container lacks CAP_SYS_PTRACE, so /proc/<pid>/fd of another user is unreadable: the
+# Process column stays empty), so the listener is told by its owner, `ss -e` (uid:<n>).
+ygg_listeners() { docker exec "$NODE_A" sh -c 'u=$(id -u socketguard-net); ss -ltneH 2>/dev/null | grep -E "uid:$u( |\$)"'; }
+no_ygg_listener() { ! ygg_listeners >/dev/null; }
 step "no listener of the yggdrasil process while LAN discovery is off" no_ygg_listener
 peers_connected() { net_json | jq -e '.[0].child.peers_connected >= 1' >/dev/null; }
 step "the status shows peers_connected >= 1" retry 40 peers_connected || exit 1
@@ -130,7 +134,7 @@ lan_conf_off() { docker exec "$NODE_A" cat $STATE/yggdrasil/yggdrasil.conf | jq 
 lan_status() { net_json | jq -e ".[0].child.lan_discovery == $1" >/dev/null; }
 lan_on() { lan_status true; }
 lan_off() { lan_status false; }
-has_ygg_listener() { docker exec "$NODE_A" sh -c "ss -ltnpH 2>/dev/null | grep -q yggdrasil"; }
+has_ygg_listener() { ygg_listeners >/dev/null; }
 step "turn LAN discovery on" A $SG networks lan-discovery ygg on -y
 step "the conf lists no MulticastInterfaces: the default applies" retry 30 lan_conf_default
 step "the status says LAN discovery is on" retry 30 lan_on
@@ -155,10 +159,6 @@ import socket, json, sys
 s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1])
 s.sendall(json.dumps({"request": "getMulticastInterfaces"}).encode())
 print(s.recv(65536).decode())' "$STATE/yggdrasil/run/admin.sock" 2>&1
-  echo "--- diagnostics: a second node as socketguard-net, -loglevel debug, 8 s ---"
-  docker exec "$NODE_A" sh -c 'echo "{\"IfName\": \"none\", \"AdminListen\": \"none\"}" >/tmp/diag.conf; chmod 644 /tmp/diag.conf
-    (timeout 8 "$0/yggdrasil/yggdrasil" -useconffile /tmp/diag.conf -user socketguard-net -loglevel debug 2>&1 | tail -n 40) &
-    sleep 5; ss -ltnup 2>&1; wait' "$TP" 2>&1
 }
 if ! retry 40 has_ygg_listener; then ygg_listener_diagnostics; fi
 step "the yggdrasil process has a TCP listener while LAN discovery is on" retry 5 has_ygg_listener
