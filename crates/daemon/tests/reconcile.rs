@@ -2231,7 +2231,26 @@ async fn a_loopback_only_ipv4_listener_gets_no_host_rule_and_says_why() {
         .unwrap();
     let app = h.app().await;
     let peer = h.peer("laptop", CredentialKind::Ip, "192.168.1.5").await;
-    let gid = h.grant(&app.id, Subject::Peer(peer)).await.grant.id;
+    let preview = h
+        .engine()
+        .await
+        .apply_changes(
+            &h.state,
+            &socketguard_core::api_types::ChangesRequest {
+                ops: vec![socketguard_core::api_types::ChangeOp::AddGrant {
+                    target: Target::App(app.id.clone()),
+                    scope: Scope::All,
+                    network_id: None,
+                    subject: Subject::Peer(peer.clone()),
+                    confirm_open: false,
+                }],
+                dry_run: true,
+            },
+        )
+        .await
+        .unwrap();
+    let created = h.grant(&app.id, Subject::Peer(peer)).await;
+    let gid = created.grant.id.clone();
     let views = h
         .engine()
         .await
@@ -2239,6 +2258,11 @@ async fn a_loopback_only_ipv4_listener_gets_no_host_rule_and_says_why() {
         .await
         .unwrap();
     let reach = &views.iter().find(|v| v.grant.id == gid).unwrap().reach[0];
+    // The preview of the same grant in a batch (a dry run) shows the reach listed later.
+    assert_eq!(
+        preview.changes[0].reach,
+        views.iter().find(|v| v.grant.id == gid).unwrap().reach
+    );
     assert_eq!(reach.reach, Reach::NotReachable);
     assert!(
         reach
