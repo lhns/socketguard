@@ -49,6 +49,21 @@ impl Catalog {
             .collect()
     }
 
+    /// Whether apps can join what `target` names through the patterns of a tag: the tag
+    /// itself, or a reservation that binds such a tag.
+    pub fn target_has_patterns(&self, target: &Target) -> bool {
+        let patterned = |id: &str| self.tag(id).is_some_and(|t| !t.patterns.is_empty());
+        match target {
+            Target::Tag(id) => patterned(id),
+            Target::Reservation(id) => self.reservation(id).is_some_and(|r| {
+                r.bindings.iter().any(|b| {
+                    matches!(&b.target, socketguard_core::BindingTarget::Tag { tag_id } if patterned(tag_id))
+                })
+            }),
+            Target::App(_) => false,
+        }
+    }
+
     pub fn reservation(&self, id: &str) -> Option<&Reservation> {
         self.reservations.iter().find(|r| r.id == id)
     }

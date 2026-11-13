@@ -782,7 +782,16 @@ impl Engine {
         };
         plan.activities
             .push(Self::grant_added_activity(&grant, &info));
-        let reach = plan.grant_reach(&grant);
+        let mut reach = plan.grant_reach(&grant);
+        if grant.subject == Subject::Anyone && plan.cat.target_has_patterns(&grant.target) {
+            // Said in the preview, so every frontend shows the same warning.
+            for r in reach.iter_mut() {
+                r.note = Some(match r.note.take() {
+                    Some(n) => format!("{n}; {PATTERN_NOTE}"),
+                    None => PATTERN_NOTE.to_string(),
+                });
+            }
+        }
         plan.changes_reach |= lets_in(&reach);
         plan.changes.push(BatchChange {
             change: Change {
@@ -843,6 +852,8 @@ impl Engine {
         Ok(())
     }
 }
+
+use socketguard_core::api_types::PATTERN_OPEN_NOTE as PATTERN_NOTE;
 
 /// Whether one of `grants` is a grant to Anyone.
 pub(super) fn any_to_anyone(grants: &[Grant]) -> bool {

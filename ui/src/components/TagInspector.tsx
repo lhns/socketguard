@@ -106,7 +106,7 @@ export function TagInspector({ tag, highlight, onCollapse, onClose }: { tag: Tag
 
       {asking && (
         <ConfirmDialog title="Open more apps to anyone?" confirmLabel="Save and open" onCancel={() => setAsking(false)} onConfirm={() => { setAsking(false); save(true); }}>
-          <p>This tag is open to anyone, and the new patterns put apps into it. Those apps will be open to anyone too.</p>
+          <p>This tag is open to anyone. Apps that match these patterns later will be open to Anyone without asking again.</p>
         </ConfirmDialog>
       )}
       {deleting && (

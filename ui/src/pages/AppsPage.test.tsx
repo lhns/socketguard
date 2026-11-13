@@ -544,7 +544,9 @@ describe("Tags", () => {
     await user.clear(patterns);
     await user.type(patterns, "ngi*{Enter}x");
     await user.click(within(inspector()).getByRole("button", { name: "Save tag" }));
-    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Save and open" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Apps that match these patterns later will be open to Anyone without asking again.");
+    await user.click(within(dialog).getByRole("button", { name: "Save and open" }));
     await waitFor(() => expect(calls).toBe(2));
     expect(d.last("update_tag")?.args).toMatchObject({ id: "t1", req: { patterns: ["ngi*", "x"], confirm_open: true } });
   });

@@ -66,6 +66,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0056](0056-only-socketguards-own-tor-and-yggdrasil.md) | Only SocketGuard's Own Tor and Yggdrasil | Accepted (supersedes 0040; 0048, 0051, 0052 in part) |
 | [0057](0057-one-staged-tree-and-one-purge-list.md) | One Staged Tree per System, One Purge List | Accepted (refines 0050, 0052; superseded in part by 0058) |
 | [0058](0058-freeing-a-reservations-rows-is-a-change-of-reach.md) | Freeing a Reservation's Rows Is a Change of Reach | Accepted (extends 0047; supersedes 0057 in part) |
+| [0059](0059-patterns-on-a-tag-open-to-anyone-are-confirmed.md) | Patterns on a Tag That Anyone Can Reach Are Confirmed | Accepted (refines 0043, 0047) |
 
 ## Format
 

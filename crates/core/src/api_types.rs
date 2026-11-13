@@ -420,6 +420,11 @@ pub enum ChangeItem {
     Binding,
 }
 
+/// What a grant to Anyone on a tag with patterns means (ADR 0059): said in previews, the UI
+/// and the CLI alike.
+pub const PATTERN_OPEN_NOTE: &str =
+    "Apps that match these patterns later will be open to Anyone without asking again.";
+
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Change {

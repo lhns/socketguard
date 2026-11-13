@@ -19,6 +19,7 @@ use socketguard_core::api_types::{
     error_code, ApplyRequest, ChangeOp, ChangesRequest, Enforcement, LockoutRiskInfo,
     MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation,
     NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest, UpdatePortGroup, UpdateTag,
+    PATTERN_OPEN_NOTE,
 };
 use socketguard_core::{
     ActivityKind, ActivityQuery, ActivityRecord, App, BackendConfig, BindingTarget, CredentialKind,
@@ -775,6 +776,38 @@ async fn tag_members(c: &Ctx, texts: &[String]) -> Result<Vec<TagMember>> {
     Ok(out)
 }
 
+/// Ask before setting patterns on a tag that has a grant to anyone (ADR 0059).
+fn confirm_patterns_open(label: &str) -> Result<()> {
+    prompt::Stdin.confirm_or_yes(
+        false,
+        &format!("Tag {label} is open to anyone. {PATTERN_OPEN_NOTE} Continue?"),
+        &format!("tag {label} is open to anyone. {PATTERN_OPEN_NOTE} Repeat with --yes to confirm"),
+    )
+}
+
+/// The sentence to add to the question of a grant to anyone on `targets` when apps can join
+/// them by a pattern (a tag with patterns, or a reservation that binds one).
+async fn pattern_warning(c: &Ctx, targets: &[Target]) -> Result<String> {
+    let tags = c.client.list_tags().await?;
+    let reservations = c.client.list_reservations().await?;
+    let patterned = |id: &str| tags.iter().any(|t| t.id == id && !t.patterns.is_empty());
+    let hit = targets.iter().any(|t| match t {
+        Target::Tag(id) => patterned(id),
+        Target::Reservation(id) => reservations.iter().any(|r| {
+            r.reservation.id == *id
+                && r.reservation.bindings.iter().any(
+                    |b| matches!(&b.target, BindingTarget::Tag { tag_id } if patterned(tag_id)),
+                )
+        }),
+        Target::App(_) => false,
+    });
+    Ok(if hit {
+        format!(" {PATTERN_OPEN_NOTE}")
+    } else {
+        String::new()
+    })
+}
+
 /// Ask before apps join a tag that has a grant to anyone, which opens them.
 fn confirm_tag_open(label: &str) -> Result<()> {
     prompt::Stdin.confirm_or_yes(
@@ -856,7 +889,7 @@ async fn tags(c: &Ctx, cmd: TagsCmd) -> Result<()> {
             };
             let saved = match c.client.update_tag(&tag.id, &req).await {
                 Err(e) if e.is_confirmation_required() => {
-                    confirm_tag_open(&tag.label)?;
+                    confirm_patterns_open(&tag.label)?;
                     req.confirm_open = true;
                     c.client.update_tag(&tag.id, &req).await?
                 }
@@ -1479,11 +1512,13 @@ async fn grant(c: &Ctx, a: GrantArgs) -> Result<()> {
                 [Some(n)] => Some(n.as_str()),
                 _ => None,
             };
+            let targets: Vec<Target> = spec.targets.iter().map(|t| t.0.clone()).collect();
+            let extra = pattern_warning(c, &targets).await?;
             prompt::Stdin.confirm_or_yes(
                 false,
-                &render::open_question(&spec.names(), net),
+                &format!("{}{extra}", render::open_question(&spec.names(), net)),
                 &format!(
-                    "this opens {} to every host that can reach it; repeat with --yes to confirm",
+                    "this opens {} to every host that can reach it;{extra} repeat with --yes to confirm",
                     spec.names()
                 ),
             )?;
@@ -1516,11 +1551,15 @@ async fn grant_one(c: &Ctx, a: &GrantArgs, spec: GrantSpec) -> Result<()> {
     };
     let created = match c.client.create_grant(&req).await {
         Err(e) if e.is_confirmation_required() => {
+            let extra = pattern_warning(c, std::slice::from_ref(&req.target)).await?;
             prompt::Stdin.confirm_or_yes(
                 false,
-                &render::open_question(&text, req.network_id.as_deref()),
                 &format!(
-                    "this opens {text} to every host that can reach it; repeat with --yes to confirm"
+                    "{}{extra}",
+                    render::open_question(&text, req.network_id.as_deref())
+                ),
+                &format!(
+                    "this opens {text} to every host that can reach it;{extra} repeat with --yes to confirm"
                 ),
             )?;
             req.confirm_open = true;

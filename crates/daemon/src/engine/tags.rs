@@ -117,15 +117,14 @@ impl Engine {
         let mut tag = self.get_tag(state, id).await?;
         let label = label.map(|l| Self::clean_label(l, "tag")).transpose()?;
         let patterns = patterns.map(clean_patterns);
-        if let (Some(p), false) = (&patterns, confirm_open) {
-            // Apps that would join through the new patterns are opened by a grant to Anyone.
-            let mut probe = tag.clone();
-            probe.patterns = p.clone();
-            let apps = state.db.list_apps().await?;
-            if !probe.pattern_candidates(&apps).is_empty() {
-                let cat = crate::catalog::Catalog::load(state).await?;
-                ensure_confirmed(any_to_anyone(&cat.grants_through_tag(id)), confirm_open)?;
-            }
+        if patterns
+            .as_ref()
+            .is_some_and(|p| !p.is_empty() && *p != tag.patterns)
+        {
+            // Setting patterns on a tag that Anyone can reach opens every app that matches
+            // later, whether or not one matches today (ADR 0059).
+            let cat = crate::catalog::Catalog::load(state).await?;
+            ensure_confirmed(any_to_anyone(&cat.grants_through_tag(id)), confirm_open)?;
         }
         if !state
             .db
@@ -274,6 +273,26 @@ impl Engine {
         match state.db.auto_tag_app(app).await {
             Ok(joined) if !joined.is_empty() => {
                 self.emit(state, DaemonEvent::TagsChanged);
+                // A tag that Anyone can reach opens the app by its pattern: say so.
+                if let Ok(cat) = crate::catalog::Catalog::load(state).await {
+                    for tag_id in &joined {
+                        let Some(tag) = cat.tag(tag_id) else { continue };
+                        if any_to_anyone(&cat.grants_through_tag(tag_id)) {
+                            self.record(
+                                state,
+                                NewActivity::new(
+                                    ActivityKind::TagChanged,
+                                    format!(
+                                        "{} was opened to Anyone through the pattern of tag {}",
+                                        app.name, tag.label
+                                    ),
+                                )
+                                .app(&app.id),
+                            )
+                            .await;
+                        }
+                    }
+                }
             }
             Ok(_) => {}
             Err(e) => warn!("Could not tag the new app {}: {e:#}", app.name),

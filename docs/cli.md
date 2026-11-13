@@ -84,7 +84,8 @@ Credential kinds for `--cred`: `ygg_key`, `ygg_addr`, `ygg_subnet`, `ip`, `ip_su
 ```
 tags list | show T | rename T NEW | rm T [-y]
 tags add dev web:80 --match 'python*' --match node     members and/or globs on process name or path
-tags patterns dev 'python*' [-y]                       replace the patterns (none: clear)
+tags patterns dev 'python*' [-y]                       replace the patterns (none: clear); asks on a tag open to anyone,
+                                                        also when no app matches yet
 tags members add dev redis [-y]                        an app, one port or web:port-group=passive
 tags members rm dev redis [-y]                         a pattern-matched app stays out afterwards
 
