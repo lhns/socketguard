@@ -498,7 +498,8 @@ impl Engine {
             };
             for (addr, network_id) in wanted {
                 if present.contains(&addr) {
-                    // Already there (e.g. from before ownership was recorded): own it.
+                    // Already there without a record (put there by hand, say): own it, so it is
+                    // removed like any other when no grant calls for it.
                     if !active.contains(&addr) {
                         if let Err(e) = state
                             .db
