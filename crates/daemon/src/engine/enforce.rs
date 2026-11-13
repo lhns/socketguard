@@ -463,10 +463,11 @@ impl Engine {
             .into_iter()
             .filter(|a| a.network_id == backend_id)
             .collect();
-        if let Err(e) = self.retire_addresses(state, &existing).await {
-            error!("Could not record the addresses of '{backend_id}' as retiring: {e}");
-        }
-        let deleted = match state.db.delete_addresses_by_network(backend_id).await {
+        let deleted = match state
+            .db
+            .delete_addresses_by_network_with(backend_id, &self.retire_writes(&existing))
+            .await
+        {
             Ok(d) => d,
             Err(e) => {
                 error!("Failed to delete addresses for backend '{backend_id}': {e}");

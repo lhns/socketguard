@@ -106,7 +106,7 @@ pub enum Write {
     },
 }
 
-async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
+pub(super) async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
     match w {
         Write::InsertPeer(p) => insert_peer_in(tx, p).await?,
         Write::InsertGroup(g) => {

@@ -308,7 +308,16 @@ impl Database {
 
     /// Delete an app; its ports, addresses and grants go with it. False if unknown.
     pub async fn delete_app(&self, id: &str) -> Result<bool> {
+        self.delete_app_with(id, &[]).await
+    }
+
+    /// [`Database::delete_app`] after `before` (the retiring of its addresses), in one
+    /// transaction: if the delete fails, `before` is rolled back with it.
+    pub async fn delete_app_with(&self, id: &str, before: &[Write]) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
+        for w in before {
+            tags::apply_write(&mut tx, w).await?;
+        }
         sqlx::query("DELETE FROM grants WHERE target_kind = 'app' AND target_id = ?")
             .bind(id)
             .execute(&mut *tx)
@@ -510,11 +519,27 @@ impl Database {
     }
 
     pub async fn update_address_ipv6(&self, id: &str, addr: Ipv6Addr) -> Result<bool> {
+        self.update_address_ipv6_with(id, addr, &[]).await
+    }
+
+    /// [`Database::update_address_ipv6`] after `before` (retiring the old address), in one
+    /// transaction.
+    pub async fn update_address_ipv6_with(
+        &self,
+        id: &str,
+        addr: Ipv6Addr,
+        before: &[Write],
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        for w in before {
+            tags::apply_write(&mut tx, w).await?;
+        }
         let r = sqlx::query("UPDATE addresses SET locator_kind = 'ipv6', locator = ? WHERE id = ?")
             .bind(addr.to_string())
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -529,7 +554,20 @@ impl Database {
     /// Delete every address of a network, returning them (the caller takes them off the
     /// interface).
     pub async fn delete_addresses_by_network(&self, network_id: &str) -> Result<Vec<Address>> {
+        self.delete_addresses_by_network_with(network_id, &[]).await
+    }
+
+    /// [`Database::delete_addresses_by_network`] after `before` (retiring them), in one
+    /// transaction.
+    pub async fn delete_addresses_by_network_with(
+        &self,
+        network_id: &str,
+        before: &[Write],
+    ) -> Result<Vec<Address>> {
         let mut tx = self.pool.begin().await?;
+        for w in before {
+            tags::apply_write(&mut tx, w).await?;
+        }
         let rows = sqlx::query(&format!("{ADDRESS_SELECT} WHERE network_id = ?"))
             .bind(network_id)
             .fetch_all(&mut *tx)
@@ -1597,6 +1635,85 @@ mod tests {
         assert_eq!(protect, db.protect_host().await.unwrap());
         assert_eq!(owned.len(), 1);
         assert_eq!(db.read_catalog().await.unwrap().peers, cat.peers);
+    }
+
+    /// The owned row of `addr`, claimed and not yet retiring, and the write that retires it.
+    async fn claimed(db: &Database, addr: &str) -> Write {
+        let addr: Ipv6Addr = addr.parse().unwrap();
+        db.claim_address(addr, "ygg0", Some("ygg")).await.unwrap();
+        Write::RetireAddress {
+            addr,
+            interface: "ygg0".into(),
+            network_id: Some("ygg".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failing_app_delete_leaves_the_retired_address_active() {
+        let db = db().await;
+        db.insert_app(&app("a1")).await.unwrap();
+        let retire = claimed(&db, "300:1::1").await;
+        db.exec_raw(
+            "CREATE TRIGGER boom BEFORE DELETE ON apps BEGIN SELECT RAISE(ABORT, 'x'); END",
+        )
+        .await
+        .unwrap();
+        assert!(db.delete_app_with("a1", &[retire.clone()]).await.is_err());
+        assert!(!db.list_owned_addresses().await.unwrap()[0].retiring);
+        db.exec_raw("DROP TRIGGER boom").await.unwrap();
+        assert!(db.delete_app_with("a1", &[retire]).await.unwrap());
+        assert!(db.list_owned_addresses().await.unwrap()[0].retiring);
+    }
+
+    #[tokio::test]
+    async fn a_failing_network_delete_leaves_the_retired_address_active() {
+        let db = db().await;
+        db.insert_app(&app("a1")).await.unwrap();
+        db.insert_address(&address("a1", "ygg", "300:1::1"))
+            .await
+            .unwrap();
+        let retire = claimed(&db, "300:1::1").await;
+        db.exec_raw(
+            "CREATE TRIGGER boom BEFORE DELETE ON addresses BEGIN SELECT RAISE(ABORT, 'x'); END",
+        )
+        .await
+        .unwrap();
+        assert!(db
+            .delete_addresses_by_network_with("ygg", &[retire.clone()])
+            .await
+            .is_err());
+        assert!(!db.list_owned_addresses().await.unwrap()[0].retiring);
+        db.exec_raw("DROP TRIGGER boom").await.unwrap();
+        db.delete_addresses_by_network_with("ygg", &[retire])
+            .await
+            .unwrap();
+        assert!(db.list_owned_addresses().await.unwrap()[0].retiring);
+    }
+
+    #[tokio::test]
+    async fn a_failing_address_rewrite_leaves_the_retired_address_active() {
+        let db = db().await;
+        db.insert_app(&app("a1")).await.unwrap();
+        let a = address("a1", "ygg", "300:1::1");
+        db.insert_address(&a).await.unwrap();
+        let retire = claimed(&db, "300:1::1").await;
+        let new: Ipv6Addr = "300:2::1".parse().unwrap();
+        db.exec_raw(
+            "CREATE TRIGGER boom BEFORE UPDATE ON addresses BEGIN SELECT RAISE(ABORT, 'x'); END",
+        )
+        .await
+        .unwrap();
+        assert!(db
+            .update_address_ipv6_with(&a.id, new, &[retire.clone()])
+            .await
+            .is_err());
+        assert!(!db.list_owned_addresses().await.unwrap()[0].retiring);
+        db.exec_raw("DROP TRIGGER boom").await.unwrap();
+        assert!(db
+            .update_address_ipv6_with(&a.id, new, &[retire])
+            .await
+            .unwrap());
+        assert!(db.list_owned_addresses().await.unwrap()[0].retiring);
     }
 
     #[tokio::test]

@@ -28,26 +28,7 @@ use tracing::{debug, error, info, warn};
 const ADD_CONCURRENCY: usize = 4;
 
 impl Engine {
-    /// Write ahead of taking `addresses` off their interfaces: mark them retiring. They
-    /// stay in the ruleset's managed scope until [`Engine::sweep_owned`] has confirmed
-    /// their removal, so no address is ever on an interface without deny rules.
-    pub(super) async fn retire_addresses(
-        &self,
-        state: &AppState,
-        addresses: &[Address],
-    ) -> anyhow::Result<()> {
-        for a in addresses {
-            if let (Some(ip), Some(iface)) = (a.locator.ipv6(), self.interface_of(&a.network_id)) {
-                state
-                    .db
-                    .retire_address(ip, &iface, Some(&a.network_id))
-                    .await?;
-            }
-        }
-        Ok(())
-    }
-
-    /// The writes that retire `addresses` (the same filter as [`Engine::retire_addresses`]),
+    /// The writes that retire `addresses` (owned addresses of IP networks that have an interface),
     /// for a batch to put first in its transaction: if the batch fails, nothing is retiring.
     /// Taking them off their networks (`remove_app_locators`) waits for the commit.
     pub(super) fn retire_writes(&self, addresses: &[Address]) -> Vec<Write> {
@@ -420,18 +401,18 @@ impl Engine {
                     placed = Some((owned, wanted));
                 }
                 let (owned, wanted) = placed.as_ref().expect("looked up above");
-                // Write ahead: the old address is retiring before the row stops naming it.
-                if owned.contains(&old) {
-                    if let Err(e) = state
-                        .db
-                        .retire_address(old, &iface, Some(network_id.as_str()))
-                        .await
-                    {
-                        error!("Failed to record {old} as retiring: {e}");
-                        continue;
-                    }
-                }
-                match state.db.update_address_ipv6(&a.id, new).await {
+                // Write ahead: the old address is retiring before the row stops naming it,
+                // in the same transaction.
+                let retire = if owned.contains(&old) {
+                    vec![Write::RetireAddress {
+                        addr: old,
+                        interface: iface.to_string(),
+                        network_id: Some(network_id.clone()),
+                    }]
+                } else {
+                    vec![]
+                };
+                match state.db.update_address_ipv6_with(&a.id, new, &retire).await {
                     Ok(_) if wanted.contains(&old) => {
                         moves.push((iface.to_string(), network_id.clone(), new))
                     }

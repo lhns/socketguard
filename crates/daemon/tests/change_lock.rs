@@ -110,6 +110,7 @@ const CASES: &[&str] = &[
     "detach_port_group",
     "generate_tor_key",
     "set_protect_host",
+    "delete_app",
 ];
 
 /// One call of the named method, on the fixture. Results are not looked at: the test is

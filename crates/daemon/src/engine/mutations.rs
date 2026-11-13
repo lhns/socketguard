@@ -19,6 +19,7 @@ impl Engine {
     /// Forget an app: its addresses leave the interfaces, then it and its grants go. It
     /// reappears as a new app the next time it listens.
     pub async fn delete_app(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
+        let change = self.change_lock.lock().await;
         let app = state
             .db
             .get_app(id)
@@ -32,12 +33,17 @@ impl Engine {
             .into_iter()
             .filter(|a| a.app_id.as_deref() == Some(id))
             .collect();
-        self.retire_addresses(state, &addresses).await?;
-        self.remove_app_locators(state, &addresses).await;
+        // The addresses are retired in the transaction that deletes the app, and leave their
+        // networks once it has committed (as in a batch).
         {
             let _apps = self.apps_lock.lock().await;
-            state.db.delete_app(id).await?;
+            state
+                .db
+                .delete_app_with(id, &self.retire_writes(&addresses))
+                .await?;
         }
+        drop(change);
+        self.remove_app_locators(state, &addresses).await;
         let applied = self.apply_and_ensure(state).await;
         self.sweep_owned(state).await;
         let activity = NewActivity::new(
