@@ -57,6 +57,14 @@ state_nft_table() { # family output
     else echo ABSENT; fi
 }
 
+# nft list tables: `table inet socketguard`, one line per table of every family. Any table whose
+# name contains socketguard counts, in any family (a renamed or second table is a leftover too).
+state_nft_tables() {
+    if denied "$1"; then echo UNKNOWN
+    elif grep -Eqi '^table [a-z0-9]+ .*socketguard' <<<"$1"; then echo PRESENT
+    else echo ABSENT; fi
+}
+
 # getent group socketguard -> `socketguard:x:998:`
 state_group_getent() { grep -Eq '^socketguard:' <<<"$1" && echo PRESENT || echo ABSENT; }
 
@@ -161,52 +169,81 @@ add_ledger_item() { # ledger text, interface output
 
 # ---- live collection (only reached outside --self-test) ------------------------------------
 
-run() { command -v "$1" >/dev/null 2>&1 && "$@" 2>&1 || true; }
+# probe STATE-FN NAME [ARG...] -- CMD...: runs CMD and records STATE-FN ARG... OUTPUT as NAME.
+# A tool that is not installed is UNKNOWN, never ABSENT: empty output would read as "nothing
+# there" and hide a leftover. Every tool used here exists on the system it is used on (nft, ip,
+# getent, ps, find on Linux; pfctl, dscl, ps, find on macOS), so a missing one is a broken test
+# machine. The only by-design gap is the split by system itself: nft, ip and getent are never
+# asked on macOS, pfctl and dscl never on Linux.
+probe() {
+    local fn=$1 name=$2 args=()
+    shift 2
+    while [ "$1" != -- ]; do args+=("$1"); shift; done
+    shift
+    if ! command -v "$1" >/dev/null 2>&1; then rec UNKNOWN "$name" "$1 is not installed"; return; fi
+    rec "$("$fn" ${args[@]+"${args[@]}"} "$("$@" 2>&1 || true)")" "$name"
+}
 
 # The processes and the shipped files, the same on both systems.
 add_network_items() { # third_party candidate directories...
-    local ps_out; ps_out=$(run ps -eo args)
-    rec "$(state_child_ps tor "$ps_out")" child-tor
-    rec "$(state_child_ps yggdrasil "$ps_out")" child-yggdrasil
-    rec "$(state_helper_ps "$ps_out")" child-obfs4-helper
-    local dirs=() d
+    local ps_out n
+    if command -v ps >/dev/null 2>&1; then
+        ps_out=$(ps -eo args 2>&1 || true)
+        rec "$(state_child_ps tor "$ps_out")" child-tor
+        rec "$(state_child_ps yggdrasil "$ps_out")" child-yggdrasil
+        rec "$(state_helper_ps "$ps_out")" child-obfs4-helper
+    else
+        for n in child-tor child-yggdrasil child-obfs4-helper; do rec UNKNOWN "$n" "ps is not installed"; done
+    fi
+    local dirs=()
     [ -n "${SOCKETGUARD_THIRD_PARTY:-}" ] && dirs+=("$SOCKETGUARD_THIRD_PARTY")
     dirs+=("$@")
     rec "$(state_listed "$(existing "${dirs[@]}")" '/third_party$')" third-party-files
 }
-existing() { local p; for p in "$@"; do [ -e "$p" ] && printf '%s\n' "$p"; done; return 0; }
+# Existing paths, a dangling symlink included (the enable link of a unit points into /etc or /usr
+# and outlives the unit file it names).
+existing() { local p; for p in "$@"; do if [ -e "$p" ] || [ -L "$p" ]; then printf '%s\n' "$p"; fi; done; return 0; }
+# find is part of the base system; without it the data files cannot be listed, so say UNKNOWN.
+need_find() { command -v find >/dev/null 2>&1 || rec UNKNOWN tool-find "find is not installed"; }
 
 collect_linux() {
     local paths
+    need_find
     paths=$(existing /lib/systemd/system/socketguard.service /usr/lib/systemd/system/socketguard.service \
-                     /etc/systemd/system/socketguard.service /etc/socketguard /var/lib/socketguard \
-                     /run/socketguard.sock
+                     /etc/systemd/system/socketguard.service \
+                     /etc/systemd/system/multi-user.target.wants/socketguard.service \
+                     /etc/socketguard /var/lib/socketguard /run/socketguard.sock
             find /etc/socketguard /var/lib/socketguard -mindepth 1 -maxdepth 1 2>/dev/null)
-    rec "$(state_nft_table inet "$(run nft list table inet socketguard)")" nft-table-inet
+    probe state_nft_table nft-table-inet inet -- nft list table inet socketguard
+    probe state_nft_tables nft-tables-socketguard -- nft list tables
     rec "$(state_listed "$paths" 'systemd/system/socketguard\.service$')" systemd-unit
-    rec "$(state_group_getent "$(run getent group socketguard)")" group
+    rec "$(state_listed "$paths" 'multi-user\.target\.wants/socketguard\.service$')" systemd-enable-link
+    probe state_group_getent group -- getent group socketguard
     rec "$(state_listed "$paths" '^/etc/socketguard$')" config-dir
     rec "$(state_listed "$paths" '^/var/lib/socketguard$')" data-dir
     add_file_items "$paths"
     rec "$(state_listed "$paths" '^/run/socketguard\.sock$')" socket
-    rec "$(state_account_getent "$(run getent passwd socketguard-net)")" account-socketguard-net
-    rec "$(state_link_ip "$(run ip -o link show sgygg0)")" adapter-sgygg0
+    probe state_account_getent account-socketguard-net -- getent passwd socketguard-net
+    probe state_link_ip adapter-sgygg0 -- ip -o link show sgygg0
     add_network_items /usr/bin/third_party /usr/local/bin/third_party /usr/lib/socketguard/third_party /opt/socketguard/third_party
     REQUIRED=" systemd-unit group config-dir "
 }
 
 collect_macos() {
     local paths d="/Library/Application Support/SocketGuard"
+    need_find
     paths=$(existing /Library/LaunchDaemons/de.lhns.socketguard.plist "$d" /var/run/socketguard.sock
             find "$d" -mindepth 1 -maxdepth 1 2>/dev/null)
-    rec "$(state_pf_anchor_rules "$(run pfctl -a socketguard -sr)")" pf-anchor-rules
-    rec "$(state_pf_conf_line "$(cat /etc/pf.conf 2>/dev/null)")" pf-conf-anchor-line
+    probe state_pf_anchor_rules pf-anchor-rules -- pfctl -a socketguard -sr
+    # /etc/pf.conf ships with macOS; unreadable is UNKNOWN, not "no anchor line".
+    if [ -r /etc/pf.conf ]; then rec "$(state_pf_conf_line "$(cat /etc/pf.conf)")" pf-conf-anchor-line
+    else rec UNKNOWN pf-conf-anchor-line "/etc/pf.conf is not readable"; fi
     rec "$(state_listed "$paths" 'LaunchDaemons/de\.lhns\.socketguard\.plist$')" launchd-plist
-    rec "$(state_group_dscl "$(run dscl . -read /Groups/socketguard)")" group
+    probe state_group_dscl group -- dscl . -read /Groups/socketguard
     rec "$(state_listed "$paths" '^/Library/Application Support/SocketGuard$')" config-dir
     add_file_items "$paths"
     rec "$(state_listed "$paths" '^/var/run/socketguard\.sock$')" socket
-    rec "$(state_account_dscl "$(run dscl . -read /Users/socketguard-net)")" account-socketguard-net
+    probe state_account_dscl account-socketguard-net -- dscl . -read /Users/socketguard-net
     add_network_items /usr/local/bin/third_party /usr/local/lib/socketguard/third_party "$d/third_party"
     REQUIRED=" launchd-plist group config-dir "
 }
@@ -255,6 +292,34 @@ self_test() {
     expect nft-empty ABSENT "$(state_nft_table ip6 "")"
     expect nft-wrong-family ABSENT "$(state_nft_table ip6 "$nft_present")"
     expect nft-denied UNKNOWN "$(state_nft_table inet "$nft_denied")"
+
+    # every table of every family: any name containing socketguard is a leftover
+    expect nft-tables-inet PRESENT "$(state_nft_tables $'table inet filter\ntable inet socketguard')"
+    expect nft-tables-other-family PRESENT "$(state_nft_tables $'table ip filter\ntable ip6 socketguard')"
+    expect nft-tables-renamed PRESENT "$(state_nft_tables $'table netdev my_SocketGuard_old')"
+    expect nft-tables-none ABSENT "$(state_nft_tables $'table inet filter\ntable ip nat')"
+    expect nft-tables-empty ABSENT "$(state_nft_tables '')"
+    expect nft-tables-denied UNKNOWN "$(state_nft_tables 'Operation not permitted (you must be root)')"
+
+    # a tool that is not installed is UNKNOWN, never ABSENT
+    ITEMS=(); probe state_group_getent group -- sg-no-such-tool-xyz group socketguard
+    expect missing-tool-is-unknown "UNKNOWN|group|sg-no-such-tool-xyz is not installed" "${ITEMS[0]}"
+    ITEMS=(); probe state_group_getent group -- echo ""
+    expect present-tool-empty-output-is-absent "ABSENT|group|" "${ITEMS[0]}"
+    ITEMS=(); probe state_nft_table nft-table-inet inet -- echo "table inet socketguard {"
+    expect probe-passes-state-args PRESENT "${ITEMS[0]%%|*}"
+    ITEMS=(); rec UNKNOWN nft-table-inet "nft is not installed"
+    evaluate absent >/dev/null; expect verdict-missing-tool-fails 1 $?
+
+    # the enable symlink counts even when it dangles
+    local sgtmp; sgtmp=$(mktemp -d)
+    ln -s "$sgtmp/no-such-unit" "$sgtmp/socketguard.service"
+    expect existing-dangling-symlink "$sgtmp/socketguard.service" "$(existing "$sgtmp/socketguard.service" "$sgtmp/none")"
+    expect enable-link-regex PRESENT "$(state_listed "$(existing "$sgtmp/socketguard.service")" 'socketguard\.service$')"
+    expect enable-link-regex-wants PRESENT "$(state_listed $'/etc/systemd/system/multi-user.target.wants/socketguard.service' 'multi-user\.target\.wants/socketguard\.service$')"
+    expect enable-link-regex-other-unit ABSENT "$(state_listed $'/etc/systemd/system/multi-user.target.wants/other.service' 'multi-user\.target\.wants/socketguard\.service$')"
+    expect unit-regex-ignores-wants ABSENT "$(state_listed $'/etc/systemd/system/multi-user.target.wants/socketguard.service' 'systemd/system/socketguard\.service$')"
+    rm -rf "$sgtmp"
 
     expect getent-present PRESENT "$(state_group_getent 'socketguard:x:998:alice')"
     expect getent-absent ABSENT "$(state_group_getent '')"

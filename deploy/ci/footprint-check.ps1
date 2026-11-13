@@ -80,14 +80,14 @@ function Get-ServiceState([string]$Out) {
     if ($Out -match 'FAILED 1060') { return 'ABSENT' }
     if (Test-Denied $Out) { return 'UNKNOWN' }
     if ($Out -match '(?m)^SERVICE_NAME:\s*SocketGuard\s*$') { return 'PRESENT' }
-    return 'ABSENT'
+    return 'UNKNOWN'
 }
 
 # net localgroup "SocketGuard Users": missing is system error 1376 / "does not exist".
 function Get-GroupState([string]$Out) {
     if ($Out -match '1376|does not exist') { return 'ABSENT' }
     if ($Out -match '(?m)SocketGuard Users') { return 'PRESENT' }
-    return 'ABSENT'
+    return 'UNKNOWN'
 }
 
 # Executable paths of the running processes: one of the program `$Name` (tor, yggdrasil) from a
@@ -119,6 +119,8 @@ function Get-AdapterState($Names) {
 function Get-WintunState([string]$Out, [bool]$PresentBefore) {
     if ($PresentBefore) { return 'ABSENT' }
     if ($Out -match '(?im)^[^:\r\n]+:\s*wintun\.inf\s*$') { return 'PRESENT' }
+    # A failed or refused pnputil prints nothing useful; that is not "no Wintun".
+    if ($Out -notmatch '\S' -or (Test-Denied $Out)) { return 'UNKNOWN' }
     return 'ABSENT'
 }
 
@@ -244,7 +246,10 @@ function Invoke-SelfTest {
     $grpGone = "System error 1376 has occurred.`n`nThe specified local group does not exist.`n"
     Assert-Equal 'group-present' 'PRESENT' (Get-GroupState $grpUp)
     Assert-Equal 'group-absent' 'ABSENT' (Get-GroupState $grpGone)
-    Assert-Equal 'group-empty' 'ABSENT' (Get-GroupState '')
+    Assert-Equal 'group-empty-is-unknown' 'UNKNOWN' (Get-GroupState '')
+    Assert-Equal 'group-garbled-is-unknown' 'UNKNOWN' (Get-GroupState 'The service has not been started.')
+    Assert-Equal 'service-empty-is-unknown' 'UNKNOWN' (Get-ServiceState '')
+    Assert-Equal 'service-garbled-is-unknown' 'UNKNOWN' (Get-ServiceState 'sc.exe is not recognized')
 
     $dir = 'C:\ProgramData\SocketGuard'
     $files = @($dir, "$dir\socketguard.json", "$dir\socketguard.db-wal", "$dir\socketguard.tmp-9-abc", "$dir\setup-log.json")
@@ -270,6 +275,9 @@ function Invoke-SelfTest {
     Assert-Equal 'wintun-present' 'PRESENT' (Get-WintunState $enum $false)
     Assert-Equal 'wintun-shared' 'ABSENT' (Get-WintunState $enum $true)
     Assert-Equal 'wintun-absent' 'ABSENT' (Get-WintunState "Published Name:     oem3.inf`nOriginal Name:      prnms009.inf`n" $false)
+    Assert-Equal 'wintun-empty-output-is-unknown' 'UNKNOWN' (Get-WintunState '' $false)
+    Assert-Equal 'wintun-denied-is-unknown' 'UNKNOWN' (Get-WintunState 'Access is denied.' $false)
+    Assert-Equal 'wintun-shared-needs-no-output' 'ABSENT' (Get-WintunState '' $true)
     Assert-Equal 'wintun-translated-labels' 'PRESENT' (Get-WintunState "Originalname:       wintun.inf`n" $false)
     $dirs = @("$dir\tor", "$dir\yggdrasil", "$dir\setup-log.json")
     Assert-Equal 'dir-tor' 'PRESENT' (Get-ListedState $dirs '\\tor$')
@@ -358,12 +366,20 @@ function Invoke-Live {
     $items += New-Item2 (Get-ListedState $pipes '(?i)\\socketguard-portable$') 'named-pipe-portable'
 
     # Tor and Yggdrasil (ADR 0052).
-    $exes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object { $_.ExecutablePath } | Where-Object { $_ })
-    $items += New-Item2 (Get-ChildProcessState $exes 'tor') 'child-tor'
-    $items += New-Item2 (Get-ChildProcessState $exes 'yggdrasil') 'child-yggdrasil'
-    $items += New-Item2 (Get-HelperProcessState $exes) 'child-obfs4-helper'
-    $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-    $items += New-Item2 (Get-AdapterState $adapters) 'adapter-SocketGuard'
+    # A query that fails is UNKNOWN, never an empty list (which would read as ABSENT).
+    $exes = $null
+    try { $exes = @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object { $_.ExecutablePath } | Where-Object { $_ }) } catch { }
+    if ($null -ne $exes) {
+        $items += New-Item2 (Get-ChildProcessState $exes 'tor') 'child-tor'
+        $items += New-Item2 (Get-ChildProcessState $exes 'yggdrasil') 'child-yggdrasil'
+        $items += New-Item2 (Get-HelperProcessState $exes) 'child-obfs4-helper'
+    } else {
+        foreach ($n in 'child-tor', 'child-yggdrasil', 'child-obfs4-helper') { $items += New-Item2 'UNKNOWN' $n 'Win32_Process query failed' }
+    }
+    $adapters = $null
+    try { $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | ForEach-Object { $_.Name }) } catch { }
+    if ($null -ne $adapters) { $items += New-Item2 (Get-AdapterState $adapters) 'adapter-SocketGuard' }
+    else { $items += New-Item2 'UNKNOWN' 'adapter-SocketGuard' 'Get-NetAdapter failed' }
     $items += New-Item2 (Get-WintunState ((& pnputil.exe /enum-drivers 2>&1) | Out-String) $WintunPresentBefore.IsPresent) 'wintun-driver'
     $shipped = @($env:SOCKETGUARD_THIRD_PARTY, (Join-Path $env:ProgramFiles 'SocketGuard\third_party')) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
     $items += New-Item2 (Get-ListedState $shipped '(?i)\\third_party$') 'third-party-files'
