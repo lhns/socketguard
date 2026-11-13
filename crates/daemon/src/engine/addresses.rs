@@ -91,7 +91,7 @@ impl Engine {
             return 0;
         }
         let total = owned.len();
-        let failures = release_owned(&state.db, &self.ifaces, owned).await;
+        let failures = release_owned(&state.db, &self.ifaces, &self.backends, owned).await;
         for (o, e) in &failures {
             warn!("Cannot remove {} from {}: {e}", o.addr, o.interface);
         }
@@ -123,7 +123,7 @@ impl Engine {
             return;
         }
         let due_count = due.len();
-        let failures = release_owned(db, &self.ifaces, due).await;
+        let failures = release_owned(db, &self.ifaces, &self.backends, due).await;
         {
             let mut failing = self.removal_failing.lock().unwrap();
             let still: HashSet<Ipv6Addr> = failures.iter().map(|(o, _)| o.addr).collect();
@@ -553,10 +553,14 @@ impl Engine {
 
 /// Take owned addresses off their interfaces: mark each retiring, remove it, and delete its
 /// row only when the removal is confirmed (it succeeded, or the interface no longer has
-/// the address). Returns the ones that are still there.
+/// the address). Once it is, the address gives its lease back if its network has one: a
+/// crash between a commit and the removal of the locators leaves only this row (the lease
+/// store is persisted for that), and releasing an unknown or already released address is a
+/// no-op. Returns the ones that are still there.
 async fn release_owned(
     db: &Database,
     ifaces: &Arc<dyn InterfaceManager>,
+    backends: &HashMap<String, ActiveBackend>,
     rows: Vec<OwnedAddress>,
 ) -> Vec<(OwnedAddress, anyhow::Error)> {
     let mut failures = Vec::new();
@@ -582,16 +586,32 @@ async fn release_owned(
         })
         .await;
         match removed {
-            Ok(Ok(())) => {
-                if let Err(e) = db.forget_address(o.addr).await {
-                    failures.push((o, e));
-                }
-            }
+            Ok(Ok(())) => match db.forget_address(o.addr).await {
+                Ok(()) => release_lease(backends, &o).await,
+                Err(e) => failures.push((o, e)),
+            },
             Ok(Err(e)) => failures.push((o, e)),
             Err(e) => failures.push((o, e.into())),
         }
     }
     failures
+}
+
+/// Give the lease of a removed address back to the network that holds it, if any. Best
+/// effort: it never fails the sweep.
+async fn release_lease(backends: &HashMap<String, ActiveBackend>, o: &OwnedAddress) {
+    let Some(active) = o.network_id.as_ref().and_then(|id| backends.get(id)) else {
+        return;
+    };
+    if !active.network.capabilities().ip_locators {
+        return;
+    }
+    let (net, addr) = (active.network.clone(), o.addr);
+    match tokio::task::spawn_blocking(move || net.release_lease(addr)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!("Could not release the lease of {addr}: {e:#}"),
+        Err(e) => warn!("Release task failed: {e}"),
+    }
 }
 
 fn locator_text(l: &Locator) -> String {
