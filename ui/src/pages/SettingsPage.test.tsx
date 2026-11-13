@@ -118,6 +118,7 @@ describe("Settings page", () => {
       apply_state: (a) => ({
         dry_run: (a.req as { dry_run: boolean }).dry_run,
         changes: [{ kind: "create", item: "peer", name: "carol", detail: "1 credentials", opens_to_anyone: false }],
+        confirm_open_required: false,
       }),
     });
     const user = userEvent.setup();
@@ -130,6 +131,29 @@ describe("Settings page", () => {
     await user.click(screen.getByRole("button", { name: "Apply 1 changes" }));
     await waitFor(() => expect(d.count("apply_state")).toBe(2));
     expect((d.last("apply_state")?.args.req as { dry_run: boolean }).dry_run).toBe(false);
+    expect((d.last("apply_state")?.args.req as { confirm_open: boolean }).confirm_open).toBe(false);
+  });
+
+  it("asks before an import that affects what Anyone can reach, then confirms it", async () => {
+    const d = mockDaemon({
+      apply_state: (a) => ({
+        dry_run: (a.req as { dry_run: boolean }).dry_run,
+        changes: [{ kind: "create", item: "grant", name: "nginx to Anyone", opens_to_anyone: true }],
+        confirm_open_required: true,
+      }),
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<SettingsPage />);
+    await user.click(await screen.findByLabelText("Import a document"));
+    await user.paste('{"version":1}');
+    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    await user.click(await screen.findByRole("button", { name: "Apply 1 changes" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Some of these changes affect what Anyone can reach. Apply them?");
+    expect(d.count("apply_state")).toBe(1);
+    await user.click(within(dialog).getByRole("button", { name: "Apply anyway" }));
+    await waitFor(() => expect(d.count("apply_state")).toBe(2));
+    expect(d.last("apply_state")?.args.req).toMatchObject({ dry_run: false, confirm_open: true });
   });
 
   it("turns SocketGuard off with its effect spelled out", async () => {

@@ -4,4 +4,9 @@ import type { ExportDocument } from "./ExportDocument";
 /**
  * Body of `POST /api/apply`.
  */
-export type ApplyRequest = { document: ExportDocument, dry_run: boolean, };
+export type ApplyRequest = { document: ExportDocument, dry_run: boolean, 
+/**
+ * Confirms the changes that affect what Anyone can reach (ADR 0061). Without it, an
+ * import that has any is refused before it changes anything.
+ */
+confirm_open: boolean, };

@@ -877,20 +877,121 @@ pub async fn apply(
     let desired = validate(engine, state, &req.document).await?;
     let current = export(engine, state).await?;
     let plan = plan(&current, &desired);
+    let confirm_open_required = confirm_open_required(state, &desired, &plan).await?;
     if req.dry_run || plan.changes.is_empty() {
         return Ok(ApplyResponse {
             dry_run: req.dry_run,
             changes: plan.changes,
+            confirm_open_required,
         });
     }
-    execute(engine, state, &plan).await?;
+    // `execute` is not atomic, so the refusal comes before it applies anything.
+    if confirm_open_required && !req.confirm_open {
+        return Err(EngineError::ConfirmationRequired);
+    }
+    execute(engine, state, &plan, req.confirm_open).await?;
     Ok(ApplyResponse {
         dry_run: false,
         changes: plan.changes,
+        confirm_open_required,
     })
 }
 
-async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), EngineError> {
+/// Whether the import must be confirmed with `confirm_open` (ADR 0061): an Anyone grant
+/// exists now or in the document, and the plan has a change that `execute` carries out
+/// through a confirming engine call. Coarse on purpose: it can ask when nothing ends up
+/// opening, but it never lets through a change the engine would refuse.
+async fn confirm_open_required(
+    state: &AppState,
+    desired: &ExportDocument,
+    p: &Plan,
+) -> Result<bool, EngineError> {
+    if !has_confirming_calls(p) {
+        return Ok(false);
+    }
+    let in_document = desired
+        .grants
+        .iter()
+        .any(|g| g.subject == ExportSubject::Anyone)
+        || desired
+            .reservations
+            .iter()
+            .flat_map(|r| &r.grants)
+            .any(|g| g.subject == ExportSubject::Anyone);
+    if in_document {
+        return Ok(true);
+    }
+    // Grants on apps, tags and reserved addresses alike.
+    Ok(state
+        .db
+        .list_grants()
+        .await?
+        .iter()
+        .any(|g| g.subject == Subject::Anyone))
+}
+
+/// Whether `execute` makes an engine call that takes `confirm_open` for one of the plan's
+/// changes. Soundness of the precheck: the engine asks only when a grant to Anyone exists
+/// after the call, and while `execute` runs the grants are a subset of the current ones
+/// plus the document's. So without such a grant in either, no call is refused, and the
+/// calls that never take the flag cannot be refused for it. The destructuring is
+/// exhaustive: a new plan field has to be classified here.
+fn has_confirming_calls(p: &Plan) -> bool {
+    let Plan {
+        // No flag: these only remove or create things that grant nothing.
+        delete_grants: _,
+        delete_port_groups: _,
+        remove_credentials: _,
+        delete_groups: _,
+        delete_peers: _,
+        create_peers: _,
+        add_credentials: _,
+        create_groups: _,
+        set_members: _,
+        remove_reservation_grants: _,
+        // `set_protect_host` takes a lockout flag, not this one.
+        protect_host: _,
+        changes: _,
+        // `create_port_group`, `update_port_group` (new ports), `attach_port_group`.
+        create_port_groups,
+        update_port_groups,
+        // `create_grant`: on an app and on a reserved address.
+        create_grants,
+        add_reservation_grants,
+        // `remove_binding`, `release_reservation`, `create_reservation`, `add_binding`.
+        remove_bindings,
+        delete_reservations,
+        create_reservations,
+        add_bindings,
+    } = p;
+    !(create_port_groups.is_empty()
+        && create_grants.is_empty()
+        && add_reservation_grants.is_empty()
+        && remove_bindings.is_empty()
+        && delete_reservations.is_empty()
+        && create_reservations.is_empty()
+        && add_bindings.is_empty())
+        || update_port_groups
+            .iter()
+            .any(|(want, was)| group_ports_changed(want, was) || !added_apps(want, was).is_empty())
+}
+
+fn group_ports_changed(want: &ExportPortGroup, was: &ExportPortGroup) -> bool {
+    want.ports != was.ports
+}
+
+/// The apps the document attaches to a group that it is not attached to now.
+fn added_apps<'a>(want: &'a ExportPortGroup, was: &ExportPortGroup) -> Vec<&'a ExportAppRef> {
+    let had: BTreeSet<&String> = was.apps.iter().map(|a| &a.id).collect();
+    want.apps.iter().filter(|a| !had.contains(&a.id)).collect()
+}
+
+async fn execute(
+    engine: &Engine,
+    state: &AppState,
+    p: &Plan,
+    confirm_open: bool,
+) -> Result<(), EngineError> {
     // Phase 1: grants that go. Their rules leave before the subjects do.
     let current_grants = engine.list_grants(state, GrantFilter::default()).await?;
     let peers = engine.list_peers(state).await?;
@@ -957,22 +1058,19 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
             export_binding(&x.target, &apps_by_id, &tags, &port_groups).as_ref() == Some(b)
         });
         if let Some(x) = found {
-            // The document states its Anyone grants explicitly, so freeing a row they name
-            // counts as confirmed, like the grants themselves below.
             engine
-                .remove_binding(state, &view.reservation.id, &x.id, true)
+                .remove_binding(state, &view.reservation.id, &x.id, confirm_open)
                 .await?;
         }
     }
     for label in &p.delete_reservations {
         if let Ok(id) = res_id(label, &reservations) {
-            engine.release_reservation(state, &id, true).await?;
+            engine.release_reservation(state, &id, confirm_open).await?;
         }
     }
 
     // Phase 1b: port groups. What goes (a detached or deleted group, once no grant uses
-    // it) first, then what is new or wider, before any grant refers to it. The document
-    // states the Anyone grants explicitly, so a group that widens them counts as confirmed.
+    // it) first, then what is new or wider, before any grant refers to it.
     for (want, was) in &p.update_port_groups {
         let Some(group) = port_groups.iter().find(|g| g.label == want.label) else {
             continue;
@@ -990,22 +1088,21 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
     for g in &p.create_port_groups {
         let apps: Vec<String> = g.apps.iter().map(|a| a.id.clone()).collect();
         engine
-            .create_port_group(state, Some(&g.label), &g.ports, &apps, true)
+            .create_port_group(state, Some(&g.label), &g.ports, &apps, confirm_open)
             .await?;
     }
     for (want, was) in &p.update_port_groups {
         let Some(group) = port_groups.iter().find(|g| g.label == want.label) else {
             continue;
         };
-        if want.ports != was.ports {
+        if group_ports_changed(want, was) {
             engine
-                .update_port_group(state, &group.id, None, Some(&want.ports), true)
+                .update_port_group(state, &group.id, None, Some(&want.ports), confirm_open)
                 .await?;
         }
-        let had: BTreeSet<&String> = was.apps.iter().map(|a| &a.id).collect();
-        for added in want.apps.iter().filter(|a| !had.contains(&a.id)) {
+        for added in added_apps(want, was) {
             engine
-                .attach_port_group(state, &group.id, &added.id, true)
+                .attach_port_group(state, &group.id, &added.id, confirm_open)
                 .await?;
         }
     }
@@ -1076,7 +1173,7 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
         engine.set_group_members(state, &group.id, &members).await?;
     }
 
-    // Phase 5: grants. Anyone is explicit in the document, so it counts as confirmed.
+    // Phase 5: grants.
     for g in &p.create_grants {
         let subject = match &g.subject {
             ExportSubject::Anyone => Subject::Anyone,
@@ -1112,14 +1209,13 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
                     },
                     network_id: g.network.clone(),
                     subject,
-                    confirm_open: true,
+                    confirm_open,
                 },
             )
             .await?;
     }
 
-    // Phase 5b: reservations, their bindings and the grants on them. The document is
-    // explicit about Anyone, so it counts as confirmed.
+    // Phase 5b: reservations, their bindings and the grants on them.
     let to_target = |b: &ExportBinding| -> Result<BindingTarget, EngineError> {
         Ok(match b {
             ExportBinding::App { app, scope } => BindingTarget::App {
@@ -1142,13 +1238,18 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
             .map(&to_target)
             .collect::<Result<Vec<_>, _>>()?;
         engine
-            .create_reservation(state, &r.label, bindings, true)
+            .create_reservation(state, &r.label, bindings, confirm_open)
             .await?;
     }
     let reservations = engine.list_reservations(state).await?;
     for (label, b) in &p.add_bindings {
         engine
-            .add_binding(state, &res_id(label, &reservations)?, to_target(b)?, true)
+            .add_binding(
+                state,
+                &res_id(label, &reservations)?,
+                to_target(b)?,
+                confirm_open,
+            )
             .await?;
     }
     let subject_of = |s: &ExportSubject| -> Result<Subject, EngineError> {
@@ -1179,7 +1280,7 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
                     scope: Scope::All,
                     network_id: g.network.clone(),
                     subject: subject_of(&g.subject)?,
-                    confirm_open: true,
+                    confirm_open,
                 },
             )
             .await?;

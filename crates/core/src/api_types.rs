@@ -404,6 +404,10 @@ pub struct ApplyRequest {
     pub document: ExportDocument,
     #[serde(default)]
     pub dry_run: bool,
+    /// Confirms the changes that affect what Anyone can reach (ADR 0061). Without it, an
+    /// import that has any is refused before it changes anything.
+    #[serde(default)]
+    pub confirm_open: bool,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -446,7 +450,7 @@ pub struct Change {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub detail: Option<String>,
-    /// A grant to Anyone, which the document confirms by being explicit.
+    /// A grant to Anyone.
     #[serde(default)]
     pub opens_to_anyone: bool,
 }
@@ -457,6 +461,10 @@ pub struct Change {
 pub struct ApplyResponse {
     pub dry_run: bool,
     pub changes: Vec<Change>,
+    /// The import needs `confirm_open`: it may change what Anyone can reach (ADR 0061). A
+    /// coarse test, so it can be set when nothing ends up opening.
+    #[serde(default)]
+    pub confirm_open_required: bool,
 }
 
 impl ApplyResponse {

@@ -8,6 +8,6 @@ export type Change = { kind: ChangeKind, item: ChangeItem,
  */
 name: string, detail?: string, 
 /**
- * A grant to Anyone, which the document confirms by being explicit.
+ * A grant to Anyone.
  */
 opens_to_anyone: boolean, };

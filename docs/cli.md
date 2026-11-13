@@ -142,7 +142,8 @@ protect-host off | status
 
 ```
 export -o socketguard.toml              TOML, or JSON by the .json name or --format json; stdout without -o
-apply -f socketguard.toml [--dry-run] [-y]   shows the diff, asks
+apply -f socketguard.toml [--dry-run] [-y]   shows the diff, asks (asks specifically when
+                                        changes affect what Anyone can reach; -y confirms those too)
 ```
 
 ## Switching off

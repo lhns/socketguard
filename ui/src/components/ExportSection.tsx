@@ -49,7 +49,7 @@ export default function ExportSection() {
     const document_ = parse();
     if (!document_) return;
     try {
-      setPreview(await api.applyState({ document: document_, dry_run: true }));
+      setPreview(await api.applyState({ document: document_, dry_run: true, confirm_open: false }));
     } catch (e) {
       setError(errorText(e));
     }
@@ -58,7 +58,7 @@ export default function ExportSection() {
   const doApply = () => {
     const document_ = parse();
     if (!document_) return;
-    apply.mutate({ document: document_, dry_run: false }, {
+    apply.mutate({ document: document_, dry_run: false, confirm_open: preview?.confirm_open_required ?? false }, {
       onSuccess: (r) => {
         toast.success(`Applied ${r.changes.length} changes`);
         setPreview(null);
@@ -67,8 +67,6 @@ export default function ExportSection() {
       onError: (e) => setError(errorText(e)),
     });
   };
-
-  const opens = preview?.changes.some((c) => c.opens_to_anyone && c.kind !== "delete") ?? false;
 
   return (
     <section className="card" aria-label="Export and import">
@@ -124,7 +122,7 @@ export default function ExportSection() {
             </ul>
           )}
           <div className="actions">
-            <button className="btn btn-primary" disabled={preview.changes.length === 0 || apply.isPending} onClick={() => (opens ? setConfirming(true) : doApply())}>
+            <button className="btn btn-primary" disabled={preview.changes.length === 0 || apply.isPending} onClick={() => (preview.confirm_open_required ? setConfirming(true) : doApply())}>
               Apply {preview.changes.length} changes
             </button>
           </div>
@@ -132,7 +130,7 @@ export default function ExportSection() {
       )}
       {confirming && (
         <ConfirmDialog
-          title="This document opens apps to anyone"
+          title="Apply changes that affect Anyone?"
           confirmLabel="Apply anyway"
           onCancel={() => setConfirming(false)}
           onConfirm={() => {
@@ -140,7 +138,7 @@ export default function ExportSection() {
             doApply();
           }}
         >
-          <p>An import counts as confirmed, so grants to Anyone in it are applied without a further question.</p>
+          <p>Some of these changes affect what Anyone can reach. Apply them?</p>
         </ConfirmDialog>
       )}
     </section>

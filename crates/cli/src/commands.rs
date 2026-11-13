@@ -1903,6 +1903,7 @@ async fn apply(c: &Ctx, a: ApplyArgs) -> Result<()> {
         .apply(&ApplyRequest {
             document: document.clone(),
             dry_run: true,
+            confirm_open: false,
         })
         .await?;
     if a.dry_run || diff.is_empty() {
@@ -1911,19 +1912,29 @@ async fn apply(c: &Ctx, a: ApplyArgs) -> Result<()> {
     if !c.json {
         socketguard_core::outln!("{}", render::changes(&diff));
     }
-    prompt::Stdin.confirm_or_yes(
-        a.yes,
-        "Apply these changes?",
-        &format!(
-            "{} change(s) pending; repeat with --yes to apply them",
-            diff.changes.len()
-        ),
-    )?;
+    // `--yes` confirms what Anyone can reach too, as for the other commands (ADR 0061).
+    if diff.confirm_open_required {
+        prompt::Stdin.confirm_or_yes(
+            a.yes,
+            "Some of these changes affect what Anyone can reach. Apply them?",
+            "some changes affect what Anyone can reach; repeat with --yes to apply them",
+        )?;
+    } else {
+        prompt::Stdin.confirm_or_yes(
+            a.yes,
+            "Apply these changes?",
+            &format!(
+                "{} change(s) pending; repeat with --yes to apply them",
+                diff.changes.len()
+            ),
+        )?;
+    }
     let done = c
         .client
         .apply(&ApplyRequest {
             document,
             dry_run: false,
+            confirm_open: diff.confirm_open_required,
         })
         .await?;
     c.print(&done, || {
