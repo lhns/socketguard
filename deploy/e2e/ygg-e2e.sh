@@ -111,11 +111,11 @@ if ! wait_up 90; then
 fi
 pass "the network is up"
 # LAN discovery is off: the node opens no TCP port of its own (no multicast peering listener).
-# The node runs as socketguard-net, the only process of that user. `ss -p` cannot name its sockets
-# (the container lacks CAP_SYS_PTRACE, so /proc/<pid>/fd of another user is unreadable: the
-# Process column stays empty), so a listener is told by its owner: /proc/net/tcp{,6} column 8 is
-# the uid, state 0A is LISTEN.
-ygg_listeners() { docker exec "$NODE_A" sh -c 'u=$(id -u socketguard-net); awk -v u="$u" '"'"'$4 == "0A" && $8 == u'"'"' /proc/net/tcp /proc/net/tcp6 | grep .'; }
+# The multicast listener is the only TCP listener on a link-local address in the container, so it
+# is told by that. Not by process or owner: `ss -p` cannot name it (the container lacks
+# CAP_SYS_PTRACE, the Process column stays empty), and its socket belongs to root because the node
+# opens it before it changes to socketguard-net.
+ygg_listeners() { docker exec "$NODE_A" sh -c "ss -ltnH | grep -F '[fe80:'"; }
 no_ygg_listener() { ! ygg_listeners >/dev/null; }
 step "no listener of the yggdrasil process while LAN discovery is off" no_ygg_listener
 peers_connected() { net_json | jq -e '.[0].child.peers_connected >= 1' >/dev/null; }
@@ -148,7 +148,7 @@ ygg_listener_diagnostics() {
   docker exec "$NODE_A" cat $STATE/yggdrasil/yggdrasil.conf | jq '.PrivateKey = "<redacted>"' 2>&1
   echo "--- diagnostics: daemon log lines of the yggdrasil child ---"
   docker exec "$NODE_A" grep -i 'yggdrasil\]' /var/log/sg.log 2>&1 | tail -n 40 | cut -c1-300
-  echo "--- diagnostics: listeners of socketguard-net (/proc/net/tcp*) ---"; docker exec "$NODE_A" sh -c 'id -u socketguard-net; cat /proc/net/tcp6' 2>&1
+  echo "--- diagnostics: /proc/net/tcp6 ---"; docker exec "$NODE_A" cat /proc/net/tcp6 2>&1
   echo "--- diagnostics: ss -ltnup ---"; docker exec "$NODE_A" ss -ltnup 2>&1
   echo "--- diagnostics: ss -lunp ---"; docker exec "$NODE_A" ss -lunp 2>&1
   echo "--- diagnostics: ip -6 addr ---"; docker exec "$NODE_A" ip -6 addr 2>&1
