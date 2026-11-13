@@ -49,6 +49,13 @@ $script:listener = $null
 # Mn-* helpers shared with test/msi.ps1 (test/networks.ps1).
 . (Join-Path $PSScriptRoot 'networks.ps1')
 
+# The IPv6 addresses SocketGuard could add, before its first start: the absent checks at the end
+# fail if a new one is left on an interface (deploy/ci/footprint-check.ps1, "Address baseline").
+# The earlier checks run while this test's own address is on the adapter, so they take no baseline.
+$AddrBase = Join-Path $Out 'addresses-before.txt'
+& $Footprint -SaveAddresses $AddrBase
+if ($LASTEXITCODE -ne 0) { throw 'could not record the IPv6 addresses before the first start' }
+
 function On-Fail {
   Write-Host '--- diagnostics ---'
   Get-ChildItem $Out -Filter 'daemon-*.txt' -ErrorAction SilentlyContinue | ForEach-Object {
@@ -339,7 +346,7 @@ $code = End-Cleanly
 if ($code -ne 0) { Fail "the portable daemon exited with $code" }
 $rm = Run $inst @('uninstall', '--purge', '--yes') 'c-uninstall-2'
 if ($rm.Code -ne 0) { Write-Host $rm.Text; Fail "uninstall --purge (2) exited $($rm.Code)" }
-Assert-Footprint @{ Expect = 'absent' } 'end'
+Assert-Footprint @{ Expect = 'absent'; Baseline = $AddrBase } 'end'
 
 Section '(d) Tor and Yggdrasil (ADR 0052) in portable mode'
 # The bundle action must have run before the zip was built (packages.yml, portable job).
@@ -463,7 +470,7 @@ if ($adapterSeen -and -not $wintunBefore) {
   Write-Host "  no adapter was created: the driver store is asserted by the footprint check only (Wintun in store: $wintunAfter)"
 }
 Write-Host "  data\tor and data\yggdrasil stay in the portable folder: $((Test-Path (Join-Path $Data 'tor')) -and (Test-Path (Join-Path $Data 'yggdrasil')))"
-$fp = @{ Expect = 'absent' }
+$fp = @{ Expect = 'absent'; Baseline = $AddrBase }
 if ($wintunBefore) { $fp.WintunPresentBefore = $true }
 Assert-Footprint $fp 'd-after-exit'
 
