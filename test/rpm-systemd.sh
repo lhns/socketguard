@@ -25,9 +25,11 @@ on_fail() {
 }
 x() { docker exec "$name" bash -euo pipefail -c "$*"; }
 
-# The base image has no systemd and no sudo-ish tools; add systemd (and nothing the rpm should bring).
+# The base image has no systemd. Add it, and the tools the footprint check looks with (ip, nft, ps):
+# the rpm depends on iproute and nftables, but the address baseline is taken before the install,
+# and a removal may take dependencies along, which would blind the check.
 printf 'FROM %s
-RUN dnf install -y systemd && dnf clean all
+RUN dnf install -y systemd iproute nftables procps-ng findutils && dnf clean all
 ' "$img" | docker build -t sg-fedora-systemd -
 img=sg-fedora-systemd
 docker run -d --name "$name" --privileged --cgroupns=host --tmpfs /run --tmpfs /tmp \
@@ -47,6 +49,9 @@ answers() { wait_until 60 docker exec "$name" socketguard status --json; }
 active() { wait_until 40 docker exec "$name" systemctl is-active --quiet socketguard; }
 mainpid() { docker exec "$name" systemctl show -p MainPID --value socketguard; }
 db=/var/lib/socketguard/socketguard.db
+
+# Addresses SocketGuard could add, in the container's network namespace, before the first install.
+fp --save-addresses /tmp/sg-addrs-before.txt
 
 step "install"
 x "dnf install -y /p1.rpm"
@@ -93,7 +98,7 @@ x "! systemctl is-active --quiet socketguard"
 x "! test -e /etc/systemd/system/socketguard.service"
 x "! nft list table inet socketguard >/dev/null 2>&1" || fail "nft table left after remove"
 x "test -e $db" || fail "remove deleted the data"
-fp expect-absent --allow-data
+fp expect-absent --allow-data --baseline /tmp/sg-addrs-before.txt
 
 step "round two: install, purge by command, erase"
 x "dnf install -y /p1.rpm"
@@ -101,5 +106,5 @@ active || fail "unit not active (round two)"
 answers || fail "no answer (round two)"
 x "socketguard-daemon uninstall --purge --yes"
 x "dnf remove -y socketguard"
-fp expect-absent
+fp expect-absent --baseline /tmp/sg-addrs-before.txt
 echo OK

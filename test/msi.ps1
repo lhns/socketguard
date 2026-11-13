@@ -452,6 +452,11 @@ function Assert-PrefixBlock([string]$NodeAddr) {
 
 Section 'install'
 if (Test-Path $InstallDir) { Fail "$InstallDir exists already; this test needs a clean machine" }
+# The IPv6 addresses SocketGuard could add, before the first install; both absent checks below fail
+# if one is still on an interface afterwards (deploy/ci/footprint-check.ps1, "Address baseline").
+$AddrBase = Join-Path $Out 'addresses-before.txt'
+& $Footprint -SaveAddresses $AddrBase
+if ($LASTEXITCODE -ne 0) { Fail 'could not record the IPv6 addresses before the install' }
 Save-Wfp 'before'
 # INSTALLFOLDER on the command line must change nothing (ADR 0064): the folder is fixed.
 $Elsewhere = 'C:\SgElsewhere'
@@ -552,7 +557,7 @@ if ([Environment]::GetEnvironmentVariable('Path', 'Machine') -like '*SocketGuard
 if (-not (Test-Path (Join-Path $DataDir 'socketguard.db'))) { Fail 'the MSI removal deleted the database' }
 Ok 'the data is kept'
 Save-Wfp 'uninstalled'
-Assert-Footprint @{ Expect = 'absent'; AllowData = $true } 'absent-keep-data'
+Assert-Footprint @{ Expect = 'absent'; AllowData = $true; Baseline = $AddrBase } 'absent-keep-data'
 
 Section 'purge with the daemon kept aside'
 $export = Join-Path $Out 'export.json'
@@ -578,7 +583,7 @@ if ($script:mnWintun -and -not $script:mnWintun.present_before) {
 } else {
   Write-Host '  no wintun_driver entry in the install record (no adapter was created): nothing to assert'
 }
-Assert-Footprint @{ Expect = 'absent' } 'absent'
+Assert-Footprint @{ Expect = 'absent'; Baseline = $AddrBase } 'absent'
 
 Section 'done'
 Write-Summary 'networks'

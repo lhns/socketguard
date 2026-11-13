@@ -59,6 +59,11 @@ cp /etc/pf.conf "${RUNNER_TEMP:-/tmp}/pf.conf.before"
 pf_state() { sudo pfctl -s info 2>&1 | awk '/^Status:/ {print $2}'; }
 pf_before=$(pf_state)
 
+# The IPv6 addresses SocketGuard could add, before the first install; every expect-absent below
+# fails if one is still on an interface afterwards (deploy/ci/footprint-check.sh, "Address baseline").
+addr_base="${RUNNER_TEMP:-/tmp}/sg-addrs-before.txt"
+bash "$here/deploy/ci/footprint-check.sh" --save-addresses "$addr_base"
+
 step "install"
 sudo installer -pkg "$pkg" -target / -verbose
 sudo launchctl print "system/$label" >/dev/null || fail "the launchd daemon is not loaded"
@@ -131,7 +136,7 @@ echo "pf before: $pf_before, after: $pf_after"
 
 step "the files a pkg cannot remove"
 sudo rm -rf /Applications/SocketGuard.app /usr/local/bin/socketguard-daemon /usr/local/bin/socketguard /usr/local/lib/socketguard /usr/local/share/doc/socketguard
-sudo $fp expect-absent
+sudo $fp expect-absent --baseline "$addr_base"
 sudo pkgutil --forget de.lhns.socketguard
 ! pkgutil --pkg-info de.lhns.socketguard >/dev/null 2>&1 || fail "the receipt is still there"
 echo OK

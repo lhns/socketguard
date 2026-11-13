@@ -7,6 +7,8 @@
 #   test/rpm.sh dist/socketguard-0.1.0-1.x86_64.rpm
 set -euo pipefail
 rpmfile="$(readlink -f "$1")"
+# No address baseline here: there is no systemd in this container, so the daemon never starts and
+# SocketGuard never puts an address on an interface (test/rpm-systemd.sh and test/deb.sh do).
 docker run --rm -v "$rpmfile:/pkg.rpm:ro" fedora:latest bash -euxo pipefail -c '
     dnf install -y /pkg.rpm
     rpm -q socketguard

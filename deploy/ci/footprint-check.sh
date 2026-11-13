@@ -25,6 +25,12 @@
 # string in the file is compared (lower-cased, textual) with the host's addresses; if it is still
 # configured, the item `ledger-addresses` is PRESENT. Never required.
 #
+# Address baseline: `--save-addresses FILE` writes the IPv6 addresses SocketGuard could add (ULA
+# fc00::/7 and /128 host addresses; link-local, ::1 and temporary/privacy ones are ignored, they
+# are the OS's own) and exits. A later `expect-... --baseline FILE` adds the item `new-addresses`,
+# PRESENT when such an address is on an interface that the file did not list. Package tests save
+# before the first install and pass the file to every expect-absent.
+#
 # Tor and Yggdrasil (ADR 0052) add: the programs `tor` and `yggdrasil` running from a
 # `third_party` directory, the directories <state dir>/tor and <state dir>/yggdrasil, the
 # account `socketguard-net`, the Linux adapter `sgygg0` (a macOS utun goes with its process)
@@ -98,6 +104,36 @@ ledger_addrs() { grep -oE '[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4}){2,7}' | tr 'A-F' 
 # Addresses in both: ledger text, interface output.
 ledger_still_present() { comm -12 <(ledger_addrs <<<"$1") <(iface_addrs <<<"$2"); }
 
+# The addresses SocketGuard could have added, from `ip -6 addr` or `ifconfig` text: ULA
+# (fc00::/7) and /128 host addresses. Ignored on purpose, because the OS adds, rotates and
+# removes them by itself: link-local (fe80::), ::1, temporary/privacy addresses, and the /64
+# addresses SLAAC derives from a router advertisement (not ULA, not /128).
+addr_candidates() {
+    awk '$1=="inet6" {
+        a=$2; len=""
+        if (a ~ /\//) { split(a, p, "/"); a=p[1]; len=p[2] } else if ($3=="prefixlen") len=$4
+        sub(/%.*/, "", a); a=tolower(a)
+        if ($0 ~ /temporary/ || a ~ /^fe80:/ || a == "::1") next
+        if (a ~ /^f[cd]/ || len == 128) print a
+    }' | sort -u
+}
+# new_addresses BASELINE-LIST CURRENT-TEXT: candidate addresses now that the baseline lacked.
+new_addresses() { comm -13 <(grep -v '^$' <<<"$1" | sort -u) <(addr_candidates <<<"$2"); }
+# The host's IPv6 addresses as text; status 1 when the tool is not installed.
+live_addrs() {
+    case "$(uname -s)" in
+        Linux) command -v ip >/dev/null 2>&1 && ip -6 addr ;;
+        Darwin) command -v ifconfig >/dev/null 2>&1 && ifconfig ;;
+        *) return 1 ;;
+    esac
+}
+add_baseline_item() { # baseline file
+    local cur new
+    if ! cur=$(live_addrs); then rec UNKNOWN new-addresses "no ip/ifconfig"; return; fi
+    new=$(new_addresses "$(cat "$1")" "$cur" | tr '\n' ' ')
+    if [ -n "${new// /}" ]; then rec PRESENT new-addresses "$new"; else rec ABSENT new-addresses; fi
+}
+
 # ---- item tables ---------------------------------------------------------------------------
 # name|regex over the path list. Same regexes on both systems; directories differ.
 FILE_ITEMS=(
@@ -156,7 +192,6 @@ collect_linux() {
     rec "$(state_account_getent "$(run getent passwd socketguard-net)")" account-socketguard-net
     rec "$(state_link_ip "$(run ip -o link show sgygg0)")" adapter-sgygg0
     add_network_items /usr/bin/third_party /usr/local/bin/third_party /usr/lib/socketguard/third_party /opt/socketguard/third_party
-    LIVE_ADDRS=$(run ip -6 addr)
     REQUIRED=" systemd-unit group config-dir "
 }
 
@@ -173,7 +208,6 @@ collect_macos() {
     rec "$(state_listed "$paths" '^/var/run/socketguard\.sock$')" socket
     rec "$(state_account_dscl "$(run dscl . -read /Users/socketguard-net)")" account-socketguard-net
     add_network_items /usr/local/bin/third_party /usr/local/lib/socketguard/third_party "$d/third_party"
-    LIVE_ADDRS=$(run ifconfig)
     REQUIRED=" launchd-plist group config-dir "
 }
 
@@ -281,6 +315,21 @@ self_test() {
     expect ledger-object-mac "fd00::1" "$(ledger_still_present "$ledger_obj" "$mac_if" | tr '\n' ' ' | sed 's/ $//')"
     expect ledger-gone "" "$(ledger_still_present "$ledger_arr" $'    inet6 ::1/128 scope host')"
 
+    # address baseline: ULA and /128 count; link-local, ::1, temporary and SLAAC /64 do not
+    local before_ip=$'1: lo: <LOOPBACK>\n    inet6 ::1/128 scope host\n2: eth0: <UP>\n    inet6 2001:db8::5/64 scope global dynamic\n    inet6 2001:db8::77/64 scope global temporary dynamic\n    inet6 fe80::1/64 scope link'
+    local after_ip="$before_ip"$'\n3: sgygg0: <UP>\n    inet6 fd00::9/128 scope global\n    inet6 201:abcd::1/128 scope global\n    inet6 2001:db8::88/64 scope global temporary dynamic'
+    local baseline_list; baseline_list=$(addr_candidates <<<"$before_ip")
+    expect addr-baseline-empty "" "$baseline_list"
+    expect addr-candidates-ula-and-host "201:abcd::1 fd00::9" "$(addr_candidates <<<"$after_ip" | tr '\n' ' ' | sed 's/ $//')"
+    expect addr-candidates-mac "fd00::2" "$(addr_candidates <<<$'\tinet6 fe80::1%lo0 prefixlen 64 scopeid 0x1\n\tinet6 fd00::2 prefixlen 64\n\tinet6 2001:db8::3 prefixlen 64 autoconf temporary' | tr '\n' ' ' | sed 's/ $//')"
+    # planted leftover: the purge left addresses the baseline did not have
+    expect addr-leftover-found "201:abcd::1 fd00::9" "$(new_addresses "$baseline_list" "$after_ip" | tr '\n' ' ' | sed 's/ $//')"
+    expect addr-unchanged-host-ok "" "$(new_addresses "$baseline_list" "$before_ip")"
+    expect addr-temporary-rotation-ignored "" "$(new_addresses "$baseline_list" "$before_ip"$'\n    inet6 2001:db8::99/64 scope global temporary dynamic')"
+    expect addr-baseline-ula-kept-is-not-new "" "$(new_addresses "fd00::9" $'    inet6 fd00::9/128 scope global')"
+    ITEMS=(); rec ABSENT config-dir; rec PRESENT new-addresses "fd00::9"
+    evaluate absent >/dev/null; expect verdict-new-address-fails 1 $?
+
     # verdicts over synthetic items
     ITEMS=(); REQUIRED=" systemd-unit group config-dir "
     rec ABSENT systemd-unit; rec ABSENT group; rec ABSENT config-dir; rec ABSENT nft-table-inet
@@ -300,16 +349,18 @@ self_test() {
 
 # ---- main ----------------------------------------------------------------------------------
 
-usage() { echo "usage: $0 expect-absent|expect-present [--allow-data] [--require NAME[,NAME]] [--ledger-export FILE] | --self-test" >&2; exit 2; }
+usage() { echo "usage: $0 expect-absent|expect-present [--allow-data] [--require NAME[,NAME]] [--ledger-export FILE] [--baseline FILE] | --save-addresses FILE | --self-test" >&2; exit 2; }
 
 DATA_ITEMS=" config-dir data-dir config-json database database-wal database-shm setup-log temp-file dir-tor dir-yggdrasil dir-run account-socketguard-net "
 ALLOWED=" "
-mode="" ledger="" selftest=0 extra_required=""
+mode="" ledger="" baseline="" save="" selftest=0 extra_required=""
 while [ $# -gt 0 ]; do
     case "$1" in
         expect-absent) mode=absent ;;
         expect-present) mode=present ;;
         --ledger-export) [ $# -ge 2 ] || usage; ledger=$2; shift ;;
+        --baseline) [ $# -ge 2 ] || usage; baseline=$2; shift ;;
+        --save-addresses) [ $# -ge 2 ] || usage; save=$2; shift ;;
         --allow-data) ALLOWED=$DATA_ITEMS ;;
         --require) [ $# -ge 2 ] || usage; extra_required=$2; shift ;;
         --self-test) selftest=1 ;;
@@ -319,17 +370,26 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$selftest" = 1 ]; then self_test; exit $?; fi
+if [ -n "$save" ]; then
+    live=$(live_addrs) || { echo "cannot list the IPv6 addresses: no ip/ifconfig" >&2; exit 2; }
+    addr_candidates <<<"$live" >"$save" || exit 2
+    echo "saved $(wc -l <"$save" | tr -d " ") address(es) to $save"
+    exit 0
+fi
 [ -n "$mode" ] || usage
+if [ -n "$baseline" ] && [ ! -r "$baseline" ]; then echo "cannot read baseline: $baseline" >&2; exit 2; fi
 if [ -n "$ledger" ] && [ ! -r "$ledger" ]; then echo "cannot read ledger export: $ledger" >&2; exit 2; fi
 
-LIVE_ADDRS=""
 case "$(uname -s)" in
     Linux) collect_linux ;;
     Darwin) collect_macos ;;
     *) echo "unsupported system $(uname -s); use footprint-check.ps1 on Windows" >&2; exit 2 ;;
 esac
 for n in ${extra_required//,/ }; do REQUIRED="$REQUIRED$n "; done
-if [ -n "$ledger" ]; then add_ledger_item "$(cat "$ledger")" "$LIVE_ADDRS"; fi
+if [ -n "$ledger" ]; then
+    if live=$(live_addrs); then add_ledger_item "$(cat "$ledger")" "$live"; else rec UNKNOWN ledger-addresses "no ip/ifconfig"; fi
+fi
+if [ -n "$baseline" ]; then add_baseline_item "$baseline"; fi
 
 evaluate "$mode"
 if [ $? -eq 0 ]; then exit 0; else exit 1; fi

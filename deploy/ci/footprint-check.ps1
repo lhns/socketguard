@@ -20,6 +20,12 @@
 # with an `addresses` array of strings (the addresses the daemon owned). Each one still returned
 # by Get-NetIPAddress makes the item `ledger-addresses` PRESENT. Never required.
 #
+# Address baseline: -SaveAddresses FILE writes the IPv6 addresses SocketGuard could add (ULA
+# fc00::/7 and /128 host addresses; link-local, ::1 and temporary/privacy ones are ignored, they
+# are the OS's own) and exits. A later -Baseline FILE adds the item `new-addresses`, PRESENT when
+# such an address is on an interface that the file did not list. Package tests save before the
+# first install and pass the file to every -Expect absent.
+#
 # Tor and Yggdrasil (ADR 0052) add: the programs tor.exe and yggdrasil.exe running from a
 # `third_party` directory, the directories <ProgramData>\SocketGuard\tor and \yggdrasil, the
 # adapter `SocketGuard`, the Wintun driver in the driver store (-WintunPresentBefore says the
@@ -35,6 +41,10 @@
 param(
     [ValidateSet('absent', 'present')][string]$Expect,
     [string]$LedgerExport,
+    # Address baseline: -SaveAddresses FILE writes the candidate addresses and exits; -Baseline FILE adds
+    # the item `new-addresses` (see the comment below the header)
+    [string]$SaveAddresses,
+    [string]$Baseline,
     [switch]$WintunPresentBefore,
     # present: item names that must also be PRESENT (e.g. wfp-provider after the first start)
     [string[]]$Require = @(),
@@ -138,6 +148,26 @@ function Get-LedgerAddresses([string]$Json) {
 function Get-LedgerStillPresent([string]$Json, $InterfaceAddresses) {
     $have = @($InterfaceAddresses | ForEach-Object { ConvertTo-NormalAddress ([string]$_) })
     return @(Get-LedgerAddresses $Json | Where-Object { $have -contains $_ } | Select-Object -Unique)
+}
+
+# The addresses SocketGuard could have added: ULA (fc00::/7) and /128 host addresses, from
+# Get-NetIPAddress objects (IPAddress, PrefixLength, SuffixOrigin). Ignored on purpose, because
+# Windows adds, rotates and removes them by itself: link-local (fe80::), ::1, temporary/privacy
+# addresses (SuffixOrigin Random) and the /64 addresses SLAAC derives from a router advertisement.
+function Get-AddressCandidates($Entries) {
+    $out = @()
+    foreach ($e in @($Entries)) {
+        $a = ConvertTo-NormalAddress ([string]$e.IPAddress)
+        if ("$($e.SuffixOrigin)" -eq 'Random' -or $a -like 'fe80:*' -or $a -eq '::1') { continue }
+        if ($a -match '^f[cd]' -or [int]$e.PrefixLength -eq 128) { $out += $a }
+    }
+    return @($out | Sort-Object -Unique)
+}
+
+# Candidate addresses now that the baseline list lacked.
+function Get-NewAddresses($BaselineList, $Entries) {
+    $have = @($BaselineList | Where-Object { $_ })
+    return @(Get-AddressCandidates $Entries | Where-Object { $have -notcontains $_ })
 }
 
 # ---- items and verdict ---------------------------------------------------------------------
@@ -260,6 +290,19 @@ function Invoke-SelfTest {
     Assert-Equal 'ledger-object' 'fd00::1' ((Get-LedgerStillPresent $ledgerObj $live) -join ' ')
     Assert-Equal 'ledger-gone' '' ((Get-LedgerStillPresent $ledgerArr @('::1')) -join ' ')
 
+    # address baseline: ULA and /128 count; link-local, ::1, temporary and SLAAC /64 do not
+    function New-Addr([string]$A, [int]$Len, [string]$Origin = 'Manual') { [pscustomobject]@{ IPAddress = $A; PrefixLength = $Len; SuffixOrigin = $Origin } }
+    $before = @((New-Addr '::1' 128), (New-Addr 'fe80::1%12' 64 'Link'), (New-Addr '2001:db8::5' 64 'Link'), (New-Addr '2001:db8::77' 64 'Random'))
+    $after = $before + @((New-Addr 'fd00::9' 128), (New-Addr '201:abcd::1' 128), (New-Addr '2001:db8::88' 64 'Random'))
+    $baseList = @(Get-AddressCandidates $before)
+    Assert-Equal 'addr-baseline-empty' '' ($baseList -join ' ')
+    Assert-Equal 'addr-candidates-ula-and-host' '201:abcd::1 fd00::9' ((Get-AddressCandidates $after) -join ' ')
+    Assert-Equal 'addr-leftover-found' '201:abcd::1 fd00::9' ((Get-NewAddresses $baseList $after) -join ' ')
+    Assert-Equal 'addr-unchanged-host-ok' '' ((Get-NewAddresses $baseList $before) -join ' ')
+    Assert-Equal 'addr-temporary-rotation-ignored' '' ((Get-NewAddresses $baseList ($before + @(New-Addr '2001:db8::99' 64 'Random'))) -join ' ')
+    Assert-Equal 'addr-baseline-ula-kept-is-not-new' '' ((Get-NewAddresses @('fd00::9') @(New-Addr 'FD00::9' 128)) -join ' ')
+    Assert-Equal 'verdict-new-address-fails' 1 (Write-Verdict @((New-Item2 'ABSENT' 'config-dir'), (New-Item2 'PRESENT' 'new-addresses' 'fd00::9')) 'absent' @() | Select-Object -Last 1)
+
     $req = @('service', 'group', 'config-dir')
     $clean = @((New-Item2 'ABSENT' 'service'), (New-Item2 'ABSENT' 'group'), (New-Item2 'ABSENT' 'config-dir'), (New-Item2 'ABSENT' 'wfp-provider'))
     Assert-Equal 'verdict-absent-clean' 0 (Write-Verdict $clean 'absent' $req | Select-Object -Last 1)
@@ -331,14 +374,30 @@ function Invoke-Live {
         if ($hits.Count -gt 0) { $items += New-Item2 'PRESENT' 'ledger-addresses' ($hits -join ' ') }
         else { $items += New-Item2 'ABSENT' 'ledger-addresses' }
     }
+    if ($Baseline) {
+        $base = @(Get-Content -LiteralPath $Baseline)
+        $new = @(Get-NewAddresses $base @(Get-NetIPAddress -AddressFamily IPv6))
+        if ($new.Count -gt 0) { $items += New-Item2 'PRESENT' 'new-addresses' ($new -join ' ') }
+        else { $items += New-Item2 'ABSENT' 'new-addresses' }
+    }
     return $items
 }
 
 # ---- main ----------------------------------------------------------------------------------
 
 if ($SelfTest) { exit (Invoke-SelfTest | Select-Object -Last 1) }
+if ($SaveAddresses) {
+    $c = @(Get-AddressCandidates @(Get-NetIPAddress -AddressFamily IPv6))
+    Set-Content -LiteralPath $SaveAddresses -Value $c -Encoding ascii
+    Write-Host "saved $($c.Count) address(es) to $SaveAddresses"
+    exit 0
+}
 if (-not $Expect) {
-    Write-Host 'usage: footprint-check.ps1 -Expect absent|present [-LedgerExport FILE] | -SelfTest'
+    Write-Host 'usage: footprint-check.ps1 -Expect absent|present [-LedgerExport FILE] [-Baseline FILE] | -SaveAddresses FILE | -SelfTest'
+    exit 2
+}
+if ($Baseline -and -not (Test-Path -LiteralPath $Baseline)) {
+    Write-Host "cannot read baseline: $Baseline"
     exit 2
 }
 if ($LedgerExport -and -not (Test-Path -LiteralPath $LedgerExport)) {
