@@ -1354,3 +1354,39 @@ async fn an_import_that_releases_the_reservation_hiding_an_anyone_grant_needs_co
     w.import_needs_confirmation(|doc| doc.reservations.clear())
         .await;
 }
+
+#[tokio::test]
+async fn a_dry_run_of_deleting_a_bound_tag_shows_who_gains_access_and_changes_nothing() {
+    let (w, tag) = web_with_bound_tag().await;
+    let op = |confirm_open| ChangeOp::DeleteTag {
+        tag_id: tag.clone(),
+        confirm_open,
+    };
+    let refused = w.dry_run(op(false)).await;
+    assert!(confirmation_required(&refused), "{refused:?}");
+    let preview = w.dry_run(op(true)).await.unwrap();
+    assert!(preview.changes_reach);
+    let change = &preview.changes[0];
+    assert!(change.change.opens_to_anyone);
+    assert!(change
+        .reach
+        .iter()
+        .any(|r| r.network_id == "tor" && r.reach != Reach::NotReachable));
+    // A dry run deletes nothing and publishes nothing.
+    let engine = w.h.state.engine.read().await;
+    assert!(engine.get_tag(&w.h.state, &tag).await.is_ok());
+    assert!(w.h.tor.add_commands().is_empty());
+    // The batch applies it like the route does.
+    engine
+        .apply_changes(
+            &w.h.state,
+            &ChangesRequest {
+                ops: vec![op(true)],
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(engine.get_tag(&w.h.state, &tag).await.is_err());
+    assert_eq!(w.h.tor.add_commands().len(), 1);
+}

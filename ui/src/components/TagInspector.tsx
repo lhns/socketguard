@@ -1,10 +1,10 @@
-import { useId, useRef, useState } from "react";
+import { useId, useState } from "react";
 import { grantEntries, mergeEntries } from "../access";
-import { toDaemonError, type Scope, type Tag } from "../api";
+import { toDaemonError, type ChangeOp, type Scope, type Tag } from "../api";
 import { useCommit, useRevoke } from "../commit";
 import { ALL_SCOPE, errorField, errorText, sameScope, scopeKey, scopeLabel, scopeOfPort, splitOperationError } from "../lib";
 import { useNav } from "../nav";
-import { useApps, useDeleteTag, useGrants, useList, usePortGroups, useReservations, useUpdateTag } from "../queries";
+import { useApps, useGrants, useList, usePortGroups, useReservations, useUpdateTag } from "../queries";
 import AccessList, { type AccessHighlight } from "./AccessList";
 import { ActionRow, DangerZone } from "./ActionRow";
 import AddAccess from "./AddAccess";
@@ -30,14 +30,13 @@ export function TagInspector({ tag, highlight, onCollapse, onClose }: { tag: Tag
   const grants = (useGrants().data ?? []).filter((g) => g.target.kind === "tag" && g.target.id === tag.id);
   const bound = useList(useReservations()).some((r) => r.bindings.some((b) => b.target.kind === "tag" && b.target.tag_id === tag.id));
   const update = useUpdateTag();
-  const del = useDeleteTag();
+  const del = useCommit(onClose);
   const { revoke, commit: revokeCommit } = useRevoke();
   const [label, setLabel] = useState(tag.label);
   const [patterns, setPatterns] = useState(tag.patterns.join("\n"));
   const [error, setError] = useState<{ field: string; text: string } | null>(null);
   const [asking, setAsking] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [askingDelete, setAskingDelete] = useState(false);
   const dirty = label.trim() !== tag.label || patternsOf(patterns).join("\n") !== tag.patterns.join("\n");
 
   const save = (confirm_open: boolean) => {
@@ -51,13 +50,6 @@ export function TagInspector({ tag, highlight, onCollapse, onClose }: { tag: Tag
       },
     });
   };
-
-  const remove = (confirmOpen: boolean) =>
-    del.mutate({ id: tag.id, confirmOpen }, {
-      onSuccess: () => { toast.success("Tag deleted"); onClose(); },
-      // The tag is bound to a reservation, and deleting it frees rows that a grant to anyone names.
-      onError: (err) => (toDaemonError(err).code === "confirmation_required" ? setAskingDelete(true) : toast.error(errorText(err))),
-    });
 
   return (
     <Inspector label="Tag details" title={tag.label} subtitle={`tag · ${tag.members.length} ${tag.members.length === 1 ? "member" : "members"}`} onCollapse={onCollapse} onClose={onClose}>
@@ -116,23 +108,13 @@ export function TagInspector({ tag, highlight, onCollapse, onClose }: { tag: Tag
           onCancel={() => setDeleting(false)}
           onConfirm={() => {
             setDeleting(false);
-            remove(false);
+            void del.runBatch([{ op: "delete_tag", tag_id: tag.id, confirm_open: false }], "Tag deleted");
           }}
         >
           <p>The grants on this tag are removed with it. The apps stay.</p>
         </ConfirmDialog>
       )}
-      {askingDelete && (
-        <ConfirmDialog
-          title="Open rows to anyone?"
-          confirmLabel="Delete and open"
-          onCancel={() => setAskingDelete(false)}
-          onConfirm={() => { setAskingDelete(false); remove(true); }}
-          warning={<strong>Deleting this tag frees rows from a reservation, and a grant to anyone on them becomes live on Tor.</strong>}
-        >
-          <p>A reservation is opened as a whole on Tor, so grants on its bound rows do nothing there. Once the rows are free, each gets its own onion address that anyone can use.</p>
-        </ConfirmDialog>
-      )}
+      <CommitPreview commit={del} title={`Delete tag ${tag.label}?`} confirmLabel="Delete tag" />
     </Inspector>
   );
 }
@@ -233,28 +215,17 @@ function Members({ tag }: { tag: Tag }) {
 /** Several tags: the access they share, and the same edits for all of them. */
 export function TagsInspector({ tags, onCollapse, onClose }: { tags: Tag[] } & Common) {
   const names = useNameCtx();
-  const toast = useToast();
   const grants = useGrants().data ?? [];
-  const del = useDeleteTag();
+  const del = useCommit(onClose);
   const { revoke, commit: revokeCommit } = useRevoke();
   const [deleting, setDeleting] = useState(false);
-  const [askingDelete, setAskingDelete] = useState(false);
-  const deleted = useRef(new Set<string>());
   const entries = mergeEntries(tags.map((t) => grantEntries(grants.filter((g) => g.target.kind === "tag" && g.target.id === t.id), "subject", names)));
-  const deleteAll = async (confirmOpen: boolean) => {
+  const deleteAll = () => {
     setDeleting(false);
-    try {
-      for (const t of tags.filter((x) => !deleted.current.has(x.id))) {
-        await del.mutateAsync({ id: t.id, confirmOpen });
-        deleted.current.add(t.id);
-      }
-      toast.success(`Deleted ${tags.length} tags`);
-      onClose();
-    } catch (e) {
-      // A tag is bound to a reservation, and deleting it frees rows that a grant to anyone names.
-      if (toDaemonError(e).code === "confirmation_required") setAskingDelete(true);
-      else toast.error(errorText(e));
-    }
+    void del.runBatch(
+      tags.map<ChangeOp>((t) => ({ op: "delete_tag", tag_id: t.id, confirm_open: false })),
+      `Deleted ${tags.length} tags`,
+    );
   };
   return (
     <Inspector label="Tags details" title={`${tags.length} tags selected`} subtitle={tags.map((t) => t.label).join(", ")} onCollapse={onCollapse} onClose={onClose}>
@@ -267,21 +238,11 @@ export function TagsInspector({ tags, onCollapse, onClose }: { tags: Tag[] } & C
         <button className="btn btn-danger btn-sm" onClick={() => setDeleting(true)}>Delete {tags.length} tags</button>
       </DangerZone>
       {deleting && (
-        <ConfirmDialog title={`Delete ${tags.length} tags?`} confirmLabel="Delete tags" onCancel={() => setDeleting(false)} onConfirm={() => void deleteAll(false)}>
+        <ConfirmDialog title={`Delete ${tags.length} tags?`} confirmLabel="Delete tags" onCancel={() => setDeleting(false)} onConfirm={deleteAll}>
           <p>The grants on these tags are removed with them. The apps stay.</p>
         </ConfirmDialog>
       )}
-      {askingDelete && (
-        <ConfirmDialog
-          title="Open rows to anyone?"
-          confirmLabel="Delete and open"
-          onCancel={() => setAskingDelete(false)}
-          onConfirm={() => { setAskingDelete(false); void deleteAll(true); }}
-          warning={<strong>Deleting these tags frees rows from a reservation, and a grant to anyone on them becomes live on Tor.</strong>}
-        >
-          <p>A reservation is opened as a whole on Tor, so grants on its bound rows do nothing there. Once the rows are free, each gets its own onion address that anyone can use.</p>
-        </ConfirmDialog>
-      )}
+      <CommitPreview commit={del} title={`Delete ${tags.length} tags?`} confirmLabel="Delete tags" />
     </Inspector>
   );
 }

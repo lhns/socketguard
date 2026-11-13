@@ -28,6 +28,8 @@ pub enum Write {
     InsertGroup(PeerGroup),
     /// The tag with its members.
     InsertTag(Tag),
+    /// The tag with its members, exclusions, the bindings to it and the grants on it.
+    DeleteTag(String),
     InsertGrant(Grant),
     DeleteGrant(String),
     /// Idempotent; a manual addition clears the app's exclusion.
@@ -194,6 +196,16 @@ pub(super) async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
             interface,
             network_id,
         } => super::retire_address_in(tx, *addr, interface, network_id.as_deref()).await?,
+        Write::DeleteTag(id) => {
+            sqlx::query("DELETE FROM grants WHERE target_kind = 'tag' AND target_id = ?")
+                .bind(id)
+                .execute(&mut **tx)
+                .await?;
+            sqlx::query("DELETE FROM tags WHERE id = ?")
+                .bind(id)
+                .execute(&mut **tx)
+                .await?;
+        }
         Write::DeleteAddress(id) => {
             sqlx::query("DELETE FROM addresses WHERE id = ?")
                 .bind(id)

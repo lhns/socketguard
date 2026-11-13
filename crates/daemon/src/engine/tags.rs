@@ -176,35 +176,12 @@ impl Engine {
         id: &str,
         confirm_open: bool,
     ) -> Result<(), EngineError> {
-        let change = self.change_lock.lock().await;
-        let tag = self.get_tag(state, id).await?;
-        let mut cat = crate::catalog::Catalog::load(state).await?;
-        let bound_before = cat.bound_rows();
-        cat.tags.retain(|t| t.id != id);
-        for r in cat.reservations.iter_mut() {
-            r.bindings
-                .retain(|b| !matches!(&b.target, BindingTarget::Tag { tag_id } if tag_id == id));
-        }
-        cat.grants
-            .retain(|g| g.target != Target::Tag(id.to_string()));
-        let freed = cat.freed_grants(
-            &bound_before,
-            &self.networks(),
-            &self.protected_interfaces(state).await?,
-        );
-        ensure_confirmed(any_to_anyone(&freed), confirm_open)?;
-        state.db.delete_tag(id).await?;
-        drop(change);
-        let applied = self.apply_and_ensure(state).await;
-        let activity = NewActivity::new(
-            ActivityKind::TagRemoved,
-            format!("Removed tag {}", tag.label),
-        );
-        self.commit(
+        self.run_one(
             state,
-            applied,
-            Some(activity),
-            &[DaemonEvent::TagsChanged, DaemonEvent::GrantsChanged],
+            ChangeOp::DeleteTag {
+                tag_id: id.to_string(),
+                confirm_open,
+            },
         )
         .await?;
         Ok(())
@@ -410,6 +387,40 @@ impl Engine {
             app_id: app.id,
             scope,
         });
+        plan.event(DaemonEvent::TagsChanged);
+        plan.event(DaemonEvent::GrantsChanged);
+        Ok(())
+    }
+
+    /// Delete a tag: its grants go, and so do the bindings of reservations to it, which
+    /// frees their rows (`account_for_freed` asks for the confirmation where that matters).
+    pub(super) fn plan_op_delete_tag(
+        &self,
+        plan: &mut Plan,
+        tag_id: &str,
+    ) -> Result<(), EngineError> {
+        let tag_id = plan.resolve(tag_id)?;
+        let tag = plan
+            .cat
+            .tags
+            .iter()
+            .find(|t| t.id == tag_id)
+            .ok_or_else(|| EngineError::NotFound(format!("tag {tag_id}")))?
+            .clone();
+        plan.cat.tags.retain(|t| t.id != tag_id);
+        for r in plan.cat.reservations.iter_mut() {
+            r.bindings
+                .retain(|b| !matches!(&b.target, BindingTarget::Tag { tag_id: t } if *t == tag_id));
+        }
+        plan.cat
+            .grants
+            .retain(|g| g.target != Target::Tag(tag_id.clone()));
+        plan.activities.push(NewActivity::new(
+            ActivityKind::TagRemoved,
+            format!("Removed tag {}", tag.label),
+        ));
+        plan.change(ChangeKind::Delete, ChangeItem::Tag, tag.label, None);
+        plan.writes.push(Write::DeleteTag(tag_id));
         plan.event(DaemonEvent::TagsChanged);
         plan.event(DaemonEvent::GrantsChanged);
         Ok(())

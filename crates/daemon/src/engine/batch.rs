@@ -426,6 +426,7 @@ impl Engine {
                 self.plan_op_remove_tag_member(state, plan, tag_id, app_id, scope)
                     .await?
             }
+            ChangeOp::DeleteTag { tag_id, .. } => self.plan_op_delete_tag(plan, tag_id)?,
             ChangeOp::CreateReservation {
                 ref_,
                 label,
@@ -472,6 +473,7 @@ fn op_confirms(op: &ChangeOp) -> bool {
         ChangeOp::RemoveBinding { confirm_open, .. }
         | ChangeOp::ReleaseReservation { confirm_open, .. }
         | ChangeOp::RemoveTagMember { confirm_open, .. }
+        | ChangeOp::DeleteTag { confirm_open, .. }
         | ChangeOp::MoveApp { confirm_open, .. } => *confirm_open,
         _ => false,
     }
