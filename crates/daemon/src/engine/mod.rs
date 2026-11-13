@@ -193,6 +193,9 @@ pub struct Engine {
     exposed_reported: Mutex<HashSet<(String, String)>>,
     /// Where each app port's listener is bound, from the last socket scan (Tor targets).
     binds: Mutex<HashMap<(AppId, PortRef), IpAddr>>,
+    /// The ports that listeners of processes the process filter hides are bound to, from the
+    /// last socket scan: no app is stored for them, but they are taken all the same.
+    hidden_listening: Mutex<Vec<PortRef>>,
     /// The last enforcement error per non-IP network (log each distinct one once).
     enforce_failing: Mutex<HashMap<String, String>>,
 }
@@ -355,6 +358,7 @@ impl Engine {
             metrics: Metrics::default(),
             exposed_reported: Mutex::default(),
             binds: Mutex::default(),
+            hidden_listening: Mutex::default(),
             enforce_failing: Mutex::default(),
         }
     }

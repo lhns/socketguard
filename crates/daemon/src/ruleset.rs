@@ -55,6 +55,9 @@ pub struct Snapshot {
     /// Addresses the daemon owns on interfaces, whether or not an app still has them
     /// (retiring ones included): denied until they are really gone.
     pub owned: Vec<IpAddr>,
+    /// Ports that listening sockets of processes the process filter hides are bound to, from
+    /// the last poll: no app is stored for them, but they are taken all the same.
+    pub hidden_listening: Vec<PortRef>,
 }
 
 fn sorted_unique<T: Ord>(v: impl IntoIterator<Item = T>) -> Vec<T> {
@@ -73,6 +76,7 @@ impl Snapshot {
             reservations: &c.reservations,
             port_groups: &c.port_groups,
             addresses: &c.addresses,
+            hidden: &self.hidden_listening,
         }
     }
 }
@@ -1054,6 +1058,26 @@ mod tests {
         // Not attached to the app: no ports from it.
         s.catalog.port_groups[0].apps.clear();
         assert!(build(&s).rules.is_empty());
+    }
+
+    #[test]
+    fn ranges_leave_out_ports_a_filtered_process_listens_on() {
+        let mut s = base();
+        s.catalog.apps[0].ports = app("x", &[8080]).ports;
+        s.catalog.port_groups = vec![group("passive", &["50000-50010/tcp"], &["web"])];
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
+        // A process the process filter hides listens on 50003: no app is stored for it.
+        s.hidden_listening = vec![tcp(50003)];
+        let rs = build(&s);
+        assert_eq!(
+            rule_ports(&rs, "ay"),
+            ["50000-50002/tcp", "50004-50010/tcp", "8080/tcp"]
+        );
+        let info = Model::new(s.world()).address_info();
+        assert_eq!(
+            info["ay"].excluded.ranges(),
+            [PortRange::single(tcp(50003))]
+        );
     }
 
     #[test]

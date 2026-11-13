@@ -118,8 +118,14 @@ impl Engine {
         }
         let mut live: BTreeMap<AppId, Live> = BTreeMap::new();
         let mut binds: HashMap<(AppId, PortRef), IpAddr> = HashMap::new();
+        let mut hidden: BTreeSet<PortRef> = BTreeSet::new();
         for ls in sockets {
             if !process_filter.matches(&ls.process_name) {
+                // No app is stored for it, yet the port is taken (the exclusion rule).
+                hidden.insert(PortRef {
+                    port: ls.port,
+                    proto: ls.protocol,
+                });
                 continue;
             }
             let AppIdentity {
@@ -156,6 +162,7 @@ impl Engine {
         }
 
         *self.binds.lock().unwrap() = binds;
+        *self.hidden_listening.lock().unwrap() = hidden.into_iter().collect();
 
         let db = &state.db;
         let _apps = self.apps_lock.lock().await;

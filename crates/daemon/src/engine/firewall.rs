@@ -41,6 +41,7 @@ impl Engine {
             protect_host,
             // Owned addresses stay denied until they are really off their interface.
             owned: owned.into_iter().map(|o| IpAddr::V6(o.addr)).collect(),
+            hidden_listening: self.hidden_listening.lock().unwrap().clone(),
         })
     }
 
