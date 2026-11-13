@@ -187,9 +187,9 @@ fn host_ipv4_rules(
                 };
                 let sources = match (&grant.subject, network) {
                     (Subject::Anyone, None) => Sources::Any,
-                    (Subject::Anyone, Some(_)) => {
-                        Sources::Nets(subnets.iter().copied().map(IpNet::V4).collect())
-                    }
+                    (Subject::Anyone, Some(_)) => Sources::Nets(IpNet::aggregate(
+                        &subnets.iter().copied().map(IpNet::V4).collect::<Vec<_>>(),
+                    )),
                     _ if peer_nets.is_empty() => continue,
                     _ => Sources::Nets(IpNet::aggregate(&peer_nets)),
                 };
@@ -1506,6 +1506,34 @@ mod tests {
             Sources::Nets(vec!["192.168.1.0/24".parse().unwrap()])
         );
         assert_eq!(rs.rules.len(), 2);
+    }
+
+    #[test]
+    fn segment_subnets_are_aggregated_so_nft_accepts_the_set() {
+        let mut s = protected_lan();
+        let mut g = grant("g", "web", Subject::Anyone);
+        g.network_id = Some("lan".into());
+        s.catalog.grants = vec![g];
+        // Two addresses in one subnet, and a subnet nested in another interface subnet.
+        s.v4_subnets = BTreeMap::from([(
+            "eth0".into(),
+            vec![
+                "192.168.1.0/24".parse().unwrap(),
+                "192.168.1.0/24".parse().unwrap(),
+                "10.0.0.0/8".parse().unwrap(),
+                "10.1.0.0/16".parse().unwrap(),
+            ],
+        )]);
+        let rs = build(&s);
+        let v4 = v4_rules(&rs);
+        assert_eq!(v4.len(), 1);
+        assert_eq!(
+            v4[0].sources,
+            Sources::Nets(vec![
+                "10.0.0.0/8".parse().unwrap(),
+                "192.168.1.0/24".parse().unwrap()
+            ])
+        );
     }
 
     #[test]
