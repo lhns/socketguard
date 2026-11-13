@@ -198,6 +198,12 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Hold the change lock (ADR 0062), so a test can show that a change waits for it.
+    #[doc(hidden)]
+    pub async fn hold_change_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.change_lock.lock().await
+    }
+
     pub fn new(config: &DaemonConfig, ula_global_id: [u8; 5]) -> anyhow::Result<Self> {
         Self::new_with_deps(
             config,
