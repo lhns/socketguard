@@ -308,17 +308,21 @@ impl Engine {
         if plan.writes.is_empty() {
             return Ok(response(&plan));
         }
-        // Addresses of a port group that goes or is detached leave their interfaces and
-        // networks first (retiring, so they stay denied until really gone).
-        if !plan.removed.is_empty() {
-            self.retire_addresses(state, &plan.removed).await?;
-            self.remove_app_locators(state, &plan.removed).await;
-        }
+        // Addresses of a port group that goes or is detached are retired in the same
+        // transaction (first, so they stay denied until really gone) and leave their
+        // networks once it has committed; a failed write leaves them as they were. A crash
+        // in between is healed at start: the owned row is retiring and the address row gone,
+        // so the sweep removes it, and the onion ledger removes services without a row.
+        let mut writes = self.retire_writes(&plan.removed);
+        writes.extend(plan.writes.iter().cloned());
         state
             .db
-            .apply_writes(&plan.writes)
+            .apply_writes(&writes)
             .await
             .map_err(|e| Self::conflict_or_internal(e, "a change of this batch"))?;
+        if !plan.removed.is_empty() {
+            self.remove_app_locators(state, &plan.removed).await;
+        }
         let applied = self.apply_and_ensure(state).await;
         if let Err(e) = state.db.insert_activity(&plan.activities).await {
             warn!("Could not record activity: {e}");

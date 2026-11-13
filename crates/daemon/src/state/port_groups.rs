@@ -230,4 +230,33 @@ mod tests {
         assert!(is_unique_violation(&err));
         assert_eq!(count(&db, "port_groups").await, 1);
     }
+
+    #[tokio::test]
+    async fn a_retire_in_a_failed_batch_is_rolled_back_and_in_a_good_one_kept() {
+        let db = db().await;
+        let addr: std::net::Ipv6Addr = "300:1::1".parse().unwrap();
+        db.claim_address(addr, "ygg0", Some("ygg")).await.unwrap();
+        db.apply_writes(&[Write::InsertPortGroup(group("x", &["1/tcp"], &[]))])
+            .await
+            .unwrap();
+        let retire = Write::RetireAddress {
+            addr,
+            interface: "ygg0".into(),
+            network_id: Some("ygg".into()),
+        };
+        let err = db
+            .apply_writes(&[
+                retire.clone(),
+                Write::InsertPortGroup(group("x", &["3/tcp"], &[])),
+            ])
+            .await
+            .unwrap_err();
+        assert!(is_unique_violation(&err));
+        assert!(!db.list_owned_addresses().await.unwrap()[0].retiring);
+        // A dry run leaves nothing either.
+        db.try_writes(&[retire.clone()]).await.unwrap();
+        assert!(!db.list_owned_addresses().await.unwrap()[0].retiring);
+        db.apply_writes(&[retire]).await.unwrap();
+        assert!(db.list_owned_addresses().await.unwrap()[0].retiring);
+    }
 }

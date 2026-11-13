@@ -63,6 +63,25 @@ pub struct OwnedAddress {
     pub retiring: bool,
 }
 
+/// [`Database::retire_address`] on a connection, so a batch can retire in its transaction.
+pub(crate) async fn retire_address_in(
+    conn: &mut sqlx::SqliteConnection,
+    addr: Ipv6Addr,
+    interface: &str,
+    network_id: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO owned_addresses (addr, interface, network_id, state, since)          VALUES (?1, ?2, ?3, 'retiring', ?4)          ON CONFLICT(addr) DO UPDATE SET state = 'retiring',          since = CASE WHEN state = 'retiring' THEN since ELSE ?4 END",
+    )
+    .bind(addr.to_string())
+    .bind(interface)
+    .bind(network_id)
+    .bind(ts(Utc::now()))
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 pub struct Database {
     pool: SqlitePool,
     /// The file, for protecting it after the schema (and -wal/-shm) exist.
@@ -505,6 +524,13 @@ impl Database {
         Ok(())
     }
 
+    /// Run SQL as it is. Tests only, to make a later write fail.
+    #[doc(hidden)]
+    pub async fn exec_raw(&self, sql: &str) -> Result<()> {
+        sqlx::query(sql).execute(&self.pool).await?;
+        Ok(())
+    }
+
     /// Mark `addr` as being removed. It stays owned (and so denied) until
     /// [`Database::forget_address`] confirms it is gone.
     pub async fn retire_address(
@@ -513,19 +539,8 @@ impl Database {
         interface: &str,
         network_id: Option<&str>,
     ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO owned_addresses (addr, interface, network_id, state, since) \
-             VALUES (?1, ?2, ?3, 'retiring', ?4) \
-             ON CONFLICT(addr) DO UPDATE SET state = 'retiring', \
-             since = CASE WHEN state = 'retiring' THEN since ELSE ?4 END",
-        )
-        .bind(addr.to_string())
-        .bind(interface)
-        .bind(network_id)
-        .bind(ts(Utc::now()))
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        let mut conn = self.pool.acquire().await?;
+        retire_address_in(&mut conn, addr, interface, network_id).await
     }
 
     /// Delete the row of an address that is confirmed off its interface.

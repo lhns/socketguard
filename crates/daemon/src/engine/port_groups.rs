@@ -455,24 +455,25 @@ impl Engine {
 
     // ─── Running a plan ──────────────────────────────────────────────────────
 
-    /// Save a plan and make it take effect: the addresses it removes leave their interfaces
-    /// and networks first (retiring, so they stay denied), then the writes, then the
-    /// ruleset.
+    /// Save a plan and make it take effect: the writes, with the retiring of the addresses it
+    /// removes first in the same transaction (so they stay denied, and a failed write
+    /// changes nothing), then those addresses leave their networks, then the ruleset.
     async fn run_group_plan(
         &self,
         state: &AppState,
         plan: GroupPlan,
         activity: NewActivity,
     ) -> Result<(), EngineError> {
-        if !plan.removed.is_empty() {
-            self.retire_addresses(state, &plan.removed).await?;
-            self.remove_app_locators(state, &plan.removed).await;
-        }
+        let mut writes = self.retire_writes(&plan.removed);
+        writes.extend(plan.writes.iter().cloned());
         state
             .db
-            .apply_writes(&plan.writes)
+            .apply_writes(&writes)
             .await
             .map_err(|e| Self::conflict_or_internal(e, "this port group"))?;
+        if !plan.removed.is_empty() {
+            self.remove_app_locators(state, &plan.removed).await;
+        }
         let applied = self.apply_and_ensure(state).await;
         self.commit(
             state,
