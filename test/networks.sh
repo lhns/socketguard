@@ -30,7 +30,17 @@ mn_netjson() { $SG networks list --json; }
 mn_field() { { mn_netjson 2>/dev/null | jq -r --arg id "$1" ".[] | select(.id == \$id) | ($2) // empty"; } || true; }
 mn_pid() { pgrep -f "$1" | head -1 || true; }
 # The yggdrasil process itself, not the child-guard whose command line also names it.
-mn_ygg_pid() { pgrep -f "^/[^ ]*/third_party/yggdrasil/yggdrasil( |$)" | head -1 || true; }
+# The install path may hold spaces (macOS: /Library/Application Support/SocketGuard), so the
+# guard is told apart by its `child-guard` argument, not by the shape of the path.
+mn_ygg_pid() {
+    local p
+    for p in $(pgrep -f "/third_party/yggdrasil/yggdrasil( |$)" || true); do
+        case "$(ps -o command= -p "$p" 2>/dev/null)" in
+            *" child-guard "*) ;;
+            *) echo "$p"; return 0 ;;
+        esac
+    done
+}
 mn_uid() { ps -o uid= -p "$1" 2>/dev/null | tr -d " " || true; }
 mn_gone() { [ -z "$(mn_pid "$1")" ]; }
 mn_running() { [ -n "$(mn_pid "$1")" ]; }

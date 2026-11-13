@@ -360,6 +360,9 @@ self_test() {
     expect child-obfs4-helper-full-path PRESENT "$(state_helper_ps $'/usr/lib/socketguard/third_party/tor/pluggable_transports/lyrebird')"
     expect child-obfs4-helper-absent ABSENT "$(state_helper_ps "$ps_ours")"
     expect child-obfs4-helper-other-lyrebird ABSENT "$(state_helper_ps $'/usr/bin/lyrebird')"
+    local ps_mac=$'/Library/Application Support/SocketGuard/third_party/yggdrasil/yggdrasil -useconffile /Library/Application Support/SocketGuard/yggdrasil/yggdrasil.conf'
+    expect child-yggdrasil-in-a-path-with-a-space PRESENT "$(state_child_ps yggdrasil "$ps_mac")"
+    expect child-obfs4-helper-in-a-path-with-a-space PRESENT "$(state_helper_ps $'/Library/Application Support/SocketGuard/third_party/tor/pluggable_transports/lyrebird')"
     expect child-none ABSENT "$(state_child_ps yggdrasil $'/sbin/init\n/usr/sbin/tor --runasdaemon 1')"
     expect child-system-yggdrasil-is-not-ours ABSENT "$(state_child_ps yggdrasil $'/usr/bin/yggdrasil -useconffile /etc/yggdrasil.conf')"
     expect child-tor-path-must-be-exact ABSENT "$(state_child_ps tor $'/opt/third_party/yggdrasil/yggdrasil')"
