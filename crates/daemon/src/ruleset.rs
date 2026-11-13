@@ -344,6 +344,17 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
                         );
                     };
                     if grant.subject == Subject::Anyone {
+                        // Without an interface the rule would admit Anyone on every
+                        // interface, not on this network's.
+                        if iif.is_none()
+                            && matches!(network.kind, NetworkKind::Lan | NetworkKind::Yggdrasil)
+                        {
+                            warnings.insert(format!(
+                                "Network {} has no interface; skipping its rules for Anyone",
+                                network.id
+                            ));
+                            continue;
+                        }
                         let id = match &iif {
                             Some(i) => format!("{base}:{i}"),
                             None => base,
@@ -787,6 +798,32 @@ mod tests {
         assert_eq!(managed(&build(&s)).len(), 3);
         let scope_ids: Vec<_> = rs.scopes.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(scope_ids, ["managed", "overlay:ygg0"]);
+    }
+
+    #[test]
+    fn anyone_on_a_network_without_an_interface_gets_no_rule_and_a_warning() {
+        let mut s = base();
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
+        s.networks[1].interface = None; // lan
+        s.networks[2].interface = None; // ygg
+        let (rs, warnings) = build_with_warnings(&s);
+        // An unbound rule would admit Anyone on every interface; Local stays as it is.
+        assert!(
+            rs.rules
+                .iter()
+                .all(|r| r.iif.is_some() || r.dst == ip("fd00::1")),
+            "{:?}",
+            ids(&rs)
+        );
+        assert!(!ids(&rs)
+            .iter()
+            .any(|i| i.starts_with("a:an:") || i.starts_with("a:ay:")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("lan") && w.contains("no interface")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("ygg") && w.contains("no interface")));
     }
 
     #[test]
