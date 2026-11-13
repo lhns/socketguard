@@ -49,7 +49,7 @@ async fn fixture(engine: &Engine, state: &AppState) -> Ids {
         .await
         .unwrap();
     let group = engine
-        .create_group(state, "g0", &[peer.id.clone()])
+        .create_group(state, "g0", std::slice::from_ref(&peer.id))
         .await
         .unwrap();
     let grant = engine
@@ -71,7 +71,13 @@ async fn fixture(engine: &Engine, state: &AppState) -> Ids {
         .await
         .unwrap();
     let pg_attached = engine
-        .create_port_group(state, Some("pg1"), &[range(51000)], &[app.clone()], false)
+        .create_port_group(
+            state,
+            Some("pg1"),
+            &[range(51000)],
+            std::slice::from_ref(&app),
+            false,
+        )
         .await
         .unwrap();
     Ids {
