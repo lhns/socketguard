@@ -237,7 +237,12 @@ pub enum TagsCmd {
         yes: bool,
     },
     /// Remove a tag and the grants on it
-    Rm { tag: String },
+    Rm {
+        tag: String,
+        /// Confirm without asking when freeing rows from a reservation opens them to anyone
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Add or remove members
     #[command(subcommand)]
     Members(TagMembersCmd),
@@ -317,9 +322,17 @@ pub enum ReservationsCmd {
         reservation: String,
         #[arg(required = true)]
         targets: Vec<String>,
+        /// Confirm without asking when the freed rows are opened to anyone on Tor
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Delete a reservation, its addresses and the grants on it
-    Release { reservation: String },
+    Release {
+        reservation: String,
+        /// Confirm without asking when the freed rows are opened to anyone on Tor
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -352,6 +365,9 @@ pub enum TagMembersCmd {
         tag: String,
         #[arg(required = true)]
         members: Vec<String>,
+        /// Confirm without asking when freeing a row from a reservation opens it to anyone
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 }
 

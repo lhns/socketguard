@@ -514,7 +514,7 @@ describe("Tags", () => {
     const rows = within(await within(inspector()).findByRole("group", { name: "Rows of redis-server in web" }));
     expect(rows.getByRole("button", { name: "All ports" })).toHaveAttribute("aria-pressed", "true");
     await user.click(rows.getByRole("button", { name: "All ports" }));
-    await waitFor(() => expect(applied(d)).toEqual([[{ op: "remove_tag_member", tag_id: "t1", app_id: "a2", scope: { kind: "all" } }]]));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "remove_tag_member", tag_id: "t1", app_id: "a2", scope: { kind: "all" }, confirm_open: false }]]));
     expect(await screen.findByRole("button", { name: "Undo" })).toBeInTheDocument();
 
     await user.click(within(inspector()).getByRole("button", { name: "Add or remove members" }));
@@ -559,6 +559,32 @@ describe("Tags", () => {
     await user.type(screen.getByLabelText(/Auto-match patterns/), "stg*");
     await user.click(screen.getByRole("button", { name: "Create tag" }));
     await waitFor(() => expect(applied(d)).toEqual([[{ op: "create_tag", label: "staging", patterns: ["stg*"] }]]));
+  });
+});
+
+describe("Inspector: delete a tag bound to a reservation", () => {
+  it("asks again before opening rows to anyone, and deletes with the confirmation", async () => {
+    // The daemon refuses the first delete: freeing the rows makes a grant to anyone live on Tor.
+    const d = setup({
+      delete_tag: (a) => {
+        if (!a.confirmOpen) throw { code: "confirmation_required", message: "confirm opening to anyone" };
+        return saved(null);
+      },
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("checkbox", { name: "Select web" }));
+    expect(await screen.findByRole("heading", { name: "web" })).toBeInTheDocument();
+    const panel = within(await screen.findByRole("region", { name: "Details" }));
+    await user.click(await panel.findByRole("button", { name: "Delete tag" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete tag" }));
+    const dialog = await screen.findByRole("dialog", { name: "Open rows to anyone?" });
+    expect(dialog).toHaveTextContent("grant to anyone");
+    await user.click(within(dialog).getByRole("button", { name: "Delete and open" }));
+    await waitFor(() => expect(d.calls.filter((c) => c.cmd === "delete_tag").map((c) => c.args)).toEqual([
+      { id: "t1", confirmOpen: false },
+      { id: "t1", confirmOpen: true },
+    ]));
   });
 });
 

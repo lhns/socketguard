@@ -19,8 +19,8 @@ use futures_util::stream::Stream;
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use socketguard_core::api_types::{
-    error_code, event_name, ApiError, ApplyRequest, AttachPortGroup, ChangesRequest, Counts,
-    DisableRequest, Enforcement, EnforcementNotice, EnforcementStatus, LockoutRiskInfo,
+    error_code, event_name, ApiError, ApplyRequest, AttachPortGroup, ChangesRequest, ConfirmQuery,
+    Counts, DisableRequest, Enforcement, EnforcementNotice, EnforcementStatus, LockoutRiskInfo,
     MemberQuery, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup,
     NewReservation, NewTag, NewTagMember, ParseCredentialsRequest, ProtectHostRequest,
     ProtectHostResponse, ReserveRequest, SetBridges, SetMembers, SetPeers, StatusResponse,
@@ -545,9 +545,12 @@ async fn reservation_rename(
 async fn reservation_release(
     State(state): State<Shared>,
     Path(id): Path<String>,
+    ApiQuery(q): ApiQuery<ConfirmQuery>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    engine.release_reservation(&state, &id).await?;
+    engine
+        .release_reservation(&state, &id, q.confirm_open)
+        .await?;
     Ok(saved(&engine, StatusCode::NO_CONTENT, None::<()>))
 }
 
@@ -566,9 +569,12 @@ async fn binding_add(
 async fn binding_remove(
     State(state): State<Shared>,
     Path((id, binding_id)): Path<(String, String)>,
+    ApiQuery(q): ApiQuery<ConfirmQuery>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    let view = engine.remove_binding(&state, &id, &binding_id).await?;
+    let view = engine
+        .remove_binding(&state, &id, &binding_id, q.confirm_open)
+        .await?;
     Ok(saved(&engine, StatusCode::OK, Some(view)))
 }
 
@@ -807,9 +813,13 @@ async fn tag_update(
     Ok(saved(&engine, StatusCode::OK, Some(tag)))
 }
 
-async fn tag_delete(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
+async fn tag_delete(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiQuery(q): ApiQuery<ConfirmQuery>,
+) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    engine.delete_tag(&state, &id).await?;
+    engine.delete_tag(&state, &id, q.confirm_open).await?;
     Ok(saved(&engine, StatusCode::NO_CONTENT, None::<()>))
 }
 
@@ -833,7 +843,7 @@ async fn tag_member_remove(
     let scope = q.scope().map_err(ApiErr::invalid)?;
     let engine = state.engine.read().await;
     let tag = engine
-        .remove_tag_member(&state, &id, &app_id, scope)
+        .remove_tag_member(&state, &id, &app_id, scope, q.confirm_open)
         .await?;
     Ok(saved(&engine, StatusCode::OK, Some(tag)))
 }

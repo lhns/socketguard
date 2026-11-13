@@ -957,14 +957,16 @@ async fn execute(engine: &Engine, state: &AppState, p: &Plan) -> Result<(), Engi
             export_binding(&x.target, &apps_by_id, &tags, &port_groups).as_ref() == Some(b)
         });
         if let Some(x) = found {
+            // The document states its Anyone grants explicitly, so freeing a row they name
+            // counts as confirmed, like the grants themselves below.
             engine
-                .remove_binding(state, &view.reservation.id, &x.id)
+                .remove_binding(state, &view.reservation.id, &x.id, true)
                 .await?;
         }
     }
     for label in &p.delete_reservations {
         if let Ok(id) = res_id(label, &reservations) {
-            engine.release_reservation(state, &id).await?;
+            engine.release_reservation(state, &id, true).await?;
         }
     }
 

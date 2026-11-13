@@ -2,9 +2,9 @@ import { useId, useMemo, useRef, useState } from "react";
 import { appEntriesFromGrants, grantEntries } from "../access";
 import type { ChangeOp, ReservationView, Scope } from "../api";
 import { useCommit } from "../commit";
-import { ALL_SCOPE, errorField, errorText, scopeKey, scopeLabel, scopeOfPort, sameScope } from "../lib";
+import { ALL_SCOPE, errorField, scopeKey, scopeLabel, scopeOfPort, sameScope } from "../lib";
 import { boundRows, conflictText, type BoundRow } from "../reservations";
-import { useApps, useGrants, useList, useReleaseReservation, useReservations, usePortGroups, useTags } from "../queries";
+import { useApps, useGrants, useList, useReservations, usePortGroups, useTags } from "../queries";
 import { bindsRow } from "../matrix";
 import type { AccessHighlight } from "./AccessList";
 import { DangerZone, RowButton } from "./ActionRow";
@@ -15,7 +15,6 @@ import ConfirmDialog from "./ConfirmDialog";
 import Inspector, { Section, useNameCtx } from "./Inspector";
 import Picker, { type PickerItem } from "./Picker";
 import RowCard, { RowAccess } from "./RowCard";
-import { useToast } from "./Toast";
 
 interface Common {
   onCollapse?: () => void;
@@ -28,9 +27,8 @@ const RELEASE_TEXT = "Its addresses are given up, and the grants on it go. Ports
 export function ReservationInspector({ reservation: r, highlight, onCollapse, onClose }: { reservation: ReservationView; highlight: AccessHighlight | null } & Common) {
   const id = useId();
   const names = useNameCtx();
-  const toast = useToast();
   const groups = useList(usePortGroups());
-  const release = useReleaseReservation();
+  const release = useCommit(onClose);
   const rename = useCommit(() => setRenaming(false));
   const bind = useCommit();
   const [renaming, setRenaming] = useState(false);
@@ -126,18 +124,13 @@ export function ReservationInspector({ reservation: r, highlight, onCollapse, on
           onCancel={() => setReleasing(false)}
           onConfirm={() => {
             setReleasing(false);
-            release.mutate(r.id, {
-              onSuccess: () => {
-                toast.success(`Released ${r.label}`);
-                onClose();
-              },
-              onError: (e) => toast.error(errorText(e)),
-            });
+            void release.runBatch([{ op: "release_reservation", reservation_id: r.id, confirm_open: false }], `Released ${r.label}`);
           }}
         >
           <p>{RELEASE_TEXT}</p>
         </ConfirmDialog>
       )}
+      <CommitPreview commit={release} title={`Release ${r.label}?`} confirmLabel="Release reservation" />
     </Inspector>
   );
 }
@@ -196,7 +189,7 @@ function BoundCard({ reservation: r, row, conflict, highlight }: { reservation: 
             aria-label={`Remove ${what} from reservation`}
             onClick={() =>
               void remove.runBatch(
-                [{ op: "remove_binding", reservation_id: r.id, binding_id: binding.id }],
+                [{ op: "remove_binding", reservation_id: r.id, binding_id: binding.id, confirm_open: false }],
                 `Removed ${what} from ${r.label}`,
                 [{ op: "add_binding", reservation_id: r.id, target: binding.target, confirm_open: false }],
               )
@@ -204,6 +197,7 @@ function BoundCard({ reservation: r, row, conflict, highlight }: { reservation: 
           >
             Remove from reservation
           </RowButton>
+          <CommitPreview commit={remove} title={`Remove ${what} from ${r.label}?`} confirmLabel="Remove" />
         </>
       }
     />
@@ -287,20 +281,16 @@ function AddPorts({ reservation: r, open, onOpenChange, onPick }: {
 
 /** Several reservations: Release them together. */
 export function ReservationsInspector({ reservations, onCollapse, onClose }: { reservations: ReservationView[] } & Common) {
-  const toast = useToast();
-  const release = useReleaseReservation();
+  const release = useCommit(onClose);
   const [releasing, setReleasing] = useState(false);
   const shown = reservations.length > 6 ? `${reservations.slice(0, 6).map((r) => r.label).join(", ")} and ${reservations.length - 6} more` : reservations.map((r) => r.label).join(", ");
 
-  const releaseAll = async () => {
+  const releaseAll = () => {
     setReleasing(false);
-    try {
-      for (const r of reservations) await release.mutateAsync(r.id);
-      toast.success(`Released ${reservations.length} reservations`);
-      onClose();
-    } catch (e) {
-      toast.error(errorText(e));
-    }
+    void release.runBatch(
+      reservations.map<ChangeOp>((r) => ({ op: "release_reservation", reservation_id: r.id, confirm_open: false })),
+      `Released ${reservations.length} reservations`,
+    );
   };
 
   return (
@@ -313,11 +303,12 @@ export function ReservationsInspector({ reservations, onCollapse, onClose }: { r
           title={`Release ${reservations.length} reservations?`}
           confirmLabel="Release reservations"
           onCancel={() => setReleasing(false)}
-          onConfirm={() => void releaseAll()}
+          onConfirm={releaseAll}
         >
           <p>{RELEASE_TEXT}</p>
         </ConfirmDialog>
       )}
+      <CommitPreview commit={release} title={`Release ${reservations.length} reservations?`} confirmLabel="Release reservations" />
     </Inspector>
   );
 }

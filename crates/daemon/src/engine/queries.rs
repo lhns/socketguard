@@ -11,7 +11,7 @@ use socketguard_core::{
     GrantView, Model, Network, NetworkKind, Peer, PeerGroup, PortGroup, PortRangeSet, Reach,
     Reservation, Row, Settings, Subject, Tag, Target, V4Context,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// What the reach of a grant is worked out from, built once per request.
 pub(super) struct ReachCtx<'a> {
@@ -105,10 +105,10 @@ impl<'a> ReachCtx<'a> {
         reach
     }
 
-    /// On Tor a reservation is opened as a whole (ADR 0047): a grant on a row that is bound
-    /// to a reservation has no effect there. Say so in the reach, with the reason.
-    fn bound_rows_on_tor(&self, reach: &mut [GrantReach], grant: &Grant, networks: &[Network]) {
-        let rows: Vec<Row> = match &grant.target {
+    /// The rows a grant names: its own row, or the rows of the members of its tag. A grant on
+    /// a reservation names none (it covers whatever is bound).
+    fn grant_rows(&self, grant: &Grant) -> Vec<Row> {
+        match &grant.target {
             Target::App(a) => vec![Row {
                 app_id: a.clone(),
                 scope: grant.scope.clone(),
@@ -120,7 +120,39 @@ impl<'a> ReachCtx<'a> {
                 .map(|t| t.members.iter().map(Row::from).collect())
                 .unwrap_or_default(),
             Target::Reservation(_) => vec![],
-        };
+        }
+    }
+
+    /// Among `grants`, those that name a row in `freed` (bound before a change, not any more)
+    /// and now let their subject in on a Tor network: a row is inert there while bound
+    /// (`bound_rows_on_tor`), so freeing it publishes its own onion address. Compared per
+    /// row, not per grant: a tag grant that was live through its other members gains this
+    /// member's service too.
+    pub(super) fn freed_live_on_tor<'g>(
+        &self,
+        grants: &'g [Grant],
+        freed: &HashSet<Row>,
+        networks: &[Network],
+        protected: &[String],
+    ) -> Vec<&'g Grant> {
+        grants
+            .iter()
+            .filter(|g| self.grant_rows(g).iter().any(|r| freed.contains(r)))
+            .filter(|g| {
+                self.reach_of(g, networks, protected).iter().any(|r| {
+                    r.reach != Reach::NotReachable
+                        && networks
+                            .iter()
+                            .any(|n| n.id == r.network_id && n.kind == NetworkKind::Tor)
+                })
+            })
+            .collect()
+    }
+
+    /// On Tor a reservation is opened as a whole (ADR 0047): a grant on a row that is bound
+    /// to a reservation has no effect there. Say so in the reach, with the reason.
+    fn bound_rows_on_tor(&self, reach: &mut [GrantReach], grant: &Grant, networks: &[Network]) {
+        let rows = self.grant_rows(grant);
         let bound: Vec<(&Row, &str)> = rows
             .iter()
             .filter_map(|row| Some((row, *self.bound.get(row)?)))

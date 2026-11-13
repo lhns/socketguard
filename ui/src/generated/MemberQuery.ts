@@ -6,4 +6,8 @@ import type { Protocol } from "./Protocol";
  * All-sockets membership goes, with `port` (and `proto`) the membership of that port, with
  * `group` (a port group id) the membership by that group.
  */
-export type MemberQuery = { port?: number, proto?: Protocol, group?: string, };
+export type MemberQuery = { port?: number, proto?: Protocol, group?: string, 
+/**
+ * Needed when the row leaves a reservation's tag and opens to Anyone on Tor.
+ */
+confirm_open: boolean, };

@@ -867,9 +867,15 @@ async fn tags(c: &Ctx, cmd: TagsCmd) -> Result<()> {
             let names = c.names().await?;
             c.print(&r, || render::tag_detail(&r, &names, &[]))
         }
-        TagsCmd::Rm { tag } => {
+        TagsCmd::Rm { tag, yes } => {
             let tag = c.tag(&tag).await?;
-            let saved = c.client.delete_tag(&tag.id).await?;
+            let saved = match c.client.delete_tag(&tag.id, yes).await {
+                Err(e) if e.is_confirmation_required() => {
+                    confirm_freed_open(&format!("Removing tag {}", tag.label))?;
+                    c.client.delete_tag(&tag.id, true).await?
+                }
+                other => other?,
+            };
             c.done_saved(saved, format!("removed tag {} and its grants", tag.label))
         }
         TagsCmd::Members(TagMembersCmd::Add { tag, members, yes }) => {
@@ -891,14 +897,25 @@ async fn tags(c: &Ctx, cmd: TagsCmd) -> Result<()> {
             let names = c.names().await?;
             c.print(&last, || render::tag_detail(&last, &names, &[]))
         }
-        TagsCmd::Members(TagMembersCmd::Rm { tag, members }) => {
+        TagsCmd::Members(TagMembersCmd::Rm { tag, members, yes }) => {
             let tag = c.tag(&tag).await?;
             let mut last = tag.clone();
+            let mut confirmed = yes;
             for m in tag_members(c, &members).await? {
-                let saved = c
+                let saved = match c
                     .client
-                    .remove_tag_member(&tag.id, &m.app_id, &m.scope)
-                    .await?;
+                    .remove_tag_member(&tag.id, &m.app_id, &m.scope, confirmed)
+                    .await
+                {
+                    Err(e) if e.is_confirmation_required() => {
+                        confirm_freed_open(&format!("Removing a member of tag {}", tag.label))?;
+                        confirmed = true;
+                        c.client
+                            .remove_tag_member(&tag.id, &m.app_id, &m.scope, true)
+                            .await?
+                    }
+                    other => other?,
+                };
                 c.warn_pending(&saved.enforcement);
                 last = saved.value;
             }
@@ -1054,6 +1071,19 @@ impl Ctx {
     }
 }
 
+/// Ask before a removal frees rows from a reservation: on Tor a bound row is inert, so a
+/// grant to anyone on it becomes live.
+fn confirm_freed_open(what: &str) -> Result<()> {
+    prompt::Stdin.confirm_or_yes(
+        false,
+        &format!("{what} frees rows from a reservation, and a grant to anyone on them becomes live on Tor. Continue?"),
+        &format!(
+            "{} frees rows from a reservation, which opens them to anyone on Tor; repeat with --yes to confirm",
+            what.to_lowercase()
+        ),
+    )
+}
+
 /// Ask before binding rows to a reservation that is open to anyone.
 fn confirm_binding_open(label: &str) -> Result<()> {
     prompt::Stdin.confirm_or_yes(
@@ -1141,9 +1171,11 @@ async fn reservations(c: &Ctx, cmd: ReservationsCmd) -> Result<()> {
         ReservationsCmd::Unbind {
             reservation,
             targets,
+            yes,
         } => {
             let res = c.reservation(&reservation).await?;
             let mut last = res.clone();
+            let mut confirmed = yes;
             for target in c.binding_targets(&targets).await? {
                 let binding = res
                     .reservation
@@ -1157,19 +1189,43 @@ async fn reservations(c: &Ctx, cmd: ReservationsCmd) -> Result<()> {
                             res.reservation.label
                         )
                     })?;
-                let saved = c
+                let saved = match c
                     .client
-                    .remove_binding(&res.reservation.id, &binding.id)
-                    .await?;
+                    .remove_binding(&res.reservation.id, &binding.id, confirmed)
+                    .await
+                {
+                    Err(e) if e.is_confirmation_required() => {
+                        confirm_freed_open(&format!(
+                            "Unbinding from reservation {}",
+                            res.reservation.label
+                        ))?;
+                        confirmed = true;
+                        c.client
+                            .remove_binding(&res.reservation.id, &binding.id, true)
+                            .await?
+                    }
+                    other => other?,
+                };
                 c.warn_pending(&saved.enforcement);
                 last = saved.value;
             }
             let names = c.names().await?;
             c.print(&last, || render::reservation_detail(&last, &names))
         }
-        ReservationsCmd::Release { reservation } => {
+        ReservationsCmd::Release { reservation, yes } => {
             let res = c.reservation(&reservation).await?;
-            let saved = c.client.release_reservation(&res.reservation.id).await?;
+            let saved = match c.client.release_reservation(&res.reservation.id, yes).await {
+                Err(e) if e.is_confirmation_required() => {
+                    confirm_freed_open(&format!(
+                        "Releasing reservation {}",
+                        res.reservation.label
+                    ))?;
+                    c.client
+                        .release_reservation(&res.reservation.id, true)
+                        .await?
+                }
+                other => other?,
+            };
             c.done_saved(
                 saved,
                 format!(

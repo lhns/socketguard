@@ -506,6 +506,18 @@ pub struct MemberQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub group: Option<PortGroupId>,
+    /// Needed when the row leaves a reservation's tag and opens to Anyone on Tor.
+    #[serde(default)]
+    pub confirm_open: bool,
+}
+
+/// Query of the `DELETE` routes that can free rows from a reservation and so open them to
+/// Anyone on Tor (`?confirm_open=true`).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfirmQuery {
+    #[serde(default)]
+    pub confirm_open: bool,
 }
 
 impl MemberQuery {
@@ -709,6 +721,10 @@ pub enum ChangeOp {
         app_id: AppId,
         #[serde(default)]
         scope: Scope,
+        /// Needed when the row leaves a reservation's tag and a grant to Anyone that names it
+        /// then becomes live on Tor (ADR 0047: a bound row is inert there).
+        #[serde(default)]
+        confirm_open: bool,
     },
     CreateReservation {
         #[serde(rename = "ref", default)]
@@ -742,10 +758,16 @@ pub enum ChangeOp {
     RemoveBinding {
         reservation_id: ReservationId,
         binding_id: BindingId,
+        /// Needed when the freed rows have a grant to Anyone that becomes live on Tor.
+        #[serde(default)]
+        confirm_open: bool,
     },
     /// Delete the reservation, its addresses and the grants on it.
     ReleaseReservation {
         reservation_id: ReservationId,
+        /// Needed when the freed rows have a grant to Anyone that becomes live on Tor.
+        #[serde(default)]
+        confirm_open: bool,
     },
     /// Move grants, tag memberships, addresses and bindings from one app to another.
     MoveApp {

@@ -37,6 +37,46 @@ impl ResPlan {
     }
 }
 
+impl Catalog {
+    /// The rows bound to a reservation, directly or through a tag.
+    pub(super) fn bound_rows(&self) -> HashSet<Row> {
+        self.reservations
+            .iter()
+            .flat_map(|r| reservation_members(r, &self.tags))
+            .map(|m| Row::from(&m))
+            .collect()
+    }
+
+    /// The grants that name a row that was bound in `before` and is not any more, and now
+    /// let their subject in on a Tor network (a bound row is inert there, ADR 0047). A change
+    /// that frees rows reports these like other changes of reach, and needs `confirm_open`
+    /// when Anyone is among them.
+    pub(super) fn freed_grants(
+        &self,
+        before: &HashSet<Row>,
+        networks: &[socketguard_core::Network],
+        protected: &[String],
+    ) -> Vec<Grant> {
+        let after = self.bound_rows();
+        let freed: HashSet<Row> = before.difference(&after).cloned().collect();
+        if freed.is_empty() {
+            return vec![];
+        }
+        let ctx = super::queries::ReachCtx::new(
+            &self.apps,
+            &self.peers,
+            &self.groups,
+            &self.tags,
+            &self.port_groups,
+            &self.reservations,
+        );
+        ctx.freed_live_on_tor(&self.grants, &freed, networks, protected)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+}
+
 fn row_text(cat: &Catalog, row: &Row) -> String {
     let app = cat
         .app(&row.app_id)
@@ -445,23 +485,31 @@ impl Engine {
         state: &AppState,
         id: &str,
         binding_id: &str,
+        confirm_open: bool,
     ) -> Result<ReservationView, EngineError> {
         self.run_one(
             state,
             ChangeOp::RemoveBinding {
                 reservation_id: id.to_string(),
                 binding_id: binding_id.to_string(),
+                confirm_open,
             },
         )
         .await?;
         self.get_reservation(state, id).await
     }
 
-    pub async fn release_reservation(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
+    pub async fn release_reservation(
+        &self,
+        state: &AppState,
+        id: &str,
+        confirm_open: bool,
+    ) -> Result<(), EngineError> {
         self.run_one(
             state,
             ChangeOp::ReleaseReservation {
                 reservation_id: id.to_string(),
+                confirm_open,
             },
         )
         .await?;

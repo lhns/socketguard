@@ -163,7 +163,6 @@ const PEER_KEYS = keysOf("peers_changed");
 /** Deleting a peer or a group, a credential or a member changes grants too. */
 const PEER_GRANT_KEYS = keysOf("peers_changed", "grants_changed");
 const TAG_KEYS = keysOf("tags_changed", "grants_changed", "apps_changed", "activity");
-const RESERVATION_KEYS = keysOf("reservations_changed", "grants_changed", "apps_changed", "activity");
 const NETWORK_KEYS = keysOf("networks_changed", "apps_changed", "grants_changed", "settings_changed");
 /** A batch can touch anything. */
 const CHANGES_KEYS = keysOf(
@@ -172,9 +171,6 @@ const CHANGES_KEYS = keysOf(
 
 export const useDeleteApp = () =>
   useInvalidating((id: string) => api.deleteApp(id), keysOf("apps_changed", "grants_changed", "tags_changed", "activity"));
-
-export const useReleaseReservation = () =>
-  useInvalidating((id: string) => api.releaseReservation(id), RESERVATION_KEYS);
 
 /** Many changes at once (ADR 0045). A dry run changes nothing, so it invalidates nothing. */
 export function useChanges() {
@@ -214,7 +210,7 @@ export const useSetGroupMembers = () =>
 export const useUpdateTag = () =>
   useInvalidating((v: { id: string; req: UpdateTag }) => api.updateTag(v.id, v.req), TAG_KEYS);
 export const useDeleteTag = () =>
-  useInvalidating((id: string) => api.deleteTag(id), TAG_KEYS);
+  useInvalidating((v: { id: string; confirmOpen?: boolean }) => api.deleteTag(v.id, v.confirmOpen), TAG_KEYS);
 
 export const useAddNetwork = () =>
   useInvalidating((req: NewNetwork) => api.addNetwork(req), NETWORK_KEYS);

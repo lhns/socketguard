@@ -43,7 +43,7 @@ export default function TagPicker({ appIds, scope: rowScope }: Props) {
   const toggle = (item: PickerItem) => {
     const suffix = named && scope.kind !== "all" ? ` ${what}` : "";
     if (item.state === "on") {
-      const ops: ChangeOp[] = appIds.map((app_id) => ({ op: "remove_tag_member", tag_id: item.id, app_id, scope }));
+      const ops: ChangeOp[] = appIds.map((app_id) => ({ op: "remove_tag_member", tag_id: item.id, app_id, scope, confirm_open: false }));
       const undo: ChangeOp[] = appIds.map((app_id) => ({ op: "add_tag_member", tag_id: item.id, app_id, scope, confirm_open: false }));
       void commit.runBatch(ops, `Removed from ${item.label}${suffix}`, undo);
     } else {

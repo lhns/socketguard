@@ -5,6 +5,7 @@
 //! plan is a list of database writes, applied in one transaction; a dry run applies them
 //! against the real constraints and rolls back.
 
+use super::mutations::{any_to_anyone, ensure_confirmed};
 use super::port_groups::GroupPlan;
 use super::reservations::ResPlan;
 use super::*;
@@ -16,9 +17,9 @@ use socketguard_core::api_types::{
     BatchChange, Change, ChangeItem, ChangeKind, ChangeOp, ChangesRequest, ChangesResponse,
 };
 use socketguard_core::{
-    Address, BindingTarget, Grant, GrantReach, PortGroup, Reach, Scope, Subject,
+    Address, BindingTarget, Grant, GrantReach, PortGroup, Reach, Row, Scope, Subject,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// The state of planning a batch.
 pub(super) struct Plan {
@@ -128,6 +129,38 @@ impl Plan {
                 tag_id: self.resolve(tag_id)?,
             },
         })
+    }
+
+    /// After an operation: the grants it made live on Tor by freeing rows from a reservation
+    /// (`Catalog::freed_grants`) go into that operation's change (reach, who, opens to
+    /// anyone), and refuse it unless `confirm_open` when Anyone is among them. Checked for
+    /// every operation, so none can free a row unnoticed.
+    pub(super) fn account_for_freed(
+        &mut self,
+        bound_before: &HashSet<Row>,
+        confirm_open: bool,
+        first_change: usize,
+    ) -> Result<(), EngineError> {
+        let freed = self
+            .cat
+            .freed_grants(bound_before, &self.networks, &self.protected);
+        if freed.is_empty() {
+            return Ok(());
+        }
+        let opens = any_to_anyone(&freed);
+        ensure_confirmed(opens, confirm_open)?;
+        let reach: Vec<GrantReach> = freed.iter().flat_map(|g| self.grant_reach(g)).collect();
+        self.changes_reach = true;
+        let who = format!("reachable by {}", self.who(&freed).join(", "));
+        if let Some(c) = self.changes.get_mut(first_change) {
+            c.change.opens_to_anyone |= opens;
+            c.change.detail = Some(match c.change.detail.take() {
+                Some(d) => format!("{d}; {who}"),
+                None => who,
+            });
+            c.reach.extend(reach);
+        }
+        Ok(())
     }
 
     /// Who is reachable through `grants`, for the detail of a change.
@@ -250,8 +283,10 @@ impl Engine {
             removed: Vec::new(),
         };
         for (i, op) in req.ops.iter().enumerate() {
+            let (bound_before, first_change) = (plan.cat.bound_rows(), plan.changes.len());
             self.plan_op(state, &mut plan, op)
                 .await
+                .and_then(|()| plan.account_for_freed(&bound_before, op_confirms(op), first_change))
                 .map_err(|e| in_operation(i, e))?;
         }
 
@@ -378,6 +413,7 @@ impl Engine {
                 tag_id,
                 app_id,
                 scope,
+                ..
             } => {
                 self.plan_op_remove_tag_member(state, plan, tag_id, app_id, scope)
                     .await?
@@ -405,8 +441,9 @@ impl Engine {
             ChangeOp::RemoveBinding {
                 reservation_id,
                 binding_id,
+                ..
             } => self.plan_op_remove_binding(plan, reservation_id, binding_id)?,
-            ChangeOp::ReleaseReservation { reservation_id } => {
+            ChangeOp::ReleaseReservation { reservation_id, .. } => {
                 self.plan_op_release_reservation(plan, reservation_id)?
             }
             ChangeOp::MoveApp {
@@ -420,6 +457,18 @@ impl Engine {
 }
 
 /// Name the operation a refusal came from.
+/// The `confirm_open` of an operation that can free rows from a reservation; the others
+/// cannot confirm, so one that frees a row all the same is refused.
+fn op_confirms(op: &ChangeOp) -> bool {
+    match op {
+        ChangeOp::RemoveBinding { confirm_open, .. }
+        | ChangeOp::ReleaseReservation { confirm_open, .. }
+        | ChangeOp::RemoveTagMember { confirm_open, .. }
+        | ChangeOp::MoveApp { confirm_open, .. } => *confirm_open,
+        _ => false,
+    }
+}
+
 fn in_operation(i: usize, e: EngineError) -> EngineError {
     match e {
         EngineError::NotFound(m) => EngineError::NotFound(format!("{m} (operation {i})")),

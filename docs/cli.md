@@ -82,11 +82,11 @@ Credential kinds for `--cred`: `ygg_key`, `ygg_addr`, `ygg_subnet`, `ip`, `ip_su
 ## Tags and port groups
 
 ```
-tags list | show T | rename T NEW | rm T
+tags list | show T | rename T NEW | rm T [-y]
 tags add dev web:80 --match 'python*' --match node     members and/or globs on process name or path
 tags patterns dev 'python*' [-y]                       replace the patterns (none: clear)
 tags members add dev redis [-y]                        an app, one port or web:port-group=passive
-tags members rm dev redis                              a pattern-matched app stays out afterwards
+tags members rm dev redis [-y]                         a pattern-matched app stays out afterwards
 
 port-groups list | rm G
 port-groups add 21/tcp 50000-51000/tcp -n passive --app ftpd [-y]
@@ -101,9 +101,11 @@ A reservation is a named address that keeps its place while the apps behind it c
 ```
 addresses list                          every address, automatic and reserved, up or not
 addresses reserve <address-id> web-public   keep an automatic address under a name
-reservations list | rename R NEW | release R
+reservations list | rename R NEW | release R [-y]
 reservations add public-web web:80/tcp tag:dev          bindings: app[:port[/proto]], app:port-group=L, tag:L
-reservations bind R redis [-y] | unbind R redis         bind asks before opening to anyone
+reservations bind R redis [-y] | unbind R redis [-y]    bind asks before opening to anyone; unbind, release,
+                                                        tags rm and tags members rm ask when freeing rows
+                                                        opens them to anyone on Tor (a bound row is inert there)
 ```
 
 ## Networks

@@ -262,8 +262,8 @@ async fn update_tag(id: String, req: UpdateTag) -> DoneResult<Tag> {
 }
 
 #[tauri::command]
-async fn delete_tag(id: String) -> DoneResult<()> {
-    Ok(client().delete_tag(&id).await?.into())
+async fn delete_tag(id: String, confirm_open: bool) -> DoneResult<()> {
+    Ok(client().delete_tag(&id, confirm_open).await?.into())
 }
 
 #[tauri::command]
@@ -275,9 +275,14 @@ async fn add_tag_member(tag_id: String, member: TagMember, confirm_open: bool) -
 }
 
 #[tauri::command]
-async fn remove_tag_member(tag_id: String, app_id: String, scope: Scope) -> DoneResult<Tag> {
+async fn remove_tag_member(
+    tag_id: String,
+    app_id: String,
+    scope: Scope,
+    confirm_open: bool,
+) -> DoneResult<Tag> {
     Ok(client()
-        .remove_tag_member(&tag_id, &app_id, &scope)
+        .remove_tag_member(&tag_id, &app_id, &scope, confirm_open)
         .await?
         .into())
 }
@@ -354,8 +359,11 @@ async fn rename_reservation(id: String, label: String) -> DoneResult<Reservation
 }
 
 #[tauri::command]
-async fn release_reservation(id: String) -> DoneResult<()> {
-    Ok(client().release_reservation(&id).await?.into())
+async fn release_reservation(id: String, confirm_open: bool) -> DoneResult<()> {
+    Ok(client()
+        .release_reservation(&id, confirm_open)
+        .await?
+        .into())
 }
 
 #[tauri::command]
@@ -364,8 +372,15 @@ async fn add_binding(id: String, req: NewBinding) -> DoneResult<ReservationView>
 }
 
 #[tauri::command]
-async fn remove_binding(id: String, binding_id: String) -> DoneResult<ReservationView> {
-    Ok(client().remove_binding(&id, &binding_id).await?.into())
+async fn remove_binding(
+    id: String,
+    binding_id: String,
+    confirm_open: bool,
+) -> DoneResult<ReservationView> {
+    Ok(client()
+        .remove_binding(&id, &binding_id, confirm_open)
+        .await?
+        .into())
 }
 
 #[tauri::command]

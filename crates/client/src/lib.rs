@@ -20,11 +20,11 @@ use hyper_util::rt::TokioIo;
 use serde::{de::DeserializeOwned, Serialize};
 use socketguard_core::api_types::{
     ApiError, ApplyRequest, ApplyResponse, AttachPortGroup, ChangesRequest, ChangesResponse,
-    DisableRequest, Enforcement, EnforcementNotice, ExportDocument, MemberQuery, MoveAppRequest,
-    NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation, NewTag, NewTagMember,
-    ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse, ReserveRequest, SetBridges,
-    SetMembers, SetPeers, ShareResponse, StatusResponse, TorKeyResponse, UpdateLabel,
-    UpdatePortGroup, UpdateTag,
+    ConfirmQuery, DisableRequest, Enforcement, EnforcementNotice, ExportDocument, MemberQuery,
+    MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation,
+    NewTag, NewTagMember, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse,
+    ReserveRequest, SetBridges, SetMembers, SetPeers, ShareResponse, StatusResponse,
+    TorKeyResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::setup::NetworkSetup;
 use socketguard_core::{
@@ -233,8 +233,32 @@ impl Client {
         params: &[&str],
         body: Option<Vec<u8>>,
     ) -> Result<Saved<T>> {
-        let (status, bytes) = self.call_status(route, params, None, body).await?;
+        self.call_saved_q(route, params, None, body).await
+    }
+
+    /// [`Client::call_saved`] with a query string.
+    async fn call_saved_q<T: DeserializeOwned>(
+        &self,
+        route: &Route,
+        params: &[&str],
+        query: Option<String>,
+        body: Option<Vec<u8>>,
+    ) -> Result<Saved<T>> {
+        let (status, bytes) = self.call_status(route, params, query, body).await?;
         self.saved_from(status, &bytes)
+    }
+
+    /// A `DELETE` that can open something to Anyone: `?confirm_open=true` when confirmed.
+    async fn call_saved_confirmed<T: DeserializeOwned>(
+        &self,
+        route: &Route,
+        params: &[&str],
+        confirm_open: bool,
+    ) -> Result<Saved<T>> {
+        let query = confirm_open
+            .then(|| serde_urlencoded::to_string(ConfirmQuery { confirm_open }).ok())
+            .flatten();
+        self.call_saved_q(route, params, query, None).await
     }
 
     /// Read the answer of a change as [`Client::call_saved`] does.
@@ -441,8 +465,11 @@ impl Client {
         self.call_saved(&routes::UPDATE_TAG, &[id], json(req)).await
     }
 
-    pub async fn delete_tag(&self, id: &str) -> Result<Saved<()>> {
-        self.call_saved(&routes::DELETE_TAG, &[id], None).await
+    /// Delete a tag. A reservation that binds it loses the binding, which can open rows to
+    /// Anyone on Tor: that needs `confirm_open`, else the code is `confirmation_required`.
+    pub async fn delete_tag(&self, id: &str, confirm_open: bool) -> Result<Saved<()>> {
+        self.call_saved_confirmed(&routes::DELETE_TAG, &[id], confirm_open)
+            .await
     }
 
     /// Add an app (or a port or port group of it) to a tag. A tag with a grant to Anyone
@@ -463,24 +490,31 @@ impl Client {
             .await
     }
 
-    /// Remove an app (`Scope::All`), or one port or port group of it, from a tag.
+    /// Remove an app (`Scope::All`), or one port or port group of it, from a tag. When the tag
+    /// is bound to a reservation this frees the row, which can open it to Anyone on Tor: that
+    /// needs `confirm_open`, else the code is `confirmation_required`.
     pub async fn remove_tag_member(
         &self,
         tag_id: &str,
         app_id: &str,
         scope: &Scope,
+        confirm_open: bool,
     ) -> Result<Saved<Tag>> {
         let query = match scope {
             Scope::All => MemberQuery::default(),
             Scope::Port { port, proto } => MemberQuery {
                 port: Some(*port),
                 proto: Some(*proto),
-                group: None,
+                ..MemberQuery::default()
             },
             Scope::Group { id } => MemberQuery {
                 group: Some(id.clone()),
                 ..MemberQuery::default()
             },
+        };
+        let query = MemberQuery {
+            confirm_open,
+            ..query
         };
         let q = serde_urlencoded::to_string(&query).ok();
         let (status, bytes) = self
@@ -580,9 +614,11 @@ impl Client {
         .await
     }
 
-    /// Delete a reservation, its addresses and the grants on it.
-    pub async fn release_reservation(&self, id: &str) -> Result<Saved<()>> {
-        self.call_saved(&routes::RELEASE_RESERVATION, &[id], None)
+    /// Delete a reservation, its addresses and the grants on it. Its rows are freed: where
+    /// that makes a grant to Anyone live on Tor it needs `confirm_open`, else the code is
+    /// `confirmation_required`.
+    pub async fn release_reservation(&self, id: &str, confirm_open: bool) -> Result<Saved<()>> {
+        self.call_saved_confirmed(&routes::RELEASE_RESERVATION, &[id], confirm_open)
             .await
     }
 
@@ -593,12 +629,15 @@ impl Client {
             .await
     }
 
+    /// Free what a binding held. Where that makes a grant to Anyone live on Tor it needs
+    /// `confirm_open`, else the code is `confirmation_required`.
     pub async fn remove_binding(
         &self,
         id: &str,
         binding_id: &str,
+        confirm_open: bool,
     ) -> Result<Saved<ReservationView>> {
-        self.call_saved(&routes::REMOVE_BINDING, &[id, binding_id], None)
+        self.call_saved_confirmed(&routes::REMOVE_BINDING, &[id, binding_id], confirm_open)
             .await
     }
 

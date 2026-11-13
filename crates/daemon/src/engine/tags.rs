@@ -9,7 +9,9 @@ use crate::state::{NewActivity, Write};
 use crate::AppState;
 use chrono::Utc;
 use socketguard_core::api_types::{BatchChange, Change, ChangeItem, ChangeKind, ChangeOp};
-use socketguard_core::{new_id, ActivityKind, App, GrantReach, Scope, Tag, TagMember};
+use socketguard_core::{
+    new_id, ActivityKind, App, BindingTarget, GrantReach, Scope, Tag, TagMember, Target,
+};
 
 /// The patterns as stored: trimmed, no blanks, no duplicates.
 pub(super) fn clean_patterns(patterns: &[String]) -> Vec<String> {
@@ -163,8 +165,30 @@ impl Engine {
     }
 
     /// Delete a tag; the grants on it go with it, and with them their rules.
-    pub async fn delete_tag(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
+    /// A reservation that binds the tag loses those bindings (they cascade), which frees the
+    /// rows: refused without `confirm_open` where that makes a grant to Anyone live on Tor.
+    pub async fn delete_tag(
+        &self,
+        state: &AppState,
+        id: &str,
+        confirm_open: bool,
+    ) -> Result<(), EngineError> {
         let tag = self.get_tag(state, id).await?;
+        let mut cat = crate::catalog::Catalog::load(state).await?;
+        let bound_before = cat.bound_rows();
+        cat.tags.retain(|t| t.id != id);
+        for r in cat.reservations.iter_mut() {
+            r.bindings
+                .retain(|b| !matches!(&b.target, BindingTarget::Tag { tag_id } if tag_id == id));
+        }
+        cat.grants
+            .retain(|g| g.target != Target::Tag(id.to_string()));
+        let freed = cat.freed_grants(
+            &bound_before,
+            &self.networks(),
+            &self.protected_interfaces(state).await?,
+        );
+        ensure_confirmed(any_to_anyone(&freed), confirm_open)?;
         state.db.delete_tag(id).await?;
         let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
@@ -211,39 +235,16 @@ impl Engine {
         tag_id: &str,
         app_id: &str,
         scope: Scope,
+        confirm_open: bool,
     ) -> Result<Tag, EngineError> {
-        let tag = self.get_tag(state, tag_id).await?;
-        if !tag
-            .members
-            .iter()
-            .any(|m| m.app_id == app_id && m.scope == scope)
-        {
-            return Err(EngineError::NotFound(format!(
-                "membership of app {app_id} in tag {}",
-                tag.label
-            )));
-        }
-        let exclude = Self::removal_excludes(state, &tag, app_id, &scope).await?;
-        state
-            .db
-            .apply_writes(&[Write::RemoveTagMember {
+        self.run_one(
+            state,
+            ChangeOp::RemoveTagMember {
                 tag_id: tag_id.to_string(),
                 app_id: app_id.to_string(),
                 scope,
-                exclude,
-            }])
-            .await?;
-        let applied = self.apply_and_ensure(state).await;
-        let activity = NewActivity::new(
-            ActivityKind::TagChanged,
-            format!("Removed an app from tag {}", tag.label),
-        )
-        .app(app_id);
-        self.commit(
-            state,
-            applied,
-            Some(activity),
-            &[DaemonEvent::TagsChanged, DaemonEvent::GrantsChanged],
+                confirm_open,
+            },
         )
         .await?;
         self.get_tag(state, tag_id).await
