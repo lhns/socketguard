@@ -1658,7 +1658,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(db.delete_app_with("a1", &[retire.clone()]).await.is_err());
+        assert!(db
+            .delete_app_with("a1", std::slice::from_ref(&retire))
+            .await
+            .is_err());
         assert!(!db.list_owned_addresses().await.unwrap()[0].retiring);
         db.exec_raw("DROP TRIGGER boom").await.unwrap();
         assert!(db.delete_app_with("a1", &[retire]).await.unwrap());
@@ -1679,7 +1682,7 @@ mod tests {
         .await
         .unwrap();
         assert!(db
-            .delete_addresses_by_network_with("ygg", &[retire.clone()])
+            .delete_addresses_by_network_with("ygg", std::slice::from_ref(&retire))
             .await
             .is_err());
         assert!(!db.list_owned_addresses().await.unwrap()[0].retiring);
@@ -1704,7 +1707,7 @@ mod tests {
         .await
         .unwrap();
         assert!(db
-            .update_address_ipv6_with(&a.id, new, &[retire.clone()])
+            .update_address_ipv6_with(&a.id, new, std::slice::from_ref(&retire))
             .await
             .is_err());
         assert!(!db.list_owned_addresses().await.unwrap()[0].retiring);
