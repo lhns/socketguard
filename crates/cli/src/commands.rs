@@ -19,6 +19,7 @@ use socketguard_core::api_types::{
     error_code, ApplyRequest, ChangeOp, ChangesRequest, Enforcement, LockoutRiskInfo,
     MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation,
     NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest, UpdatePortGroup, UpdateTag,
+    PATTERN_OPEN_NOTE,
 };
 use socketguard_core::{
     ActivityKind, ActivityQuery, ActivityRecord, App, BackendConfig, BindingTarget, CredentialKind,
@@ -289,12 +290,49 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
                 bail!("{id} is not a Yggdrasil network");
             };
             if add.is_empty() && rm.is_empty() {
-                return c.print(&child.peers, || render::network_peers(&id, &child.peers));
+                return c.print(&child.peers, || {
+                    render::network_peers(&id, &child.peers, child.lan_discovery)
+                });
             }
             let peers = edited_peers(&child.peers, &add, &rm)?;
             let n = c.client.set_peers(&id, &peers).await?;
+            let lan = n.child.as_ref().is_some_and(|m| m.lan_discovery);
             let now = n.child.map(|m| m.peers).unwrap_or(peers);
-            c.print(&now, || render::network_peers(&id, &now))
+            c.print(&now, || render::network_peers(&id, &now, lan))
+        }
+        NetworksCmd::LanDiscovery { id, state, yes } => {
+            let networks = c.client.list_networks().await?;
+            let Some(child) = networks
+                .iter()
+                .find(|n| n.id == id && n.kind == socketguard_core::NetworkKind::Yggdrasil)
+                .and_then(|n| n.child.as_ref())
+            else {
+                bail!("{id} is not a Yggdrasil network");
+            };
+            let Some(state) = state else {
+                let on = child.lan_discovery;
+                return c.print(&on, || {
+                    format!("LAN discovery of {id} is {}", if on { "on" } else { "off" })
+                });
+            };
+            let enabled = state == OnOff::On;
+            let saved = match c.client.set_lan_discovery(&id, enabled, yes).await {
+                Err(e) if e.is_confirmation_required() => {
+                    prompt::Stdin.confirm_or_yes(
+                        false,
+                        LAN_DISCOVERY_QUESTION,
+                        &format!("{LAN_DISCOVERY_QUESTION} Repeat with --yes to confirm"),
+                    )?;
+                    c.client.set_lan_discovery(&id, true, true).await?
+                }
+                other => other?,
+            };
+            c.print(&saved, || {
+                format!(
+                    "LAN discovery of {id} is {}",
+                    if enabled { "on" } else { "off" }
+                )
+            })
         }
         NetworksCmd::Bridges { id, add, rm, clear } => {
             let networks = c.client.list_networks().await?;
@@ -775,6 +813,43 @@ async fn tag_members(c: &Ctx, texts: &[String]) -> Result<Vec<TagMember>> {
     Ok(out)
 }
 
+/// Turning LAN discovery on opens the node's peering listener to the local network.
+const LAN_DISCOVERY_QUESTION: &str = "Other computers on your local network will be able to \
+connect to this computer's Yggdrasil node. They cannot reach your apps unless you grant access. \
+Turn LAN discovery on?";
+
+/// Ask before setting patterns on a tag that has a grant to anyone (ADR 0059).
+fn confirm_patterns_open(label: &str) -> Result<()> {
+    prompt::Stdin.confirm_or_yes(
+        false,
+        &format!("Tag {label} is open to anyone. {PATTERN_OPEN_NOTE} Continue?"),
+        &format!("tag {label} is open to anyone. {PATTERN_OPEN_NOTE} Repeat with --yes to confirm"),
+    )
+}
+
+/// The sentence to add to the question of a grant to anyone on `targets` when apps can join
+/// them by a pattern (a tag with patterns, or a reservation that binds one).
+async fn pattern_warning(c: &Ctx, targets: &[Target]) -> Result<String> {
+    let tags = c.client.list_tags().await?;
+    let reservations = c.client.list_reservations().await?;
+    let patterned = |id: &str| tags.iter().any(|t| t.id == id && !t.patterns.is_empty());
+    let hit = targets.iter().any(|t| match t {
+        Target::Tag(id) => patterned(id),
+        Target::Reservation(id) => reservations.iter().any(|r| {
+            r.reservation.id == *id
+                && r.reservation.bindings.iter().any(
+                    |b| matches!(&b.target, BindingTarget::Tag { tag_id } if patterned(tag_id)),
+                )
+        }),
+        Target::App(_) => false,
+    });
+    Ok(if hit {
+        format!(" {PATTERN_OPEN_NOTE}")
+    } else {
+        String::new()
+    })
+}
+
 /// Ask before apps join a tag that has a grant to anyone, which opens them.
 fn confirm_tag_open(label: &str) -> Result<()> {
     prompt::Stdin.confirm_or_yes(
@@ -856,7 +931,7 @@ async fn tags(c: &Ctx, cmd: TagsCmd) -> Result<()> {
             };
             let saved = match c.client.update_tag(&tag.id, &req).await {
                 Err(e) if e.is_confirmation_required() => {
-                    confirm_tag_open(&tag.label)?;
+                    confirm_patterns_open(&tag.label)?;
                     req.confirm_open = true;
                     c.client.update_tag(&tag.id, &req).await?
                 }
@@ -867,9 +942,15 @@ async fn tags(c: &Ctx, cmd: TagsCmd) -> Result<()> {
             let names = c.names().await?;
             c.print(&r, || render::tag_detail(&r, &names, &[]))
         }
-        TagsCmd::Rm { tag } => {
+        TagsCmd::Rm { tag, yes } => {
             let tag = c.tag(&tag).await?;
-            let saved = c.client.delete_tag(&tag.id).await?;
+            let saved = match c.client.delete_tag(&tag.id, yes).await {
+                Err(e) if e.is_confirmation_required() => {
+                    confirm_freed_open(&format!("Removing tag {}", tag.label))?;
+                    c.client.delete_tag(&tag.id, true).await?
+                }
+                other => other?,
+            };
             c.done_saved(saved, format!("removed tag {} and its grants", tag.label))
         }
         TagsCmd::Members(TagMembersCmd::Add { tag, members, yes }) => {
@@ -891,14 +972,25 @@ async fn tags(c: &Ctx, cmd: TagsCmd) -> Result<()> {
             let names = c.names().await?;
             c.print(&last, || render::tag_detail(&last, &names, &[]))
         }
-        TagsCmd::Members(TagMembersCmd::Rm { tag, members }) => {
+        TagsCmd::Members(TagMembersCmd::Rm { tag, members, yes }) => {
             let tag = c.tag(&tag).await?;
             let mut last = tag.clone();
+            let mut confirmed = yes;
             for m in tag_members(c, &members).await? {
-                let saved = c
+                let saved = match c
                     .client
-                    .remove_tag_member(&tag.id, &m.app_id, &m.scope)
-                    .await?;
+                    .remove_tag_member(&tag.id, &m.app_id, &m.scope, confirmed)
+                    .await
+                {
+                    Err(e) if e.is_confirmation_required() => {
+                        confirm_freed_open(&format!("Removing a member of tag {}", tag.label))?;
+                        confirmed = true;
+                        c.client
+                            .remove_tag_member(&tag.id, &m.app_id, &m.scope, true)
+                            .await?
+                    }
+                    other => other?,
+                };
                 c.warn_pending(&saved.enforcement);
                 last = saved.value;
             }
@@ -1054,6 +1146,19 @@ impl Ctx {
     }
 }
 
+/// Ask before a removal frees rows from a reservation: on Tor a bound row is inert, so a
+/// grant to anyone on it becomes live.
+fn confirm_freed_open(what: &str) -> Result<()> {
+    prompt::Stdin.confirm_or_yes(
+        false,
+        &format!("{what} frees rows from a reservation, and a grant to anyone on them becomes live on Tor. Continue?"),
+        &format!(
+            "{} frees rows from a reservation, which opens them to anyone on Tor; repeat with --yes to confirm",
+            what.to_lowercase()
+        ),
+    )
+}
+
 /// Ask before binding rows to a reservation that is open to anyone.
 fn confirm_binding_open(label: &str) -> Result<()> {
     prompt::Stdin.confirm_or_yes(
@@ -1141,9 +1246,11 @@ async fn reservations(c: &Ctx, cmd: ReservationsCmd) -> Result<()> {
         ReservationsCmd::Unbind {
             reservation,
             targets,
+            yes,
         } => {
             let res = c.reservation(&reservation).await?;
             let mut last = res.clone();
+            let mut confirmed = yes;
             for target in c.binding_targets(&targets).await? {
                 let binding = res
                     .reservation
@@ -1157,19 +1264,43 @@ async fn reservations(c: &Ctx, cmd: ReservationsCmd) -> Result<()> {
                             res.reservation.label
                         )
                     })?;
-                let saved = c
+                let saved = match c
                     .client
-                    .remove_binding(&res.reservation.id, &binding.id)
-                    .await?;
+                    .remove_binding(&res.reservation.id, &binding.id, confirmed)
+                    .await
+                {
+                    Err(e) if e.is_confirmation_required() => {
+                        confirm_freed_open(&format!(
+                            "Unbinding from reservation {}",
+                            res.reservation.label
+                        ))?;
+                        confirmed = true;
+                        c.client
+                            .remove_binding(&res.reservation.id, &binding.id, true)
+                            .await?
+                    }
+                    other => other?,
+                };
                 c.warn_pending(&saved.enforcement);
                 last = saved.value;
             }
             let names = c.names().await?;
             c.print(&last, || render::reservation_detail(&last, &names))
         }
-        ReservationsCmd::Release { reservation } => {
+        ReservationsCmd::Release { reservation, yes } => {
             let res = c.reservation(&reservation).await?;
-            let saved = c.client.release_reservation(&res.reservation.id).await?;
+            let saved = match c.client.release_reservation(&res.reservation.id, yes).await {
+                Err(e) if e.is_confirmation_required() => {
+                    confirm_freed_open(&format!(
+                        "Releasing reservation {}",
+                        res.reservation.label
+                    ))?;
+                    c.client
+                        .release_reservation(&res.reservation.id, true)
+                        .await?
+                }
+                other => other?,
+            };
             c.done_saved(
                 saved,
                 format!(
@@ -1423,11 +1554,13 @@ async fn grant(c: &Ctx, a: GrantArgs) -> Result<()> {
                 [Some(n)] => Some(n.as_str()),
                 _ => None,
             };
+            let targets: Vec<Target> = spec.targets.iter().map(|t| t.0.clone()).collect();
+            let extra = pattern_warning(c, &targets).await?;
             prompt::Stdin.confirm_or_yes(
                 false,
-                &render::open_question(&spec.names(), net),
+                &format!("{}{extra}", render::open_question(&spec.names(), net)),
                 &format!(
-                    "this opens {} to every host that can reach it; repeat with --yes to confirm",
+                    "this opens {} to every host that can reach it;{extra} repeat with --yes to confirm",
                     spec.names()
                 ),
             )?;
@@ -1460,11 +1593,15 @@ async fn grant_one(c: &Ctx, a: &GrantArgs, spec: GrantSpec) -> Result<()> {
     };
     let created = match c.client.create_grant(&req).await {
         Err(e) if e.is_confirmation_required() => {
+            let extra = pattern_warning(c, std::slice::from_ref(&req.target)).await?;
             prompt::Stdin.confirm_or_yes(
                 false,
-                &render::open_question(&text, req.network_id.as_deref()),
                 &format!(
-                    "this opens {text} to every host that can reach it; repeat with --yes to confirm"
+                    "{}{extra}",
+                    render::open_question(&text, req.network_id.as_deref())
+                ),
+                &format!(
+                    "this opens {text} to every host that can reach it;{extra} repeat with --yes to confirm"
                 ),
             )?;
             req.confirm_open = true;

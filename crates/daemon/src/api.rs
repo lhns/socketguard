@@ -19,12 +19,12 @@ use futures_util::stream::Stream;
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use socketguard_core::api_types::{
-    error_code, event_name, ApiError, ApplyRequest, AttachPortGroup, ChangesRequest, Counts,
-    DisableRequest, Enforcement, EnforcementNotice, EnforcementStatus, LockoutRiskInfo,
+    error_code, event_name, ApiError, ApplyRequest, AttachPortGroup, ChangesRequest, ConfirmQuery,
+    Counts, DisableRequest, Enforcement, EnforcementNotice, EnforcementStatus, LockoutRiskInfo,
     MemberQuery, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup,
     NewReservation, NewTag, NewTagMember, ParseCredentialsRequest, ProtectHostRequest,
-    ProtectHostResponse, ReserveRequest, SetBridges, SetMembers, SetPeers, StatusResponse,
-    UpdateLabel, UpdatePortGroup, UpdateTag,
+    ProtectHostResponse, ReserveRequest, SetBridges, SetLanDiscovery, SetMembers, SetPeers,
+    StatusResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig};
 use socketguard_core::{ActivityQuery, NewCredential, NewGrant};
@@ -139,6 +139,7 @@ pub const ROUTES: &[(Method, &str)] = &[
     (Method::POST, "/api/networks"),
     (Method::DELETE, "/api/networks/{id}"),
     (Method::PUT, "/api/networks/{id}/peers"),
+    (Method::PUT, "/api/networks/{id}/lan-discovery"),
     (Method::PUT, "/api/networks/{id}/bridges"),
     (Method::GET, "/api/settings"),
     (Method::PUT, "/api/settings/protect-host"),
@@ -210,6 +211,7 @@ fn handler(method: &Method, path: &str) -> MethodRouter<Shared> {
         ("POST", "/api/networks") => post(network_create),
         ("DELETE", "/api/networks/{id}") => delete(network_delete),
         ("PUT", "/api/networks/{id}/peers") => put(network_peers),
+        ("PUT", "/api/networks/{id}/lan-discovery") => put(network_lan_discovery),
         ("PUT", "/api/networks/{id}/bridges") => put(network_bridges),
         ("GET", "/api/settings") => get(settings_get),
         ("PUT", "/api/settings/protect-host") => put(protect_host_put),
@@ -545,9 +547,12 @@ async fn reservation_rename(
 async fn reservation_release(
     State(state): State<Shared>,
     Path(id): Path<String>,
+    ApiQuery(q): ApiQuery<ConfirmQuery>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    engine.release_reservation(&state, &id).await?;
+    engine
+        .release_reservation(&state, &id, q.confirm_open)
+        .await?;
     Ok(saved(&engine, StatusCode::NO_CONTENT, None::<()>))
 }
 
@@ -566,9 +571,12 @@ async fn binding_add(
 async fn binding_remove(
     State(state): State<Shared>,
     Path((id, binding_id)): Path<(String, String)>,
+    ApiQuery(q): ApiQuery<ConfirmQuery>,
 ) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    let view = engine.remove_binding(&state, &id, &binding_id).await?;
+    let view = engine
+        .remove_binding(&state, &id, &binding_id, q.confirm_open)
+        .await?;
     Ok(saved(&engine, StatusCode::OK, Some(view)))
 }
 
@@ -807,9 +815,13 @@ async fn tag_update(
     Ok(saved(&engine, StatusCode::OK, Some(tag)))
 }
 
-async fn tag_delete(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
+async fn tag_delete(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiQuery(q): ApiQuery<ConfirmQuery>,
+) -> ApiResult<Response> {
     let engine = state.engine.read().await;
-    engine.delete_tag(&state, &id).await?;
+    engine.delete_tag(&state, &id, q.confirm_open).await?;
     Ok(saved(&engine, StatusCode::NO_CONTENT, None::<()>))
 }
 
@@ -833,7 +845,7 @@ async fn tag_member_remove(
     let scope = q.scope().map_err(ApiErr::invalid)?;
     let engine = state.engine.read().await;
     let tag = engine
-        .remove_tag_member(&state, &id, &app_id, scope)
+        .remove_tag_member(&state, &id, &app_id, scope, q.confirm_open)
         .await?;
     Ok(saved(&engine, StatusCode::OK, Some(tag)))
 }
@@ -1005,6 +1017,21 @@ async fn network_peers(
     Ok(Json(network).into_response())
 }
 
+/// Turn LAN discovery of a Yggdrasil network on or off; the node restarts. On needs
+/// `confirm_open`.
+async fn network_lan_discovery(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<SetLanDiscovery>,
+) -> ApiResult<Response> {
+    let mut engine = state.engine.write().await;
+    let network = engine
+        .set_lan_discovery(&state, &id, req.enabled, req.confirm_open)
+        .await?;
+    persist_networks(&state, &engine).await;
+    Ok(Json(network).into_response())
+}
+
 /// Replace the bridge lines of a Tor network; Tor restarts. Like the peers, open to every
 /// API caller: the lines are parsed against one fixed form and written to the
 /// `torrc` only in canonical form, so they cannot add a Tor option (ADR 0040).
@@ -1040,6 +1067,13 @@ async fn network_delete(
 /// settings; any API caller may add one.
 fn check_files(state: &AppState, backend: &BackendConfig) -> Result<(), ApiErr> {
     backend.validate().map_err(ApiErr::invalid)?;
+    if backend.lan_discovery() {
+        // Opening the LAN to Yggdrasil nodes is its own confirmed step (ADR 0060).
+        return Err(ApiErr::invalid(
+            "a new Yggdrasil network starts with LAN discovery off; turn it on afterwards \
+             (PUT /api/networks/{id}/lan-discovery)",
+        ));
+    }
     let files = match backend {
         BackendConfig::Tor { .. } => state.bundled.tor().map(|_| ()),
         BackendConfig::Yggdrasil { .. } => state.bundled.yggdrasil().map(|_| ()),

@@ -40,15 +40,21 @@ pub fn allowed_sid() -> Option<&'static str> {
     ALLOW_SID.get().map(String::as_str)
 }
 
-/// A SID in its string form: `S-1-` and dash-separated numbers. Nothing else is put into
-/// the pipe's security descriptor.
+/// The SID of one account in its string form: `S-1-5-21-a-b-c-rid` (local, domain or
+/// Microsoft account) or `S-1-12-1-a-b-c-d` (Entra ID). Well-known group SIDs such as
+/// Everyone (`S-1-1-0`) or Authenticated Users (`S-1-5-11`) would open the pipe and the data
+/// folder to every local user, so they are refused. Nothing else is put into the pipe's
+/// security descriptor.
 pub fn valid_sid(s: &str) -> bool {
-    let Some(rest) = s.strip_prefix("S-1-") else {
+    let Some(rest) = s
+        .strip_prefix("S-1-5-21-")
+        .or_else(|| s.strip_prefix("S-1-12-1-"))
+    else {
         return false;
     };
     let parts: Vec<&str> = rest.split('-').collect();
     s.len() <= 184
-        && parts.len() >= 2
+        && parts.len() == 4
         && parts
             .iter()
             .all(|p| !p.is_empty() && p.len() <= 10 && p.bytes().all(|b| b.is_ascii_digit()))
@@ -242,7 +248,10 @@ pub fn prepare(opts: &RunOptions) -> Result<()> {
     }
     if let Some(sid) = &opts.allow_user {
         if !valid_sid(sid) {
-            bail!("--allow-user needs a SID such as S-1-5-21-1-2-3-1001, not {sid:?}");
+            bail!(
+                "--allow-user needs the SID of one account (S-1-5-21-... or S-1-12-1-...), \
+                 not {sid:?}: a group such as Everyone would open the pipe to every user"
+            );
         }
         let _ = ALLOW_SID.set(sid.clone());
     }
@@ -272,7 +281,6 @@ mod tests {
     #[test]
     fn a_sid_is_digits_and_dashes_only() {
         assert!(valid_sid("S-1-5-21-1004336348-1177238915-682003330-512"));
-        assert!(valid_sid("S-1-5-32-544"));
         assert!(!valid_sid(""));
         assert!(!valid_sid("S-1-5"));
         assert!(!valid_sid("S-1-5-21-1)(A;;GA;;;WD"));
@@ -280,6 +288,35 @@ mod tests {
         assert!(!valid_sid("S-1-5--1"));
         assert!(!valid_sid("Everyone"));
         assert!(!valid_sid("s-1-5-21-1"));
+    }
+
+    /// What the UI passes (its own account) must be accepted.
+    #[cfg(windows)]
+    #[test]
+    fn the_sid_of_the_current_account_is_accepted() {
+        let sid = socketguard_core::winsid::current_user_sid().unwrap();
+        assert!(valid_sid(&sid), "{sid}");
+    }
+
+    #[test]
+    fn only_account_sids_are_accepted() {
+        assert!(valid_sid("S-1-12-1-1-2-3-4"));
+        // Everyone, Authenticated Users, Users, Administrators, SYSTEM, Interactive
+        for group in [
+            "S-1-1-0",
+            "S-1-5-11",
+            "S-1-5-32-545",
+            "S-1-5-32-544",
+            "S-1-5-18",
+            "S-1-5-4",
+        ] {
+            assert!(!valid_sid(group), "{group}");
+        }
+        // an account SID has the domain's three numbers and the account's own
+        assert!(!valid_sid("S-1-5-21"));
+        assert!(!valid_sid("S-1-12-1"));
+        assert!(!valid_sid("S-1-5-21-1-2-3"));
+        assert!(!valid_sid("S-1-5-21-1-2-3-4-5"));
     }
 
     #[test]

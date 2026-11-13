@@ -82,11 +82,12 @@ Credential kinds for `--cred`: `ygg_key`, `ygg_addr`, `ygg_subnet`, `ip`, `ip_su
 ## Tags and port groups
 
 ```
-tags list | show T | rename T NEW | rm T
+tags list | show T | rename T NEW | rm T [-y]
 tags add dev web:80 --match 'python*' --match node     members and/or globs on process name or path
-tags patterns dev 'python*' [-y]                       replace the patterns (none: clear)
+tags patterns dev 'python*' [-y]                       replace the patterns (none: clear); asks on a tag open to anyone,
+                                                        also when no app matches yet
 tags members add dev redis [-y]                        an app, one port or web:port-group=passive
-tags members rm dev redis                              a pattern-matched app stays out afterwards
+tags members rm dev redis [-y]                         a pattern-matched app stays out afterwards
 
 port-groups list | rm G
 port-groups add 21/tcp 50000-51000/tcp -n passive --app ftpd [-y]
@@ -101,9 +102,11 @@ A reservation is a named address that keeps its place while the apps behind it c
 ```
 addresses list                          every address, automatic and reserved, up or not
 addresses reserve <address-id> web-public   keep an automatic address under a name
-reservations list | rename R NEW | release R
+reservations list | rename R NEW | release R [-y]
 reservations add public-web web:80/tcp tag:dev          bindings: app[:port[/proto]], app:port-group=L, tag:L
-reservations bind R redis [-y] | unbind R redis         bind asks before opening to anyone
+reservations bind R redis [-y] | unbind R redis [-y]    bind asks before opening to anyone; unbind, release,
+                                                        tags rm and tags members rm ask when freeing rows
+                                                        opens them to anyone on Tor (a bound row is inert there)
 ```
 
 ## Networks
@@ -115,6 +118,9 @@ networks add tor                        SocketGuard's own Tor
 networks add yggdrasil --peer tls://host:port           SocketGuard's own Yggdrasil; --peer repeats
 networks add ula|slaac|dhcpv6 [--interface eth0] [--id ID]
 networks peers yggdrasil [--add URI] [--rm URI]         show or change the peers of the Yggdrasil node
+networks lan-discovery yggdrasil [on|off] [-y]          show, or turn on or off, finding Yggdrasil nodes on the
+                                        local network (off by default; on lets other computers on the LAN
+                                        connect to the node and asks first; the node restarts)
 networks bridges tor [--add LINE] [--rm LINE] [--clear]   show or change the obfs4 bridges of Tor;
                                         LINE is `[Bridge ]obfs4 IP:port FINGERPRINT cert=CERT iat-mode=0` (other
                                         transports are refused); changing them restarts Tor; --clear turns them off
@@ -169,5 +175,13 @@ uninstall [--purge | --keep-data] [--yes] [--export FILE] [--force]
 ```
 
 `--owner-pid` and `--allow-user` belong to portable mode (the app passes them) and go with no other
-command. A file named `portable` next to the program also selects portable mode. In portable mode
+command. `--allow-user` takes the SID of one account (`S-1-5-21-...` or `S-1-12-1-...`), not a group
+such as Everyone. A file named `portable` next to the program also selects portable mode. In portable mode
 `service` (except `status`), `access` and `uninstall` are refused. `child-guard` is internal.
+
+The daemon refuses to start on a config file that does not parse (an unknown key is an error).
+`uninstall` and `--disable` must work anyway, so they print a warning naming the file and the error
+and go on with the built-in default configuration at the same paths: what the database, the install
+record and the address ledger name is removed; networks, a database path and an API socket named
+only in the unreadable file are not known (a database elsewhere is not found, so a plain run
+refuses, and `--force` removes the firewall rules by name).

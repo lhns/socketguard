@@ -1002,3 +1002,282 @@ async fn an_unbound_row_keeps_its_own_onion_and_a_dangling_grant_publishes_nothi
         .unwrap();
     assert!(!views[0].up, "not published, so not up");
 }
+
+// ─── Freeing a row from a reservation can open it to Anyone on Tor ──────────────
+
+use socketguard_core::api_types::{ChangeOp, ChangesRequest, ChangesResponse};
+use socketguard_core::Reach;
+use socketguard_daemon::engine::EngineError;
+
+fn confirmation_required<T>(r: &Result<T, EngineError>) -> bool {
+    matches!(r, Err(EngineError::ConfirmationRequired))
+}
+
+impl Web {
+    /// The reach the dry run of `op` reports, and whether it opens to Anyone.
+    async fn dry_run(&self, op: ChangeOp) -> Result<ChangesResponse, EngineError> {
+        let engine = self.h.state.engine.read().await;
+        engine
+            .apply_changes(
+                &self.h.state,
+                &ChangesRequest {
+                    ops: vec![op],
+                    dry_run: true,
+                },
+            )
+            .await
+    }
+
+    async fn binding_of(&self, app: &str) -> String {
+        let view = self
+            .h
+            .state
+            .engine
+            .read()
+            .await
+            .get_reservation(&self.h.state, &self.rid)
+            .await
+            .unwrap();
+        view.reservation
+            .bindings
+            .into_iter()
+            .find(|b| matches!(&b.target, BindingTarget::App { app_id, .. } if app_id == app))
+            .unwrap()
+            .id
+    }
+}
+
+fn release_op(rid: &str, confirm_open: bool) -> ChangeOp {
+    ChangeOp::ReleaseReservation {
+        reservation_id: rid.to_string(),
+        confirm_open,
+    }
+}
+
+#[tokio::test]
+async fn releasing_a_reservation_that_hides_an_anyone_grant_on_tor_needs_confirmation() {
+    let w = web().await;
+    // Inert on Tor while nginx is bound; releasing frees nginx and its own onion address
+    // is published to Anyone.
+    w.grant(Target::App(w.nginx.clone()), Scope::All, Subject::Anyone)
+        .await;
+    assert!(w.h.tor.add_commands().is_empty());
+    let engine = w.h.state.engine.read().await;
+    let refused = engine.release_reservation(&w.h.state, &w.rid, false).await;
+    assert!(confirmation_required(&refused), "{refused:?}");
+    assert!(w.h.tor.add_commands().is_empty(), "nothing was published");
+    assert!(engine.get_reservation(&w.h.state, &w.rid).await.is_ok());
+    drop(engine);
+
+    // The preview says who gains access.
+    let preview = w.dry_run(release_op(&w.rid, true)).await.unwrap();
+    assert!(preview.changes_reach);
+    let change = &preview.changes[0];
+    assert!(change.change.opens_to_anyone);
+    assert!(change.change.detail.as_deref().unwrap().contains("Anyone"));
+    assert!(change
+        .reach
+        .iter()
+        .any(|r| r.network_id == "tor" && r.reach != Reach::NotReachable));
+
+    let engine = w.h.state.engine.read().await;
+    engine
+        .release_reservation(&w.h.state, &w.rid, true)
+        .await
+        .unwrap();
+    assert_eq!(w.h.tor.add_commands().len(), 1, "nginx is published now");
+}
+
+#[tokio::test]
+async fn removing_the_binding_that_hides_an_anyone_grant_on_tor_needs_confirmation() {
+    let w = web().await;
+    w.grant(Target::App(w.nginx.clone()), Scope::All, Subject::Anyone)
+        .await;
+    let binding = w.binding_of(&w.nginx).await;
+    let engine = w.h.state.engine.read().await;
+    let refused = engine
+        .remove_binding(&w.h.state, &w.rid, &binding, false)
+        .await;
+    assert!(confirmation_required(&refused), "{refused:?}");
+    assert!(w.h.tor.add_commands().is_empty());
+    engine
+        .remove_binding(&w.h.state, &w.rid, &binding, true)
+        .await
+        .unwrap();
+    assert_eq!(w.h.tor.add_commands().len(), 1);
+}
+
+#[tokio::test]
+async fn freeing_rows_for_a_named_peer_needs_no_confirmation_but_shows_the_reach() {
+    let w = web().await;
+    let (bob, _) = w.peer("bob").await;
+    w.grant(Target::App(w.nginx.clone()), Scope::All, Subject::Peer(bob))
+        .await;
+    let preview = w.dry_run(release_op(&w.rid, false)).await.unwrap();
+    assert!(preview.changes_reach, "bob gains access to nginx on Tor");
+    assert!(!preview.changes[0].change.opens_to_anyone);
+    assert!(!preview.changes[0].reach.is_empty());
+    let engine = w.h.state.engine.read().await;
+    engine
+        .release_reservation(&w.h.state, &w.rid, false)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn releasing_needs_no_confirmation_when_no_anyone_grant_becomes_live() {
+    let w = web().await;
+    // Anyone on the reservation itself goes with it: nothing is newly open.
+    w.grant(
+        Target::Reservation(w.rid.clone()),
+        Scope::All,
+        Subject::Anyone,
+    )
+    .await;
+    let preview = w.dry_run(release_op(&w.rid, false)).await.unwrap();
+    assert!(!preview.changes_reach);
+    assert!(!preview.changes[0].change.opens_to_anyone);
+    let engine = w.h.state.engine.read().await;
+    engine
+        .release_reservation(&w.h.state, &w.rid, false)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_tag_grant_that_was_live_through_other_members_gains_the_freed_one() {
+    // Tag {nginx (bound), redis (free)}: the Anyone grant on the tag is reachable on Tor
+    // through redis before and after, yet freeing nginx publishes nginx's own address.
+    let h = Harness::new(vec![tcp_socket("nginx", 443), tcp_socket("redis", 6379)]).await;
+    h.reconcile().await;
+    let apps = h.state.db.list_apps().await.unwrap();
+    let id_of = |n: &str| {
+        apps.iter()
+            .find(|a| a.process_name == n)
+            .unwrap()
+            .id
+            .clone()
+    };
+    let (nginx, redis) = (id_of("nginx"), id_of("redis"));
+    let engine = h.state.engine.read().await;
+    let tag = engine
+        .create_tag(
+            &h.state,
+            "pair",
+            &[],
+            &[
+                socketguard_core::TagMember {
+                    app_id: nginx.clone(),
+                    scope: Scope::All,
+                },
+                socketguard_core::TagMember {
+                    app_id: redis.clone(),
+                    scope: Scope::All,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    let res = engine
+        .create_reservation(
+            &h.state,
+            "web",
+            vec![BindingTarget::App {
+                app_id: nginx.clone(),
+                scope: Scope::All,
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    engine
+        .create_grant(
+            &h.state,
+            &NewGrant {
+                target: Target::Tag(tag.id.clone()),
+                scope: Scope::All,
+                network_id: None,
+                subject: Subject::Anyone,
+                confirm_open: true,
+            },
+        )
+        .await
+        .unwrap();
+    let published = h.tor.add_commands().len();
+    let refused = engine
+        .release_reservation(&h.state, &res.reservation.id, false)
+        .await;
+    assert!(confirmation_required(&refused), "{refused:?}");
+    engine
+        .release_reservation(&h.state, &res.reservation.id, true)
+        .await
+        .unwrap();
+    assert!(h.tor.add_commands().len() > published);
+}
+
+/// Tag `bt` with sshd's All ports, bound to the reservation `bound`; an Anyone grant on
+/// sshd's row directly (inert on Tor while the tag is bound). Returns (web, tag id).
+async fn web_with_bound_tag() -> (Web, String) {
+    let w = web().await;
+    let engine = w.h.state.engine.read().await;
+    // sshd leaves the reservation's direct binding and goes in through a tag.
+    let binding = w.binding_of(&w.ssh).await;
+    engine
+        .remove_binding(&w.h.state, &w.rid, &binding, true)
+        .await
+        .unwrap();
+    let tag = engine
+        .create_tag(
+            &w.h.state,
+            "bt",
+            &[],
+            &[socketguard_core::TagMember {
+                app_id: w.ssh.clone(),
+                scope: Scope::All,
+            }],
+        )
+        .await
+        .unwrap();
+    engine
+        .add_binding(
+            &w.h.state,
+            &w.rid,
+            BindingTarget::Tag {
+                tag_id: tag.id.clone(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    drop(engine);
+    w.grant(Target::App(w.ssh.clone()), Scope::All, Subject::Anyone)
+        .await;
+    assert!(w.h.tor.add_commands().is_empty(), "inert while bound");
+    (w, tag.id)
+}
+
+#[tokio::test]
+async fn taking_a_member_out_of_a_bound_tag_that_hides_an_anyone_grant_needs_confirmation() {
+    let (w, tag) = web_with_bound_tag().await;
+    let engine = w.h.state.engine.read().await;
+    let refused = engine
+        .remove_tag_member(&w.h.state, &tag, &w.ssh, Scope::All, false)
+        .await;
+    assert!(confirmation_required(&refused), "{refused:?}");
+    engine
+        .remove_tag_member(&w.h.state, &tag, &w.ssh, Scope::All, true)
+        .await
+        .unwrap();
+    assert_eq!(w.h.tor.add_commands().len(), 1);
+}
+
+#[tokio::test]
+async fn deleting_a_bound_tag_that_hides_an_anyone_grant_needs_confirmation() {
+    let (w, tag) = web_with_bound_tag().await;
+    let engine = w.h.state.engine.read().await;
+    let refused = engine.delete_tag(&w.h.state, &tag, false).await;
+    assert!(confirmation_required(&refused), "{refused:?}");
+    assert!(engine.get_tag(&w.h.state, &tag).await.is_ok());
+    engine.delete_tag(&w.h.state, &tag, true).await.unwrap();
+    assert_eq!(w.h.tor.add_commands().len(), 1);
+}

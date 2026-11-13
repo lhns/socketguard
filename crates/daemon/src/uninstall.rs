@@ -215,6 +215,28 @@ pub async fn uninstall(
         }
     }
 
+    // The networks' data trees of the purge list go whether or not the record lists them (a
+    // failed record write, an older install), but only strictly inside the state directory.
+    if delete {
+        let recorded: Vec<&Path> = dirs
+            .iter()
+            .filter_map(|e| match &e.change {
+                Change::OwnedDirectory { path } => Some(Path::new(path)),
+                _ => None,
+            })
+            .collect();
+        for item in purge_items(paths, std::env::consts::OS) {
+            let Item::Tree(p) = item else { continue };
+            if recorded.contains(&p.as_path())
+                || !strictly_inside(&p, &paths.state_dir)
+                || std::fs::symlink_metadata(&p).is_err()
+            {
+                continue;
+            }
+            remove_tree(&mut report, &p);
+        }
+    }
+
     // Owned directories (a child process's data), then the directories we created.
     for e in &dirs {
         match &e.change {
@@ -236,13 +258,7 @@ pub async fn uninstall(
                     );
                     kept_entries.push(e.clone());
                 } else {
-                    match std::fs::remove_dir_all(p) {
-                        Ok(()) => report.removed(format!("directory {path} (with its contents)")),
-                        Err(x) if x.kind() == std::io::ErrorKind::NotFound => {
-                            report.absent(format!("directory {path}"))
-                        }
-                        Err(x) => report.left(format!("directory {path}"), x.to_string()),
-                    }
+                    remove_tree(&mut report, p);
                 }
             }
             Change::DirectoryCreated { path } => match std::fs::remove_dir(path) {
@@ -309,6 +325,25 @@ fn list_prefixed(dir: &Path, prefix: &str) -> Vec<PathBuf> {
         .collect();
     v.sort();
     v
+}
+
+/// Delete the directory `p` with its contents. A symlink (or junction) is unlinked, never
+/// followed: what it points to stays.
+fn remove_tree(report: &mut Report, p: &Path) {
+    let label = format!("directory {}", p.display());
+    let linked = std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink());
+    let result = if linked {
+        // A directory link is removed like a file on Unix, like a directory on Windows.
+        std::fs::remove_file(p).or_else(|_| std::fs::remove_dir(p))
+    } else {
+        std::fs::remove_dir_all(p)
+    };
+    match result {
+        Ok(()) if linked => report.removed(format!("{label} (a link; its target is kept)")),
+        Ok(()) => report.removed(format!("{label} (with its contents)")),
+        Err(x) if x.kind() == std::io::ErrorKind::NotFound => report.absent(label),
+        Err(x) => report.left(label, x.to_string()),
+    }
 }
 
 fn remove_named(report: &mut Report, f: &Path) {
@@ -797,6 +832,94 @@ mod tests {
             .items
             .iter()
             .any(|i| matches!(&i.outcome, Outcome::Left(w) if w.contains("refused"))));
+        std::fs::remove_dir_all(w.d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn purge_deletes_the_networks_data_trees_even_when_the_record_lacks_them() {
+        let w = world();
+        let trees: Vec<PathBuf> = ["tor", "yggdrasil", "run"]
+            .iter()
+            .map(|n| w.state.join(n))
+            .collect();
+        for t in &trees {
+            std::fs::create_dir_all(t.join("keys")).unwrap();
+            std::fs::write(t.join("keys").join("k"), "k").unwrap();
+        }
+        // A directory outside the state directory is not a data tree.
+        let outside = w.d.join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("precious"), "p").unwrap();
+        // The record has no OwnedDirectory entries (a failed write, an older install).
+        record(&w, vec![]);
+        let (mut host, mut mgr, mut groups) = (
+            FakeHost::new("linux"),
+            FakeServiceManager::default(),
+            FakeGroups::default(),
+        );
+        let order = RefCell::new(vec![]);
+        let r = run(
+            &w,
+            &mut host,
+            &mut mgr,
+            &mut groups,
+            UninstallOptions {
+                purge: true,
+                ..Default::default()
+            },
+            Report::default(),
+            &order,
+        )
+        .await
+        .unwrap();
+        for t in &trees {
+            // `run` is a data tree on Unix only; purge_items says which are listed.
+            let listed =
+                purge_items(&paths(&w), std::env::consts::OS).contains(&Item::Tree(t.clone()));
+            assert!(
+                !listed || !t.exists(),
+                "{} is left:
+{}",
+                t.display(),
+                r.render()
+            );
+        }
+        assert!(r.complete(), "{}", r.render());
+        assert!(outside.join("precious").exists());
+        std::fs::remove_dir_all(w.d).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_data_tree_is_unlinked_and_its_target_stays() {
+        let w = world();
+        let outside = w.d.join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("precious"), "p").unwrap();
+        std::os::unix::fs::symlink(&outside, w.state.join("tor")).unwrap();
+        record(&w, vec![]);
+        let (mut host, mut mgr, mut groups) = (
+            FakeHost::new("linux"),
+            FakeServiceManager::default(),
+            FakeGroups::default(),
+        );
+        let order = RefCell::new(vec![]);
+        run(
+            &w,
+            &mut host,
+            &mut mgr,
+            &mut groups,
+            UninstallOptions {
+                purge: true,
+                ..Default::default()
+            },
+            Report::default(),
+            &order,
+        )
+        .await
+        .unwrap();
+        assert!(std::fs::symlink_metadata(w.state.join("tor")).is_err());
+        assert!(outside.join("precious").exists());
         std::fs::remove_dir_all(w.d).unwrap();
     }
 

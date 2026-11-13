@@ -189,11 +189,11 @@ export const api = {
   listTags: () => call<Tag[]>("list_tags"),
   createTag: (req: NewTag) => callSaved<Tag>("create_tag", { req }),
   updateTag: (id: string, req: UpdateTag) => callSaved<Tag>("update_tag", { id, req }),
-  deleteTag: (id: string) => callSaved<null>("delete_tag", { id }),
+  deleteTag: (id: string, confirmOpen = false) => callSaved<null>("delete_tag", { id, confirmOpen }),
   addTagMember: (tagId: string, member: TagMember, confirmOpen = false) =>
     callSaved<Tag>("add_tag_member", { tagId, member, confirmOpen }),
-  removeTagMember: (tagId: string, appId: string, scope: Scope) =>
-    callSaved<Tag>("remove_tag_member", { tagId, appId, scope }),
+  removeTagMember: (tagId: string, appId: string, scope: Scope, confirmOpen = false) =>
+    callSaved<Tag>("remove_tag_member", { tagId, appId, scope, confirmOpen }),
   listPortGroups: () => call<PortGroup[]>("list_port_groups"),
   getPortGroup: (id: string) => call<PortGroup>("get_port_group", { id }),
   createPortGroup: (req: NewPortGroup) => callSaved<PortGroup>("create_port_group", { req }),
@@ -211,6 +211,8 @@ export const api = {
   /** What becomes reachable without the block of one network (or all of them): ADR 0051. */
   /** Replace the peers of a Yggdrasil network; its node restarts. */
   setNetworkPeers: (id: string, peers: string[]) => call<Network>("set_network_peers", { id, peers }),
+  setNetworkLanDiscovery: (id: string, enabled: boolean, confirmOpen = false) =>
+    call<Network>("set_network_lan_discovery", { id, enabled, confirmOpen }),
   /** Replace the obfs4 bridges of a Tor network; Tor restarts. */
   setNetworkBridges: (id: string, bridges: string[]) => call<Network>("set_network_bridges", { id, bridges }),
   /** Open one of the allow-listed pages (`links.ts`) in the system browser. */
@@ -222,11 +224,12 @@ export const api = {
     callSaved<ReservationView>("create_reservation", { req }),
   renameReservation: (id: string, label: string) =>
     callSaved<ReservationView>("rename_reservation", { id, label }),
-  releaseReservation: (id: string) => callSaved<null>("release_reservation", { id }),
+  releaseReservation: (id: string, confirmOpen = false) =>
+    callSaved<null>("release_reservation", { id, confirmOpen }),
   addBinding: (id: string, req: NewBinding) =>
     callSaved<ReservationView>("add_binding", { id, req }),
-  removeBinding: (id: string, bindingId: string) =>
-    callSaved<ReservationView>("remove_binding", { id, bindingId }),
+  removeBinding: (id: string, bindingId: string, confirmOpen = false) =>
+    callSaved<ReservationView>("remove_binding", { id, bindingId, confirmOpen }),
   reserveAddress: (id: string, req: ReserveRequest) =>
     callSaved<ReservationView>("reserve_address", { id, req }),
   getSettings: () => call<Settings>("get_settings"),

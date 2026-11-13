@@ -217,6 +217,17 @@ pub struct SetPeers {
     pub peers: Vec<String>,
 }
 
+/// Body of `PUT /api/networks/{id}/lan-discovery`: find Yggdrasil nodes on the local network
+/// (the node restarts). Turning it on opens a peering listener to the LAN, so it needs
+/// `confirm_open`; turning it off needs none (ADR 0060).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetLanDiscovery {
+    pub enabled: bool,
+    #[serde(default)]
+    pub confirm_open: bool,
+}
+
 /// Body of `PUT /api/networks/{id}/bridges`: the obfs4 bridge lines of a Tor network
 /// (Tor restarts to use them). Empty turns bridges off. Lines are checked by
 /// `bridge::parse_bridge_line` and stored in canonical form.
@@ -420,6 +431,11 @@ pub enum ChangeItem {
     Binding,
 }
 
+/// What a grant to Anyone on a tag with patterns means (ADR 0059): said in previews, the UI
+/// and the CLI alike.
+pub const PATTERN_OPEN_NOTE: &str =
+    "Apps that match these patterns later will be open to Anyone without asking again.";
+
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Change {
@@ -506,6 +522,18 @@ pub struct MemberQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub group: Option<PortGroupId>,
+    /// Needed when the row leaves a reservation's tag and opens to Anyone on Tor.
+    #[serde(default)]
+    pub confirm_open: bool,
+}
+
+/// Query of the `DELETE` routes that can free rows from a reservation and so open them to
+/// Anyone on Tor (`?confirm_open=true`).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfirmQuery {
+    #[serde(default)]
+    pub confirm_open: bool,
 }
 
 impl MemberQuery {
@@ -709,6 +737,10 @@ pub enum ChangeOp {
         app_id: AppId,
         #[serde(default)]
         scope: Scope,
+        /// Needed when the row leaves a reservation's tag and a grant to Anyone that names it
+        /// then becomes live on Tor (ADR 0047: a bound row is inert there).
+        #[serde(default)]
+        confirm_open: bool,
     },
     CreateReservation {
         #[serde(rename = "ref", default)]
@@ -742,10 +774,16 @@ pub enum ChangeOp {
     RemoveBinding {
         reservation_id: ReservationId,
         binding_id: BindingId,
+        /// Needed when the freed rows have a grant to Anyone that becomes live on Tor.
+        #[serde(default)]
+        confirm_open: bool,
     },
     /// Delete the reservation, its addresses and the grants on it.
     ReleaseReservation {
         reservation_id: ReservationId,
+        /// Needed when the freed rows have a grant to Anyone that becomes live on Tor.
+        #[serde(default)]
+        confirm_open: bool,
     },
     /// Move grants, tag memberships, addresses and bindings from one app to another.
     MoveApp {

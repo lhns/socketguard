@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import ReservedPage from "./ReservedPage";
 import type { ChangesRequest, GrantView, Network } from "../api";
 import {
-  batch, detail, grantView, mkApp, mkPeer, mkReservation, mkTag, memoryStorage, mockDaemon, networks, renderWithProviders, saved,
+  batch, detail, grantView, mkApp, mkPeer, mkReservation, mkTag, memoryStorage, mockDaemon, networks, renderWithProviders,
 } from "../test/helpers";
 
 const nginx = mkApp("a1", "nginx", [80, 443]);
@@ -291,7 +291,7 @@ describe("Remove from reservation", () => {
     renderWithProviders(<ReservedPage />);
     await openReservation(user, "front");
     await user.click(within(rowOf("caddy · 443/tcp")).getByRole("button", { name: "Remove caddy · 443/tcp from reservation" }));
-    await waitFor(() => expect(applied(d)).toEqual([[{ op: "remove_binding", reservation_id: "r1", binding_id: "r1-b1" }]]));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "remove_binding", reservation_id: "r1", binding_id: "r1-b1", confirm_open: false }]]));
     await user.click(await screen.findByRole("button", { name: "Undo" }));
     await waitFor(() => expect(applied(d)).toHaveLength(2));
     expect(applied(d)[1]).toEqual([
@@ -316,28 +316,49 @@ describe("Remove from reservation", () => {
 
 describe("Release", () => {
   it("asks first and says what happens to the addresses and the bound ports", async () => {
-    const d = setup({ release_reservation: () => saved(null) });
+    const d = setup();
     const user = userEvent.setup();
     renderWithProviders(<ReservedPage />);
     const panel = await openReservation(user, "front");
     await user.click(panel.getByRole("button", { name: "Release reservation" }));
-    expect(d.count("release_reservation")).toBe(0);
+    expect(requests(d)).toHaveLength(0);
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveTextContent("addresses are given up");
     expect(dialog).toHaveTextContent("get their own addresses again");
     await user.click(within(dialog).getByRole("button", { name: "Release reservation" }));
-    await waitFor(() => expect(d.last("release_reservation")?.args).toEqual({ id: "r1" }));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "release_reservation", reservation_id: "r1", confirm_open: false }]]));
+  });
+
+  it("freeing a row that a grant to anyone names on Tor shows the reach and asks before opening it", async () => {
+    const reach = { kind: "delete" as const, item: "reservation" as const, name: "front", opens_to_anyone: true, detail: "reachable by Anyone", reach: [{ network_id: "n-tor", reach: "open" as const }] };
+    const d = setup({ changes: (a) => batch(a.req as ChangesRequest, true, [reach]) });
+    const user = userEvent.setup();
+    renderWithProviders(<ReservedPage />);
+    const panel = await openReservation(user, "front");
+    await user.click(panel.getByRole("button", { name: "Release reservation" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Release reservation" }));
+    // The dry run says Anyone gains access: the Anyone form of the dialog, nothing applied yet.
+    const dialog = await screen.findByRole("dialog", { name: "Open front to anyone?" });
+    expect(dialog).toHaveTextContent("reachable by Anyone");
+    expect(applied(d)).toHaveLength(0);
+    await user.click(within(dialog).getByRole("button", { name: "Open front to anyone" }));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "release_reservation", reservation_id: "r1", confirm_open: true }]]));
   });
 
   it("several selected: Release N", async () => {
-    const d = setup({ release_reservation: () => saved(null) });
+    const d = setup();
     const user = userEvent.setup();
     renderWithProviders(<ReservedPage />);
     await user.click(await inList().findByRole("checkbox", { name: "Select front" }));
     await user.click(inList().getByRole("checkbox", { name: "Select ops" }));
     await user.click(await screen.findByRole("button", { name: "Release 2" }));
     await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Release reservations" }));
-    await waitFor(() => expect(d.calls.filter((c) => c.cmd === "release_reservation").map((c) => c.args.id)).toEqual(["r1", "r2"]));
+    await waitFor(() =>
+      expect(applied(d)).toEqual([[
+        { op: "release_reservation", reservation_id: "r1", confirm_open: false },
+        { op: "release_reservation", reservation_id: "r2", confirm_open: false },
+      ]]),
+    );
   });
 });
 

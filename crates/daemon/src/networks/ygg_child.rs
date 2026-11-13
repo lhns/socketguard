@@ -131,17 +131,19 @@ pub fn resolve_run_as(accounts: &dyn Accounts) -> RunAs {
 }
 
 /// The configuration file: only what SocketGuard decides. Everything else keeps Yggdrasil's
-/// own default; in particular `MulticastInterfaces` is left out on purpose, which keeps the
-/// built-in default (every interface, beacon and listen: nodes on the LAN find each other).
-/// Checked against 0.5.15: `-useconffile <conf> -normaliseconf` prints that default for a
-/// file without the key.
+/// own default. `MulticastInterfaces` is `[]` unless `lan_discovery` is on: the node then
+/// neither beacons nor opens a peering listener on the LAN (ADR 0060). On, the key is left
+/// out and the built-in default applies (every interface, beacon and listen: nodes on the
+/// LAN find each other). Checked against 0.5.15: `-useconffile <conf> -normaliseconf` prints
+/// that default for a file without the key.
 pub fn conf_text(
     key: &YggKey,
     peers: &[String],
+    lan_discovery: bool,
     if_name: &str,
     admin_listen: Option<&str>,
 ) -> String {
-    let conf = serde_json::json!({
+    let mut conf = serde_json::json!({
         "PrivateKey": key.private_hex(),
         "IfName": if_name,
         "AdminListen": admin_listen.unwrap_or("none"),
@@ -149,6 +151,9 @@ pub fn conf_text(
         "Peers": peers,
         "NodeInfoPrivacy": true,
     });
+    if !lan_discovery {
+        conf["MulticastInterfaces"] = serde_json::json!([]);
+    }
     let mut text = serde_json::to_string_pretty(&conf).expect("a JSON value");
     text.push('\n');
     text
@@ -368,6 +373,7 @@ impl YggChild {
             version: self.ctx.bundled.version_of("yggdrasil"),
             address: self.node().map(|n| n.address.to_string()),
             peers: vec![],
+            lan_discovery: false,
             peers_connected: if no_admin { None } else { peers_connected },
             bridges: vec![],
             bridges_unavailable: None,
@@ -375,12 +381,17 @@ impl YggChild {
     }
 
     /// The child to run with `peers`, or why this build cannot run one.
-    pub fn spec(&self, peers: &[String]) -> Result<ChildSpec, String> {
-        self.spec_with(peers, cfg!(windows))
+    pub fn spec(&self, peers: &[String], lan_discovery: bool) -> Result<ChildSpec, String> {
+        self.spec_with(peers, lan_discovery, cfg!(windows))
     }
 
     /// [`YggChild::spec`], with the admin valve armed or not (tests arm it everywhere).
-    pub fn spec_with(&self, peers: &[String], valve_armed: bool) -> Result<ChildSpec, String> {
+    pub fn spec_with(
+        &self,
+        peers: &[String],
+        lan_discovery: bool,
+        valve_armed: bool,
+    ) -> Result<ChildSpec, String> {
         let files = self.ctx.bundled.yggdrasil()?;
         let paths = self.paths.clone()?;
         let key = self
@@ -401,6 +412,7 @@ impl YggChild {
             owner,
             key,
             peers: peers.to_vec(),
+            lan_discovery,
             ygg: self.clone(),
         };
         let id = self.id.clone();
@@ -438,7 +450,8 @@ impl YggChild {
             health: Some(Arc::new(YggHealth(self.clone()))),
             before_start: Some(Arc::new(move || prepare.run())),
             on_exit,
-            config_tag: peers.join("\n"),
+            // What makes a launch different: a change restarts the node.
+            config_tag: format!("{}\nlan_discovery={lan_discovery}", peers.join("\n")),
         })
     }
 }
@@ -481,6 +494,7 @@ struct Prepare {
     owner: Option<(u32, u32)>,
     key: YggKey,
     peers: Vec<String>,
+    lan_discovery: bool,
     ygg: YggChild,
 }
 
@@ -497,6 +511,7 @@ impl Prepare {
         let text = conf_text(
             &self.key,
             &self.peers,
+            self.lan_discovery,
             adapter_name().unwrap_or("auto"),
             admin.as_deref(),
         );
@@ -613,6 +628,7 @@ mod tests {
                 "tcp://192.0.2.1:9001".into(),
                 "tls://example.org:443".into(),
             ],
+            false,
             "sgygg0",
             Some("unix:///var/lib/socketguard/yggdrasil/run/admin.sock"),
         );
@@ -621,6 +637,7 @@ mod tests {
   "AdminListen": "unix:///var/lib/socketguard/yggdrasil/run/admin.sock",
   "IfName": "sgygg0",
   "Listen": [],
+  "MulticastInterfaces": [],
   "NodeInfoPrivacy": true,
   "Peers": [
     "tcp://192.0.2.1:9001",
@@ -631,9 +648,10 @@ mod tests {
 "#
         );
         assert_eq!(text, expected);
-        // Left out on purpose: Yggdrasil's default (discovery on the LAN) applies.
-        assert!(!text.contains("Multicast"));
-        let none = conf_text(&key(), &[], "auto", None);
+        // LAN discovery on: the key is left out and Yggdrasil's default applies.
+        let on = conf_text(&key(), &[], true, "auto", None);
+        assert!(!on.contains("Multicast"), "{on}");
+        let none = conf_text(&key(), &[], false, "auto", None);
         assert!(none.contains(r#""AdminListen": "none""#) && none.contains(r#""IfName": "auto""#));
         assert!(none.contains(r#""Peers": []"#));
     }
@@ -713,7 +731,7 @@ mod tests {
             ..FakeAccounts::present()
         };
         let c = ctx(Some(d.clone()), accounts);
-        let spec = ygg(&c, &ifaces()).spec(&[]).unwrap();
+        let spec = ygg(&c, &ifaces()).spec(&[], false).unwrap();
         assert_eq!(spec.run_as, RunAs::Portable);
         (spec.before_start.unwrap())().unwrap();
         let paths = YggPaths::new(&d);
@@ -734,7 +752,7 @@ mod tests {
         let d = state_dir();
         let c = ctx(Some(d.clone()), FakeAccounts::present());
         let spec = ygg(&c, &ifaces())
-            .spec(&["tcp://192.0.2.1:9001".to_string()])
+            .spec(&["tcp://192.0.2.1:9001".to_string()], false)
             .unwrap();
         assert_eq!(spec.name, "yggdrasil");
         let conf = d
@@ -761,12 +779,14 @@ mod tests {
         assert_eq!(spec.guarded, cfg!(unix), "-user drops the death signal");
         assert_eq!(spec.start_deadline, Some(ADMIN_DEADLINE));
         assert_eq!(spec.cwd.as_deref(), Some(d.join("yggdrasil").as_path()));
-        assert_eq!(spec.config_tag, "tcp://192.0.2.1:9001");
+        assert_eq!(spec.config_tag, "tcp://192.0.2.1:9001\nlan_discovery=false");
         assert!(spec.health.is_some() && spec.before_start.is_some());
         // A different peer list is a different launch; the same one is not.
-        let other = ygg(&c, &ifaces()).spec(&[]).unwrap();
+        let other = ygg(&c, &ifaces()).spec(&[], false).unwrap();
         assert!(!spec.same_launch(&other));
-        assert!(other.same_launch(&ygg(&c, &ifaces()).spec(&[]).unwrap()));
+        assert!(other.same_launch(&ygg(&c, &ifaces()).spec(&[], false).unwrap()));
+        // So is turning LAN discovery on.
+        assert!(!other.same_launch(&ygg(&c, &ifaces()).spec(&[], true).unwrap()));
     }
 
     #[tokio::test]
@@ -775,19 +795,19 @@ mod tests {
         none.keys.insert("ygg", key());
         assert_eq!(
             YggChild::new("ygg", &none, Arc::new(ifaces()))
-                .spec(&[])
+                .spec(&[], false)
                 .unwrap_err(),
             socketguard_core::setup::NOT_INCLUDED
         );
         let c = ctx(None, FakeAccounts::present());
         assert!(ygg(&c, &ifaces())
-            .spec(&[])
+            .spec(&[], false)
             .unwrap_err()
             .contains("no state directory"));
         let c = ctx(Some(state_dir()), FakeAccounts::present());
         c.keys.remove("ygg");
         assert_eq!(
-            ygg(&c, &ifaces()).spec(&[]).unwrap_err(),
+            ygg(&c, &ifaces()).spec(&[], false).unwrap_err(),
             "the node's key is not available"
         );
     }
@@ -887,7 +907,7 @@ mod tests {
         let mut c = ctx(Some(d.clone()), FakeAccounts::own());
         c.children = Arc::new(Supervisor::new(Arc::new(fake.clone())));
         let y = ygg(&c, &ifaces());
-        let spec = y.spec_with(&[], true).unwrap();
+        let spec = y.spec_with(&[], false, true).unwrap();
         c.children.set("ygg", Some(spec));
         let conf = d.join("yggdrasil").join("yggdrasil.conf");
         let step = Duration::from_millis(5);
@@ -924,7 +944,7 @@ mod tests {
         let net = ifaces();
         let y = ygg(&c, &net);
         let conf = d.join("yggdrasil").join("yggdrasil.conf");
-        c.children.set("ygg", Some(y.spec(&[]).unwrap()));
+        c.children.set("ygg", Some(y.spec(&[], false).unwrap()));
         tokio::time::sleep(Duration::from_millis(5)).await;
         if y.paths.as_ref().unwrap().admin_listen().is_none() {
             return;

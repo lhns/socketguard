@@ -145,7 +145,8 @@ async fn the_child_starts_after_the_ruleset_with_the_adr_command_line_and_a_priv
     );
     assert_eq!(conf["Listen"], serde_json::json!([]));
     assert_eq!(conf["NodeInfoPrivacy"], true);
-    assert!(conf.get("MulticastInterfaces").is_none());
+    // LAN discovery is off: no multicast, so no beacon and no listener on the LAN (ADR 0060).
+    assert_eq!(conf["MulticastInterfaces"], serde_json::json!([]));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -100,7 +100,10 @@ socketguard networks peers yggdrasil --add tls://host:port --rm tls://old:1
 socketguard networks bridges tor --add "obfs4 IP:port FINGERPRINT cert=... iat-mode=0"   # only if Tor is blocked
 ```
 
-A new Yggdrasil node only finds nodes on your LAN; add peers to reach further. The app has a "Find
+A new Yggdrasil node reaches nobody until you add peers or turn on LAN discovery
+(`socketguard networks lan-discovery yggdrasil on`, or the switch "Find Yggdrasil nodes on the local
+network" in the app). LAN discovery is off by default because it lets other computers on your local
+network connect to the node (ADR 0060); they still reach no app without a grant. The app has a "Find
 public peers" link to the project's list
 ([github.com/yggdrasil-network/public-peers](https://github.com/yggdrasil-network/public-peers));
 SocketGuard ships no list, fetches none and adds no peer on its own.
@@ -233,7 +236,7 @@ socketguard port-groups add 21/tcp 50000-51000/tcp -n passive --app ftpd
 socketguard addresses list                 # automatic and reserved addresses
 socketguard reservations add web nginx:80 tag:dev   # bind rows; then grant reservation:web
 socketguard networks add tor | add yggdrasil --peer tls://host:port
-socketguard networks list | detect | peers yggdrasil --add URI --rm URI | rm ID
+socketguard networks list | detect | peers yggdrasil --add URI --rm URI | lan-discovery yggdrasil on|off | rm ID
 socketguard networks bridges tor [--add LINE] [--rm LINE] [--clear]   # obfs4 bridges for Tor
 socketguard share nginx                    # connection strings for the peer
 socketguard activity --blocked -f          # what was refused
@@ -277,6 +280,7 @@ Entries of `backends` (`"type"` selects the kind):
 | | `prefix` | string | discovered (also `"auto"`) | IPv6 `/64` to use |
 | `dhcpv6` (LAN) | `interface` | string | required | Interface on the DHCPv6 server's LAN |
 | `yggdrasil` | `peers` | string array | `[]` | URIs (`tcp`, `tls`, `quic`, `ws`, `wss`, `socks`, `sockstls`) |
+| | `lan_discovery` | bool | `false` (left out when false) | Find and be found by Yggdrasil nodes on the local network: multicast beacons and a peering listener on each adapter's link-local address. Turning it on needs a confirmation (ADR 0060) |
 | `tor` | `bridges` | string array | `[]` | obfs4 bridge lines (`obfs4 IP:port FINGERPRINT cert=... iat-mode=0`), stored in this form; Tor then connects through them |
 
 An unknown key, at the top level or in a `backends` entry, makes the daemon refuse the file and name

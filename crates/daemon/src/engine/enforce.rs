@@ -1,5 +1,6 @@
 //! Networks that are not enforced by the firewall (Tor), and adding and removing networks.
 
+use super::mutations::ensure_confirmed;
 use super::*;
 use crate::api::DaemonEvent;
 use crate::networks;
@@ -209,7 +210,7 @@ impl Engine {
         };
         let mut updated = active.config.backend.clone();
         match &mut updated {
-            BackendConfig::Yggdrasil { peers: current } => *current = peers,
+            BackendConfig::Yggdrasil { peers: current, .. } => *current = peers,
             _ => {
                 return Err(EngineError::Invalid(format!(
                     "network {id} is not a Yggdrasil network"
@@ -225,6 +226,57 @@ impl Engine {
         let activity = NewActivity::new(
             ActivityKind::NetworkChanged,
             format!("Changed the peers of {id} ({count} now)"),
+        )
+        .network(id);
+        self.commit(
+            state,
+            Ok(()),
+            Some(activity),
+            &[DaemonEvent::NetworksChanged],
+        )
+        .await?;
+        self.networks()
+            .into_iter()
+            .find(|n| n.id == id)
+            .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))
+    }
+
+    /// The API's `PUT /api/networks/{id}/lan-discovery`: turn the Yggdrasil node's discovery
+    /// of the local network on or off (ADR 0060). On opens a peering listener to the LAN, so
+    /// it needs `confirm_open`; off needs none. The node restarts. The caller saves the config
+    /// while it holds the write lock.
+    pub async fn set_lan_discovery(
+        &mut self,
+        state: &AppState,
+        id: &str,
+        enabled: bool,
+        confirm_open: bool,
+    ) -> Result<Network, EngineError> {
+        let Some(active) = self.backends.get_mut(id) else {
+            return Err(EngineError::NotFound(format!("network {id}")));
+        };
+        let BackendConfig::Yggdrasil { lan_discovery, .. } = &mut active.config.backend else {
+            return Err(EngineError::Invalid(format!(
+                "network {id} is not a Yggdrasil network"
+            )));
+        };
+        if enabled == *lan_discovery {
+            return self
+                .networks()
+                .into_iter()
+                .find(|n| n.id == id)
+                .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")));
+        }
+        ensure_confirmed(enabled, confirm_open)?;
+        *lan_discovery = enabled;
+        // A changed spec restarts the child (`networks::child::child_wish`).
+        self.sync_children(state).await;
+        let activity = NewActivity::new(
+            ActivityKind::NetworkChanged,
+            format!(
+                "Turned LAN discovery of {id} {}",
+                if enabled { "on" } else { "off" }
+            ),
         )
         .network(id);
         self.commit(

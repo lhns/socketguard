@@ -194,3 +194,76 @@ async fn peers_are_replaced_validated_and_saved() {
         (StatusCode::NOT_FOUND, Some("not_found"))
     );
 }
+
+#[tokio::test]
+async fn lan_discovery_is_off_and_turning_it_on_needs_confirmation() {
+    let f = Fixture::new(Bundled::none()).await;
+    f.with_ygg_child(&["tls://a.example:1"]).await;
+    let put = |body: Value| f.call(Method::PUT, "/api/networks/ygg/lan-discovery", Some(body));
+    let on = || async {
+        f.state.engine.read().await.backend_configs()[0]
+            .backend
+            .lan_discovery()
+    };
+    let (_, n) = f.call(Method::GET, "/api/networks", None).await;
+    assert_eq!(n[0]["child"]["lan_discovery"], false, "{n}");
+    assert!(!on().await);
+
+    // Turning it on opens the LAN to Yggdrasil nodes: refused without the confirmation.
+    let (s, e) = put(json!({"enabled": true})).await;
+    assert_eq!(
+        (s, e["code"].as_str()),
+        (StatusCode::CONFLICT, Some("confirmation_required")),
+        "{e}"
+    );
+    assert!(!on().await);
+    let (s, n) = put(json!({"enabled": true, "confirm_open": true})).await;
+    assert_eq!(s, StatusCode::OK, "{n}");
+    assert_eq!(n["child"]["lan_discovery"], true);
+    assert!(on().await);
+    // Changing the peers keeps it.
+    let (s, n) = f
+        .call(
+            Method::PUT,
+            "/api/networks/ygg/peers",
+            Some(json!({"peers": []})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{n}");
+    assert!(on().await);
+    // Turning it off needs nothing.
+    let (s, n) = put(json!({"enabled": false})).await;
+    assert_eq!(s, StatusCode::OK, "{n}");
+    assert_eq!(n["child"]["lan_discovery"], false);
+    assert!(!on().await);
+
+    let (s, e) = f
+        .call(
+            Method::PUT,
+            "/api/networks/nope/lan-discovery",
+            Some(json!({"enabled": false})),
+        )
+        .await;
+    assert_eq!(
+        (s, e["code"].as_str()),
+        (StatusCode::NOT_FOUND, Some("not_found"))
+    );
+}
+
+#[tokio::test]
+async fn a_new_yggdrasil_network_cannot_be_added_with_lan_discovery_on() {
+    let f = Fixture::new(Bundled::none()).await;
+    let (s, e) = f
+        .call(
+            Method::POST,
+            "/api/networks",
+            Some(json!({"type": "yggdrasil", "lan_discovery": true})),
+        )
+        .await;
+    // Refused before the files are even looked at.
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    assert!(
+        e["message"].as_str().unwrap().contains("LAN discovery"),
+        "{e}"
+    );
+}

@@ -98,7 +98,8 @@ step "the status names the account and the shipped version" sh -c "docker exec $
 step "the install record lists <state>/yggdrasil as an owned directory" sh -c "docker exec $NODE_A cat /etc/setup-log.json | jq -e --arg p '$STATE/yggdrasil' '[.entries[] | select(.type == \"owned_directory\" and .path == \$p)] | length == 1' >/dev/null"
 step "yggdrasil.conf is the daemon's own and private (0600)" sh -c "[ \"\$(docker exec $NODE_A stat -c '%U %a' $STATE/yggdrasil/yggdrasil.conf)\" = 'root 600' ]"
 step "the run directory (admin socket) belongs to socketguard-net" sh -c "[ \"\$(docker exec $NODE_A stat -c '%U %a' $STATE/yggdrasil/run)\" = 'socketguard-net 700' ]"
-step "the conf leaves the multicast default alone" sh -c "! docker exec $NODE_A grep -q Multicast $STATE/yggdrasil/yggdrasil.conf"
+step "the conf turns multicast off (LAN discovery is off by default)" sh -c "docker exec $NODE_A cat $STATE/yggdrasil/yggdrasil.conf | jq -e '.MulticastInterfaces == [] and .Listen == []' >/dev/null"
+step "the status says LAN discovery is off" sh -c "docker exec $NODE_A $SG networks list --json | jq -e '.[0].child.lan_discovery == false' >/dev/null"
 
 echo "      waiting for the node to come up (up to 90s)"
 if ! wait_up 90; then
@@ -106,6 +107,9 @@ if ! wait_up 90; then
   fail "the network came up"; exit 1
 fi
 pass "the network is up"
+# LAN discovery is off: the node opens no TCP port of its own (no multicast peering listener).
+no_ygg_listener() { ! docker exec "$NODE_A" sh -c "ss -ltnpH 2>/dev/null | grep -q yggdrasil"; }
+step "no listener of the yggdrasil process while LAN discovery is off" no_ygg_listener
 peers_connected() { net_json | jq -e '.[0].child.peers_connected >= 1' >/dev/null; }
 step "the status shows peers_connected >= 1" retry 40 peers_connected || exit 1
 NODE_ADDR="$(net_json | jq -r '.[0].child.address')"

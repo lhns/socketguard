@@ -305,7 +305,7 @@ async fn patterns_add_matching_apps_now_and_new_ones_later_but_not_excluded_ones
         .send(
             axum::http::Method::PATCH,
             &format!("/api/tags/{tag_id}"),
-            json!({"patterns": ["ngi*", "nginx*"]}),
+            json!({"patterns": ["ngi*", "nginx*"], "confirm_open": true}),
         )
         .await;
     assert_eq!(s, StatusCode::OK, "{tag}");
@@ -679,8 +679,8 @@ async fn new_patterns_that_add_apps_to_an_open_tag_need_confirm_open() {
     let path = format!("/api/tags/{tag_id}");
     let patch = |body: Value| d.send(axum::http::Method::PATCH, &path, body);
 
-    // A rename adds nobody; a pattern nothing matches adds nobody.
-    let (s, body) = patch(json!({"label": "web2", "patterns": ["zzz*"]})).await;
+    // A rename changes no patterns.
+    let (s, body) = patch(json!({"label": "web2"})).await;
     assert_eq!(s, StatusCode::OK, "{body}");
 
     let (s, body) = patch(json!({"patterns": ["ngi*"]})).await;
@@ -938,4 +938,107 @@ async fn a_batch_group_refuses_unknown_members_and_clashing_names_and_rolls_back
     }
     assert!(d.state.db.list_peers().await.unwrap().is_empty());
     assert_eq!(d.state.db.list_groups().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn patterns_on_a_tag_anyone_can_reach_need_confirm_open_even_when_nothing_matches_yet() {
+    let d = Daemon::new().await;
+    let (tag_id, _) = open_tag_and_spare_app(&d).await;
+    let path = format!("/api/tags/{tag_id}");
+    let patch = |body: Value| d.send(axum::http::Method::PATCH, &path, body);
+
+    let (s, body) = patch(json!({"patterns": ["zzz*"]})).await;
+    assert_eq!(
+        (s, code(&body)),
+        (StatusCode::CONFLICT, "confirmation_required"),
+        "{body}"
+    );
+    let (s, body) = patch(json!({"patterns": ["zzz*"], "confirm_open": true})).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    // The same patterns again, a rename and clearing them need nothing.
+    let (s, body) = patch(json!({"label": "web3", "patterns": ["zzz*"]})).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let (s, body) = patch(json!({"patterns": []})).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn patterns_on_a_tag_nobody_anonymous_can_reach_need_no_confirmation() {
+    let d = Daemon::new().await;
+    let peer = d.ygg_peer("alice").await;
+    let (_, tag) = d.post("/api/tags", json!({"label": "web"})).await;
+    let tag_id = id(&tag);
+    d.post(
+        "/api/grants",
+        json!({"target": tag_target(&tag_id), "subject": {"kind": "peer", "id": peer}}),
+    )
+    .await;
+    let (s, body) = d
+        .send(
+            axum::http::Method::PATCH,
+            &format!("/api/tags/{tag_id}"),
+            json!({"patterns": ["zzz*"]}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn a_grant_to_anyone_on_a_tag_with_patterns_says_what_is_special_in_its_preview() {
+    let d = Daemon::new().await;
+    let (_, tag) = d
+        .post("/api/tags", json!({"label": "web", "patterns": ["zzz*"]}))
+        .await;
+    let (_, plain) = d.post("/api/tags", json!({"label": "plain"})).await;
+    let note = |tag_id: &str| {
+        let d = &d;
+        let tag_id = tag_id.to_string();
+        async move {
+            let (s, body) = d
+                .post(
+                    "/api/changes",
+                    json!({"dry_run": true, "ops": [{"op": "add_grant",
+                        "target": tag_target(&tag_id), "subject": {"kind": "anyone"},
+                        "confirm_open": true}]}),
+                )
+                .await;
+            assert_eq!(s, StatusCode::OK, "{body}");
+            body["changes"][0]["reach"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|r| r["note"].as_str().map(String::from))
+                .collect::<Vec<_>>()
+        }
+    };
+    let notes = note(&id(&tag)).await;
+    assert!(!notes.is_empty());
+    assert!(
+        notes
+            .iter()
+            .all(|n| n.contains("match these patterns later")),
+        "{notes:?}"
+    );
+    assert!(note(&id(&plain)).await.is_empty());
+}
+
+#[tokio::test]
+async fn an_app_that_joins_an_open_tag_by_pattern_is_logged_as_opened_to_anyone() {
+    let d = Daemon::new().await;
+    let (_, tag) = d
+        .post("/api/tags", json!({"label": "web", "patterns": ["ngi*"]}))
+        .await;
+    d.post(
+        "/api/grants",
+        json!({"target": tag_target(&id(&tag)), "subject": {"kind": "anyone"}, "confirm_open": true}),
+    )
+    .await;
+    d.sockets.lock().unwrap().push(listener("nginx-two", 8081));
+    d.reconcile().await;
+    let (_, log) = d.get("/api/activity").await;
+    assert!(
+        log.to_string()
+            .contains("was opened to Anyone through the pattern of tag web"),
+        "{log}"
+    );
 }

@@ -237,10 +237,22 @@ pub enum TagsCmd {
         yes: bool,
     },
     /// Remove a tag and the grants on it
-    Rm { tag: String },
+    Rm {
+        tag: String,
+        /// Confirm without asking when freeing rows from a reservation opens them to anyone
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Add or remove members
     #[command(subcommand)]
     Members(TagMembersCmd),
+}
+
+/// `on` or `off`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnOff {
+    On,
+    Off,
 }
 
 #[derive(Subcommand, Debug)]
@@ -317,9 +329,17 @@ pub enum ReservationsCmd {
         reservation: String,
         #[arg(required = true)]
         targets: Vec<String>,
+        /// Confirm without asking when the freed rows are opened to anyone on Tor
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Delete a reservation, its addresses and the grants on it
-    Release { reservation: String },
+    Release {
+        reservation: String,
+        /// Confirm without asking when the freed rows are opened to anyone on Tor
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -352,6 +372,9 @@ pub enum TagMembersCmd {
         tag: String,
         #[arg(required = true)]
         members: Vec<String>,
+        /// Confirm without asking when freeing a row from a reservation opens it to anyone
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 }
 
@@ -468,6 +491,16 @@ pub enum NetworksCmd {
         /// Remove a peer (repeatable)
         #[arg(long = "rm", value_name = "URI")]
         rm: Vec<String>,
+    },
+    /// Show, or turn on or off, finding Yggdrasil nodes on the local network (off by default;
+    /// on lets other computers on the LAN connect to the node); the node restarts
+    LanDiscovery {
+        id: String,
+        #[arg(value_enum)]
+        state: Option<OnOff>,
+        /// Confirm without asking when turning it on
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Show or change the obfs4 bridges of a Tor network (for a network where Tor is
     /// blocked); changing them restarts Tor. Get bridge lines from bridges.torproject.org.

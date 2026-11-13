@@ -11,10 +11,10 @@ const T0 = "2026-01-01T00:00:00Z";
 let networks: Network[] = [
   { id: "n-local", kind: "local", name: "Local", interface: "lo", grants_apply: false, status: { state: "up" } },
   { id: "n-ygg", kind: "yggdrasil", name: "Yggdrasil", interface: "ygg0", grants_apply: true, status: { state: "up" },
-    child: { state: "up", runs_as: "the daemon's account (Windows cannot drop it)", version: "0.5.12", address: "200:8af8:ba35:56ae:bef0:6284:981f:5972", peers: ["tls://ygg.example.org:443"], peers_connected: 1 } },
+    child: { state: "up", lan_discovery: false, runs_as: "the daemon's account (Windows cannot drop it)", version: "0.5.12", address: "200:8af8:ba35:56ae:bef0:6284:981f:5972", peers: ["tls://ygg.example.org:443"], peers_connected: 1 } },
   { id: "n-lan", kind: "lan", name: "LAN", interface: "eth0", grants_apply: true, status: { state: "up" } },
   { id: "n-tor", kind: "tor", name: "Tor", interface: null, grants_apply: true, status: { state: "up" },
-    child: { state: "bootstrapping", progress: 62, runs_as: "socketguard-net", version: "0.4.8.12", peers: [] } },
+    child: { state: "bootstrapping", lan_discovery: false, progress: 62, runs_as: "socketguard-net", version: "0.4.8.12", peers: [] } },
 ];
 
 let seq = 100;
@@ -543,6 +543,11 @@ export function installMock(kind?: string | null) {
           const n = networks.find((x) => x.id === a.id);
           if (n?.child) n.child = { ...n.child, peers: a.peers as string[], state: "starting", peers_connected: undefined };
           return done(n);
+        }
+        case "set_network_lan_discovery": {
+          const n = networks.find((x) => x.id === a.id);
+          if (n?.child) n.child = { ...n.child, lan_discovery: a.enabled as boolean, state: "starting", peers_connected: undefined };
+          return n;
         }
         case "set_network_bridges": {
           const n = networks.find((x) => x.id === a.id);

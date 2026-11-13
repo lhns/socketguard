@@ -18,6 +18,11 @@ pub enum BackendConfig {
         /// Peers to connect to, as URIs (`tls://host:port`).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         peers: Vec<String>,
+        /// Find and be found by Yggdrasil nodes on the local network (multicast, with a
+        /// peering listener on each adapter's link-local address). Off unless turned on
+        /// (ADR 0060).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        lan_discovery: bool,
     },
     Slaac {
         /// Physical network interface connected to the router
@@ -48,7 +53,21 @@ impl BackendConfig {
 
     /// The Yggdrasil network (ADR 0052) with `peers`.
     pub fn yggdrasil(peers: Vec<String>) -> Self {
-        BackendConfig::Yggdrasil { peers }
+        BackendConfig::Yggdrasil {
+            peers,
+            lan_discovery: false,
+        }
+    }
+
+    /// Whether a Yggdrasil network finds nodes on the LAN; false otherwise.
+    pub fn lan_discovery(&self) -> bool {
+        matches!(
+            self,
+            BackendConfig::Yggdrasil {
+                lan_discovery: true,
+                ..
+            }
+        )
     }
 
     /// SocketGuard runs this network's software itself as a child process (Tor, Yggdrasil).
@@ -70,7 +89,7 @@ impl BackendConfig {
     /// The peers of a Yggdrasil network; empty otherwise.
     pub fn peers(&self) -> &[String] {
         match self {
-            BackendConfig::Yggdrasil { peers } => peers,
+            BackendConfig::Yggdrasil { peers, .. } => peers,
             _ => &[],
         }
     }
@@ -84,7 +103,7 @@ impl BackendConfig {
                 crate::bridge::normalize_bridges(bridges)?;
                 Ok(())
             }
-            BackendConfig::Yggdrasil { peers } => {
+            BackendConfig::Yggdrasil { peers, .. } => {
                 let mut seen = HashSet::new();
                 for p in peers {
                     valid_peer_uri(p)?;
