@@ -42,3 +42,9 @@ Per-app addresses are IPv6 only (ADR 0036), so ADR 0026's amendment turned IPv4 
 - **Anyone** (not scoped to a network) also gets an IPv4 rule on every protected interface that carries IPv4, so protect-host does not close IPv4 for an app opened to everyone. Anyone scoped to a LAN or Local network gets the interface's IPv4 subnet instead.
 - **Address family** is stored per port (schema v5, `app_ports.family`, default `dual` for old rows). Unix `::` counts as dual-stack (IPV6_V6ONLY is not visible in /proc); Windows `::` as v6-only, merged with the IPv4 sockets of the same port.
 - **Reach for an IPv4 credential** is computed per app and grant (`reach_for_app`): the listener family and the protected interfaces decide between `IpOnly`, `Unfiltered` and `NotReachable`.
+
+## Amendment (2026-11-13): an IPv4 grant names a port that the app listens on from the network
+
+An IPv4 host rule matches a port on any IPv4 address of the host, so it also reaches another app that listens on the same port on the LAN address. An app bound to `127.0.0.1` only (not reachable from the network anyway) therefore opened that other app's port to its peers.
+
+A port counts for an app's IPv4 rules only if one of the app's IPv4 listeners on it is bound to the wildcard or to a non-loopback IPv4 address. A port whose IPv4 listeners are all on loopback gets no IPv4 host rule, and the reach of the app's IPv4 credentials reads "not reachable — it listens on this machine only (IPv4 loopback)". The engine records this per poll (`Snapshot::v4_local_only`). An unknown bind (no live socket) changes nothing: the rule is written as before.

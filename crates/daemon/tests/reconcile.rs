@@ -2220,6 +2220,44 @@ async fn ipv4_peer_reach_follows_the_listener_and_protect_host() {
 }
 
 #[tokio::test]
+async fn a_loopback_only_ipv4_listener_gets_no_host_rule_and_says_why() {
+    let h = Harness::new(vec![lan_net()], vec![socket_on("nginx", 80, "127.0.0.1")]).await;
+    h.net.set_ipv4_subnets("eth0", &["192.168.1.0/24"]);
+    h.reconcile().await;
+    h.engine()
+        .await
+        .set_protect_host(&h.state, vec!["eth0".into()], false)
+        .await
+        .unwrap();
+    let app = h.app().await;
+    let peer = h.peer("laptop", CredentialKind::Ip, "192.168.1.5").await;
+    let gid = h.grant(&app.id, Subject::Peer(peer)).await.grant.id;
+    let views = h
+        .engine()
+        .await
+        .list_grants(&h.state, GrantFilter::default())
+        .await
+        .unwrap();
+    let reach = &views.iter().find(|v| v.grant.id == gid).unwrap().reach[0];
+    assert_eq!(reach.reach, Reach::NotReachable);
+    assert!(
+        reach
+            .note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("this machine only"),
+        "{reach:?}"
+    );
+    assert!(h.last_ruleset().rules.iter().all(|r| r.dst != Dst::HostV4));
+
+    // Listening on the LAN address opens it for the peer again.
+    h.set_sockets(vec![socket_on("nginx", 80, "192.168.1.9")]);
+    h.reconcile().await;
+    assert_eq!(reach_of(&h, &gid).await, Reach::IpOnly);
+    assert!(h.last_ruleset().rules.iter().any(|r| r.dst == Dst::HostV4));
+}
+
+#[tokio::test]
 async fn a_segment_grant_is_limited_to_the_networks_prefix() {
     let h = Harness::new(vec![lan_net()], vec![socket_on("nginx", 80, "::")]).await;
     h.reconcile().await;

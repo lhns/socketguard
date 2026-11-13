@@ -196,6 +196,8 @@ pub struct Engine {
     /// The ports that listeners of processes the process filter hides are bound to, from the
     /// last socket scan: no app is stored for them, but they are taken all the same.
     hidden_listening: Mutex<Vec<PortRef>>,
+    /// App ports whose IPv4 listeners are all on loopback, from the last socket scan.
+    v4_local_only: Mutex<std::collections::BTreeSet<(AppId, PortRef)>>,
     /// The last enforcement error per non-IP network (log each distinct one once).
     enforce_failing: Mutex<HashMap<String, String>>,
 }
@@ -359,6 +361,7 @@ impl Engine {
             exposed_reported: Mutex::default(),
             binds: Mutex::default(),
             hidden_listening: Mutex::default(),
+            v4_local_only: Mutex::default(),
             enforce_failing: Mutex::default(),
         }
     }

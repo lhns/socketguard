@@ -51,7 +51,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0041](0041-unique-grants.md) | Grants Are Unique in the Database | Accepted; amended (refines 0027; refined by 0043; extended by 0047) |
 | [0042](0042-ui-covers-the-whole-api.md) | The UI Covers the Whole API | Accepted; amended; superseded in part by 0053 (review actions) (supersedes 0033's UI scope) |
 | [0043](0043-app-tags.md) | App Tags as Grant Targets | Accepted; amended (refines 0027, 0041; extended by 0047) |
-| [0044](0044-ipv4-and-network-segments.md) | IPv4 and Network Segments on Protect-Host | Accepted (amends 0026, 0028) |
+| [0044](0044-ipv4-and-network-segments.md) | IPv4 and Network Segments on Protect-Host | Accepted (amends 0026, 0028); amended 2026-11-13 (loopback-only listeners) |
 | [0045](0045-batch-changes-credential-parsing-tor-keys.md) | Batch Changes, One Credential Parser, Stored Tor Client Keys | Accepted; superseded in part by 0053 (`Review` batch operation) (refines 0028, 0040) |
 | [0046](0046-unidentified-sockets-and-system-flag.md) | Unidentified Sockets Become Apps; System Components Are Flagged | Accepted; superseded in part by 0053 (pending state) (amends 0027) |
 | [0047](0047-addresses-on-demand-reservations-port-groups.md) | Addresses on Demand, Reservations and Port Groups | Accepted (supersedes 0027 in part; extends 0041, 0043) |

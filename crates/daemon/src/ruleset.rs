@@ -58,6 +58,9 @@ pub struct Snapshot {
     /// Ports that listening sockets of processes the process filter hides are bound to, from
     /// the last poll: no app is stored for them, but they are taken all the same.
     pub hidden_listening: Vec<PortRef>,
+    /// App ports whose IPv4 listeners are all bound to loopback: reachable from this machine
+    /// only, so they get no IPv4 host rule (ADR 0044, amendment of 2026-11-13).
+    pub v4_local_only: BTreeSet<(String, PortRef)>,
 }
 
 fn sorted_unique<T: Ord>(v: impl IntoIterator<Item = T>) -> Vec<T> {
@@ -161,6 +164,9 @@ fn host_ipv4_rules(
             .iter()
             .filter(|p| p.family.has_v4())
             .map(AppPort::port_ref)
+            // Another app on the LAN address of the same port must not become reachable
+            // through this app's grants.
+            .filter(|p| !snap.v4_local_only.contains(&(app.id.clone(), *p)))
             .collect();
         if v4_ports.is_empty() {
             continue;
@@ -1418,6 +1424,20 @@ mod tests {
 
     fn v4_rules(rs: &DesiredRuleset) -> Vec<&Rule> {
         rs.rules.iter().filter(|r| r.dst == Dst::HostV4).collect()
+    }
+
+    #[test]
+    fn a_port_bound_to_loopback_only_gets_no_ipv4_rule() {
+        let mut s = protected_lan();
+        s.catalog.apps[0].ports = app("x", &[8080, 9090]).ports;
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
+        let ports = |s: &Snapshot| -> Vec<u16> {
+            v4_rules(&build(s)).iter().map(|r| r.ports.start).collect()
+        };
+        assert_eq!(ports(&s), [8080, 9090]);
+        // 8080 listens on 127.0.0.1 only: opening it would expose another app's 8080.
+        s.v4_local_only = [("web".to_string(), tcp(8080))].into();
+        assert_eq!(ports(&s), [9090]);
     }
 
     #[test]
