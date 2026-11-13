@@ -10,7 +10,7 @@ use crate::networks::{self, ledger, Network};
 use crate::report::Report;
 use crate::state::Database;
 use socketguard_core::{Address, Locator};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::warn;
@@ -25,8 +25,6 @@ pub struct NetworkSlot {
 
 pub struct DisableInput<'a> {
     pub db: &'a Database,
-    /// Network id to interface name.
-    pub interfaces: &'a HashMap<String, String>,
     pub networks: Vec<NetworkSlot>,
     pub firewall: Arc<dyn Firewall>,
     pub ifaces: Arc<dyn InterfaceManager>,
@@ -36,7 +34,6 @@ pub struct DisableInput<'a> {
 pub async fn disable_with_db(input: DisableInput<'_>) -> Report {
     let DisableInput {
         db,
-        interfaces,
         networks,
         firewall,
         ifaces,
@@ -50,21 +47,6 @@ pub async fn disable_with_db(input: DisableInput<'_>) -> Report {
     }
     // Removing the rules answers the unadopted question too.
     let _ = db.set_unadopted(false).await;
-
-    // Addresses from before ownership was recorded are adopted so they are removed too.
-    match db.list_addresses().await {
-        Ok(list) => {
-            for a in list {
-                let Some(ip) = a.locator.ipv6() else { continue };
-                if let Some(iface) = interfaces.get(&a.network_id) {
-                    if let Err(e) = db.retire_address(ip, iface, Some(&a.network_id)).await {
-                        warn!("Cannot record {ip} as retiring: {e}");
-                    }
-                }
-            }
-        }
-        Err(e) => report.left("the address list", format!("cannot be read: {e:#}")),
-    }
 
     // Addresses first: removing the rules first would briefly expose them.
     let mut addresses_left = 0;
@@ -355,7 +337,6 @@ pub async fn disable_command(
     absent_ok: bool,
     firewall: Arc<dyn Firewall>,
     ifaces: Arc<dyn InterfaceManager>,
-    interfaces: &HashMap<String, String>,
     make_slots: &dyn Fn([u8; 5]) -> Vec<NetworkSlot>,
 ) -> Result<Report, String> {
     if target.db.is_file() {
@@ -376,7 +357,6 @@ pub async fn disable_command(
         };
         let mut report = disable_with_db(DisableInput {
             db: &db,
-            interfaces,
             networks: make_slots(ula),
             firewall,
             ifaces,
@@ -459,7 +439,6 @@ mod tests {
         net.set_remove_failing(true);
         let r = disable_with_db(DisableInput {
             db: &db,
-            interfaces: &HashMap::from([("local".to_string(), "lo".to_string())]),
             networks: vec![],
             firewall: mock_fw(),
             ifaces: Arc::new(net),
@@ -483,7 +462,6 @@ mod tests {
         net.set_interface_missing("sgygg0", true);
         let r = disable_with_db(DisableInput {
             db: &db,
-            interfaces: &HashMap::from([("ygg".to_string(), "sgygg0".to_string())]),
             networks: vec![],
             firewall: mock_fw(),
             ifaces: Arc::new(net),
@@ -508,7 +486,6 @@ mod tests {
         net.plant_address("lo", a); // b is not on the interface
         let r = disable_with_db(DisableInput {
             db: &db,
-            interfaces: &HashMap::from([("local".to_string(), "lo".to_string())]),
             networks: vec![],
             firewall: mock_fw(),
             ifaces: Arc::new(net),
@@ -593,7 +570,6 @@ mod tests {
             false,
             fw,
             Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),
-            &HashMap::new(),
             &no_slots,
         )
         .await
@@ -632,7 +608,6 @@ mod tests {
             false,
             fw,
             Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),
-            &HashMap::new(),
             &no_slots,
         )
         .await
@@ -664,7 +639,6 @@ mod tests {
             false,
             fw,
             Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),
-            &HashMap::new(),
             &no_slots,
         )
         .await
@@ -700,7 +674,6 @@ mod tests {
         let calls = Arc::new(Mutex::new(vec![]));
         let r = disable_with_db(DisableInput {
             db: &db,
-            interfaces: &HashMap::from([("local".to_string(), "lo".to_string())]),
             networks: vec![NetworkSlot {
                 id: "tor".into(),
                 is_tor: true,
@@ -745,7 +718,6 @@ mod tests {
         });
         let r = disable_with_db(DisableInput {
             db: &db,
-            interfaces: &HashMap::new(),
             networks: vec![NetworkSlot {
                 id: "tor".into(),
                 is_tor: true,
@@ -775,7 +747,6 @@ mod tests {
         });
         let r = disable_with_db(DisableInput {
             db: &db,
-            interfaces: &HashMap::new(),
             networks: vec![NetworkSlot {
                 id: "tor".into(),
                 is_tor: true,
@@ -804,7 +775,6 @@ mod tests {
             .unwrap();
         let r = disable_with_db(DisableInput {
             db: &db,
-            interfaces: &HashMap::new(),
             networks: vec![],
             firewall: mock_fw(),
             ifaces: Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),

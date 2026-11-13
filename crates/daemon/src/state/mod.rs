@@ -1730,7 +1730,7 @@ mod tests {
         assert!(!rows[0].retiring);
         db.retire_address(a, "ygg0", Some("ygg")).await.unwrap();
         assert!(db.list_owned_addresses().await.unwrap()[0].retiring);
-        // Retiring an unknown address records it too (adopting a legacy one).
+        // Retiring an unknown address records it too.
         let b: Ipv6Addr = "300:1::2".parse().unwrap();
         db.retire_address(b, "ygg0", None).await.unwrap();
         assert_eq!(db.list_owned_addresses().await.unwrap().len(), 2);

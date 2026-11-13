@@ -11,7 +11,7 @@ use crate::report::Report;
 use crate::uninstall::{self, Deps, UninstallOptions, UninstallPaths};
 use crate::{engine, firewall, iface, networks, state};
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -54,12 +54,6 @@ pub fn network_slots(
 
 /// The report of disabling for the config `r`; Err is a refusal that changed nothing.
 pub async fn disable_report(r: &Resolved, force: bool, absent_ok: bool) -> Result<Report, String> {
-    let interfaces: HashMap<String, String> = r
-        .config
-        .backends
-        .iter()
-        .filter_map(|b| Some((b.id.clone(), b.backend.interface()?.to_string())))
-        .collect();
     let config = r.config.clone();
     disable::disable_command(
         &disable::Target {
@@ -71,7 +65,6 @@ pub async fn disable_report(r: &Resolved, force: bool, absent_ok: bool) -> Resul
         absent_ok,
         Arc::from(firewall::create_firewall()),
         Arc::from(iface::create()),
-        &interfaces,
         &move |ula| network_slots(&config, ula),
     )
     .await

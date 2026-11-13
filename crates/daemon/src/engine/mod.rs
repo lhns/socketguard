@@ -600,24 +600,13 @@ impl Engine {
         state.db.set_disabled(true).await?;
         let _lock = state.firewall_lock.lock().await;
         *self.last_applied.lock().unwrap() = None;
-        let ifaces = self
-            .backends
-            .iter()
-            .filter_map(|(id, b)| Some((id.clone(), Self::interface_in_use(b)?)))
-            .collect();
         let nets = self
             .backends
             .iter()
             .map(|(id, b)| (id.clone(), b.network.clone()))
             .collect();
-        let removed = disable_everything(
-            &state.db,
-            &ifaces,
-            nets,
-            self.firewall.clone(),
-            self.ifaces.clone(),
-        )
-        .await;
+        let removed =
+            disable_everything(&state.db, nets, self.firewall.clone(), self.ifaces.clone()).await;
         // The onion services are gone; now the children go too (they would take
         // the services with them, but a stopped child also costs nothing).
         self.sync_children_and_wait(state).await;
@@ -698,7 +687,6 @@ impl Engine {
 /// the first error is returned.
 pub async fn disable_everything(
     db: &Database,
-    interfaces: &HashMap<String, String>,
     networks: Vec<(String, Arc<dyn networks::Network>)>,
     firewall: Arc<dyn Firewall>,
     ifaces: Arc<dyn InterfaceManager>,
@@ -713,7 +701,6 @@ pub async fn disable_everything(
         .collect();
     crate::disable::disable_with_db(crate::disable::DisableInput {
         db,
-        interfaces,
         networks: slots,
         firewall,
         ifaces,
@@ -802,7 +789,6 @@ mod tests {
 
         let result = disable_everything(
             &db,
-            &HashMap::from([("local".to_string(), "lo".to_string())]),
             vec![("tor".to_string(), tor.clone())],
             Arc::new(MockFirewall::new(Arc::new(Mutex::new(vec![])))),
             Arc::new(net),
