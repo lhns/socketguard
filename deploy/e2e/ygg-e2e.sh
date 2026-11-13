@@ -137,7 +137,31 @@ step "the status says LAN discovery is on" retry 30 lan_on
 step "the network comes back up after the restart" wait_up 90
 has_link_local() { docker exec "$NODE_A" sh -c "ip -6 addr show scope link | grep -q fe80"; }
 step "node A has a link-local IPv6 address (Yggdrasil's multicast listener binds to one)" has_link_local
-step "the yggdrasil process has a TCP listener while LAN discovery is on" retry 40 has_ygg_listener
+# Printed only when the listener step fails: what the node A process is and sees.
+ygg_listener_diagnostics() {
+  echo "--- diagnostics: yggdrasil.conf (PrivateKey redacted) ---"
+  docker exec "$NODE_A" cat $STATE/yggdrasil/yggdrasil.conf | jq '.PrivateKey = "<redacted>"' 2>&1
+  echo "--- diagnostics: daemon log lines of the yggdrasil child ---"
+  docker exec "$NODE_A" grep -i 'yggdrasil\]' /var/log/sg.log 2>&1 | tail -n 40 | cut -c1-300
+  echo "--- diagnostics: ss -ltnup ---"; docker exec "$NODE_A" ss -ltnup 2>&1
+  echo "--- diagnostics: ss -lunp ---"; docker exec "$NODE_A" ss -lunp 2>&1
+  echo "--- diagnostics: ip -6 addr ---"; docker exec "$NODE_A" ip -6 addr 2>&1
+  echo "--- diagnostics: ip link ---"; docker exec "$NODE_A" ip link 2>&1
+  echo "--- diagnostics: yggdrasil process ---"
+  docker exec "$NODE_A" sh -c 'for p in $(pgrep -f "third_party/yggdrasil/yggdrasil"); do echo "pid $p: $(ps -o user=,args= -p $p)"; grep -E "^(Uid|CapEff|CapPrm|CapBnd)" /proc/$p/status; done' 2>&1
+  echo "--- diagnostics: admin socket getMulticastInterfaces ---"
+  docker exec "$NODE_A" python3 -c '
+import socket, json, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1])
+s.sendall(json.dumps({"request": "getMulticastInterfaces"}).encode())
+print(s.recv(65536).decode())' "$STATE/yggdrasil/run/admin.sock" 2>&1
+  echo "--- diagnostics: a second node as socketguard-net, -loglevel debug, 8 s ---"
+  docker exec "$NODE_A" sh -c 'echo "{\"IfName\": \"none\", \"AdminListen\": \"none\"}" >/tmp/diag.conf; chmod 644 /tmp/diag.conf
+    (timeout 8 "$0/yggdrasil/yggdrasil" -useconffile /tmp/diag.conf -user socketguard-net -loglevel debug 2>&1 | tail -n 40) &
+    sleep 5; ss -ltnup 2>&1; wait' "$TP" 2>&1
+}
+if ! retry 40 has_ygg_listener; then ygg_listener_diagnostics; fi
+step "the yggdrasil process has a TCP listener while LAN discovery is on" retry 5 has_ygg_listener
 step "turn LAN discovery off" A $SG networks lan-discovery ygg off
 step "the conf turns multicast off again" retry 30 lan_conf_off
 step "the status says LAN discovery is off" retry 30 lan_off
