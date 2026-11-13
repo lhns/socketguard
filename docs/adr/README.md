@@ -70,6 +70,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0060](0060-yggdrasil-lan-discovery-is-off-unless-turned-on.md) | Yggdrasil LAN Discovery Is Off Unless Turned On | Accepted (amends 0052) |
 | [0061](0061-an-import-asks-before-it-changes-what-anyone-can-reach.md) | An Import Asks Before It Changes What Anyone Can Reach | Accepted (supersedes 0058 in part; refines 0047) |
 | [0062](0062-changes-are-planned-and-written-one-at-a-time-against-one-snapshot.md) | Changes Are Planned and Written One at a Time, Against One Snapshot | Accepted (refines 0045) |
+| [0064](0064-the-msi-installs-to-a-fixed-folder.md) | The MSI Installs to a Fixed Folder | Accepted (refines 0050) |
 
 ## Format
 

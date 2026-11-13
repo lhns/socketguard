@@ -453,13 +453,20 @@ function Assert-PrefixBlock([string]$NodeAddr) {
 Section 'install'
 if (Test-Path $InstallDir) { Fail "$InstallDir exists already; this test needs a clean machine" }
 Save-Wfp 'before'
-Invoke-Msi @('/i', $Msi, "ALLOWUSER=$User") 'install'
+# INSTALLFOLDER on the command line must change nothing (ADR 0064): the folder is fixed.
+$Elsewhere = 'C:\SgElsewhere'
+if (Test-Path $Elsewhere) { Fail "$Elsewhere exists already" }
+Invoke-Msi @('/i', $Msi, "ALLOWUSER=$User", "INSTALLFOLDER=$Elsewhere") 'install'
 
 Section 'after install'
 foreach ($f in 'socketguard-daemon.exe', 'socketguard.exe', 'socketguard-ui.exe') {
   if (-not (Test-Path (Join-Path $InstallDir $f))) { Fail "$f not installed" }
 }
 Ok 'the three binaries are in Program Files'
+if (Test-Path $Elsewhere) { Fail "INSTALLFOLDER=$Elsewhere on the command line was honoured: $Elsewhere exists" }
+$svcPath = (Get-CimInstance Win32_Service -Filter "Name='SocketGuard'").PathName
+if ($svcPath -notlike "*$InstallDir*") { Fail "the service runs from $svcPath, not from $InstallDir" }
+Ok "INSTALLFOLDER=$Elsewhere changed nothing: files and service are under Program Files, $Elsewhere does not exist"
 if (-not (Wait-Until { (Service-State) -eq 'Running' } 60 'service')) { Fail "service is $(Service-State), not Running" }
 Ok 'service SocketGuard is Running'
 $cfg = (Get-CimInstance Win32_Service -Filter "Name='SocketGuard'")
