@@ -17,7 +17,7 @@
 use anyhow::{bail, Result};
 use ipnet::IpNet;
 use socketguard_core::{valid_interface_name, PortRange, PortRangeSet, Protocol};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -271,10 +271,60 @@ pub fn revocations(old: &DesiredRuleset, new: &DesiredRuleset) -> Vec<Revocation
     out
 }
 
+/// Give revocations of "any IPv4 destination of the host" the concrete destinations they
+/// stand for: the host's own IPv4 addresses on the protected interfaces. A backend that
+/// took `HostV4` as the whole IPv4 space would cut the host's own outbound flows (to the
+/// same port elsewhere) and unrelated states. Returns the revocations and how many `HostV4`
+/// ones had to be dropped because `local` is empty (nothing can be named, so nothing is cut).
+pub fn resolve_host_v4(revoked: Vec<Revocation>, local: &[Ipv4Addr]) -> (Vec<Revocation>, usize) {
+    let mut dropped = 0;
+    let mut out = Vec::with_capacity(revoked.len());
+    for r in revoked {
+        if r.dst != Dst::HostV4 {
+            out.push(r);
+        } else if local.is_empty() {
+            dropped += 1;
+        } else {
+            out.extend(local.iter().map(|a| Revocation {
+                dst: Dst::Addr(IpAddr::V4(*a)),
+                ..r.clone()
+            }));
+        }
+    }
+    out.sort();
+    out.dedup();
+    (out, dropped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use socketguard_core::PortRef;
+
+    #[test]
+    fn host_ipv4_revocations_name_the_local_addresses_or_nothing() {
+        let host = Revocation {
+            dst: Dst::HostV4,
+            ports: PortRange::single(PortRef {
+                port: 22,
+                proto: Protocol::Tcp,
+            }),
+            src: None,
+        };
+        let other = Revocation {
+            dst: Dst::Addr("fd00::9".parse().unwrap()),
+            ..host.clone()
+        };
+        let local: Vec<Ipv4Addr> =
+            vec!["192.168.1.5".parse().unwrap(), "10.0.0.2".parse().unwrap()];
+        let (got, dropped) = resolve_host_v4(vec![host.clone(), other.clone()], &local);
+        assert_eq!(dropped, 0);
+        assert!(got.iter().all(|r| r.dst != Dst::HostV4));
+        assert_eq!(got.len(), 3);
+        assert!(got.contains(&other));
+        let (got, dropped) = resolve_host_v4(vec![host, other.clone()], &[]);
+        assert_eq!((got, dropped), (vec![other], 1));
+    }
 
     fn rule(id: &str, sources: Sources) -> Rule {
         Rule {

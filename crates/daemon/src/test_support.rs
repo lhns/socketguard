@@ -197,12 +197,22 @@ impl MockInterfaceManager {
         self.extra.lock().unwrap().insert(iface.to_string());
     }
 
-    /// Give `iface` the IPv4 subnets `nets` (e.g. "192.168.1.0/24"); empty clears them.
+    /// Give `iface` the IPv4 addresses `nets` with prefix lengths (e.g. "192.168.1.5/24"; the
+    /// subnet is derived); empty clears them.
     pub fn set_ipv4_subnets(&self, iface: &str, nets: &[&str]) {
         self.ipv4.lock().unwrap().insert(
             iface.to_string(),
             nets.iter().map(|n| n.parse().unwrap()).collect(),
         );
+    }
+
+    fn ipv4_of(&self, iface: &str) -> Vec<Ipv4Net> {
+        self.ipv4
+            .lock()
+            .unwrap()
+            .get(iface)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Make `iface` a VLAN subinterface with this id.
@@ -307,13 +317,14 @@ impl InterfaceManager for MockInterfaceManager {
         if self.missing_ifaces.lock().unwrap().contains(iface) {
             anyhow::bail!("interface {iface} does not exist");
         }
-        Ok(self
-            .ipv4
-            .lock()
-            .unwrap()
-            .get(iface)
-            .cloned()
-            .unwrap_or_default())
+        Ok(crate::iface::subnets_of(&self.ipv4_of(iface)))
+    }
+
+    fn list_ipv4_addresses(&self, iface: &str) -> Result<Vec<std::net::Ipv4Addr>> {
+        if self.missing_ifaces.lock().unwrap().contains(iface) {
+            anyhow::bail!("interface {iface} does not exist");
+        }
+        Ok(crate::iface::addresses_of(&self.ipv4_of(iface)))
     }
 
     fn list_addresses(&self, iface: &str) -> Result<Vec<Ipv6Addr>> {

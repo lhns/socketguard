@@ -9,8 +9,8 @@ pub mod desired;
 
 use anyhow::{Context, Result};
 pub use desired::{
-    revocations, safe_text, Counter, DesiredRuleset, DropEvent, DropSink, Dst, Families,
-    Revocation, Rule, Scope, ScopeKind, ScopeMatch, Sources,
+    resolve_host_v4, revocations, safe_text, Counter, DesiredRuleset, DropEvent, DropSink, Dst,
+    Families, Revocation, Rule, Scope, ScopeKind, ScopeMatch, Sources,
 };
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -72,7 +72,10 @@ pub trait Firewall: Send + Sync {
     }
 
     /// Cut established connections that a ruleset change stopped allowing. Called after a
-    /// successful apply. Best effort: backends that cannot do it say so in their docs.
+    /// successful apply. Best effort: backends that cannot do it say so in their docs. A
+    /// revocation names a concrete destination ([`resolve_host_v4`]); one that is still
+    /// "any IPv4 destination of the host" is ignored, since cutting it would also cut the
+    /// host's own flows.
     fn revoke(&self, _revoked: &[Revocation]) -> Result<()> {
         Ok(())
     }

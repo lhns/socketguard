@@ -240,19 +240,17 @@ impl InterfaceManager for WindowsInterfaces {
         let table = unsafe { &*table_ptr };
         let entries =
             unsafe { std::slice::from_raw_parts(table.Table.as_ptr(), table.NumEntries as usize) };
-        let nets = entries
+        let nets: Vec<Ipv4Net> = entries
             .iter()
             .filter(|e| unsafe { e.InterfaceLuid.Value } == unsafe { luid.Value })
             .filter_map(|e| {
                 // The address bytes are in network order in memory.
                 let octets = unsafe { e.Address.Ipv4.sin_addr.S_un.S_addr }.to_ne_bytes();
-                Ipv4Net::new(Ipv4Addr::from(octets), e.OnLinkPrefixLength)
-                    .ok()
-                    .map(|n| n.trunc())
+                Ipv4Net::new(Ipv4Addr::from(octets), e.OnLinkPrefixLength).ok()
             })
             .collect();
         unsafe { FreeMibTable(table_ptr as *const _) };
-        Ok(nets)
+        Ok(super::subnets_of(&nets))
     }
 }
 
