@@ -119,6 +119,27 @@ step "the adapter $ADAPTER holds the node's address" on_adapter "$NODE_ADDR"
 echo "      node address $NODE_ADDR (subnet $SUBNET)"
 step "node B has a route to the node (ping, always allowed)" retry 90 B ping -6 -c 1 -W 3 "$NODE_ADDR"
 
+# ── LAN discovery on, then off again (ADR 0060) ───────────────────────────────
+# On: the conf leaves MulticastInterfaces out (Yggdrasil's default: every interface, beacon and
+# listen), so the node opens a TCP listener of its own. Off: [] again and the listener is gone.
+lan_conf_default() { docker exec "$NODE_A" cat $STATE/yggdrasil/yggdrasil.conf | jq -e 'has("MulticastInterfaces") | not' >/dev/null; }
+lan_conf_off() { docker exec "$NODE_A" cat $STATE/yggdrasil/yggdrasil.conf | jq -e '.MulticastInterfaces == []' >/dev/null; }
+lan_status() { net_json | jq -e ".[0].child.lan_discovery == $1" >/dev/null; }
+lan_on() { lan_status true; }
+lan_off() { lan_status false; }
+has_ygg_listener() { docker exec "$NODE_A" sh -c "ss -ltnpH 2>/dev/null | grep -q yggdrasil"; }
+step "turn LAN discovery on" A $SG networks lan-discovery ygg on -y
+step "the conf lists no MulticastInterfaces: the default applies" retry 30 lan_conf_default
+step "the status says LAN discovery is on" retry 30 lan_on
+step "the network comes back up after the restart" wait_up 90
+step "the yggdrasil process has a TCP listener while LAN discovery is on" retry 40 has_ygg_listener
+step "turn LAN discovery off" A $SG networks lan-discovery ygg off
+step "the conf turns multicast off again" retry 30 lan_conf_off
+step "the status says LAN discovery is off" retry 30 lan_off
+step "the network comes back up after the restart" wait_up 90
+step "the listener is gone" retry 40 no_ygg_listener
+step "peers are connected again" retry 40 peers_connected
+
 # ── Closed by default, then one port for one peer ────────────────────────────
 step "daemon detected the listener" retry 60 app_id || exit 1
 APP_ID="$(app_id)"
