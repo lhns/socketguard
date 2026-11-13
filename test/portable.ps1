@@ -49,6 +49,13 @@ $script:listener = $null
 # Mn-* helpers shared with test/msi.ps1 (test/networks.ps1).
 . (Join-Path $PSScriptRoot 'networks.ps1')
 
+# The IPv6 addresses SocketGuard could add, before its first start: the absent checks at the end
+# fail if a new one is left on an interface (deploy/ci/footprint-check.ps1, "Address baseline").
+# The earlier checks run while this test's own address is on the adapter, so they take no baseline.
+$AddrBase = Join-Path $Out 'addresses-before.txt'
+& $Footprint -SaveAddresses $AddrBase
+if ($LASTEXITCODE -ne 0) { throw 'could not record the IPv6 addresses before the first start' }
+
 function On-Fail {
   Write-Host '--- diagnostics ---'
   Get-ChildItem $Out -Filter 'daemon-*.txt' -ErrorAction SilentlyContinue | ForEach-Object {
@@ -143,6 +150,20 @@ Section 'a non-portable start is not what the marker does'
 $h = Run $Cli @('status') 'cli-before-start'
 if ($h.Text -notmatch '(?i)socketguard-portable|cannot reach|not reach|connect') { Write-Host "  note: unexpected CLI output without a daemon: $($h.Text)" }
 Ok 'the CLI without a daemon fails cleanly'
+
+Section '--allow-user takes one user, not a group'
+# The shape of a SID cannot tell a user from a group; the daemon looks the account up.
+$machine = $Sid.Substring(0, $Sid.LastIndexOf('-'))
+foreach ($case in @(
+    @{ Sid = 'S-1-5-32-545'; Why = 'the Users group (S-1-5-32-545)'; Message = 'shape|account' },
+    @{ Sid = "$machine-513"; Why = 'a -513 group of this machine'; Message = 'is a group' },
+    @{ Sid = "$machine-99999"; Why = 'a SID that resolves to nothing'; Message = 'does not resolve' })) {
+  $r = Run $Daemon @('--portable', '--allow-user', $case.Sid) 'allow-user-refused'
+  if ($r.Code -eq 0) { Fail "--allow-user $($case.Sid) ($($case.Why)) was accepted`n$($r.Text)" }
+  if ($r.Text -notmatch $case.Message) { Fail "--allow-user $($case.Sid) ($($case.Why)) was refused without saying why`n$($r.Text)" }
+  Ok "--allow-user is refused for $($case.Why)"
+}
+if (Test-Path $Data) { Fail 'a refused start left a data folder' }
 
 Section 'start (portable, owned by a helper process)'
 $log1 = Start-Portable $Daemon 'first'
@@ -325,7 +346,7 @@ $code = End-Cleanly
 if ($code -ne 0) { Fail "the portable daemon exited with $code" }
 $rm = Run $inst @('uninstall', '--purge', '--yes') 'c-uninstall-2'
 if ($rm.Code -ne 0) { Write-Host $rm.Text; Fail "uninstall --purge (2) exited $($rm.Code)" }
-Assert-Footprint @{ Expect = 'absent' } 'end'
+Assert-Footprint @{ Expect = 'absent'; Baseline = $AddrBase } 'end'
 
 Section '(d) Tor and Yggdrasil (ADR 0052) in portable mode'
 # The bundle action must have run before the zip was built (packages.yml, portable job).
@@ -449,7 +470,7 @@ if ($adapterSeen -and -not $wintunBefore) {
   Write-Host "  no adapter was created: the driver store is asserted by the footprint check only (Wintun in store: $wintunAfter)"
 }
 Write-Host "  data\tor and data\yggdrasil stay in the portable folder: $((Test-Path (Join-Path $Data 'tor')) -and (Test-Path (Join-Path $Data 'yggdrasil')))"
-$fp = @{ Expect = 'absent' }
+$fp = @{ Expect = 'absent'; Baseline = $AddrBase }
 if ($wintunBefore) { $fp.WintunPresentBefore = $true }
 Assert-Footprint $fp 'd-after-exit'
 

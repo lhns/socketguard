@@ -134,11 +134,27 @@ pub fn kill_stale(file: &Path, expected_exe: &Path, probe: &Probe) -> Option<u32
     if (probe.start_of)(pid).as_deref() != Some(start.as_str()) {
         return None;
     }
-    if !same_file((probe.exe_of)(pid)?, expected_exe) {
+    let exe = (probe.exe_of)(pid)?;
+    // After an upgrade replaced the binary, Linux reports the old one as "<path> (deleted)".
+    // The start time above is the proof of identity; the path only has to be ours.
+    let exe = if cfg!(target_os = "linux") {
+        strip_deleted(exe)
+    } else {
+        exe
+    };
+    if !same_file(exe, expected_exe) {
         return None;
     }
     (probe.kill)(pid);
     Some(pid)
+}
+
+/// `path` without the ` (deleted)` that `/proc/<pid>/exe` appends once the file is gone.
+fn strip_deleted(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|p| p.strip_suffix(" (deleted)")) {
+        Some(p) => PathBuf::from(p),
+        None => path,
+    }
 }
 
 /// Whether both name the same executable (links resolved where the files exist).
@@ -277,6 +293,37 @@ mod tests {
         // No file, nothing to do.
         let probe = probe_for(&then, &ours, &kill);
         assert_eq!(kill_stale(&file, bundled, &probe), None);
+    }
+
+    #[test]
+    fn a_deleted_suffix_is_stripped_from_the_probed_path() {
+        assert_eq!(
+            strip_deleted(PathBuf::from("/opt/sg/tor (deleted)")),
+            PathBuf::from("/opt/sg/tor")
+        );
+        assert_eq!(
+            strip_deleted(PathBuf::from("/opt/sg/tor")),
+            PathBuf::from("/opt/sg/tor")
+        );
+    }
+
+    /// An upgrade replaces the binary of the running child: Linux then reads its path with a
+    /// ` (deleted)` suffix, and the leftover must still be recognised.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_leftover_whose_binary_was_replaced_is_still_killed() {
+        let d = dir();
+        let file = path(&d, "tor");
+        prepare_dir(&file).unwrap();
+        let bundled = Path::new("/opt/sg/third_party/tor/tor");
+        let killed = RefCell::new(vec![]);
+        let kill = |p| killed.borrow_mut().push(p);
+        let then = |_| Some("then".to_string());
+        let replaced = |_| Some(PathBuf::from("/opt/sg/third_party/tor/tor (deleted)"));
+        std::fs::write(&file, render(42, "then")).unwrap();
+        let r = kill_stale(&file, bundled, &probe_for(&then, &replaced, &kill));
+        assert_eq!(r, Some(42));
+        assert_eq!(*killed.borrow(), [42]);
     }
 
     /// A file the child could write in its own directory is not where the daemon looks.

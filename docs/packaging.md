@@ -27,10 +27,10 @@ none). The package builders wrap the stage and take nothing else:
 
 | Builder | Takes | Result |
 |---|---|---|
-| `installer/windows/build.ps1 -Version v -Stage dir -Out f.msi` | the three exes, `LICENSE`, `THIRD_PARTY_NOTICES.md`, every file of `third_party\` (a WiX fragment with one component per file is generated) | `C:\Program Files\SocketGuard\` with `third_party\` and `licenses\` |
+| `installer/windows/build.ps1 -Version v -Stage dir -Out f.msi` | the three exes, `LICENSE`, `THIRD_PARTY_NOTICES.md`, every file of `third_party\` (a WiX fragment with one component per file is generated) | `C:\Program Files\SocketGuard\` with `third_party\` and `licenses\`; the folder is fixed: no folder dialog, and `INSTALLFOLDER=` on the command line is ignored (ADR 0064) |
 | `installer/windows/portable.ps1 -Stage dir -Out f.zip` | the exes and `third_party\`; adds the `portable` marker, `LICENSE.txt`, `NOTICE.txt`, `README.txt` | the portable folder |
 | `installer/linux/build.sh version dir [outdir]` | the three programs, `LICENSE`, `THIRD_PARTY_NOTICES.md`, `third_party/` as a `type: tree` | deb and rpm; `/usr/lib/socketguard/third_party/`; the deb's postrm is generated here (below) |
-| `installer/macos/build.sh version dir [outdir]` | the same, into the pkg payload | `/usr/local/lib/socketguard/third_party/`, the app and `/usr/local/bin` |
+| `installer/macos/build.sh version dir [outdir]` | the same, into the pkg payload | `/Library/Application Support/SocketGuard/` (the daemon, the CLI and `third_party/`, root-owned, ADR 0065), the link `/usr/local/bin/socketguard` and the app |
 
 A package is built a second time with the next patch version (`deploy/ci/version.sh --next`) from
 the same stage, for the upgrade test.
@@ -145,16 +145,20 @@ service before replacing the file (`ServiceControl`, stop only) and `service ins
 
 ## macOS
 
-- `pkgbuild` and `productbuild`. `/usr/local/bin/{socketguard-daemon,socketguard}` and
-  `/Applications/SocketGuard.app` (with `LICENSE` and `THIRD_PARTY_NOTICES.md` in `Contents/Resources`, and
+- `pkgbuild` and `productbuild`. `/Library/Application Support/SocketGuard/{socketguard-daemon,socketguard,third_party}`
+  (root:wheel, 755; ADR 0065: the daemon runs as root, so it must not live where a user can write, and
+  `/usr/local/bin` is user-owned under Homebrew on Intel Macs), the link `/usr/local/bin/socketguard`
+  to the CLI, and `/Applications/SocketGuard.app` (with `LICENSE` and `THIRD_PARTY_NOTICES.md` in `Contents/Resources`, and
   again in `/usr/local/share/doc/socketguard`), assembled by hand (the binary, `Info.plist`, `icon.icns`, an
   ad-hoc signature). Tauri's bundler would need `@tauri-apps/cli`, a `bundle` section and a second
   build path beside `build.sh` for the same two files. The app finds the CLI and the daemon in
-  `/usr/local/bin` (`sibling_candidates` in `ui/src-tauri/src/main.rs`); the launchd plist names
-  `/usr/local/bin/socketguard-daemon`, a stable path.
+  the programs' directory (`sibling_candidates` in `ui/src-tauri/src/main.rs`); the launchd plist names
+  `/Library/Application Support/SocketGuard/socketguard-daemon`, a stable path. `service install`
+  (macOS and Linux) refuses when the daemon's executable or a directory above it can be written by a
+  user other than root.
 - A pkg has no uninstaller. **To remove:** `sudo socketguard-daemon uninstall` (add `--purge` to
   delete settings and keys), then
-  `sudo rm -rf /Applications/SocketGuard.app /usr/local/bin/socketguard-daemon /usr/local/bin/socketguard /usr/local/lib/socketguard /usr/local/share/doc/socketguard`
+  `sudo rm -rf /Applications/SocketGuard.app /usr/local/bin/socketguard "/Library/Application Support/SocketGuard" /usr/local/share/doc/socketguard`
   and `sudo pkgutil --forget de.lhns.socketguard`. The app's "Remove SocketGuard..." runs the first
   command.
 - Unsigned: Gatekeeper blocks a downloaded pkg ("cannot be opened because it is from an
@@ -179,7 +183,7 @@ Provide these repository secrets and add the marked steps (`SIGN` comments in
 | Secret | Used for |
 |---|---|
 | `WINDOWS_SIGNING_CERT_PFX` (base64), `WINDOWS_SIGNING_CERT_PASSWORD` | `signtool sign /fd sha256 /tr <timestamp> ...` on the three exes before `build.ps1` and on the MSI after |
-| `APPLE_SIGNING_IDENTITY` ("Developer ID Application: ...") | `codesign --options runtime --timestamp` of the `.app` and `/usr/local/bin/*` |
+| `APPLE_SIGNING_IDENTITY` ("Developer ID Application: ...") | `codesign --options runtime --timestamp` of the `.app` and the programs in `/Library/Application Support/SocketGuard` |
 | `APPLE_INSTALLER_IDENTITY` ("Developer ID Installer: ...") | `productbuild --sign` |
 | `APPLE_CERTIFICATE_P12` (base64), `APPLE_CERTIFICATE_PASSWORD` | import both identities into a temporary keychain |
 | `APPLE_NOTARY_APPLE_ID`, `APPLE_NOTARY_TEAM_ID`, `APPLE_NOTARY_PASSWORD` (app-specific) | `xcrun notarytool submit ... --wait`, `xcrun stapler staple` |

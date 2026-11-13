@@ -10,7 +10,7 @@ export const confirmAll = (ops: ChangeOp[]): ChangeOp[] =>
   ops.map((o) =>
     o.op === "add_grant" || o.op === "add_tag_member" || o.op === "create_port_group" || o.op === "update_port_group" || o.op === "attach_port_group" ||
     o.op === "create_reservation" || o.op === "add_binding" || o.op === "move_app" ||
-    o.op === "remove_binding" || o.op === "release_reservation" || o.op === "remove_tag_member"
+    o.op === "remove_binding" || o.op === "release_reservation" || o.op === "remove_tag_member" || o.op === "delete_tag"
       ? { ...o, confirm_open: true }
       : o,
   );

@@ -11,7 +11,7 @@ pub(crate) use self::windows::alias_to_luid;
 
 use anyhow::Result;
 use ipnet::Ipv4Net;
-use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// A network interface of the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +49,24 @@ pub fn is_lan_prefix_address(addr: Ipv6Addr) -> bool {
         || first & 0xfe00 == 0x0200)
 }
 
+/// The subnets of interface addresses (with their prefix lengths) as network addresses,
+/// sorted, without duplicates: two addresses in one subnet are one subnet.
+pub(crate) fn subnets_of(addrs: &[Ipv4Net]) -> Vec<Ipv4Net> {
+    let mut nets: Vec<Ipv4Net> = addrs.iter().map(Ipv4Net::trunc).collect();
+    nets.sort();
+    nets.dedup();
+    nets
+}
+
+/// The addresses of interface addresses, sorted, without duplicates.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+pub(crate) fn addresses_of(addrs: &[Ipv4Net]) -> Vec<Ipv4Addr> {
+    let mut out: Vec<Ipv4Addr> = addrs.iter().map(Ipv4Net::addr).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Whether the name is that of a tunnel or virtual interface commonly seen on Unix hosts.
 pub fn tunnel_like_name(name: &str) -> bool {
     const PREFIXES: &[&str] = &[
@@ -69,6 +87,11 @@ pub trait InterfaceManager: Send + Sync {
     /// The IPv4 subnets `iface` is on (its addresses with their prefix lengths, as the
     /// network address). Errors if the interface doesn't exist.
     fn list_ipv4_subnets(&self, iface: &str) -> Result<Vec<Ipv4Net>>;
+    /// The IPv4 addresses on `iface`, sorted, without duplicates. Windows reports none: its
+    /// backend cuts no connections, which is all this is for.
+    fn list_ipv4_addresses(&self, _iface: &str) -> Result<Vec<Ipv4Addr>> {
+        Ok(Vec::new())
+    }
     /// IPv6 addresses currently configured on `iface`. Errors if the interface doesn't exist.
     fn list_addresses(&self, iface: &str) -> Result<Vec<Ipv6Addr>>;
     /// The interface the default route leaves by, if the system can tell.

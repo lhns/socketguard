@@ -209,8 +209,6 @@ export const useSetGroupMembers = () =>
 
 export const useUpdateTag = () =>
   useInvalidating((v: { id: string; req: UpdateTag }) => api.updateTag(v.id, v.req), TAG_KEYS);
-export const useDeleteTag = () =>
-  useInvalidating((v: { id: string; confirmOpen?: boolean }) => api.deleteTag(v.id, v.confirmOpen), TAG_KEYS);
 
 export const useAddNetwork = () =>
   useInvalidating((req: NewNetwork) => api.addNetwork(req), NETWORK_KEYS);

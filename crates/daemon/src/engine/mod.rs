@@ -193,11 +193,22 @@ pub struct Engine {
     exposed_reported: Mutex<HashSet<(String, String)>>,
     /// Where each app port's listener is bound, from the last socket scan (Tor targets).
     binds: Mutex<HashMap<(AppId, PortRef), IpAddr>>,
+    /// The ports that listeners of processes the process filter hides are bound to, from the
+    /// last socket scan: no app is stored for them, but they are taken all the same.
+    hidden_listening: Mutex<Vec<PortRef>>,
+    /// App ports whose IPv4 listeners are all on loopback, from the last socket scan.
+    v4_local_only: Mutex<std::collections::BTreeSet<(AppId, PortRef)>>,
     /// The last enforcement error per non-IP network (log each distinct one once).
     enforce_failing: Mutex<HashMap<String, String>>,
 }
 
 impl Engine {
+    /// Hold the change lock (ADR 0062), so a test can show that a change waits for it.
+    #[doc(hidden)]
+    pub async fn hold_change_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.change_lock.lock().await
+    }
+
     pub fn new(config: &DaemonConfig, ula_global_id: [u8; 5]) -> anyhow::Result<Self> {
         Self::new_with_deps(
             config,
@@ -349,6 +360,8 @@ impl Engine {
             metrics: Metrics::default(),
             exposed_reported: Mutex::default(),
             binds: Mutex::default(),
+            hidden_listening: Mutex::default(),
+            v4_local_only: Mutex::default(),
             enforce_failing: Mutex::default(),
         }
     }
@@ -508,9 +521,6 @@ impl Engine {
     ) {
         // The API is already up: a `disable` must not interleave with putting addresses back.
         let _pass = self.poll_lock.lock().await;
-        if let Err(e) = networks::ledger::adopt_stored_keys(&state.db).await {
-            warn!("Could not adopt existing onion services: {e:#}");
-        }
         // Before the first ruleset: the node's addresses are known from its key.
         self.ensure_child_keys(state).await;
         self.detect_unadopted(state).await;
@@ -590,24 +600,13 @@ impl Engine {
         state.db.set_disabled(true).await?;
         let _lock = state.firewall_lock.lock().await;
         *self.last_applied.lock().unwrap() = None;
-        let ifaces = self
-            .backends
-            .iter()
-            .filter_map(|(id, b)| Some((id.clone(), Self::interface_in_use(b)?)))
-            .collect();
         let nets = self
             .backends
             .iter()
             .map(|(id, b)| (id.clone(), b.network.clone()))
             .collect();
-        let removed = disable_everything(
-            &state.db,
-            &ifaces,
-            nets,
-            self.firewall.clone(),
-            self.ifaces.clone(),
-        )
-        .await;
+        let removed =
+            disable_everything(&state.db, nets, self.firewall.clone(), self.ifaces.clone()).await;
         // The onion services are gone; now the children go too (they would take
         // the services with them, but a stopped child also costs nothing).
         self.sync_children_and_wait(state).await;
@@ -688,7 +687,6 @@ impl Engine {
 /// the first error is returned.
 pub async fn disable_everything(
     db: &Database,
-    interfaces: &HashMap<String, String>,
     networks: Vec<(String, Arc<dyn networks::Network>)>,
     firewall: Arc<dyn Firewall>,
     ifaces: Arc<dyn InterfaceManager>,
@@ -703,7 +701,6 @@ pub async fn disable_everything(
         .collect();
     crate::disable::disable_with_db(crate::disable::DisableInput {
         db,
-        interfaces,
         networks: slots,
         firewall,
         ifaces,
@@ -792,7 +789,6 @@ mod tests {
 
         let result = disable_everything(
             &db,
-            &HashMap::from([("local".to_string(), "lo".to_string())]),
             vec![("tor".to_string(), tor.clone())],
             Arc::new(MockFirewall::new(Arc::new(Mutex::new(vec![])))),
             Arc::new(net),

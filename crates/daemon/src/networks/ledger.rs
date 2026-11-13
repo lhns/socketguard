@@ -7,7 +7,6 @@
 use crate::state::Database;
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
-use tracing::warn;
 
 const OWNED: &str = "tor_owned_services";
 const TOMBSTONES: &str = "tor_tombstones";
@@ -52,22 +51,6 @@ pub async fn add_owned(db: &Database, ids: &BTreeSet<String>) -> Result<()> {
     }
     owned.extend(ids.iter().cloned());
     write(db, OWNED, &owned).await
-}
-
-/// Own the service of every stored onion key. Services created before the ledger existed
-/// were never recorded, so none could be swept once their address was gone. Idempotent.
-pub async fn adopt_stored_keys(db: &Database) -> Result<()> {
-    let ids: BTreeSet<String> = db
-        .onion_keys()
-        .await?
-        .iter()
-        .filter_map(|(address, secret)| {
-            super::onion_key::service_id_of_secret(secret)
-                .map_err(|e| warn!("Ignoring the onion key of address {address}: {e:#}"))
-                .ok()
-        })
-        .collect();
-    add_owned(db, &ids).await
 }
 
 /// Record services that must be removed, before removing them.

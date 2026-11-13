@@ -15,6 +15,9 @@ NODE_B=sg-ygg-e2e-b
 GO_IMAGE=${GO_IMAGE:-golang:1.26}      # builds yggdrasil; fetch.sh needs git, curl, bash and Go
 PORT=8080
 OTHER_PORT=8081
+# Multicast discovery needs a link-local IPv6 address on an interface; Docker leaves IPv6 off on
+# a network created without --ipv6 (eth0 then has no fe80::), so the node would open no listener.
+NET_ARGS="--ipv6 --subnet fd00:5e:e2e::/64"
 NODE_ARGS="--device /dev/net/tun --init"   # tun for both nodes; pid 1 reaps what the daemon leaves
 STATE=/var/lib/sg                      # the daemon's state directory; Yggdrasil's is $STATE/yggdrasil
 TP=/target/debug/third_party           # beside the daemon binary, where it looks for them
@@ -108,7 +111,12 @@ if ! wait_up 90; then
 fi
 pass "the network is up"
 # LAN discovery is off: the node opens no TCP port of its own (no multicast peering listener).
-no_ygg_listener() { ! docker exec "$NODE_A" sh -c "ss -ltnpH 2>/dev/null | grep -q yggdrasil"; }
+# The multicast listener is the only TCP listener on a link-local address in the container, so it
+# is told by that. Not by process or owner: `ss -p` cannot name it (the container lacks
+# CAP_SYS_PTRACE, the Process column stays empty), and its socket belongs to root because the node
+# opens it before it changes to socketguard-net.
+ygg_listeners() { docker exec "$NODE_A" sh -c "ss -ltnH | grep -F '[fe80:'"; }
+no_ygg_listener() { ! ygg_listeners >/dev/null; }
 step "no listener of the yggdrasil process while LAN discovery is off" no_ygg_listener
 peers_connected() { net_json | jq -e '.[0].child.peers_connected >= 1' >/dev/null; }
 step "the status shows peers_connected >= 1" retry 40 peers_connected || exit 1
@@ -118,6 +126,50 @@ SUBNET="$(A python3 -c 'import ipaddress,sys; b=bytearray(ipaddress.ip_address(s
 step "the adapter $ADAPTER holds the node's address" on_adapter "$NODE_ADDR"
 echo "      node address $NODE_ADDR (subnet $SUBNET)"
 step "node B has a route to the node (ping, always allowed)" retry 90 B ping -6 -c 1 -W 3 "$NODE_ADDR"
+
+# ── LAN discovery on, then off again (ADR 0060) ───────────────────────────────
+# On: the conf leaves MulticastInterfaces out (Yggdrasil's default: every interface, beacon and
+# listen), so the node opens a TCP listener of its own. Off: [] again and the listener is gone.
+lan_conf_default() { docker exec "$NODE_A" cat $STATE/yggdrasil/yggdrasil.conf | jq -e 'has("MulticastInterfaces") | not' >/dev/null; }
+lan_conf_off() { docker exec "$NODE_A" cat $STATE/yggdrasil/yggdrasil.conf | jq -e '.MulticastInterfaces == []' >/dev/null; }
+lan_status() { net_json | jq -e ".[0].child.lan_discovery == $1" >/dev/null; }
+lan_on() { lan_status true; }
+lan_off() { lan_status false; }
+has_ygg_listener() { ygg_listeners >/dev/null; }
+step "turn LAN discovery on" A $SG networks lan-discovery ygg on -y
+step "the conf lists no MulticastInterfaces: the default applies" retry 30 lan_conf_default
+step "the status says LAN discovery is on" retry 30 lan_on
+step "the network comes back up after the restart" wait_up 90
+has_link_local() { docker exec "$NODE_A" sh -c "ip -6 addr show scope link | grep -q fe80"; }
+step "node A has a link-local IPv6 address (Yggdrasil's multicast listener binds to one)" has_link_local
+# Printed only when the listener step fails: what the node A process is and sees.
+ygg_listener_diagnostics() {
+  echo "--- diagnostics: yggdrasil.conf (PrivateKey redacted) ---"
+  docker exec "$NODE_A" cat $STATE/yggdrasil/yggdrasil.conf | jq '.PrivateKey = "<redacted>"' 2>&1
+  echo "--- diagnostics: daemon log lines of the yggdrasil child ---"
+  docker exec "$NODE_A" grep -i 'yggdrasil\]' /var/log/sg.log 2>&1 | tail -n 40 | cut -c1-300
+  echo "--- diagnostics: /proc/net/tcp6 ---"; docker exec "$NODE_A" cat /proc/net/tcp6 2>&1
+  echo "--- diagnostics: ss -ltnup ---"; docker exec "$NODE_A" ss -ltnup 2>&1
+  echo "--- diagnostics: ss -lunp ---"; docker exec "$NODE_A" ss -lunp 2>&1
+  echo "--- diagnostics: ip -6 addr ---"; docker exec "$NODE_A" ip -6 addr 2>&1
+  echo "--- diagnostics: ip link ---"; docker exec "$NODE_A" ip link 2>&1
+  echo "--- diagnostics: yggdrasil process ---"
+  docker exec "$NODE_A" sh -c 'for p in $(pgrep -f "third_party/yggdrasil/yggdrasil"); do echo "pid $p: $(ps -o user=,args= -p $p)"; grep -E "^(Uid|CapEff|CapPrm|CapBnd)" /proc/$p/status; done' 2>&1
+  echo "--- diagnostics: admin socket getMulticastInterfaces ---"
+  docker exec "$NODE_A" python3 -c '
+import socket, json, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1])
+s.sendall(json.dumps({"request": "getMulticastInterfaces"}).encode())
+print(s.recv(65536).decode())' "$STATE/yggdrasil/run/admin.sock" 2>&1
+}
+if ! retry 40 has_ygg_listener; then ygg_listener_diagnostics; fi
+step "the yggdrasil process has a TCP listener while LAN discovery is on" retry 5 has_ygg_listener
+step "turn LAN discovery off" A $SG networks lan-discovery ygg off
+step "the conf turns multicast off again" retry 30 lan_conf_off
+step "the status says LAN discovery is off" retry 30 lan_off
+step "the network comes back up after the restart" wait_up 90
+step "the listener is gone" retry 40 no_ygg_listener
+step "peers are connected again" retry 40 peers_connected
 
 # ── Closed by default, then one port for one peer ────────────────────────────
 step "daemon detected the listener" retry 60 app_id || exit 1

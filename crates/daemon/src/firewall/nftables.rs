@@ -238,6 +238,10 @@ fn run_conntrack(args: &[String]) -> std::io::Result<std::process::Output> {
 /// Delete the flows a revocation names. `conntrack -D` takes no network for the source,
 /// so a net is resolved through a listing first. Returns false when the tool is missing.
 fn flush_conntrack(r: &Revocation) -> bool {
+    // Without a destination the selector would match the host's own outbound flows too.
+    if r.dst == Dst::HostV4 {
+        return true;
+    }
     if !r.ports.is_single() {
         return flush_conntrack_range(r);
     }
@@ -503,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn conntrack_selects_host_ipv4_flows_without_a_destination() {
+    fn a_host_ipv4_revocation_runs_no_conntrack_command() {
         let r = Revocation {
             dst: Dst::HostV4,
             ports: PortRange::single(PortRef {
@@ -512,9 +516,24 @@ mod tests {
             }),
             src: None,
         };
+        // Reaching the tool would run `conntrack`, which may not exist here; the early
+        // return proves no command is built for a destination-less IPv4 revocation.
+        assert!(flush_conntrack(&r));
+    }
+
+    #[test]
+    fn conntrack_selects_ipv4_flows_by_the_local_address() {
+        let r = Revocation {
+            dst: Dst::Addr("192.168.1.9".parse().unwrap()),
+            ports: PortRange::single(PortRef {
+                port: 22,
+                proto: Protocol::Tcp,
+            }),
+            src: None,
+        };
         assert_eq!(
             conntrack_args("-D", &r, Some("192.168.1.5".parse().unwrap())).join(" "),
-            "-D -f ipv4 -p tcp --dport 22 -s 192.168.1.5"
+            "-D -f ipv4 -d 192.168.1.9 -p tcp --dport 22 -s 192.168.1.5"
         );
     }
 

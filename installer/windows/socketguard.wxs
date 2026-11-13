@@ -54,10 +54,10 @@
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/lhns/socketguard" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="SocketGuard">
+      <Directory Id="InstallFolder" Name="SocketGuard">
         <!-- Tor, Yggdrasil and wintun.dll from the stage (ComponentGroup ThirdParty, generated) -->
-        <Directory Id="THIRDPARTYDIR" Name="third_party" />
-        <Directory Id="LICENSESDIR" Name="licenses" />
+        <Directory Id="ThirdPartyDir" Name="third_party" />
+        <Directory Id="LicensesDir" Name="licenses" />
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
@@ -118,7 +118,7 @@
     <Feature Id="Main" Title="SocketGuard" Level="1" AllowAbsent="no" AllowAdvertise="no"
              Description="The service, the command line and the desktop app.">
 
-      <Component Id="C.Daemon" Directory="INSTALLFOLDER">
+      <Component Id="C.Daemon" Directory="InstallFolder">
         <File Id="F.Daemon" Name="socketguard-daemon.exe" Source="$(StageDir)\socketguard-daemon.exe" KeyPath="yes" />
         <!--
           Only stops the service, before a file is replaced or removed (the running exe is
@@ -128,34 +128,34 @@
         <ServiceControl Id="SC.SocketGuard" Name="SocketGuard" Stop="both" Wait="yes" />
       </Component>
 
-      <Component Id="C.Cli" Directory="INSTALLFOLDER">
+      <Component Id="C.Cli" Directory="InstallFolder">
         <File Id="F.Cli" Name="socketguard.exe" Source="$(StageDir)\socketguard.exe" KeyPath="yes" />
       </Component>
 
-      <Component Id="C.Ui" Directory="INSTALLFOLDER">
+      <Component Id="C.Ui" Directory="InstallFolder">
         <File Id="F.Ui" Name="socketguard-ui.exe" Source="$(StageDir)\socketguard-ui.exe" KeyPath="yes" />
       </Component>
 
       <!-- The CLI is the primary frontend: on the system PATH (appended, never prepended). -->
-      <Component Id="C.Path" Directory="INSTALLFOLDER">
+      <Component Id="C.Path" Directory="InstallFolder">
         <RegistryValue Root="HKLM" Key="Software\lhns\SocketGuard" Name="Path"
                        Type="integer" Value="1" KeyPath="yes" />
-        <Environment Id="E.Path" Name="PATH" Value="[INSTALLFOLDER]"
+        <Environment Id="E.Path" Name="PATH" Value="[InstallFolder]"
                      Part="last" Action="set" System="yes" Permanent="no" />
       </Component>
 
       <!-- SocketGuard's licence and the notices for the bundled programs; their licence texts are in
            third_party\licenses. -->
-      <Component Id="C.Licenses" Directory="LICENSESDIR">
+      <Component Id="C.Licenses" Directory="LicensesDir">
         <File Id="F.License" Name="LICENSE.txt" Source="$(StageDir)\LICENSE" KeyPath="yes" />
       </Component>
-      <Component Id="C.Notices" Directory="LICENSESDIR">
+      <Component Id="C.Notices" Directory="LicensesDir">
         <File Id="F.Notices" Name="THIRD_PARTY_NOTICES.md" Source="$(StageDir)\THIRD_PARTY_NOTICES.md" KeyPath="yes" />
       </Component>
 
       <Component Id="C.Shortcut" Directory="ProgramMenuFolder">
         <Shortcut Id="S.Ui" Name="SocketGuard" Description="Per-application firewall and addresses"
-                  Target="[#F.Ui]" WorkingDirectory="INSTALLFOLDER" Icon="SocketGuard.ico" />
+                  Target="[#F.Ui]" WorkingDirectory="InstallFolder" Icon="SocketGuard.ico" />
         <RegistryValue Root="HKLM" Key="Software\lhns\SocketGuard" Name="Shortcut"
                        Type="integer" Value="1" KeyPath="yes" />
       </Component>
@@ -177,7 +177,7 @@
       Rollback actions precede the action they undo; a rollback runs only if the script got
       that far.
     -->
-    <?define Daemon = '"[INSTALLFOLDER]socketguard-daemon.exe"' ?>
+    <?define Daemon = '"[InstallFolder]socketguard-daemon.exe"' ?>
     <?define Arriving = 'NOT REMOVE' ?>
     <?define Leaving = 'REMOVE AND NOT UPGRADINGPRODUCTCODE' ?>
     <?define Fresh = 'NOT REMOVE AND NOT Installed AND NOT WIX_UPGRADE_DETECTED' ?>
@@ -229,10 +229,13 @@
     </UI>
 
     <!-- ===== User interface ================================================================ -->
-    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <!-- No folder dialog and no public directory property: the service runs as LocalSystem from
+         the install folder, so it stays under Program Files (ADR 0064). Directory ids with a
+         lower-case letter are private, so msiexec INSTALLFOLDER=... changes nothing. -->
+    <ui:WixUI Id="WixUI_FeatureTree" />
     <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
 
-    <!-- One dialog after the folder: who may use SocketGuard, and the WebView2 note. Built
+    <!-- One dialog after the licence: who may use SocketGuard, and the WebView2 note. Built
          here, never clicked by CI (CI installs silently). -->
     <UI>
       <Dialog Id="AccessDlg" Width="370" Height="270" Title="[ProductName] Setup">
@@ -242,7 +245,7 @@
           <Publish Event="NewDialog" Value="VerifyReadyDlg" Order="3" />
         </Control>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)">
-          <Publish Event="NewDialog" Value="InstallDirDlg" />
+          <Publish Event="NewDialog" Value="LicenseAgreementDlg" />
         </Control>
         <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
           <Publish Event="SpawnDialog" Value="CancelDlg" />
@@ -263,10 +266,10 @@
                  Text="[WEBVIEW2NOTE]" />
       </Dialog>
 
-      <!-- InstallDirDlg Next goes to VerifyReadyDlg at Order 4 when the folder is valid; the
-           later NewDialog wins, which is how WixUI is customised without copying it. -->
-      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="AccessDlg" Order="5"
-               Condition="NOT Installed AND (WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID=&quot;1&quot;)" />
+      <!-- LicenseAgreementDlg Next goes to CustomizeDlg (the feature tree); the later NewDialog
+           wins, which is how WixUI is customised without copying it. -->
+      <Publish Dialog="LicenseAgreementDlg" Control="Next" Event="NewDialog" Value="AccessDlg" Order="5"
+               Condition="NOT Installed AND LicenseAccepted = &quot;1&quot;" />
       <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="AccessDlg" Order="3"
                Condition="NOT Installed" />
     </UI>

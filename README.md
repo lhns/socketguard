@@ -133,8 +133,8 @@ registration off the host but **keeps** settings and keys. A purge deletes those
 - Fedora/RHEL: `dnf remove socketguard` removes; run `sudo socketguard-daemon uninstall --purge` before
   erasing it to purge.
 - macOS: a pkg has no uninstaller. Run `sudo socketguard-daemon uninstall` (`--purge` also deletes
-  settings and keys), then delete `/Applications/SocketGuard.app`, `/usr/local/bin/socketguard*` and
-  `/usr/local/lib/socketguard`, `/usr/local/share/doc/socketguard`, and `sudo pkgutil --forget de.lhns.socketguard`.
+  settings and keys), then delete `/Applications/SocketGuard.app`, `/usr/local/bin/socketguard`,
+  `/Library/Application Support/SocketGuard` and `/usr/local/share/doc/socketguard`, and `sudo pkgutil --forget de.lhns.socketguard`.
 
 `uninstall` also takes `--keep-data`, `--yes`, `--export <file>` and `--force`. Stopping the daemon
 removes nothing on purpose, so a stopped host stays closed; `socketguard disable` (or

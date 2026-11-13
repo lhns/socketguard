@@ -1,7 +1,7 @@
 use super::{InterfaceInfo, InterfaceManager};
 use anyhow::{Context, Result};
 use ipnet::Ipv4Net;
-use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::Command;
 
 pub struct MacosInterfaces;
@@ -117,13 +117,30 @@ impl InterfaceManager for MacosInterfaces {
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        Ok(parse_ifconfig_inet(&String::from_utf8_lossy(
-            &output.stdout,
+        Ok(super::subnets_of(&parse_ifconfig_inet(
+            &String::from_utf8_lossy(&output.stdout),
+        )))
+    }
+
+    fn list_ipv4_addresses(&self, iface: &str) -> Result<Vec<Ipv4Addr>> {
+        let output = Command::new("ifconfig")
+            .args([iface, "inet"])
+            .output()
+            .context("failed to run ifconfig")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "ifconfig {iface} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(super::addresses_of(&parse_ifconfig_inet(
+            &String::from_utf8_lossy(&output.stdout),
         )))
     }
 }
 
-/// Subnets from "<tab>inet 192.168.1.5 netmask 0xffffff00 broadcast ..." lines.
+/// Addresses with prefix lengths from "<tab>inet 192.168.1.5 netmask 0xffffff00 broadcast ..." lines.
 /// The `interface:` line of `route -n get default`.
 fn parse_route_interface(out: &str) -> Option<String> {
     out.lines()
@@ -140,9 +157,7 @@ fn parse_ifconfig_inet(out: &str) -> Vec<Ipv4Net> {
             let addr: std::net::Ipv4Addr = words.next()?.parse().ok()?;
             (words.next()? == "netmask").then_some(())?;
             let mask = u32::from_str_radix(words.next()?.strip_prefix("0x")?, 16).ok()?;
-            Ipv4Net::with_netmask(addr, mask.into())
-                .ok()
-                .map(|n| n.trunc())
+            Ipv4Net::with_netmask(addr, mask.into()).ok()
         })
         .collect()
 }
@@ -167,6 +182,10 @@ mod tests {
             "en0: flags=8863<UP>\n\tinet 192.168.1.5 netmask 0xffffff00 broadcast 192.168.1.255\n";
         assert_eq!(
             parse_ifconfig_inet(out),
+            vec!["192.168.1.5/24".parse::<Ipv4Net>().unwrap()]
+        );
+        assert_eq!(
+            crate::iface::subnets_of(&parse_ifconfig_inet(out)),
             vec!["192.168.1.0/24".parse::<Ipv4Net>().unwrap()]
         );
     }

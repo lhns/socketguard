@@ -118,8 +118,16 @@ impl Engine {
         }
         let mut live: BTreeMap<AppId, Live> = BTreeMap::new();
         let mut binds: HashMap<(AppId, PortRef), IpAddr> = HashMap::new();
+        let mut hidden: BTreeSet<PortRef> = BTreeSet::new();
+        // Per app port: whether an IPv4 listener is on loopback, and whether one is not.
+        let mut v4_bound: HashMap<(AppId, PortRef), (bool, bool)> = HashMap::new();
         for ls in sockets {
             if !process_filter.matches(&ls.process_name) {
+                // No app is stored for it, yet the port is taken (the exclusion rule).
+                hidden.insert(PortRef {
+                    port: ls.port,
+                    proto: ls.protocol,
+                });
                 continue;
             }
             let AppIdentity {
@@ -133,6 +141,15 @@ impl Engine {
                 port: ls.port,
                 proto: ls.protocol,
             };
+            if ls.family().has_v4() {
+                let exposed = ls.bind_address.is_unspecified() || !ls.bind_address.is_loopback();
+                let e = v4_bound.entry((id.clone(), port_ref)).or_default();
+                if exposed {
+                    e.1 = true;
+                } else {
+                    e.0 = true;
+                }
+            }
             let slot = binds
                 .entry((id.clone(), port_ref))
                 .or_insert(ls.bind_address);
@@ -156,6 +173,12 @@ impl Engine {
         }
 
         *self.binds.lock().unwrap() = binds;
+        *self.hidden_listening.lock().unwrap() = hidden.into_iter().collect();
+        *self.v4_local_only.lock().unwrap() = v4_bound
+            .into_iter()
+            .filter(|(_, (local, exposed))| *local && !*exposed)
+            .map(|(k, _)| k)
+            .collect();
 
         let db = &state.db;
         let _apps = self.apps_lock.lock().await;

@@ -1,7 +1,7 @@
 use super::{InterfaceInfo, InterfaceManager};
 use anyhow::{Context, Result};
 use ipnet::Ipv4Net;
-use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::Command;
 
 pub struct LinuxInterfaces;
@@ -99,6 +99,21 @@ impl InterfaceManager for LinuxInterfaces {
         }
         parse_ipv4_subnets(&String::from_utf8_lossy(&output.stdout))
     }
+
+    fn list_ipv4_addresses(&self, iface: &str) -> Result<Vec<Ipv4Addr>> {
+        let output = Command::new("ip")
+            .args(["-4", "-j", "addr", "show", "dev", iface])
+            .output()
+            .context("failed to run ip addr show")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "ip addr show dev {iface} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        parse_ipv4_addresses(&String::from_utf8_lossy(&output.stdout))
+    }
 }
 
 /// The `dev` of the default route with the lowest metric in `ip -j route show default`.
@@ -136,8 +151,8 @@ fn parse_ip_link_json(json: &str) -> Result<Vec<InterfaceInfo>> {
     Ok(out)
 }
 
-/// Parse `ip -4 -j addr show` into the subnets of the addresses it lists.
-fn parse_ipv4_subnets(json: &str) -> Result<Vec<Ipv4Net>> {
+/// Parse `ip -4 -j addr show` into the addresses it lists with their prefix lengths.
+fn parse_ipv4_interface_addrs(json: &str) -> Result<Vec<Ipv4Net>> {
     let value: serde_json::Value =
         serde_json::from_str(json).context("invalid `ip -j addr` output")?;
     let mut nets = Vec::new();
@@ -147,16 +162,23 @@ fn parse_ipv4_subnets(json: &str) -> Result<Vec<Ipv4Net>> {
             let len = info["prefixlen"]
                 .as_u64()
                 .and_then(|l| u8::try_from(l).ok());
-            if let Some(net) = addr
-                .zip(len)
-                .and_then(|(a, l)| Ipv4Net::new(a, l).ok())
-                .map(|n| n.trunc())
-            {
+            if let Some(net) = addr.zip(len).and_then(|(a, l)| Ipv4Net::new(a, l).ok()) {
                 nets.push(net);
             }
         }
     }
     Ok(nets)
+}
+
+/// The subnets of the addresses in `ip -4 -j addr show`, sorted, without duplicates (two
+/// addresses in one subnet are one subnet).
+fn parse_ipv4_subnets(json: &str) -> Result<Vec<Ipv4Net>> {
+    Ok(super::subnets_of(&parse_ipv4_interface_addrs(json)?))
+}
+
+/// The addresses in `ip -4 -j addr show`, sorted, without duplicates.
+fn parse_ipv4_addresses(json: &str) -> Result<Vec<Ipv4Addr>> {
+    Ok(super::addresses_of(&parse_ipv4_interface_addrs(json)?))
 }
 
 /// Parse `ip -6 -j addr show` output into the addresses it lists.
@@ -205,10 +227,24 @@ mod tests {
             {"family":"inet","local":"10.0.0.9","prefixlen":32}]}]"#;
         let got = parse_ipv4_subnets(json).unwrap();
         let want: Vec<Ipv4Net> = vec![
-            "192.168.1.0/24".parse().unwrap(),
             "10.0.0.9/32".parse().unwrap(),
+            "192.168.1.0/24".parse().unwrap(),
         ];
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn two_addresses_in_one_subnet_are_one_subnet() {
+        let json = r#"[{"ifname":"eth0","addr_info":[
+            {"family":"inet","local":"192.168.1.5","prefixlen":24},
+            {"family":"inet","local":"192.168.1.6","prefixlen":24}]}]"#;
+        let want: Vec<Ipv4Net> = vec!["192.168.1.0/24".parse().unwrap()];
+        assert_eq!(parse_ipv4_subnets(json).unwrap(), want);
+        let addrs: Vec<Ipv4Addr> = vec![
+            "192.168.1.5".parse().unwrap(),
+            "192.168.1.6".parse().unwrap(),
+        ];
+        assert_eq!(parse_ipv4_addresses(json).unwrap(), addrs);
     }
 
     #[test]

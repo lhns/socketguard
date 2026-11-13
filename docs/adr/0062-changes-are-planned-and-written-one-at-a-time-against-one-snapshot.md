@@ -28,3 +28,9 @@ A change reads the stored state, decides (exists, reaches Anyone, needs confirma
 - A change sees one consistent state and no other change commits between its read and its write. Changes run one after the other, in the order they get the lock.
 - Reads are now serial within a snapshot (about 10 to 25 percent slower in a debug build on the perf harness, noise included).
 - The outcome of two racing changes was already a serial one (a join that raced a grant ended as "joined first" or "refused"); the lock makes the decision and the commit one step, which is what the confirmation relies on.
+
+## Amendment (2026-11-13)
+
+`delete_app` now takes the lock. It was left out because it decides nothing about reach and its network calls ran before the write. Both reasons are gone: it now retires its addresses in the transaction that deletes the app (as a batch does) and removes the locators after the commit, so nothing it holds the lock across is a network call. It takes the lock before `apps_lock`, which keeps the order. The two other places that retired an address before a separate write now do both in one transaction too, without the lock: the removal of a network (it holds the engine's write lock) and the re-homing of addresses after a prefix change (it runs under `poll_lock`).
+
+The consequence "reads are about 10 to 25 percent slower" did not hold up. Five runs of the perf harness (debug build) on 39189e4 and five on the branch overlap in every operation: medians of the new code are between 0.76x and 1.24x of the old, the spread of the runs is of the same size, and most read endpoints were faster. The single snapshot costs nothing measurable.

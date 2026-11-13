@@ -292,6 +292,15 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
         out.push({ kind: "delete", item: "tag_member", name: `${op.app_id} from tag ${tag.label}`, opens_to_anyone: false });
         break;
       }
+      case "delete_tag": {
+        const tag = tags.find((t) => t.id === op.tag_id);
+        if (!tag) throw { code: "not_found", message: `tag ${op.tag_id as string}` };
+        tags = tags.filter((t) => t.id !== tag.id);
+        bindings = bindings.filter((b) => !(b.target.kind === "tag" && b.target.tag_id === tag.id));
+        grants = grants.filter((g) => !(g.target.kind === "tag" && g.target.id === tag.id));
+        out.push({ kind: "delete", item: "tag", name: tag.label, opens_to_anyone: false });
+        break;
+      }
       case "create_port_group": {
         const ports = op.ports as PortRange[];
         if (ports.length === 0) throw { code: "invalid", message: `operation ${out.length}: a port group needs at least one port` };

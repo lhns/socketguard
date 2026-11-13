@@ -41,6 +41,8 @@ impl Engine {
             protect_host,
             // Owned addresses stay denied until they are really off their interface.
             owned: owned.into_iter().map(|o| IpAddr::V6(o.addr)).collect(),
+            hidden_listening: self.hidden_listening.lock().unwrap().clone(),
+            v4_local_only: self.v4_local_only.lock().unwrap().clone(),
         })
     }
 
@@ -95,6 +97,19 @@ impl Engine {
                 (!subnets.is_empty()).then(|| (i.clone(), subnets))
             })
             .collect()
+    }
+
+    /// The IPv4 addresses on the protected interfaces; an interface that cannot be read is
+    /// left out.
+    fn protected_v4_addresses(&self, protect_host: &[String]) -> Vec<std::net::Ipv4Addr> {
+        let mut out: Vec<std::net::Ipv4Addr> = protect_host
+            .iter()
+            .filter_map(|i| self.ifaces.list_ipv4_addresses(i).ok())
+            .flatten()
+            .collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Whether the ruleset last applied is still what the firewall enforces. The cheap
@@ -171,6 +186,20 @@ impl Engine {
                 let revoked = previous
                     .map(|old| firewall::revocations(&old, &desired))
                     .unwrap_or_default();
+                // "Any IPv4 destination of the host" is cut only for the host's own addresses
+                // on the protected interfaces, not for every IPv4 flow.
+                let revoked = if revoked.iter().any(|r| r.dst == firewall::Dst::HostV4) {
+                    let local = self.protected_v4_addresses(&snapshot.protect_host);
+                    let (revoked, dropped) = firewall::resolve_host_v4(revoked, &local);
+                    if dropped > 0 {
+                        warn!(
+                            "The IPv4 addresses of the protected interfaces are not known: {dropped} revoked IPv4 grant(s) keep their open connections until they close"
+                        );
+                    }
+                    revoked
+                } else {
+                    revoked
+                };
                 if !revoked.is_empty() {
                     let fw = self.firewall.clone();
                     match tokio::task::spawn_blocking(move || fw.revoke(&revoked)).await {

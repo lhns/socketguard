@@ -19,7 +19,7 @@ use socketguard_core::api_types::{
 use socketguard_core::{
     Address, BindingTarget, Grant, GrantReach, PortGroup, Reach, Row, Scope, Subject,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 /// The state of planning a batch.
 pub(super) struct Plan {
@@ -31,6 +31,8 @@ pub(super) struct Plan {
     pub(super) events: Vec<DaemonEvent>,
     pub(super) networks: Vec<socketguard_core::Network>,
     pub(super) protected: Vec<String>,
+    /// App ports with only loopback IPv4 listeners, as the listings see them.
+    pub(super) v4_local_only: BTreeSet<(String, socketguard_core::PortRef)>,
     /// Some operation gives someone access they did not have.
     pub(super) changes_reach: bool,
     /// Addresses that go with a port group the batch detaches or deletes.
@@ -105,6 +107,7 @@ impl Plan {
             &c.port_groups,
             &c.reservations,
         )
+        .with_v4_local_only(&self.v4_local_only)
         .reach_of(grant, &self.networks, &self.protected)
     }
 
@@ -282,6 +285,7 @@ impl Engine {
             events: Vec::new(),
             networks: self.networks(),
             protected: self.protected_interfaces(state).await?,
+            v4_local_only: self.v4_local_only.lock().unwrap().clone(),
             changes_reach: false,
             removed: Vec::new(),
         };
@@ -426,6 +430,7 @@ impl Engine {
                 self.plan_op_remove_tag_member(state, plan, tag_id, app_id, scope)
                     .await?
             }
+            ChangeOp::DeleteTag { tag_id, .. } => self.plan_op_delete_tag(plan, tag_id)?,
             ChangeOp::CreateReservation {
                 ref_,
                 label,
@@ -472,6 +477,7 @@ fn op_confirms(op: &ChangeOp) -> bool {
         ChangeOp::RemoveBinding { confirm_open, .. }
         | ChangeOp::ReleaseReservation { confirm_open, .. }
         | ChangeOp::RemoveTagMember { confirm_open, .. }
+        | ChangeOp::DeleteTag { confirm_open, .. }
         | ChangeOp::MoveApp { confirm_open, .. } => *confirm_open,
         _ => false,
     }

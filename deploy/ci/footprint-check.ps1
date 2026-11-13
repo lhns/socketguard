@@ -20,6 +20,12 @@
 # with an `addresses` array of strings (the addresses the daemon owned). Each one still returned
 # by Get-NetIPAddress makes the item `ledger-addresses` PRESENT. Never required.
 #
+# Address baseline: -SaveAddresses FILE writes the IPv6 addresses SocketGuard could add (ULA
+# fc00::/7 and /128 host addresses; link-local, ::1 and temporary/privacy ones are ignored, they
+# are the OS's own) and exits. A later -Baseline FILE adds the item `new-addresses`, PRESENT when
+# such an address is on an interface that the file did not list. Package tests save before the
+# first install and pass the file to every -Expect absent.
+#
 # Tor and Yggdrasil (ADR 0052) add: the programs tor.exe and yggdrasil.exe running from a
 # `third_party` directory, the directories <ProgramData>\SocketGuard\tor and \yggdrasil, the
 # adapter `SocketGuard`, the Wintun driver in the driver store (-WintunPresentBefore says the
@@ -35,6 +41,10 @@
 param(
     [ValidateSet('absent', 'present')][string]$Expect,
     [string]$LedgerExport,
+    # Address baseline: -SaveAddresses FILE writes the candidate addresses and exits; -Baseline FILE adds
+    # the item `new-addresses` (see the comment below the header)
+    [string]$SaveAddresses,
+    [string]$Baseline,
     [switch]$WintunPresentBefore,
     # present: item names that must also be PRESENT (e.g. wfp-provider after the first start)
     [string[]]$Require = @(),
@@ -70,14 +80,14 @@ function Get-ServiceState([string]$Out) {
     if ($Out -match 'FAILED 1060') { return 'ABSENT' }
     if (Test-Denied $Out) { return 'UNKNOWN' }
     if ($Out -match '(?m)^SERVICE_NAME:\s*SocketGuard\s*$') { return 'PRESENT' }
-    return 'ABSENT'
+    return 'UNKNOWN'
 }
 
 # net localgroup "SocketGuard Users": missing is system error 1376 / "does not exist".
 function Get-GroupState([string]$Out) {
     if ($Out -match '1376|does not exist') { return 'ABSENT' }
     if ($Out -match '(?m)SocketGuard Users') { return 'PRESENT' }
-    return 'ABSENT'
+    return 'UNKNOWN'
 }
 
 # Executable paths of the running processes: one of the program `$Name` (tor, yggdrasil) from a
@@ -109,6 +119,8 @@ function Get-AdapterState($Names) {
 function Get-WintunState([string]$Out, [bool]$PresentBefore) {
     if ($PresentBefore) { return 'ABSENT' }
     if ($Out -match '(?im)^[^:\r\n]+:\s*wintun\.inf\s*$') { return 'PRESENT' }
+    # A failed or refused pnputil prints nothing useful; that is not "no Wintun".
+    if ($Out -notmatch '\S' -or (Test-Denied $Out)) { return 'UNKNOWN' }
     return 'ABSENT'
 }
 
@@ -138,6 +150,26 @@ function Get-LedgerAddresses([string]$Json) {
 function Get-LedgerStillPresent([string]$Json, $InterfaceAddresses) {
     $have = @($InterfaceAddresses | ForEach-Object { ConvertTo-NormalAddress ([string]$_) })
     return @(Get-LedgerAddresses $Json | Where-Object { $have -contains $_ } | Select-Object -Unique)
+}
+
+# The addresses SocketGuard could have added: ULA (fc00::/7) and /128 host addresses, from
+# Get-NetIPAddress objects (IPAddress, PrefixLength, SuffixOrigin). Ignored on purpose, because
+# Windows adds, rotates and removes them by itself: link-local (fe80::), ::1, temporary/privacy
+# addresses (SuffixOrigin Random) and the /64 addresses SLAAC derives from a router advertisement.
+function Get-AddressCandidates($Entries) {
+    $out = @()
+    foreach ($e in @($Entries)) {
+        $a = ConvertTo-NormalAddress ([string]$e.IPAddress)
+        if ("$($e.SuffixOrigin)" -eq 'Random' -or $a -like 'fe80:*' -or $a -eq '::1') { continue }
+        if ($a -match '^f[cd]' -or [int]$e.PrefixLength -eq 128) { $out += $a }
+    }
+    return @($out | Sort-Object -Unique)
+}
+
+# Candidate addresses now that the baseline list lacked.
+function Get-NewAddresses($BaselineList, $Entries) {
+    $have = @($BaselineList | Where-Object { $_ })
+    return @(Get-AddressCandidates $Entries | Where-Object { $have -notcontains $_ })
 }
 
 # ---- items and verdict ---------------------------------------------------------------------
@@ -214,7 +246,10 @@ function Invoke-SelfTest {
     $grpGone = "System error 1376 has occurred.`n`nThe specified local group does not exist.`n"
     Assert-Equal 'group-present' 'PRESENT' (Get-GroupState $grpUp)
     Assert-Equal 'group-absent' 'ABSENT' (Get-GroupState $grpGone)
-    Assert-Equal 'group-empty' 'ABSENT' (Get-GroupState '')
+    Assert-Equal 'group-empty-is-unknown' 'UNKNOWN' (Get-GroupState '')
+    Assert-Equal 'group-garbled-is-unknown' 'UNKNOWN' (Get-GroupState 'The service has not been started.')
+    Assert-Equal 'service-empty-is-unknown' 'UNKNOWN' (Get-ServiceState '')
+    Assert-Equal 'service-garbled-is-unknown' 'UNKNOWN' (Get-ServiceState 'sc.exe is not recognized')
 
     $dir = 'C:\ProgramData\SocketGuard'
     $files = @($dir, "$dir\socketguard.json", "$dir\socketguard.db-wal", "$dir\socketguard.tmp-9-abc", "$dir\setup-log.json")
@@ -240,6 +275,9 @@ function Invoke-SelfTest {
     Assert-Equal 'wintun-present' 'PRESENT' (Get-WintunState $enum $false)
     Assert-Equal 'wintun-shared' 'ABSENT' (Get-WintunState $enum $true)
     Assert-Equal 'wintun-absent' 'ABSENT' (Get-WintunState "Published Name:     oem3.inf`nOriginal Name:      prnms009.inf`n" $false)
+    Assert-Equal 'wintun-empty-output-is-unknown' 'UNKNOWN' (Get-WintunState '' $false)
+    Assert-Equal 'wintun-denied-is-unknown' 'UNKNOWN' (Get-WintunState 'Access is denied.' $false)
+    Assert-Equal 'wintun-shared-needs-no-output' 'ABSENT' (Get-WintunState '' $true)
     Assert-Equal 'wintun-translated-labels' 'PRESENT' (Get-WintunState "Originalname:       wintun.inf`n" $false)
     $dirs = @("$dir\tor", "$dir\yggdrasil", "$dir\setup-log.json")
     Assert-Equal 'dir-tor' 'PRESENT' (Get-ListedState $dirs '\\tor$')
@@ -259,6 +297,19 @@ function Invoke-SelfTest {
     Assert-Equal 'ledger-array' 'fd00::1 fd00::2' ((Get-LedgerStillPresent $ledgerArr $live) -join ' ')
     Assert-Equal 'ledger-object' 'fd00::1' ((Get-LedgerStillPresent $ledgerObj $live) -join ' ')
     Assert-Equal 'ledger-gone' '' ((Get-LedgerStillPresent $ledgerArr @('::1')) -join ' ')
+
+    # address baseline: ULA and /128 count; link-local, ::1, temporary and SLAAC /64 do not
+    function New-Addr([string]$A, [int]$Len, [string]$Origin = 'Manual') { [pscustomobject]@{ IPAddress = $A; PrefixLength = $Len; SuffixOrigin = $Origin } }
+    $before = @((New-Addr '::1' 128), (New-Addr 'fe80::1%12' 64 'Link'), (New-Addr '2001:db8::5' 64 'Link'), (New-Addr '2001:db8::77' 64 'Random'))
+    $after = $before + @((New-Addr 'fd00::9' 128), (New-Addr '201:abcd::1' 128), (New-Addr '2001:db8::88' 64 'Random'))
+    $baseList = @(Get-AddressCandidates $before)
+    Assert-Equal 'addr-baseline-empty' '' ($baseList -join ' ')
+    Assert-Equal 'addr-candidates-ula-and-host' '201:abcd::1 fd00::9' ((Get-AddressCandidates $after) -join ' ')
+    Assert-Equal 'addr-leftover-found' '201:abcd::1 fd00::9' ((Get-NewAddresses $baseList $after) -join ' ')
+    Assert-Equal 'addr-unchanged-host-ok' '' ((Get-NewAddresses $baseList $before) -join ' ')
+    Assert-Equal 'addr-temporary-rotation-ignored' '' ((Get-NewAddresses $baseList ($before + @(New-Addr '2001:db8::99' 64 'Random'))) -join ' ')
+    Assert-Equal 'addr-baseline-ula-kept-is-not-new' '' ((Get-NewAddresses @('fd00::9') @(New-Addr 'FD00::9' 128)) -join ' ')
+    Assert-Equal 'verdict-new-address-fails' 1 (Write-Verdict @((New-Item2 'ABSENT' 'config-dir'), (New-Item2 'PRESENT' 'new-addresses' 'fd00::9')) 'absent' @() | Select-Object -Last 1)
 
     $req = @('service', 'group', 'config-dir')
     $clean = @((New-Item2 'ABSENT' 'service'), (New-Item2 'ABSENT' 'group'), (New-Item2 'ABSENT' 'config-dir'), (New-Item2 'ABSENT' 'wfp-provider'))
@@ -315,12 +366,20 @@ function Invoke-Live {
     $items += New-Item2 (Get-ListedState $pipes '(?i)\\socketguard-portable$') 'named-pipe-portable'
 
     # Tor and Yggdrasil (ADR 0052).
-    $exes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object { $_.ExecutablePath } | Where-Object { $_ })
-    $items += New-Item2 (Get-ChildProcessState $exes 'tor') 'child-tor'
-    $items += New-Item2 (Get-ChildProcessState $exes 'yggdrasil') 'child-yggdrasil'
-    $items += New-Item2 (Get-HelperProcessState $exes) 'child-obfs4-helper'
-    $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-    $items += New-Item2 (Get-AdapterState $adapters) 'adapter-SocketGuard'
+    # A query that fails is UNKNOWN, never an empty list (which would read as ABSENT).
+    $exes = $null
+    try { $exes = @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object { $_.ExecutablePath } | Where-Object { $_ }) } catch { }
+    if ($null -ne $exes) {
+        $items += New-Item2 (Get-ChildProcessState $exes 'tor') 'child-tor'
+        $items += New-Item2 (Get-ChildProcessState $exes 'yggdrasil') 'child-yggdrasil'
+        $items += New-Item2 (Get-HelperProcessState $exes) 'child-obfs4-helper'
+    } else {
+        foreach ($n in 'child-tor', 'child-yggdrasil', 'child-obfs4-helper') { $items += New-Item2 'UNKNOWN' $n 'Win32_Process query failed' }
+    }
+    $adapters = $null
+    try { $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | ForEach-Object { $_.Name }) } catch { }
+    if ($null -ne $adapters) { $items += New-Item2 (Get-AdapterState $adapters) 'adapter-SocketGuard' }
+    else { $items += New-Item2 'UNKNOWN' 'adapter-SocketGuard' 'Get-NetAdapter failed' }
     $items += New-Item2 (Get-WintunState ((& pnputil.exe /enum-drivers 2>&1) | Out-String) $WintunPresentBefore.IsPresent) 'wintun-driver'
     $shipped = @($env:SOCKETGUARD_THIRD_PARTY, (Join-Path $env:ProgramFiles 'SocketGuard\third_party')) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
     $items += New-Item2 (Get-ListedState $shipped '(?i)\\third_party$') 'third-party-files'
@@ -331,14 +390,30 @@ function Invoke-Live {
         if ($hits.Count -gt 0) { $items += New-Item2 'PRESENT' 'ledger-addresses' ($hits -join ' ') }
         else { $items += New-Item2 'ABSENT' 'ledger-addresses' }
     }
+    if ($Baseline) {
+        $base = @(Get-Content -LiteralPath $Baseline)
+        $new = @(Get-NewAddresses $base @(Get-NetIPAddress -AddressFamily IPv6))
+        if ($new.Count -gt 0) { $items += New-Item2 'PRESENT' 'new-addresses' ($new -join ' ') }
+        else { $items += New-Item2 'ABSENT' 'new-addresses' }
+    }
     return $items
 }
 
 # ---- main ----------------------------------------------------------------------------------
 
 if ($SelfTest) { exit (Invoke-SelfTest | Select-Object -Last 1) }
+if ($SaveAddresses) {
+    $c = @(Get-AddressCandidates @(Get-NetIPAddress -AddressFamily IPv6))
+    Set-Content -LiteralPath $SaveAddresses -Value $c -Encoding ascii
+    Write-Host "saved $($c.Count) address(es) to $SaveAddresses"
+    exit 0
+}
 if (-not $Expect) {
-    Write-Host 'usage: footprint-check.ps1 -Expect absent|present [-LedgerExport FILE] | -SelfTest'
+    Write-Host 'usage: footprint-check.ps1 -Expect absent|present [-LedgerExport FILE] [-Baseline FILE] | -SaveAddresses FILE | -SelfTest'
+    exit 2
+}
+if ($Baseline -and -not (Test-Path -LiteralPath $Baseline)) {
+    Write-Host "cannot read baseline: $Baseline"
     exit 2
 }
 if ($LedgerExport -and -not (Test-Path -LiteralPath $LedgerExport)) {

@@ -68,7 +68,7 @@ function New-ThirdPartyFragment([string]$dir, [string]$outFile) {
       [void]$sb.AppendLine("<Component Id=`"$cid`" Directory=`"$parentId`"><File Id=`"$(Get-Id 'F_' $f.FullName)`" Name=`"$($f.Name)`" Source=`"$($f.FullName)`" KeyPath=`"yes`" /></Component>")
     }
   }
-  & $emit $dir 'THIRDPARTYDIR'
+  & $emit $dir 'ThirdPartyDir'
   [void]$sb.AppendLine('<ComponentGroup Id="ThirdParty">')
   foreach ($c in $ids) { [void]$sb.AppendLine("<ComponentRef Id=`"$c`" />") }
   [void]$sb.AppendLine('</ComponentGroup></Fragment></Wix>')

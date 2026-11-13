@@ -68,6 +68,9 @@ pub struct World<'a> {
     pub reservations: &'a [Reservation],
     pub port_groups: &'a [PortGroup],
     pub addresses: &'a [Address],
+    /// Ports something listens on that no app is stored for (a process the process filter
+    /// hides): foreign to every app, like the listeners of other apps.
+    pub hidden: &'a [PortRef],
 }
 
 /// What one address serves, whether it is up, and what it leaves out.
@@ -143,7 +146,7 @@ impl<'a> Model<'a> {
             .lock()
             .unwrap()
             .entry(id)
-            .or_insert_with(|| Arc::new(foreign_listening(self.w.apps, id)))
+            .or_insert_with(|| Arc::new(foreign_listening(self.w.apps, self.w.hidden, id)))
             .clone()
     }
 
@@ -685,6 +688,7 @@ mod tests {
             reservations: &[],
             port_groups: &[],
             addresses: &[],
+            hidden: &[],
         };
         let rows = Model::new(w).named_rows(&nets[0]);
         let names: Vec<String> = rows
@@ -711,6 +715,7 @@ mod tests {
             reservations: &res,
             port_groups: &[],
             addresses: &[],
+            hidden: &[],
         };
         let m = Model::new(w);
         assert!(m.automatic_rows(&nets[0]).is_empty());
@@ -750,6 +755,7 @@ mod tests {
             reservations: std::slice::from_ref(&res),
             port_groups: &groups,
             addresses: &[],
+            hidden: &[],
         };
         let s = Model::new(w).reservation_serving(&res);
         assert_eq!(texts(&s.served["a"].total()), ["80/tcp"]);
@@ -778,6 +784,7 @@ mod tests {
             reservations: std::slice::from_ref(&res),
             port_groups: &groups,
             addresses: &[],
+            hidden: &[],
         };
         let s = Model::new(w).reservation_serving(&res);
         assert!(s.served["a"].is_empty() && s.served["b"].is_empty());
@@ -794,6 +801,39 @@ mod tests {
         assert_eq!(texts(&s2.served["b"].total()), ["9005/tcp"]);
         assert_eq!(texts(&s2.served["a"].total()), ["9000-9001/tcp"]);
         assert!(s2.conflicts.is_empty());
+    }
+
+    #[test]
+    fn a_listener_the_process_filter_hides_excludes_its_port_from_every_app() {
+        // Nothing is stored for the hidden process, but 80/tcp is taken: a's range loses it.
+        let apps = [app_with("a", &[])];
+        let groups = [group("web", &["80-81/tcp"], &["a"])];
+        let nets = [net("lan", NetworkKind::Lan, true)];
+        let a = Address::automatic("a", Scope::group("web"), "lan", loc());
+        let grants = [grant(
+            "g",
+            Target::App("a".into()),
+            Scope::group("web"),
+            None,
+        )];
+        let addrs = [a.clone()];
+        let hidden = [PortRef {
+            port: 80,
+            proto: Protocol::Tcp,
+        }];
+        let w = World {
+            apps: &apps,
+            networks: &nets,
+            grants: &grants,
+            tags: &[],
+            reservations: &[],
+            port_groups: &groups,
+            addresses: &addrs,
+            hidden: &hidden,
+        };
+        let info = &Model::new(w).address_info()[&a.id];
+        assert_eq!(texts(&info.excluded), ["80/tcp"]);
+        assert_eq!(texts(&info.served["a"].total()), ["81/tcp"]);
     }
 
     #[test]
@@ -818,6 +858,7 @@ mod tests {
             reservations: &[],
             port_groups: &groups,
             addresses: &addrs,
+            hidden: &[],
         };
         let info = &Model::new(w).address_info()[&a.id];
         assert!(info.up);

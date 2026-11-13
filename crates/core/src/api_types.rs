@@ -750,6 +750,14 @@ pub enum ChangeOp {
         #[serde(default)]
         confirm_open: bool,
     },
+    /// Delete a tag with its grants. The bindings of reservations to it go too, which frees
+    /// rows (ADR 0058).
+    DeleteTag {
+        tag_id: TagId,
+        /// Needed when freeing the rows makes a grant to Anyone live on Tor.
+        #[serde(default)]
+        confirm_open: bool,
+    },
     CreateReservation {
         #[serde(rename = "ref", default)]
         #[cfg_attr(feature = "ts", ts(optional, rename = "ref"))]

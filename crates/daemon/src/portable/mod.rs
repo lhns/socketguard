@@ -60,6 +60,35 @@ pub fn valid_sid(s: &str) -> bool {
             .all(|p| !p.is_empty() && p.len() <= 10 && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// What Windows says a SID names (`SID_NAME_USE`, reduced to what the check needs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountKind {
+    User,
+    /// A group or alias: `Domain Users`, `Users`, ...
+    Group,
+    /// Anything else (a well-known SID, a computer, a label, ...).
+    Other,
+    /// The SID does not resolve to an account.
+    Unresolved,
+}
+
+/// `--allow-user` must name one user: the shape check cannot tell `...-1001` from a domain
+/// group such as Domain Users (`...-513`), the lookup can.
+pub fn require_user(sid: &str, kind: AccountKind) -> Result<(), String> {
+    match kind {
+        AccountKind::User => Ok(()),
+        AccountKind::Group => Err(format!(
+            "--allow-user {sid} is a group, not a user: it would open the pipe to every member"
+        )),
+        AccountKind::Other => Err(format!(
+            "--allow-user {sid} is not a user account (it names something else)"
+        )),
+        AccountKind::Unresolved => Err(format!(
+            "--allow-user {sid} does not resolve to an account on this machine or its domain"
+        )),
+    }
+}
+
 // ─── Drop events ─────────────────────────────────────────────────────────────
 
 static DROPS_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
@@ -253,6 +282,10 @@ pub fn prepare(opts: &RunOptions) -> Result<()> {
                  not {sid:?}: a group such as Everyone would open the pipe to every user"
             );
         }
+        #[cfg(windows)]
+        if let Err(e) = require_user(sid, win::account_kind(sid)) {
+            bail!("{e}");
+        }
         let _ = ALLOW_SID.set(sid.clone());
     }
     if socketguard_core::portable::ignored_config_override().is_some() {
@@ -290,12 +323,35 @@ mod tests {
         assert!(!valid_sid("s-1-5-21-1"));
     }
 
+    #[test]
+    fn only_a_user_account_may_be_allowed() {
+        assert!(require_user("S-1-5-21-1-2-3-1001", AccountKind::User).is_ok());
+        let group = require_user("S-1-5-21-1-2-3-513", AccountKind::Group).unwrap_err();
+        assert!(group.contains("is a group"), "{group}");
+        let other = require_user("S-1-5-21-1-2-3-1", AccountKind::Other).unwrap_err();
+        assert!(other.contains("not a user"), "{other}");
+        let none = require_user("S-1-5-21-1-2-3-9", AccountKind::Unresolved).unwrap_err();
+        assert!(none.contains("does not resolve"), "{none}");
+    }
+
     /// What the UI passes (its own account) must be accepted.
     #[cfg(windows)]
     #[test]
     fn the_sid_of_the_current_account_is_accepted() {
         let sid = socketguard_core::winsid::current_user_sid().unwrap();
         assert!(valid_sid(&sid), "{sid}");
+        assert_eq!(win::account_kind(&sid), AccountKind::User);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_group_and_an_unknown_sid_are_not_users() {
+        // The Users group has no S-1-5-21 form, so only the lookup tells.
+        assert_eq!(win::account_kind("S-1-5-32-545"), AccountKind::Group);
+        assert_eq!(
+            win::account_kind("S-1-5-21-1-2-3-99999"),
+            AccountKind::Unresolved
+        );
     }
 
     #[test]

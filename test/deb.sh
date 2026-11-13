@@ -46,6 +46,11 @@ wait_active() { wait_until 20 systemctl is-active --quiet socketguard; }
 wait_answers() { wait_until 30 sudo socketguard status --json; }
 mainpid() { systemctl show -p MainPID --value socketguard; }
 
+# The IPv6 addresses SocketGuard could add, before the first install; every expect-absent below
+# fails if one is still on an interface afterwards (deploy/ci/footprint-check.sh, "Address baseline").
+addr_base="${RUNNER_TEMP:-/tmp}/sg-addrs-before.txt"
+bash "$here/deploy/ci/footprint-check.sh" --save-addresses "$addr_base"
+
 step "install"
 sudo apt-get install -y "$deb"
 # Type=notify (ADR 0051): the start returned only after the first ruleset, so the table exists
@@ -126,12 +131,12 @@ test -e "$db" || fail "remove deleted the database"
 mn_children_stopped
 mn_adapter_exists && fail "the adapter $ADAPTER is still there after remove"
 mn_data_kept
-sudo $fp expect-absent --allow-data
+sudo $fp expect-absent --allow-data --baseline "$addr_base"
 
 step "purge"
 sudo apt-get purge -y socketguard
 mn_data_purged
 mn_account_after_purge "$account_created"
-sudo $fp expect-absent
+sudo $fp expect-absent --baseline "$addr_base"
 summary networks
 echo OK

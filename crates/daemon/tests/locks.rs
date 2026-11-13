@@ -230,7 +230,8 @@ async fn polls_mutations_network_changes_and_disable_never_hang() {
 }
 
 /// A grant to Anyone on a tag and an unconfirmed join of the tag run at once (ADR 0062).
-/// Whichever way they interleave, the outcome is a serial one: the join is refused and the
+/// This cannot tell a locked engine from an unlocked one (any interleaving ends in a serial
+/// outcome; `change_lock.rs` tests the lock itself); it checks that the outcome is one: the join is refused and the
 /// app is not a member, or it went first and the app is a member of the opened tag.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_anyone_grant_on_a_tag_and_an_unconfirmed_join_end_in_a_serial_order() {

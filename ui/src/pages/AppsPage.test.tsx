@@ -565,35 +565,40 @@ describe("Tags", () => {
 });
 
 describe("Inspector: delete a tag bound to a reservation", () => {
-  it("asks again before opening rows to anyone, and deletes with the confirmation", async () => {
-    // The daemon refuses the first delete: freeing the rows makes a grant to anyone live on Tor.
-    const d = setup({
-      delete_tag: (a) => {
-        if (!a.confirmOpen) throw { code: "confirmation_required", message: "confirm opening to anyone" };
-        return saved(null);
-      },
-    });
+  it("deletes at once after the first question when nobody gains access", async () => {
+    const d = setup();
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await user.click(await inList().findByRole("checkbox", { name: "Select web" }));
-    expect(await screen.findByRole("heading", { name: "web" })).toBeInTheDocument();
     const panel = within(await screen.findByRole("region", { name: "Details" }));
     await user.click(await panel.findByRole("button", { name: "Delete tag" }));
     await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete tag" }));
-    const dialog = await screen.findByRole("dialog", { name: "Open rows to anyone?" });
-    expect(dialog).toHaveTextContent("grant to anyone");
-    await user.click(within(dialog).getByRole("button", { name: "Delete and open" }));
-    await waitFor(() => expect(d.calls.filter((c) => c.cmd === "delete_tag").map((c) => c.args)).toEqual([
-      { id: "t1", confirmOpen: false },
-      { id: "t1", confirmOpen: true },
-    ]));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "delete_tag", tag_id: "t1", confirm_open: false }]]));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("shows who gains access through the freed rows and asks before opening them to anyone", async () => {
+    // Freeing the rows makes a grant to anyone live on Tor: the dry run says so.
+    const freed = { kind: "delete" as const, item: "tag" as const, name: "web", opens_to_anyone: true, detail: "reachable by Anyone", reach: [{ network_id: "n-tor", reach: "open" as const }] };
+    const d = setup({ changes: (a) => batch(a.req as ChangesRequest, true, [freed]) });
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("checkbox", { name: "Select web" }));
+    const panel = within(await screen.findByRole("region", { name: "Details" }));
+    await user.click(await panel.findByRole("button", { name: "Delete tag" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete tag" }));
+    const dialog = await screen.findByRole("dialog", { name: "Open web to anyone?" });
+    expect(dialog).toHaveTextContent("reachable by Anyone");
+    expect(applied(d)).toHaveLength(0);
+    await user.click(within(dialog).getByRole("button", { name: "Open web to anyone" }));
+    await waitFor(() => expect(applied(d)).toEqual([[{ op: "delete_tag", tag_id: "t1", confirm_open: true }]]));
   });
 });
 
 describe("Inspector: several tags", () => {
   it("shows the access they share or only some have, adds access for all, and deletes them after asking once", async () => {
     const toData = grantView({ id: "g-data", target: { kind: "tag", id: "t2" }, subject: { kind: "peer", id: "p2" } });
-    const d = setup({ delete_tag: () => saved(null) }, [web, data], [gTag, toData]);
+    const d = setup({}, [web, data], [gTag, toData]);
     const user = userEvent.setup();
     renderWithProviders(<AppsPage />);
     await user.click(await inList().findByRole("checkbox", { name: "Select web" }));
@@ -613,9 +618,12 @@ describe("Inspector: several tags", () => {
     expect(applied(d)[0].map((o) => (o as { target: { id: string } }).target.id)).toEqual(["t1", "t2"]);
 
     await user.click(panel.getByRole("button", { name: "Delete 2 tags" }));
-    expect(d.count("delete_tag")).toBe(0);
+    expect(applied(d).length).toBe(1);
     await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete tags" }));
-    await waitFor(() => expect(d.count("delete_tag")).toBe(2));
+    await waitFor(() => expect(applied(d)[1]).toEqual([
+      { op: "delete_tag", tag_id: "t1", confirm_open: false },
+      { op: "delete_tag", tag_id: "t2", confirm_open: false },
+    ]));
   });
 });
 

@@ -55,6 +55,12 @@ pub struct Snapshot {
     /// Addresses the daemon owns on interfaces, whether or not an app still has them
     /// (retiring ones included): denied until they are really gone.
     pub owned: Vec<IpAddr>,
+    /// Ports that listening sockets of processes the process filter hides are bound to, from
+    /// the last poll: no app is stored for them, but they are taken all the same.
+    pub hidden_listening: Vec<PortRef>,
+    /// App ports whose IPv4 listeners are all bound to loopback: reachable from this machine
+    /// only, so they get no IPv4 host rule (ADR 0044, amendment of 2026-11-13).
+    pub v4_local_only: BTreeSet<(String, PortRef)>,
 }
 
 fn sorted_unique<T: Ord>(v: impl IntoIterator<Item = T>) -> Vec<T> {
@@ -73,6 +79,7 @@ impl Snapshot {
             reservations: &c.reservations,
             port_groups: &c.port_groups,
             addresses: &c.addresses,
+            hidden: &self.hidden_listening,
         }
     }
 }
@@ -157,6 +164,9 @@ fn host_ipv4_rules(
             .iter()
             .filter(|p| p.family.has_v4())
             .map(AppPort::port_ref)
+            // Another app on the LAN address of the same port must not become reachable
+            // through this app's grants.
+            .filter(|p| !snap.v4_local_only.contains(&(app.id.clone(), *p)))
             .collect();
         if v4_ports.is_empty() {
             continue;
@@ -187,9 +197,9 @@ fn host_ipv4_rules(
                 };
                 let sources = match (&grant.subject, network) {
                     (Subject::Anyone, None) => Sources::Any,
-                    (Subject::Anyone, Some(_)) => {
-                        Sources::Nets(subnets.iter().copied().map(IpNet::V4).collect())
-                    }
+                    (Subject::Anyone, Some(_)) => Sources::Nets(IpNet::aggregate(
+                        &subnets.iter().copied().map(IpNet::V4).collect::<Vec<_>>(),
+                    )),
                     _ if peer_nets.is_empty() => continue,
                     _ => Sources::Nets(IpNet::aggregate(&peer_nets)),
                 };
@@ -344,6 +354,17 @@ pub fn build_with_warnings(snap: &Snapshot) -> (DesiredRuleset, Vec<String>) {
                         );
                     };
                     if grant.subject == Subject::Anyone {
+                        // Without an interface the rule would admit Anyone on every
+                        // interface, not on this network's.
+                        if iif.is_none()
+                            && matches!(network.kind, NetworkKind::Lan | NetworkKind::Yggdrasil)
+                        {
+                            warnings.insert(format!(
+                                "Network {} has no interface; skipping its rules for Anyone",
+                                network.id
+                            ));
+                            continue;
+                        }
                         let id = match &iif {
                             Some(i) => format!("{base}:{i}"),
                             None => base,
@@ -790,6 +811,32 @@ mod tests {
     }
 
     #[test]
+    fn anyone_on_a_network_without_an_interface_gets_no_rule_and_a_warning() {
+        let mut s = base();
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
+        s.networks[1].interface = None; // lan
+        s.networks[2].interface = None; // ygg
+        let (rs, warnings) = build_with_warnings(&s);
+        // An unbound rule would admit Anyone on every interface; Local stays as it is.
+        assert!(
+            rs.rules
+                .iter()
+                .all(|r| r.iif.is_some() || r.dst == ip("fd00::1")),
+            "{:?}",
+            ids(&rs)
+        );
+        assert!(!ids(&rs)
+            .iter()
+            .any(|i| i.starts_with("a:an:") || i.starts_with("a:ay:")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("lan") && w.contains("no interface")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("ygg") && w.contains("no interface")));
+    }
+
+    #[test]
     fn anyone_is_open_on_every_network_that_takes_grants() {
         let mut s = base();
         s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
@@ -1017,6 +1064,26 @@ mod tests {
         // Not attached to the app: no ports from it.
         s.catalog.port_groups[0].apps.clear();
         assert!(build(&s).rules.is_empty());
+    }
+
+    #[test]
+    fn ranges_leave_out_ports_a_filtered_process_listens_on() {
+        let mut s = base();
+        s.catalog.apps[0].ports = app("x", &[8080]).ports;
+        s.catalog.port_groups = vec![group("passive", &["50000-50010/tcp"], &["web"])];
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
+        // A process the process filter hides listens on 50003: no app is stored for it.
+        s.hidden_listening = vec![tcp(50003)];
+        let rs = build(&s);
+        assert_eq!(
+            rule_ports(&rs, "ay"),
+            ["50000-50002/tcp", "50004-50010/tcp", "8080/tcp"]
+        );
+        let info = Model::new(s.world()).address_info();
+        assert_eq!(
+            info["ay"].excluded.ranges(),
+            [PortRange::single(tcp(50003))]
+        );
     }
 
     #[test]
@@ -1360,6 +1427,20 @@ mod tests {
     }
 
     #[test]
+    fn a_port_bound_to_loopback_only_gets_no_ipv4_rule() {
+        let mut s = protected_lan();
+        s.catalog.apps[0].ports = app("x", &[8080, 9090]).ports;
+        s.catalog.grants = vec![grant("g", "web", Subject::Anyone)];
+        let ports = |s: &Snapshot| -> Vec<u16> {
+            v4_rules(&build(s)).iter().map(|r| r.ports.start).collect()
+        };
+        assert_eq!(ports(&s), [8080, 9090]);
+        // 8080 listens on 127.0.0.1 only: opening it would expose another app's 8080.
+        s.v4_local_only = [("web".to_string(), tcp(8080))].into();
+        assert_eq!(ports(&s), [9090]);
+    }
+
+    #[test]
     fn ipv4_peer_is_allowed_on_a_protected_interface() {
         let mut s = protected_lan();
         s.catalog.peers = vec![peer(
@@ -1506,6 +1587,34 @@ mod tests {
             Sources::Nets(vec!["192.168.1.0/24".parse().unwrap()])
         );
         assert_eq!(rs.rules.len(), 2);
+    }
+
+    #[test]
+    fn segment_subnets_are_aggregated_so_nft_accepts_the_set() {
+        let mut s = protected_lan();
+        let mut g = grant("g", "web", Subject::Anyone);
+        g.network_id = Some("lan".into());
+        s.catalog.grants = vec![g];
+        // Two addresses in one subnet, and a subnet nested in another interface subnet.
+        s.v4_subnets = BTreeMap::from([(
+            "eth0".into(),
+            vec![
+                "192.168.1.0/24".parse().unwrap(),
+                "192.168.1.0/24".parse().unwrap(),
+                "10.0.0.0/8".parse().unwrap(),
+                "10.1.0.0/16".parse().unwrap(),
+            ],
+        )]);
+        let rs = build(&s);
+        let v4 = v4_rules(&rs);
+        assert_eq!(v4.len(), 1);
+        assert_eq!(
+            v4[0].sources,
+            Sources::Nets(vec![
+                "10.0.0.0/8".parse().unwrap(),
+                "192.168.1.0/24".parse().unwrap()
+            ])
+        );
     }
 
     #[test]

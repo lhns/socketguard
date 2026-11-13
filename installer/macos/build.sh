@@ -5,12 +5,14 @@
 #
 # <stage> is the staged tree (docs/packaging.md): the three programs, third_party/, LICENSE and
 # THIRD_PARTY_NOTICES.md.
-# Payload: /usr/local/bin/{socketguard-daemon,socketguard} and /Applications/SocketGuard.app
+# Payload: /Library/Application Support/SocketGuard/{socketguard-daemon,socketguard,third_party}
+# (root-owned, ADR 0065: the daemon runs as root, so its directory must not be one a user can
+# write to, which /usr/local/bin can be under Homebrew), /usr/local/bin/socketguard (a symlink
+# to the CLI there) and /Applications/SocketGuard.app
 # (the UI binary, assembled by hand: Tauri's bundler would need @tauri-apps/cli, a bundle
 # section in tauri.conf.json and a second build path next to build.sh, for an Info.plist and an
-# icon). The app finds the CLI and the daemon in /usr/local/bin. postinstall runs
-# `socketguard-daemon service install`. The stage's third_party/ goes to
-# /usr/local/lib/socketguard/third_party/.
+# icon). The app finds the CLI and the daemon in the programs' directory. postinstall runs
+# `socketguard-daemon service install`. The stage's third_party/ goes next to the daemon.
 # LICENSE and THIRD_PARTY_NOTICES.md go into the app's Resources and /usr/local/share/doc/socketguard.
 #
 # SIGNING (not done yet): see docs/packaging.md for the secrets. Where it would go is marked
@@ -30,8 +32,11 @@ trap 'rm -rf "$work"' EXIT
 
 root="$work/root"
 app="$root/Applications/SocketGuard.app"
-mkdir -p "$root/usr/local/bin" "$app/Contents/MacOS" "$app/Contents/Resources"
-install -m 0755 "$stage/socketguard-daemon" "$stage/socketguard" "$root/usr/local/bin/"
+prog="$root/Library/Application Support/SocketGuard"
+mkdir -p "$prog" "$root/usr/local/bin" "$app/Contents/MacOS" "$app/Contents/Resources"
+install -m 0755 "$stage/socketguard-daemon" "$stage/socketguard" "$prog/"
+# The CLI is on the PATH through a link; the daemon is not (nobody runs it by hand).
+ln -s "/Library/Application Support/SocketGuard/socketguard" "$root/usr/local/bin/socketguard"
 install -m 0755 "$stage/socketguard-ui" "$app/Contents/MacOS/socketguard-ui"
 cp ui/src-tauri/icons/icon.icns "$app/Contents/Resources/icon.icns"
 cat > "$app/Contents/Info.plist" <<PLIST
@@ -53,11 +58,11 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-mkdir -p "$root/usr/local/lib/socketguard"
-cp -R "$stage/third_party" "$root/usr/local/lib/socketguard/third_party"
+cp -R "$stage/third_party" "$prog/third_party"
 # Tor runs as the unprivileged account socketguard-net (ADR 0052): everyone reads the tree and
 # runs the programs, only root writes (pkgbuild --ownership recommended makes root the owner).
-chmod -R u+rwX,go+rX,go-w "$root/usr/local/lib/socketguard"
+chmod -R u+rwX,go+rX,go-w "$prog/third_party"
+chmod 0755 "$prog"
 
 # Licence and third-party notices, in the app and beside the other documentation.
 mkdir -p "$root/usr/local/share/doc/socketguard"
@@ -69,7 +74,7 @@ done
 codesign --force --deep --sign - "$app"
 # SIGN: with a Developer ID Application certificate in the keychain, replace the line above by
 #   codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
-# and sign /usr/local/bin/* the same way before pkgbuild.
+# and sign the programs in "$prog" the same way before pkgbuild.
 
 cp -R installer/macos/scripts "$work/scripts"
 chmod +x "$work/scripts/"*

@@ -138,7 +138,12 @@ fn kill_pair(src: Option<IpNet>, dst: Dst) -> Vec<String> {
 /// pf cannot kill by port, so every state between the pair goes, whatever its port; a
 /// peer that is still allowed on another port reconnects.
 fn kill_commands(revoked: &[Revocation]) -> Vec<Vec<String>> {
-    let mut out: Vec<Vec<String>> = revoked.iter().map(|r| kill_pair(r.src, r.dst)).collect();
+    // A destination-less IPv4 revocation would be `0.0.0.0/0` on both sides: every state.
+    let mut out: Vec<Vec<String>> = revoked
+        .iter()
+        .filter(|r| r.dst != Dst::HostV4)
+        .map(|r| kill_pair(r.src, r.dst))
+        .collect();
     out.sort();
     out.dedup();
     out
@@ -282,6 +287,14 @@ mod tests {
             r(Some("fd00::1/128"), "fd00::9"),
             r(None, "fd00::9"),
             r(None, "192.0.2.9"),
+            Revocation {
+                dst: Dst::HostV4,
+                ports: socketguard_core::PortRange::single(socketguard_core::PortRef {
+                    port: 80,
+                    proto: Protocol::Tcp,
+                }),
+                src: None,
+            },
         ]);
         let cmds: Vec<String> = cmds.iter().map(|c| c.join(" ")).collect();
         assert_eq!(

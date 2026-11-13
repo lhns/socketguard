@@ -500,36 +500,6 @@ async fn tor_down_with_nothing_to_do_does_not_make_mutations_202() {
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
 }
 
-#[tokio::test]
-async fn services_from_before_the_ledger_are_adopted_and_swept() {
-    let h = Harness::new(vec![socket(8080, Protocol::Tcp, "::")]).await;
-    h.reconcile().await;
-    let svc = h.svc().await;
-    // As before the ledger existed: the service runs, nothing recorded it.
-    h.tor.inject_service(&svc);
-    h.state
-        .db
-        .set_setting("tor_owned_services", "[]")
-        .await
-        .unwrap();
-    assert!(ledger(&h).await.owned.is_empty());
-
-    socketguard_daemon::networks::ledger::adopt_stored_keys(&h.state.db)
-        .await
-        .unwrap();
-    socketguard_daemon::networks::ledger::adopt_stored_keys(&h.state.db)
-        .await
-        .unwrap();
-    assert_eq!(ledger(&h).await.owned.len(), 1);
-    assert!(ledger(&h).await.owned.contains(&svc));
-
-    // Its address goes away behind the daemon's back: the service is swept.
-    let app = h.app().await;
-    h.state.db.delete_app(&app.id).await.unwrap();
-    h.reconcile().await;
-    assert!(h.tor.detached().is_empty());
-}
-
 // ─── Removing the network ────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -1353,4 +1323,40 @@ async fn an_import_that_releases_the_reservation_hiding_an_anyone_grant_needs_co
         .await;
     w.import_needs_confirmation(|doc| doc.reservations.clear())
         .await;
+}
+
+#[tokio::test]
+async fn a_dry_run_of_deleting_a_bound_tag_shows_who_gains_access_and_changes_nothing() {
+    let (w, tag) = web_with_bound_tag().await;
+    let op = |confirm_open| ChangeOp::DeleteTag {
+        tag_id: tag.clone(),
+        confirm_open,
+    };
+    let refused = w.dry_run(op(false)).await;
+    assert!(confirmation_required(&refused), "{refused:?}");
+    let preview = w.dry_run(op(true)).await.unwrap();
+    assert!(preview.changes_reach);
+    let change = &preview.changes[0];
+    assert!(change.change.opens_to_anyone);
+    assert!(change
+        .reach
+        .iter()
+        .any(|r| r.network_id == "tor" && r.reach != Reach::NotReachable));
+    // A dry run deletes nothing and publishes nothing.
+    let engine = w.h.state.engine.read().await;
+    assert!(engine.get_tag(&w.h.state, &tag).await.is_ok());
+    assert!(w.h.tor.add_commands().is_empty());
+    // The batch applies it like the route does.
+    engine
+        .apply_changes(
+            &w.h.state,
+            &ChangesRequest {
+                ops: vec![op(true)],
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(engine.get_tag(&w.h.state, &tag).await.is_err());
+    assert_eq!(w.h.tor.add_commands().len(), 1);
 }

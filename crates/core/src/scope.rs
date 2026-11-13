@@ -461,16 +461,18 @@ impl ScopePorts {
     }
 }
 
-/// Every port that an app other than `app_id` listens on now. A listener on a wildcard
-/// address answers on every local address, so these ports are not the app's to grant by
-/// range (ADR 0047).
-pub fn foreign_listening(apps: &[App], app_id: &str) -> PortRangeSet {
+/// Every port that an app other than `app_id` listens on now, and every port `hidden`
+/// names (listeners of processes the process filter keeps out of the apps). A listener on a
+/// wildcard address answers on every local address, so these ports are not the app's to
+/// grant by range (ADR 0047).
+pub fn foreign_listening(apps: &[App], hidden: &[PortRef], app_id: &str) -> PortRangeSet {
     PortRangeSet::from_ports(
         apps.iter()
             .filter(|a| a.id != app_id)
             .flat_map(|a| a.ports.iter())
             .filter(|p| p.listening)
-            .map(|p| p.port_ref()),
+            .map(|p| p.port_ref())
+            .chain(hidden.iter().copied()),
     )
 }
 
@@ -753,7 +755,7 @@ pub(crate) mod tests {
         let a = app_with("a", &[(50005, true)]);
         let b = app_with("b", &[(50003, true), (50004, false)]);
         let groups = [group("passive", &["50000-50010/tcp"], &["a"])];
-        let foreign = foreign_listening(&[a.clone(), b], "a");
+        let foreign = foreign_listening(&[a.clone(), b], &[], "a");
         assert_eq!(
             texts(&foreign),
             ["50003/tcp"],
@@ -775,7 +777,7 @@ pub(crate) mod tests {
         // A detected port of the app is not affected; a named port that another app has is.
         let c = app_with("c", &[(50003, true)]);
         let groups_c = [group("passive", &["50000-50010/tcp"], &["c"])];
-        let foreign_c = foreign_listening(&[a.clone(), c.clone()], "c");
+        let foreign_c = foreign_listening(&[a.clone(), c.clone()], &[], "c");
         assert!(foreign_c.contains(tcp(50005)));
         let named = scope_ports(&c, &Scope::port(tcp(50005)), &groups_c, &foreign_c);
         assert!(

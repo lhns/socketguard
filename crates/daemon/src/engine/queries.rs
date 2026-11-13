@@ -7,9 +7,9 @@ use crate::ruleset;
 use crate::AppState;
 use socketguard_core::{
     covered_ports, effective_access, grant_reach, grant_targets, reservation_members,
-    ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, Grant, GrantReach,
-    GrantView, Model, Network, NetworkKind, Peer, PeerGroup, PortGroup, PortRangeSet, Reach,
-    Reservation, Row, Settings, Subject, Tag, Target, V4Context,
+    ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, CredentialKind, Grant,
+    GrantReach, GrantView, Model, Network, NetworkKind, Peer, PeerGroup, PortGroup, PortRangeSet,
+    Reach, Reservation, Row, Settings, Subject, Tag, Target, V4Context,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -24,6 +24,8 @@ pub(super) struct ReachCtx<'a> {
     pub(super) targets: Vec<Tag>,
     /// The label of the reservation each bound row belongs to.
     bound: HashMap<Row, &'a str>,
+    /// App ports whose IPv4 listeners are all on loopback (see `Snapshot::v4_local_only`).
+    v4_local_only: std::collections::BTreeSet<(String, PortRef)>,
 }
 
 impl<'a> ReachCtx<'a> {
@@ -49,7 +51,16 @@ impl<'a> ReachCtx<'a> {
             port_groups,
             targets: grant_targets(tags, reservations),
             bound,
+            v4_local_only: Default::default(),
         }
+    }
+
+    pub(super) fn with_v4_local_only(
+        mut self,
+        local: &std::collections::BTreeSet<(String, PortRef)>,
+    ) -> Self {
+        self.v4_local_only = local.clone();
+        self
     }
 
     /// The apps a grant can concern: the one it targets, or the members of its tag or
@@ -83,14 +94,25 @@ impl<'a> ReachCtx<'a> {
         // IPv4 credentials depend on whether the granted ports listen on IPv4 and on
         // whether protect-host filters the interface (ADR 0044).
         let none = PortRangeSet::new();
-        let app_listens_v4 = self.apps_of(grant).into_iter().any(|a| {
-            covered_ports(grant, &self.targets, a, self.port_groups, &none).is_some_and(|covered| {
-                a.ports
-                    .iter()
-                    .filter(|p| covered.contains(p.port_ref()))
-                    .any(|p| p.listening && p.family.has_v4())
+        // A listener bound to loopback only is not reachable over IPv4 from the network.
+        let v4_ports = |exposed: bool| {
+            self.apps_of(grant).into_iter().any(|a| {
+                covered_ports(grant, &self.targets, a, self.port_groups, &none).is_some_and(
+                    |covered| {
+                        a.ports
+                            .iter()
+                            .filter(|p| covered.contains(p.port_ref()))
+                            .filter(|p| p.listening && p.family.has_v4())
+                            .any(|p| {
+                                self.v4_local_only.contains(&(a.id.clone(), p.port_ref()))
+                                    != exposed
+                            })
+                    },
+                )
             })
-        });
+        };
+        let app_listens_v4 = v4_ports(true);
+        let local_only = !app_listens_v4 && v4_ports(false);
         let mut reach = grant_reach(
             &grant.subject,
             &creds,
@@ -101,6 +123,19 @@ impl<'a> ReachCtx<'a> {
                 protected,
             },
         );
+        if local_only && creds.iter().any(|c| c.kind == CredentialKind::Ip) {
+            for r in reach.iter_mut().filter(|r| {
+                r.reach == Reach::NotReachable
+                    && r.note.is_none()
+                    && networks.iter().any(|n| {
+                        n.id == r.network_id
+                            && n.grants_apply
+                            && matches!(n.kind, NetworkKind::Lan | NetworkKind::Local)
+                    })
+            }) {
+                r.note = Some("it listens on this machine only (IPv4 loopback)".into());
+            }
+        }
         self.bound_rows_on_tor(&mut reach, grant, networks);
         reach
     }
@@ -363,6 +398,7 @@ impl Engine {
             &snap.catalog.port_groups,
             &snap.catalog.reservations,
         )
+        .with_v4_local_only(&snap.v4_local_only)
     }
 
     pub async fn list_peers(&self, state: &AppState) -> Result<Vec<Peer>, EngineError> {

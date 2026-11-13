@@ -463,10 +463,11 @@ impl Engine {
             .into_iter()
             .filter(|a| a.network_id == backend_id)
             .collect();
-        if let Err(e) = self.retire_addresses(state, &existing).await {
-            error!("Could not record the addresses of '{backend_id}' as retiring: {e}");
-        }
-        let deleted = match state.db.delete_addresses_by_network(backend_id).await {
+        let deleted = match state
+            .db
+            .delete_addresses_by_network_with(backend_id, &self.retire_writes(&existing))
+            .await
+        {
             Ok(d) => d,
             Err(e) => {
                 error!("Failed to delete addresses for backend '{backend_id}': {e}");
@@ -640,5 +641,50 @@ mod tests {
             *log.0.lock().unwrap(),
             ["2001:db8::1", "2001:db8::2"].map(|a| a.parse::<Ipv6Addr>().unwrap())
         );
+    }
+
+    #[tokio::test]
+    async fn the_sweep_releases_the_lease_of_an_address_it_takes_off_its_interface() {
+        // A crash after a batch committed leaves an owned row that is retiring and no
+        // address row: the sweep removes the address, and with it gives its lease back.
+        let log = ReleaseLog::default();
+        let inst = BackendInstanceConfig {
+            id: "dhcp".into(),
+            backend: socketguard_core::config::BackendConfig::Dhcpv6 {
+                interface: "eth0".into(),
+            },
+        };
+        let mut backends = std::collections::HashMap::new();
+        backends.insert(
+            "dhcp".to_string(),
+            ip_backend(inst.clone(), Box::new(log.clone())),
+        );
+        let engine = crate::engine::Engine::new_injectable(
+            Box::new(MockSocketMonitor::new(vec![])),
+            Arc::new(MockFirewall::new(Arc::new(Mutex::new(vec![])))),
+            Arc::new(MockInterfaceManager::new(Arc::new(Mutex::new(vec![])))),
+            backends,
+        );
+        let state = test_app_state(
+            engine,
+            DaemonConfig {
+                backends: vec![inst],
+                ..Default::default()
+            },
+        )
+        .await;
+        let addr: Ipv6Addr = "2001:db8::7".parse().unwrap();
+        state
+            .db
+            .retire_address(addr, "eth0", Some("dhcp"))
+            .await
+            .unwrap();
+        let engine = state.engine.read().await;
+        engine.sweep_owned(&state).await;
+        assert!(state.db.list_owned_addresses().await.unwrap().is_empty());
+        assert_eq!(*log.0.lock().unwrap(), [addr]);
+        // A second sweep has nothing to do.
+        engine.sweep_owned(&state).await;
+        assert_eq!(log.0.lock().unwrap().len(), 1);
     }
 }
