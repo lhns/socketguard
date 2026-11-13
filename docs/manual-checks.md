@@ -53,8 +53,8 @@ account to elevate with. Get the MSI from the release.
    then opens with no banner and works without `sudo`.
 6. In the app: Settings, **Remove SocketGuard...**, leave "Also delete settings and keys?" unticked,
    press **Remove SocketGuard**, authenticate. Expect: the app says "SocketGuard is removed" and `sudo launchctl print system/de.lhns.socketguard` fails;
-   the app and the files in /usr/local/bin remain (a pkg cannot delete them): delete them as in the
+   the app, the programs in /Library/Application Support/SocketGuard and the link in /usr/local/bin remain (a pkg cannot delete them): delete them as in the
    README, then `sudo pkgutil --forget de.lhns.socketguard`.
 7. Install again and use **Remove SocketGuard...** with "Also delete settings and keys?" ticked. Expect:
-   `/Library/Application Support/SocketGuard` is gone and `/etc/pf.conf` has no `socketguard`
+   the data in `/Library/Application Support/SocketGuard` is gone (the programs stay) and `/etc/pf.conf` has no `socketguard`
    anchor line.

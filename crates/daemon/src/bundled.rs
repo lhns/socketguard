@@ -18,7 +18,7 @@ const HELPER_DIR: &str = "pluggable_transports";
 const PACKAGED: Option<&str> = if cfg!(target_os = "linux") {
     Some("/usr/lib/socketguard/third_party")
 } else if cfg!(target_os = "macos") {
-    Some("/usr/local/lib/socketguard/third_party")
+    Some("/Library/Application Support/SocketGuard/third_party")
 } else {
     None
 };

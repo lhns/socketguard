@@ -44,6 +44,50 @@ pub trait ServiceManager {
     fn status(&mut self) -> Result<ServiceStatus>;
 }
 
+/// The first of `exe` and its parent directories (up to and including `top`) that someone
+/// other than the user `root_uid` could use to swap what the service runs as root: not
+/// owned by `root_uid`, or writable by group or others. A directory with the sticky bit
+/// lets users remove only their own entries, so it passes. Returns the path and why.
+#[cfg(unix)]
+pub fn untrusted_component(exe: &Path, top: &Path, root_uid: u32) -> Option<(PathBuf, String)> {
+    use std::os::unix::fs::MetadataExt;
+    for p in exe.ancestors() {
+        if let Ok(m) = std::fs::symlink_metadata(p) {
+            if m.uid() != root_uid {
+                return Some((
+                    p.to_path_buf(),
+                    format!("owned by uid {}, not root", m.uid()),
+                ));
+            }
+            let sticky_dir = m.is_dir() && m.mode() & 0o1000 != 0;
+            if m.mode() & 0o022 != 0 && !sticky_dir {
+                return Some((p.to_path_buf(), "writable by its group or others".into()));
+            }
+        }
+        if p == top {
+            break;
+        }
+    }
+    None
+}
+
+/// Refuse to register a root service whose executable, or any directory above it, a
+/// non-root user can write to: that user could replace what root runs.
+#[cfg(unix)]
+pub fn check_exe_trusted(exe: &Path) -> Result<()> {
+    let real =
+        std::fs::canonicalize(exe).with_context(|| format!("resolving {}", exe.display()))?;
+    if let Some((path, why)) = untrusted_component(&real, Path::new("/"), 0) {
+        anyhow::bail!(
+            "refusing to install the service: {} is {why}, so a user could replace what \
+             the service runs as root ({}). Install SocketGuard in a location only root can write to.",
+            path.display(),
+            real.display()
+        );
+    }
+    Ok(())
+}
+
 /// The unit file for the binary at `exe`.
 pub fn unit_text(exe: &Path) -> String {
     UNIT_TEMPLATE
@@ -719,6 +763,67 @@ mod tests {
         std::fs::remove_dir_all(d).unwrap();
     }
 
+    #[cfg(unix)]
+    mod trusted {
+        use super::super::untrusted_component;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::path::{Path, PathBuf};
+
+        fn mode(p: &Path, m: u32) {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+        }
+
+        /// A tree owned by the current user, which stands in for root in these tests.
+        fn tree() -> (PathBuf, PathBuf, PathBuf, u32) {
+            let top = std::env::temp_dir().join(format!("sg-trust-{}", uuid::Uuid::new_v4()));
+            let mid = top.join("mid");
+            std::fs::create_dir_all(&mid).unwrap();
+            let exe = mid.join("daemon");
+            std::fs::write(&exe, b"x").unwrap();
+            for p in [&top, &mid] {
+                mode(p, 0o755);
+            }
+            mode(&exe, 0o755);
+            let uid = std::fs::metadata(&top).unwrap().uid();
+            (top, mid, exe, uid)
+        }
+
+        #[test]
+        fn a_tree_only_the_owner_writes_is_trusted() {
+            let (top, _, exe, uid) = tree();
+            assert_eq!(untrusted_component(&exe, &top, uid), None);
+        }
+
+        #[test]
+        fn a_directory_others_can_write_is_named() {
+            let (top, mid, exe, uid) = tree();
+            mode(&mid, 0o775);
+            let (p, why) = untrusted_component(&exe, &top, uid).unwrap();
+            assert_eq!(p, mid);
+            assert!(why.contains("writable"), "{why}");
+            mode(&mid, 0o757);
+            assert_eq!(untrusted_component(&exe, &top, uid).unwrap().0, mid);
+        }
+
+        #[test]
+        fn a_writable_executable_is_named_and_a_sticky_directory_passes() {
+            let (top, mid, exe, uid) = tree();
+            mode(&exe, 0o775);
+            assert_eq!(untrusted_component(&exe, &top, uid).unwrap().0, exe);
+            mode(&exe, 0o755);
+            mode(&mid, 0o1777);
+            assert_eq!(untrusted_component(&exe, &top, uid), None);
+        }
+
+        #[test]
+        fn an_owner_other_than_root_is_named() {
+            let (top, _, exe, uid) = tree();
+            let (p, why) = untrusted_component(&exe, &top, uid + 1).unwrap();
+            assert_eq!(p, exe);
+            assert!(why.contains("not root"), "{why}");
+        }
+    }
+
     #[test]
     fn launchd_bootstraps_once_and_boots_out_before_removing() {
         let d = dir();
@@ -740,13 +845,19 @@ mod tests {
                 host: &mut host,
                 dir: d.clone(),
             };
-            m.install(Path::new("/usr/local/bin/socketguard-daemon"), true)
-                .unwrap();
+            m.install(
+                Path::new("/Library/Application Support/SocketGuard/socketguard-daemon"),
+                true,
+            )
+            .unwrap();
             let plist = std::fs::read_to_string(m.plist_path()).unwrap();
             assert!(plist.contains("<key>RunAtLoad</key><true/>"));
             assert!(plist.contains("<key>KeepAlive</key><true/>"));
-            m.install(Path::new("/usr/local/bin/socketguard-daemon"), true)
-                .unwrap();
+            m.install(
+                Path::new("/Library/Application Support/SocketGuard/socketguard-daemon"),
+                true,
+            )
+            .unwrap();
             m.uninstall().unwrap();
             assert!(!m.plist_path().exists());
             m.uninstall().unwrap();

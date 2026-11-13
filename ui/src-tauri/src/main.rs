@@ -722,12 +722,13 @@ fn sibling(base: &str) -> Result<std::path::PathBuf, UiError> {
     })
 }
 
-/// Where `name` may be: next to the executable, and on macOS also in `/usr/local/bin`, where
-/// the installer puts the CLI and the daemon (the app itself is inside an `.app` bundle).
+/// Where `name` may be: next to the executable, and on macOS also in
+/// `/Library/Application Support/SocketGuard`, where the installer puts the CLI and the
+/// daemon (the app itself is inside an `.app` bundle; ADR 0065).
 fn sibling_candidates(exe_dir: Option<&std::path::Path>, name: &str) -> Vec<std::path::PathBuf> {
     let mut v: Vec<std::path::PathBuf> = exe_dir.map(|d| d.join(name)).into_iter().collect();
     if cfg!(target_os = "macos") {
-        v.push(std::path::Path::new("/usr/local/bin").join(name));
+        v.push(std::path::Path::new("/Library/Application Support/SocketGuard").join(name));
     }
     v
 }
@@ -1112,10 +1113,13 @@ mod tests {
     fn the_executable_directory_comes_first() {
         let c = sibling_candidates(Some(Path::new("/opt/sg")), "socketguard-daemon");
         assert_eq!(c[0], Path::new("/opt/sg").join("socketguard-daemon"));
-        // /usr/local/bin is a fallback on macOS only, where the app sits in a bundle.
+        // The programs' directory is a fallback on macOS only, where the app sits in a bundle.
         assert_eq!(c.len(), if cfg!(target_os = "macos") { 2 } else { 1 });
         if cfg!(target_os = "macos") {
-            assert_eq!(c[1], Path::new("/usr/local/bin/socketguard-daemon"));
+            assert_eq!(
+                c[1],
+                Path::new("/Library/Application Support/SocketGuard/socketguard-daemon")
+            );
         }
     }
 }

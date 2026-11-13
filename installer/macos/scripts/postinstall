@@ -4,4 +4,11 @@
 # Never `uninstall` here: an upgrade is not an uninstall. A pkg has no uninstaller; to remove
 # SocketGuard run `sudo socketguard-daemon uninstall` (docs/packaging.md).
 set -e
-exec /usr/local/bin/socketguard-daemon service install
+prog="/Library/Application Support/SocketGuard"
+# Only root may write where the root-run daemon lives (ADR 0065); the state in the same
+# directory (database, Tor and Yggdrasil data) keeps its own owners and modes.
+chown root:wheel "$prog" "$prog/socketguard-daemon" "$prog/socketguard"
+chmod 755 "$prog" "$prog/socketguard-daemon" "$prog/socketguard"
+chown -R root:wheel "$prog/third_party"
+chmod -R go-w "$prog/third_party"
+exec "$prog/socketguard-daemon" service install

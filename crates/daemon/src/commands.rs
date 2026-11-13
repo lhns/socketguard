@@ -129,6 +129,8 @@ pub fn service_cmd(cmd: ServiceCmd) -> i32 {
                 }
                 let r = resolved()?;
                 let exe = std::env::current_exe().context("cannot find this executable")?;
+                #[cfg(unix)]
+                crate::service::check_exe_trusted(&exe)?;
                 let plan = InstallPlan {
                     exe: &exe,
                     config: &r.config_path,
