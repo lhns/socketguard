@@ -479,6 +479,9 @@ pub fn networks(nets: &[Network]) -> String {
                         if let Some(a) = &m.address {
                             notes.push(a.clone());
                         }
+                        if n.kind == NetworkKind::Yggdrasil && m.lan_discovery {
+                            notes.push("LAN discovery on".to_string());
+                        }
                         child_status(n.kind, m)
                     }
                     (None, NetworkStatus::Up) => "up".to_string(),
@@ -500,9 +503,17 @@ pub fn networks(nets: &[Network]) -> String {
 }
 
 /// The peers of a Yggdrasil network, one per line.
-pub fn network_peers(id: &str, peers: &[String]) -> String {
+pub fn network_peers(id: &str, peers: &[String], lan_discovery: bool) -> String {
     if peers.is_empty() {
-        return format!("{id} has no peers");
+        return if lan_discovery {
+            format!("{id} has no peers; it finds nodes on the local network (LAN discovery is on)")
+        } else {
+            format!(
+                "{id} has no peers and LAN discovery is off, so it has nobody to talk to: add \
+                 peers (networks peers {id} --add tls://host:port) or turn LAN discovery on \
+                 (networks lan-discovery {id} on)"
+            )
+        };
     }
     format!("peers of {id}:\n{}", peers.join("\n"))
 }

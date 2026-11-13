@@ -211,6 +211,8 @@ export const api = {
   /** What becomes reachable without the block of one network (or all of them): ADR 0051. */
   /** Replace the peers of a Yggdrasil network; its node restarts. */
   setNetworkPeers: (id: string, peers: string[]) => call<Network>("set_network_peers", { id, peers }),
+  setNetworkLanDiscovery: (id: string, enabled: boolean, confirmOpen = false) =>
+    call<Network>("set_network_lan_discovery", { id, enabled, confirmOpen }),
   /** Replace the obfs4 bridges of a Tor network; Tor restarts. */
   setNetworkBridges: (id: string, bridges: string[]) => call<Network>("set_network_bridges", { id, bridges }),
   /** Open one of the allow-listed pages (`links.ts`) in the system browser. */

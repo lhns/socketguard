@@ -290,12 +290,49 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
                 bail!("{id} is not a Yggdrasil network");
             };
             if add.is_empty() && rm.is_empty() {
-                return c.print(&child.peers, || render::network_peers(&id, &child.peers));
+                return c.print(&child.peers, || {
+                    render::network_peers(&id, &child.peers, child.lan_discovery)
+                });
             }
             let peers = edited_peers(&child.peers, &add, &rm)?;
             let n = c.client.set_peers(&id, &peers).await?;
+            let lan = n.child.as_ref().is_some_and(|m| m.lan_discovery);
             let now = n.child.map(|m| m.peers).unwrap_or(peers);
-            c.print(&now, || render::network_peers(&id, &now))
+            c.print(&now, || render::network_peers(&id, &now, lan))
+        }
+        NetworksCmd::LanDiscovery { id, state, yes } => {
+            let networks = c.client.list_networks().await?;
+            let Some(child) = networks
+                .iter()
+                .find(|n| n.id == id && n.kind == socketguard_core::NetworkKind::Yggdrasil)
+                .and_then(|n| n.child.as_ref())
+            else {
+                bail!("{id} is not a Yggdrasil network");
+            };
+            let Some(state) = state else {
+                let on = child.lan_discovery;
+                return c.print(&on, || {
+                    format!("LAN discovery of {id} is {}", if on { "on" } else { "off" })
+                });
+            };
+            let enabled = state == OnOff::On;
+            let saved = match c.client.set_lan_discovery(&id, enabled, yes).await {
+                Err(e) if e.is_confirmation_required() => {
+                    prompt::Stdin.confirm_or_yes(
+                        false,
+                        LAN_DISCOVERY_QUESTION,
+                        &format!("{LAN_DISCOVERY_QUESTION} Repeat with --yes to confirm"),
+                    )?;
+                    c.client.set_lan_discovery(&id, true, true).await?
+                }
+                other => other?,
+            };
+            c.print(&saved, || {
+                format!(
+                    "LAN discovery of {id} is {}",
+                    if enabled { "on" } else { "off" }
+                )
+            })
         }
         NetworksCmd::Bridges { id, add, rm, clear } => {
             let networks = c.client.list_networks().await?;
@@ -775,6 +812,11 @@ async fn tag_members(c: &Ctx, texts: &[String]) -> Result<Vec<TagMember>> {
     }
     Ok(out)
 }
+
+/// Turning LAN discovery on opens the node's peering listener to the local network.
+const LAN_DISCOVERY_QUESTION: &str = "Other computers on your local network will be able to \
+connect to this computer's Yggdrasil node. They cannot reach your apps unless you grant access. \
+Turn LAN discovery on?";
 
 /// Ask before setting patterns on a tag that has a grant to anyone (ADR 0059).
 fn confirm_patterns_open(label: &str) -> Result<()> {

@@ -217,6 +217,17 @@ pub struct SetPeers {
     pub peers: Vec<String>,
 }
 
+/// Body of `PUT /api/networks/{id}/lan-discovery`: find Yggdrasil nodes on the local network
+/// (the node restarts). Turning it on opens a peering listener to the LAN, so it needs
+/// `confirm_open`; turning it off needs none (ADR 0060).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetLanDiscovery {
+    pub enabled: bool,
+    #[serde(default)]
+    pub confirm_open: bool,
+}
+
 /// Body of `PUT /api/networks/{id}/bridges`: the obfs4 bridge lines of a Tor network
 /// (Tor restarts to use them). Empty turns bridges off. Lines are checked by
 /// `bridge::parse_bridge_line` and stored in canonical form.

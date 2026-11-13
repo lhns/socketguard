@@ -111,8 +111,13 @@ pub fn child_wish(
                 Err(why) => Desired::Unavailable(why),
             }
         }
-        BackendConfig::Yggdrasil { peers } => {
-            match super::ygg_child::YggChild::new(id, ctx, ifaces.clone()).spec(peers) {
+        BackendConfig::Yggdrasil {
+            peers,
+            lan_discovery,
+        } => {
+            match super::ygg_child::YggChild::new(id, ctx, ifaces.clone())
+                .spec(peers, *lan_discovery)
+            {
                 Ok(spec) => Desired::Run(Box::new(spec)),
                 Err(why) => Desired::Unavailable(why),
             }

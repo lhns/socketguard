@@ -118,6 +118,9 @@ networks add tor                        SocketGuard's own Tor
 networks add yggdrasil --peer tls://host:port           SocketGuard's own Yggdrasil; --peer repeats
 networks add ula|slaac|dhcpv6 [--interface eth0] [--id ID]
 networks peers yggdrasil [--add URI] [--rm URI]         show or change the peers of the Yggdrasil node
+networks lan-discovery yggdrasil [on|off] [-y]          show, or turn on or off, finding Yggdrasil nodes on the
+                                        local network (off by default; on lets other computers on the LAN
+                                        connect to the node and asks first; the node restarts)
 networks bridges tor [--add LINE] [--rm LINE] [--clear]   show or change the obfs4 bridges of Tor;
                                         LINE is `[Bridge ]obfs4 IP:port FINGERPRINT cert=CERT iat-mode=0` (other
                                         transports are refused); changing them restarts Tor; --clear turns them off

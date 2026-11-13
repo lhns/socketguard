@@ -11,7 +11,13 @@ interface: string, } | { "type": "yggdrasil",
 /**
  * Peers to connect to, as URIs (`tls://host:port`).
  */
-peers?: Array<string>, } | { "type": "slaac", 
+peers?: Array<string>, 
+/**
+ * Find and be found by Yggdrasil nodes on the local network (multicast, with a
+ * peering listener on each adapter's link-local address). Off unless turned on
+ * (ADR 0060).
+ */
+lan_discovery?: boolean, } | { "type": "slaac", 
 /**
  * Physical network interface connected to the router
  */

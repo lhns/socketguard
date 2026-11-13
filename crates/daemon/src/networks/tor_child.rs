@@ -283,6 +283,7 @@ impl TorChild {
             version: self.ctx.bundled.version_of("tor"),
             address: None,
             peers: vec![],
+            lan_discovery: false,
             peers_connected: None,
             bridges: vec![],
             bridges_unavailable: self.ctx.bundled.obfs4_helper().err(),

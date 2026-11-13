@@ -411,6 +411,17 @@ async fn set_network_peers(id: String, peers: Vec<String>) -> CmdResult<Network>
 }
 
 #[tauri::command]
+async fn set_network_lan_discovery(
+    id: String,
+    enabled: bool,
+    confirm_open: bool,
+) -> CmdResult<Network> {
+    Ok(client()
+        .set_lan_discovery(&id, enabled, confirm_open)
+        .await?)
+}
+
+#[tauri::command]
 async fn set_network_bridges(id: String, bridges: Vec<String>) -> CmdResult<Network> {
     Ok(client().set_bridges(&id, &bridges).await?)
 }
@@ -1054,6 +1065,7 @@ fn main() {
             network_setup,
             add_network,
             set_network_peers,
+            set_network_lan_discovery,
             set_network_bridges,
             open_link,
             delete_network,

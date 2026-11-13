@@ -291,6 +291,7 @@ fn tor_and_yggdrasil_networks_in_the_table() {
         version: None,
         address: address.map(str::to_string),
         peers: vec![],
+        lan_discovery: false,
         peers_connected,
         bridges: vec![],
         bridges_unavailable: None,
@@ -327,13 +328,16 @@ fn tor_and_yggdrasil_networks_in_the_table() {
     assert!(out.contains("up  2 peers"), "{out}");
     assert!(out.contains("200:1::5"), "{out}");
     assert_eq!(
-        render::network_peers("yggdrasil", &["tls://a.example:1".into()]),
+        render::network_peers("yggdrasil", &["tls://a.example:1".into()], false),
         "peers of yggdrasil:\ntls://a.example:1"
     );
-    assert_eq!(
-        render::network_peers("yggdrasil", &[]),
-        "yggdrasil has no peers"
+    let none = render::network_peers("yggdrasil", &[], false);
+    assert!(
+        none.contains("no peers and LAN discovery is off")
+            && none.contains("lan-discovery yggdrasil on"),
+        "{none}"
     );
+    assert!(render::network_peers("yggdrasil", &[], true).contains("LAN discovery is on"));
     assert_eq!(
         render::network_bridges("tor", &["obfs4 192.0.2.1:1 X".into()]),
         "bridges of tor:\nobfs4 192.0.2.1:1 X"

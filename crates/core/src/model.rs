@@ -333,6 +333,9 @@ pub struct ChildInfo {
     /// Yggdrasil: the configured peers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<String>,
+    /// Yggdrasil: whether the node finds nodes on the local network (ADR 0060).
+    #[serde(default)]
+    pub lan_discovery: bool,
     /// Yggdrasil: peers connected now; None when unknown (no admin endpoint, node down).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]

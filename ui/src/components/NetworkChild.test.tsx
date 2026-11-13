@@ -13,13 +13,13 @@ const ygg = (child?: ChildInfo): Network => ({
 const row = async (name: string) => within((await screen.findByRole("button", { name: `Remove network ${name}` })).closest("li") as HTMLElement);
 
 describe("child state in words", () => {
-  const t = (m: Partial<ChildInfo>) => childStateText({ state: "up", ...m });
+  const t = (m: Partial<ChildInfo>) => childStateText({ state: "up", lan_discovery: false, ...m });
   it("says each state plainly", () => {
     expect(t({ state: "starting" })).toBe("Starting");
-    expect(t({ state: "bootstrapping", progress: 40 })).toBe("Bootstrapping 40%");
-    expect(t({ state: "up" })).toBe("Up");
+    expect(t({ state: "bootstrapping", lan_discovery: false, progress: 40 })).toBe("Bootstrapping 40%");
+    expect(t({ state: "up", lan_discovery: false })).toBe("Up");
     expect(t({ state: "exited", detail: "bind failed" })).toBe("Exited: bind failed");
-    expect(t({ state: "waiting", detail: "another Yggdrasil node is running on this host" })).toBe("another Yggdrasil node is running on this host");
+    expect(t({ state: "waiting", lan_discovery: false, detail: "another Yggdrasil node is running on this host" })).toBe("another Yggdrasil node is running on this host");
     expect(t({ state: "stopped" })).toBe("Stopped (SocketGuard is turned off)");
     expect(t({ state: "unavailable" })).toBe("Not included in this build");
   });
@@ -40,8 +40,8 @@ describe("Configured networks", () => {
   it("show the child's state", async () => {
     mockDaemon({
       list_networks: () => [
-        ygg({ state: "up", runs_as: "socketguard-net", version: "0.5.12", peers: [] }),
-        { id: "n-tor", kind: "tor", name: "Tor", interface: null, grants_apply: true, status: { state: "up" }, child: { state: "bootstrapping", progress: 62, peers: [] } },
+        ygg({ state: "up", lan_discovery: false, runs_as: "socketguard-net", version: "0.5.12", peers: [] }),
+        { id: "n-tor", kind: "tor", name: "Tor", interface: null, grants_apply: true, status: { state: "up" }, child: { state: "bootstrapping", lan_discovery: false, progress: 62, peers: [] } },
       ],
     });
     renderWithProviders(<NetworksSection />);
@@ -62,13 +62,13 @@ describe("Configured networks", () => {
 
   it("explains a waiting node with the daemon's sentence", async () => {
     const detail = "Another Yggdrasil node is running on this computer. SocketGuard's Yggdrasil cannot run next to it.";
-    mockDaemon({ list_networks: () => [ygg({ state: "waiting", detail, peers: [] })] });
+    mockDaemon({ list_networks: () => [ygg({ state: "waiting", lan_discovery: false, detail, peers: [] })] });
     renderWithProviders(<NetworksSection />);
     expect((await row("Yggdrasil")).getByText(detail)).toBeInTheDocument();
   });
 
   it("show the address with Copy and the peer count, or say there are no peers", async () => {
-    mockDaemon({ list_networks: () => [ygg({ state: "up", address: "200:1::1", peers: ["tls://a.org:443"], peers_connected: 2 })] });
+    mockDaemon({ list_networks: () => [ygg({ state: "up", lan_discovery: false, address: "200:1::1", peers: ["tls://a.org:443"], peers_connected: 2 })] });
     const user = userEvent.setup();
     const { unmount } = renderWithProviders(<NetworksSection />);
     const y = await row("Yggdrasil");
@@ -78,19 +78,19 @@ describe("Configured networks", () => {
     expect(await navigator.clipboard.readText()).toBe("200:1::1");
     unmount();
 
-    mockDaemon({ list_networks: () => [ygg({ state: "up", address: "200:1::1", peers: [], peers_connected: 0 })] });
+    mockDaemon({ list_networks: () => [ygg({ state: "up", lan_discovery: false, address: "200:1::1", peers: [], peers_connected: 0 })] });
     renderWithProviders(<NetworksSection />);
-    expect((await row("Yggdrasil")).getByText("No peers yet: it only finds nodes on your LAN.")).toBeInTheDocument();
+    expect((await row("Yggdrasil")).getByText("No peers yet, and finding nodes on the local network is off: it has nobody to talk to. Add a peer below or turn on local network discovery.")).toBeInTheDocument();
   });
 
   it("in portable mode, say that a killed SocketGuard leaves the Wintun driver", async () => {
     const note = /Wintun\) installed if SocketGuard is closed unexpectedly; it is removed on a normal exit/;
-    mockDaemon({ portable_info: () => ({ portable: true }), list_networks: () => [ygg({ state: "up", address: "200:1::1", peers: [] })] });
+    mockDaemon({ portable_info: () => ({ portable: true }), list_networks: () => [ygg({ state: "up", lan_discovery: false, address: "200:1::1", peers: [] })] });
     const { unmount } = renderWithProviders(<NetworksSection />);
     expect(await (await row("Yggdrasil")).findByText(note)).toBeInTheDocument();
     unmount();
 
-    mockDaemon({ list_networks: () => [ygg({ state: "up", address: "200:1::1", peers: [] })] });
+    mockDaemon({ list_networks: () => [ygg({ state: "up", lan_discovery: false, address: "200:1::1", peers: [] })] });
     renderWithProviders(<NetworksSection />);
     const y = await row("Yggdrasil");
     expect(y.getByText("200:1::1")).toBeInTheDocument();
@@ -99,7 +99,7 @@ describe("Configured networks", () => {
 
   it("edit the peers: add, reject an invalid URI, remove, save", async () => {
     const d = mockDaemon({
-      list_networks: () => [ygg({ state: "up", peers: ["tls://a.org:443"], peers_connected: 1 })],
+      list_networks: () => [ygg({ state: "up", lan_discovery: false, peers: ["tls://a.org:443"], peers_connected: 1 })],
       set_network_peers: () => saved(ygg()),
     });
     const user = userEvent.setup();
@@ -123,6 +123,40 @@ describe("Configured networks", () => {
     await user.click(save);
     await waitFor(() => expect(d.count("set_network_peers")).toBe(1));
     expect(d.last("set_network_peers")?.args).toEqual({ id: "n-ygg", peers: ["tcp://b.org:1234"] });
+  });
+
+  it("LAN discovery is off, says what it means, and turning it on asks first", async () => {
+    const d = mockDaemon({
+      list_networks: () => [ygg({ state: "up", lan_discovery: false, peers: [] })],
+      set_network_lan_discovery: () => ygg(),
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<NetworksSection />);
+    const y = await row("Yggdrasil");
+    const sw = y.getByRole("switch", { name: "Find Yggdrasil nodes on the local network" });
+    expect(sw).not.toBeChecked();
+    expect(y.getByText(/Other computers on your local network can connect to this computer's Yggdrasil node\. They cannot reach your apps unless you grant access\./)).toBeInTheDocument();
+    await user.click(sw);
+    // Nothing is sent until the dialog is confirmed.
+    expect(d.count("set_network_lan_discovery")).toBe(0);
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Turn on" }));
+    await waitFor(() => expect(d.count("set_network_lan_discovery")).toBe(1));
+    expect(d.last("set_network_lan_discovery")?.args).toEqual({ id: "n-ygg", enabled: true, confirmOpen: true });
+  });
+
+  it("turning LAN discovery off needs no question", async () => {
+    const d = mockDaemon({
+      list_networks: () => [ygg({ state: "up", lan_discovery: true, peers: [] })],
+      set_network_lan_discovery: () => ygg(),
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<NetworksSection />);
+    const y = await row("Yggdrasil");
+    await user.click(y.getByRole("switch", { name: "Find Yggdrasil nodes on the local network" }));
+    await waitFor(() => expect(d.count("set_network_lan_discovery")).toBe(1));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(d.last("set_network_lan_discovery")?.args).toEqual({ id: "n-ygg", enabled: false, confirmOpen: false });
   });
 });
 
@@ -152,7 +186,7 @@ describe("bridge lines", () => {
 
 describe("Bridges of Tor", () => {
   it("are off by default, with the help and the link", async () => {
-    const d = mockDaemon({ list_networks: () => [tor({ state: "up", peers: [] })], open_link: () => undefined });
+    const d = mockDaemon({ list_networks: () => [tor({ state: "up", lan_discovery: false, peers: [] })], open_link: () => undefined });
     const user = userEvent.setup();
     renderWithProviders(<NetworksSection />);
     const t = await row("Tor");
@@ -165,7 +199,7 @@ describe("Bridges of Tor", () => {
   });
 
   it("show an error per line and save only valid lines, one per line", async () => {
-    const d = mockDaemon({ list_networks: () => [tor({ state: "up", peers: [] })], set_network_bridges: () => tor() });
+    const d = mockDaemon({ list_networks: () => [tor({ state: "up", lan_discovery: false, peers: [] })], set_network_bridges: () => tor() });
     const user = userEvent.setup();
     renderWithProviders(<NetworksSection />);
     const t = await row("Tor");
@@ -190,7 +224,7 @@ describe("Bridges of Tor", () => {
   });
 
   it("show the saved bridges, and emptying them turns bridges off", async () => {
-    const d = mockDaemon({ list_networks: () => [tor({ state: "bootstrapping", progress: 10, peers: [], bridges: [bridge(1)] })], set_network_bridges: () => tor() });
+    const d = mockDaemon({ list_networks: () => [tor({ state: "bootstrapping", lan_discovery: false, progress: 10, peers: [], bridges: [bridge(1)] })], set_network_bridges: () => tor() });
     const user = userEvent.setup();
     renderWithProviders(<NetworksSection />);
     const t = await row("Tor");
@@ -204,7 +238,7 @@ describe("Bridges of Tor", () => {
 
   it("cannot be set in a build without the helper, and the card says why", async () => {
     const why = "bridges are not available: this build does not include the obfs4 helper (lyrebird)";
-    mockDaemon({ list_networks: () => [tor({ state: "up", peers: [], bridges_unavailable: why })] });
+    mockDaemon({ list_networks: () => [tor({ state: "up", lan_discovery: false, peers: [], bridges_unavailable: why })] });
     renderWithProviders(<NetworksSection />);
     const t = await row("Tor");
     expect(t.getByText(why)).toBeInTheDocument();
@@ -215,7 +249,7 @@ describe("Bridges of Tor", () => {
   it("that are already saved can still be removed when the build has no helper", async () => {
     const why = "bridges are not available: this build does not include the obfs4 helper (lyrebird)";
     const d = mockDaemon({
-      list_networks: () => [tor({ state: "up", peers: [], bridges: [bridge(1)], bridges_unavailable: why })],
+      list_networks: () => [tor({ state: "up", lan_discovery: false, peers: [], bridges: [bridge(1)], bridges_unavailable: why })],
       set_network_bridges: () => tor(),
     });
     const user = userEvent.setup();
@@ -231,7 +265,7 @@ describe("Bridges of Tor", () => {
 
   it("show the daemon's refusal", async () => {
     mockDaemon({
-      list_networks: () => [tor({ state: "up", peers: [] })],
+      list_networks: () => [tor({ state: "up", lan_discovery: false, peers: [] })],
       set_network_bridges: () => { throw { code: "invalid", message: "invalid bridge: nope" }; },
     });
     const user = userEvent.setup();
@@ -253,11 +287,11 @@ describe("Bridges of Tor", () => {
 
 describe("Public Yggdrasil peers", () => {
   it("are one link away, with a sentence of help", async () => {
-    const d = mockDaemon({ list_networks: () => [ygg({ state: "up", peers: [] })], open_link: () => undefined });
+    const d = mockDaemon({ list_networks: () => [ygg({ state: "up", lan_discovery: false, peers: [] })], open_link: () => undefined });
     const user = userEvent.setup();
     renderWithProviders(<NetworksSection />);
     const y = await row("Yggdrasil");
-    expect(y.getByText(/A new node only finds other nodes on your LAN\. Add peers to reach further\./)).toBeInTheDocument();
+    expect(y.getByText(/A new node reaches nobody until you add peers or turn on discovery on the local network\./)).toBeInTheDocument();
     await user.click(y.getByRole("link", { name: "Find public peers" }));
     await waitFor(() => expect(d.count("open_link")).toBe(1));
     expect(d.last("open_link")?.args).toEqual({ url: "https://github.com/yggdrasil-network/public-peers" });
@@ -270,7 +304,7 @@ describe("Public Yggdrasil peers", () => {
 
 describe("Wording", () => {
   it("the networks screen avoids the retired words", async () => {
-    mockDaemon({ list_networks: () => [ygg({ state: "waiting", detail: "waiting", peers: [] })] });
+    mockDaemon({ list_networks: () => [ygg({ state: "waiting", lan_discovery: false, detail: "waiting", peers: [] })] });
     renderWithProviders(<NetworksSection />);
     await screen.findByRole("article", { name: "Tor" });
     expect(document.body.textContent ?? "").not.toMatch(/whole app|whole tag|\bsockets?\b|socket group/i);

@@ -216,6 +216,11 @@ export const useAddNetwork = () =>
   useInvalidating((req: NewNetwork) => api.addNetwork(req), NETWORK_KEYS);
 export const useSetNetworkBridges = () =>
   useInvalidating((v: { id: string; bridges: string[] }) => api.setNetworkBridges(v.id, v.bridges), NETWORK_KEYS);
+export const useSetNetworkLanDiscovery = () =>
+  useInvalidating(
+    (v: { id: string; enabled: boolean; confirmOpen?: boolean }) => api.setNetworkLanDiscovery(v.id, v.enabled, v.confirmOpen),
+    NETWORK_KEYS,
+  );
 export const useSetNetworkPeers = () =>
   useInvalidating((v: { id: string; peers: string[] }) => api.setNetworkPeers(v.id, v.peers), NETWORK_KEYS);
 export const useDeleteNetwork = () =>

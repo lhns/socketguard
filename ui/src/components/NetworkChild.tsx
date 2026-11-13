@@ -1,8 +1,9 @@
 import { useState, type ReactNode } from "react";
+import ConfirmDialog from "./ConfirmDialog";
 import { api, type ChildInfo, type Network } from "../api";
 import { errorText } from "../lib";
 import { TOR_BRIDGES_URL, YGG_PUBLIC_PEERS_URL } from "../links";
-import { usePortable, useSetNetworkBridges, useSetNetworkPeers } from "../queries";
+import { usePortable, useSetNetworkBridges, useSetNetworkLanDiscovery, useSetNetworkPeers } from "../queries";
 import { useToast } from "./Toast";
 
 /** The child process of a Tor or Yggdrasil network, in words. */
@@ -131,11 +132,53 @@ export function ChildDetails({ network }: { network: Network }) {
         {m.peers_connected
           ? `Connected to ${m.peers_connected} ${m.peers_connected === 1 ? "peer" : "peers"}.`
           : peers.length === 0
-            ? "No peers yet: it only finds nodes on your LAN."
+            ? m.lan_discovery
+              ? "No peers yet: it only finds nodes on your local network."
+              : "No peers yet, and finding nodes on the local network is off: it has nobody to talk to. Add a peer below or turn on local network discovery."
             : "Not connected to any peer yet."}
       </p>
+      <LanDiscovery id={network.id} on={m.lan_discovery} />
       {/* Remounts when the saved peers change, so the draft follows the daemon. */}
       <PeersEditor key={JSON.stringify(peers)} id={network.id} saved={peers} />
+    </div>
+  );
+}
+
+/** The switch for finding Yggdrasil nodes on the local network. Turning it on opens the node to the
+ * LAN, so it asks first (the daemon refuses without `confirm_open`); turning it off does not. */
+function LanDiscovery({ id, on }: { id: string; on: boolean }) {
+  const toast = useToast();
+  const set = useSetNetworkLanDiscovery();
+  const [asking, setAsking] = useState(false);
+  const apply = (enabled: boolean) =>
+    set.mutate({ id, enabled, confirmOpen: enabled }, { onError: (e) => toast.error(errorText(e)) });
+  return (
+    <div>
+      <label className="switch-row">
+        <input
+          type="checkbox"
+          role="switch"
+          checked={on}
+          disabled={set.isPending}
+          onChange={(e) => (e.target.checked ? setAsking(true) : apply(false))}
+        />{" "}
+        Find Yggdrasil nodes on the local network
+      </label>
+      <p className="hint">Other computers on your local network can connect to this computer&apos;s Yggdrasil node. They cannot reach your apps unless you grant access.</p>
+      {asking && (
+        <ConfirmDialog
+          title="Open the Yggdrasil node to the local network?"
+          confirmLabel="Turn on"
+          onCancel={() => setAsking(false)}
+          onConfirm={() => {
+            setAsking(false);
+            apply(true);
+          }}
+          warning={<strong>Other computers on your local network will be able to connect to this computer&apos;s Yggdrasil node.</strong>}
+        >
+          <p>They cannot reach your apps unless you grant access. The node restarts.</p>
+        </ConfirmDialog>
+      )}
     </div>
   );
 }
@@ -221,7 +264,7 @@ function PeersEditor({ id, saved }: { id: string; saved: string[] }) {
       </div>
       <p className="hint">Saving restarts SocketGuard&apos;s node.</p>
       <p className="hint">
-        A new node only finds other nodes on your LAN. Add peers to reach further.{" "}
+        A new node reaches nobody until you add peers or turn on discovery on the local network.{" "}
         <ExternalLink url={YGG_PUBLIC_PEERS_URL}>Find public peers</ExternalLink>
       </p>
     </div>

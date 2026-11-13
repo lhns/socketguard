@@ -67,6 +67,7 @@ ADRs document significant architectural decisions made during the project's deve
 | [0057](0057-one-staged-tree-and-one-purge-list.md) | One Staged Tree per System, One Purge List | Accepted (refines 0050, 0052; superseded in part by 0058) |
 | [0058](0058-freeing-a-reservations-rows-is-a-change-of-reach.md) | Freeing a Reservation's Rows Is a Change of Reach | Accepted (extends 0047; supersedes 0057 in part) |
 | [0059](0059-patterns-on-a-tag-open-to-anyone-are-confirmed.md) | Patterns on a Tag That Anyone Can Reach Are Confirmed | Accepted (refines 0043, 0047) |
+| [0060](0060-yggdrasil-lan-discovery-is-off-unless-turned-on.md) | Yggdrasil LAN Discovery Is Off Unless Turned On | Accepted (amends 0052) |
 
 ## Format
 

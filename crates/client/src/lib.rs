@@ -23,8 +23,8 @@ use socketguard_core::api_types::{
     ConfirmQuery, DisableRequest, Enforcement, EnforcementNotice, ExportDocument, MemberQuery,
     MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation,
     NewTag, NewTagMember, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse,
-    ReserveRequest, SetBridges, SetMembers, SetPeers, ShareResponse, StatusResponse,
-    TorKeyResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
+    ReserveRequest, SetBridges, SetLanDiscovery, SetMembers, SetPeers, ShareResponse,
+    StatusResponse, TorKeyResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::setup::NetworkSetup;
 use socketguard_core::{
@@ -674,6 +674,23 @@ impl Client {
             peers: peers.to_vec(),
         };
         self.call(&routes::SET_PEERS, &[id], None, json(&req)).await
+    }
+
+    /// Turn a Yggdrasil network's discovery of the local network on or off (ADR 0060); the
+    /// node restarts. Turning it on needs `confirm_open`, else the code is
+    /// `confirmation_required`.
+    pub async fn set_lan_discovery(
+        &self,
+        id: &str,
+        enabled: bool,
+        confirm_open: bool,
+    ) -> Result<Network> {
+        let req = SetLanDiscovery {
+            enabled,
+            confirm_open,
+        };
+        self.call(&routes::SET_LAN_DISCOVERY, &[id], None, json(&req))
+            .await
     }
 
     /// Replace the bridge lines of a Tor network (ADR 0052); Tor restarts.

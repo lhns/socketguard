@@ -428,6 +428,7 @@ impl Engine {
                         version: None,
                         address: None,
                         peers: vec![],
+                        lan_discovery: false,
                         peers_connected: None,
                         bridges: vec![],
                         bridges_unavailable: None,
@@ -435,6 +436,7 @@ impl Engine {
                 if info.peers.is_empty() {
                     info.peers = active.config.backend.peers().to_vec();
                 }
+                info.lan_discovery = active.config.backend.lan_discovery();
                 if info.bridges.is_empty() {
                     // Shown in canonical form, whatever a hand-edited config file holds.
                     let configured = active.config.backend.bridges();

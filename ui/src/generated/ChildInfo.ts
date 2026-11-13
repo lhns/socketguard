@@ -31,6 +31,10 @@ address?: string,
  */
 peers?: Array<string>, 
 /**
+ * Yggdrasil: whether the node finds nodes on the local network (ADR 0060).
+ */
+lan_discovery: boolean, 
+/**
  * Yggdrasil: peers connected now; None when unknown (no admin endpoint, node down).
  */
 peers_connected?: number, 
