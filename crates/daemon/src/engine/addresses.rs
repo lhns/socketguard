@@ -13,7 +13,7 @@ use crate::firewall::ScopeMatch;
 use crate::iface::InterfaceManager;
 use crate::networks::ip::{iid_of, same_prefix64, with_prefix64};
 use crate::networks::{LocatorRequest, NewLocator};
-use crate::state::{Database, OwnedAddress};
+use crate::state::{Database, OwnedAddress, Write};
 use crate::AppState;
 use chrono::Utc;
 use futures_util::StreamExt;
@@ -45,6 +45,23 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// The writes that retire `addresses` (the same filter as [`Engine::retire_addresses`]),
+    /// for a batch to put first in its transaction: if the batch fails, nothing is retiring.
+    /// Taking them off their networks (`remove_app_locators`) waits for the commit.
+    pub(super) fn retire_writes(&self, addresses: &[Address]) -> Vec<Write> {
+        addresses
+            .iter()
+            .filter_map(|a| {
+                let (ip, iface) = (a.locator.ipv6()?, self.interface_of(&a.network_id)?);
+                Some(Write::RetireAddress {
+                    addr: ip,
+                    interface: iface,
+                    network_id: Some(a.network_id.clone()),
+                })
+            })
+            .collect()
     }
 
     /// Take every owned address that no longer belongs to an app off its interface, and

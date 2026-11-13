@@ -1281,3 +1281,76 @@ async fn deleting_a_bound_tag_that_hides_an_anyone_grant_needs_confirmation() {
     engine.delete_tag(&w.h.state, &tag, true).await.unwrap();
     assert_eq!(w.h.tor.add_commands().len(), 1);
 }
+
+// ─── Imports ask before freeing a row that hides an Anyone grant (ADR 0058, 0061) ───
+
+use socketguard_core::api_types::{ApplyRequest, ExportBinding, ExportDocument};
+
+impl Web {
+    async fn export_text(&self) -> String {
+        let engine = self.h.state.engine.read().await;
+        let doc = socketguard_daemon::apply::export(&engine, &self.h.state)
+            .await
+            .unwrap();
+        serde_json::to_string(&doc).unwrap()
+    }
+
+    /// Import `edit` of the current export: refused without the confirmation and nothing
+    /// applied (a new peer comes first in the execution order); applied with it.
+    async fn import_needs_confirmation(&self, edit: impl Fn(&mut ExportDocument)) {
+        let engine = self.h.state.engine.read().await;
+        let mut document = socketguard_daemon::apply::export(&engine, &self.h.state)
+            .await
+            .unwrap();
+        edit(&mut document);
+        document
+            .peers
+            .push(socketguard_core::api_types::ExportPeer {
+                label: "zed".into(),
+                credentials: vec![],
+            });
+        let request = |dry_run, confirm_open| ApplyRequest {
+            document: document.clone(),
+            dry_run,
+            confirm_open,
+        };
+        let before = self.export_text().await;
+        let preview =
+            socketguard_daemon::apply::apply(&engine, &self.h.state, request(true, false))
+                .await
+                .unwrap();
+        assert!(preview.confirm_open_required);
+        let refused =
+            socketguard_daemon::apply::apply(&engine, &self.h.state, request(false, false)).await;
+        assert!(confirmation_required(&refused), "{refused:?}");
+        assert_eq!(self.export_text().await, before, "nothing was applied");
+        assert!(self.h.tor.add_commands().is_empty());
+        socketguard_daemon::apply::apply(&engine, &self.h.state, request(false, true))
+            .await
+            .unwrap();
+        assert_ne!(self.export_text().await, before);
+        assert_eq!(self.h.tor.add_commands().len(), 1, "nginx is published now");
+    }
+}
+
+#[tokio::test]
+async fn an_import_that_removes_the_binding_hiding_an_anyone_grant_needs_confirmation() {
+    let w = web().await;
+    w.grant(Target::App(w.nginx.clone()), Scope::All, Subject::Anyone)
+        .await;
+    w.import_needs_confirmation(|doc| {
+        doc.reservations[0]
+            .bindings
+            .retain(|b| !matches!(b, ExportBinding::App { app, .. } if app.id == w.nginx));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_import_that_releases_the_reservation_hiding_an_anyone_grant_needs_confirmation() {
+    let w = web().await;
+    w.grant(Target::App(w.nginx.clone()), Scope::All, Subject::Anyone)
+        .await;
+    w.import_needs_confirmation(|doc| doc.reservations.clear())
+        .await;
+}

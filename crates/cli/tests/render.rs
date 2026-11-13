@@ -563,12 +563,14 @@ fn diff_and_risks() {
                 opens_to_anyone: true,
             },
         ],
+        confirm_open_required: false,
     };
     insta::assert_snapshot!("diff", render::changes(&r));
     assert_eq!(
         render::changes(&ApplyResponse {
             dry_run: false,
-            changes: vec![]
+            changes: vec![],
+            confirm_open_required: false,
         }),
         "no changes"
     );

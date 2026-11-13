@@ -45,6 +45,7 @@ impl Engine {
         patterns: &[String],
         members: &[TagMember],
     ) -> Result<Tag, EngineError> {
+        let change = self.change_lock.lock().await;
         let apps = state.db.list_apps().await?;
         let tag = Self::plan_tag(new_id(), label, patterns, members, &apps)?;
         state
@@ -52,6 +53,7 @@ impl Engine {
             .apply_writes(&[Write::InsertTag(tag.clone())])
             .await
             .map_err(|e| Self::conflict_or_internal(e, &format!("tag {}", tag.label)))?;
+        drop(change);
         let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(ActivityKind::TagAdded, format!("Added tag {}", tag.label));
         self.commit(
@@ -114,6 +116,7 @@ impl Engine {
         patterns: Option<&[String]>,
         confirm_open: bool,
     ) -> Result<Tag, EngineError> {
+        let change = self.change_lock.lock().await;
         let mut tag = self.get_tag(state, id).await?;
         let label = label.map(|l| Self::clean_label(l, "tag")).transpose()?;
         let patterns = patterns.map(clean_patterns);
@@ -148,6 +151,7 @@ impl Engine {
                 .collect();
             state.db.apply_writes(&writes).await?;
         }
+        drop(change);
         let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::TagChanged,
@@ -172,6 +176,7 @@ impl Engine {
         id: &str,
         confirm_open: bool,
     ) -> Result<(), EngineError> {
+        let change = self.change_lock.lock().await;
         let tag = self.get_tag(state, id).await?;
         let mut cat = crate::catalog::Catalog::load(state).await?;
         let bound_before = cat.bound_rows();
@@ -189,6 +194,7 @@ impl Engine {
         );
         ensure_confirmed(any_to_anyone(&freed), confirm_open)?;
         state.db.delete_tag(id).await?;
+        drop(change);
         let applied = self.apply_and_ensure(state).await;
         let activity = NewActivity::new(
             ActivityKind::TagRemoved,

@@ -87,12 +87,20 @@ impl Database {
     }
 
     async fn load_reservations(&self, only: Option<&str>) -> Result<Vec<Reservation>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::load_reservations_on(&mut conn, only).await
+    }
+
+    pub(super) async fn load_reservations_on(
+        conn: &mut sqlx::SqliteConnection,
+        only: Option<&str>,
+    ) -> Result<Vec<Reservation>> {
         let rows = sqlx::query(
             "SELECT id, label, created_at FROM reservations WHERE (?1 IS NULL OR id = ?1) \
              ORDER BY label",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
@@ -108,7 +116,7 @@ impl Database {
              FROM reservation_bindings WHERE (?1 IS NULL OR reservation_id = ?1) ORDER BY rowid",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut by_res: HashMap<String, Vec<Binding>> = HashMap::new();
         for r in bindings {

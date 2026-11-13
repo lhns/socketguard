@@ -522,6 +522,28 @@ async fn export_apply_and_disable() {
         env.ok(&["grants", "--json"]).await.json(),
         serde_json::json!([])
     );
+    // An import that affects what Anyone can reach is confirmed with its own sentence.
+    env.ok(&["grant", "nginx", "anyone", "--yes"]).await;
+    let anyone_path = env.dir.join("anyone.toml");
+    env.ok(&["export", "-o", anyone_path.to_str().unwrap()])
+        .await;
+    env.ok(&["revoke", "nginx", "anyone"]).await;
+    let a = anyone_path.to_str().unwrap();
+    let e = env.fails(&["apply", "-f", a]).await;
+    assert!(
+        e.stderr.contains("affect what Anyone can reach"),
+        "{}",
+        e.stderr
+    );
+    env.ok(&["apply", "-f", a, "--yes"]).await;
+    assert!(env
+        .ok(&["grants"])
+        .await
+        .stdout
+        .to_lowercase()
+        .contains("anyone"));
+    env.ok(&["revoke", "nginx", "anyone"]).await;
+
     let bad = env
         .fails(&[
             "apply",

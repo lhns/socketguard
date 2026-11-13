@@ -18,6 +18,7 @@ use socketguard_core::{
 };
 use sqlx::Row;
 use std::collections::HashMap;
+use std::net::Ipv6Addr;
 
 /// One database change. A batch applies a list of these in one transaction.
 #[derive(Debug, Clone)]
@@ -63,6 +64,13 @@ pub enum Write {
     },
     /// An address and, with it, its onion key.
     DeleteAddress(String),
+    /// Mark an owned address as being removed (ADR 0026), in the same transaction as the
+    /// write that stops naming it: a failed write leaves it active.
+    RetireAddress {
+        addr: Ipv6Addr,
+        interface: String,
+        network_id: Option<String>,
+    },
     /// A new address with its locator secret (the onion service key).
     InsertAddress {
         address: Address,
@@ -181,6 +189,11 @@ async fn apply_write(tx: &mut Tx<'_>, w: &Write) -> Result<()> {
         Write::DeletePortGroup(id) => delete_port_group_in(tx, id).await?,
         Write::AttachPortGroup { group_id, app_id } => attach_in(tx, group_id, app_id).await?,
         Write::DetachPortGroup { group_id, app_id } => detach_in(tx, group_id, app_id).await?,
+        Write::RetireAddress {
+            addr,
+            interface,
+            network_id,
+        } => super::retire_address_in(tx, *addr, interface, network_id.as_deref()).await?,
         Write::DeleteAddress(id) => {
             sqlx::query("DELETE FROM addresses WHERE id = ?")
                 .bind(id)
@@ -285,12 +298,20 @@ impl Database {
     }
 
     async fn load_tags(&self, only: Option<&str>) -> Result<Vec<Tag>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::load_tags_on(&mut conn, only).await
+    }
+
+    pub(super) async fn load_tags_on(
+        conn: &mut sqlx::SqliteConnection,
+        only: Option<&str>,
+    ) -> Result<Vec<Tag>> {
         let rows = sqlx::query(
             "SELECT id, label, patterns, created_at FROM tags WHERE (?1 IS NULL OR id = ?1) \
              ORDER BY label",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut tags = Vec::with_capacity(rows.len());
         for r in rows {
@@ -308,7 +329,7 @@ impl Database {
              WHERE (?1 IS NULL OR tag_id = ?1) ORDER BY rowid",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut by_tag: HashMap<String, Vec<TagMember>> = HashMap::new();
         for r in members {
@@ -323,7 +344,7 @@ impl Database {
              ORDER BY rowid",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut ex_by_tag: HashMap<String, Vec<String>> = HashMap::new();
         for r in excluded {

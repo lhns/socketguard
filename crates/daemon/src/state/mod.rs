@@ -31,6 +31,7 @@ pub use winacl::protect_portable_dir;
 
 use protect::{precreate_protected, protect_files};
 
+use crate::catalog::Catalog;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use socketguard_core::{
@@ -61,6 +62,25 @@ pub struct OwnedAddress {
     pub network_id: Option<String>,
     /// Being removed: not wanted any more, but still denied until it is really gone.
     pub retiring: bool,
+}
+
+/// [`Database::retire_address`] on a connection, so a batch can retire in its transaction.
+pub(crate) async fn retire_address_in(
+    conn: &mut sqlx::SqliteConnection,
+    addr: Ipv6Addr,
+    interface: &str,
+    network_id: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO owned_addresses (addr, interface, network_id, state, since)          VALUES (?1, ?2, ?3, 'retiring', ?4)          ON CONFLICT(addr) DO UPDATE SET state = 'retiring',          since = CASE WHEN state = 'retiring' THEN since ELSE ?4 END",
+    )
+    .bind(addr.to_string())
+    .bind(interface)
+    .bind(network_id)
+    .bind(ts(Utc::now()))
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 pub struct Database {
@@ -305,21 +325,62 @@ impl Database {
         Ok(self.load_apps(Some(id)).await?.into_iter().next())
     }
 
+    /// The stored catalog, read in one transaction: a commit that lands meanwhile is seen
+    /// whole or not at all (SQLite's WAL gives the transaction the state of its first read).
+    pub async fn read_catalog(&self) -> Result<Catalog> {
+        let mut tx = self.pool.begin().await?;
+        let catalog = Self::catalog_on(&mut tx).await?;
+        tx.commit().await?;
+        Ok(catalog)
+    }
+
+    /// What the ruleset is built from, read in one transaction: the catalog, the whole-host
+    /// protection and the owned addresses.
+    pub async fn read_snapshot(&self) -> Result<(Catalog, Vec<String>, Vec<OwnedAddress>)> {
+        let mut tx = self.pool.begin().await?;
+        let catalog = Self::catalog_on(&mut tx).await?;
+        let protect_host = Self::protect_host_on(&mut tx).await?;
+        let owned = Self::list_owned_addresses_on(&mut tx).await?;
+        tx.commit().await?;
+        Ok((catalog, protect_host, owned))
+    }
+
+    async fn catalog_on(conn: &mut sqlx::SqliteConnection) -> Result<Catalog> {
+        Ok(Catalog {
+            apps: Self::load_apps_on(conn, None).await?,
+            peers: Self::load_peers_on(conn, None).await?,
+            groups: Self::load_groups_on(conn, None).await?,
+            tags: Self::load_tags_on(conn, None).await?,
+            port_groups: Self::load_port_groups_on(conn, None).await?,
+            grants: Self::list_grants_on(conn).await?,
+            reservations: Self::load_reservations_on(conn, None).await?,
+            addresses: Self::list_addresses_on(conn).await?,
+        })
+    }
+
     pub async fn list_apps(&self) -> Result<Vec<App>> {
         self.load_apps(None).await
     }
 
     async fn load_apps(&self, only: Option<&str>) -> Result<Vec<App>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::load_apps_on(&mut conn, only).await
+    }
+
+    pub(super) async fn load_apps_on(
+        conn: &mut sqlx::SqliteConnection,
+        only: Option<&str>,
+    ) -> Result<Vec<App>> {
         let rows = match only {
             Some(id) => {
                 sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, identity_note, system, first_seen, last_seen FROM apps WHERE id = ?")
                     .bind(id)
-                    .fetch_all(&self.pool)
+                    .fetch_all(&mut *conn)
                     .await?
             }
             None => {
                 sqlx::query("SELECT id, name, process_name, exe_path, interpreter_arg, identity_note, system, first_seen, last_seen FROM apps ORDER BY name, id")
-                    .fetch_all(&self.pool)
+                    .fetch_all(&mut *conn)
                     .await?
             }
         };
@@ -340,7 +401,7 @@ impl Database {
                 addresses: Vec::new(),
             });
         }
-        let mut ports = self.load_ports(only).await?;
+        let mut ports = Self::load_ports_on(conn, only).await?;
         for app in &mut apps {
             app.ports = ports.remove(&app.id).unwrap_or_default();
         }
@@ -349,13 +410,16 @@ impl Database {
 
     // ======== App ports ========
 
-    async fn load_ports(&self, only: Option<&str>) -> Result<HashMap<String, Vec<AppPort>>> {
+    pub(super) async fn load_ports_on(
+        conn: &mut sqlx::SqliteConnection,
+        only: Option<&str>,
+    ) -> Result<HashMap<String, Vec<AppPort>>> {
         let rows = sqlx::query(
             "SELECT app_id, port, proto, listening, last_seen, family FROM app_ports \
              WHERE (?1 IS NULL OR app_id = ?1) ORDER BY port, proto",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut out: HashMap<String, Vec<AppPort>> = HashMap::new();
         for r in rows {
@@ -430,8 +494,15 @@ impl Database {
     }
 
     pub async fn list_addresses(&self) -> Result<Vec<Address>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::list_addresses_on(&mut conn).await
+    }
+
+    pub(super) async fn list_addresses_on(
+        conn: &mut sqlx::SqliteConnection,
+    ) -> Result<Vec<Address>> {
         sqlx::query(&format!("{ADDRESS_SELECT} ORDER BY created_at, id"))
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *conn)
             .await?
             .into_iter()
             .map(address_from_row)
@@ -505,6 +576,13 @@ impl Database {
         Ok(())
     }
 
+    /// Run SQL as it is. Tests only, to make a later write fail.
+    #[doc(hidden)]
+    pub async fn exec_raw(&self, sql: &str) -> Result<()> {
+        sqlx::query(sql).execute(&self.pool).await?;
+        Ok(())
+    }
+
     /// Mark `addr` as being removed. It stays owned (and so denied) until
     /// [`Database::forget_address`] confirms it is gone.
     pub async fn retire_address(
@@ -513,19 +591,8 @@ impl Database {
         interface: &str,
         network_id: Option<&str>,
     ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO owned_addresses (addr, interface, network_id, state, since) \
-             VALUES (?1, ?2, ?3, 'retiring', ?4) \
-             ON CONFLICT(addr) DO UPDATE SET state = 'retiring', \
-             since = CASE WHEN state = 'retiring' THEN since ELSE ?4 END",
-        )
-        .bind(addr.to_string())
-        .bind(interface)
-        .bind(network_id)
-        .bind(ts(Utc::now()))
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        let mut conn = self.pool.acquire().await?;
+        retire_address_in(&mut conn, addr, interface, network_id).await
     }
 
     /// Delete the row of an address that is confirmed off its interface.
@@ -538,10 +605,17 @@ impl Database {
     }
 
     pub async fn list_owned_addresses(&self) -> Result<Vec<OwnedAddress>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::list_owned_addresses_on(&mut conn).await
+    }
+
+    pub(super) async fn list_owned_addresses_on(
+        conn: &mut sqlx::SqliteConnection,
+    ) -> Result<Vec<OwnedAddress>> {
         let rows = sqlx::query(
             "SELECT addr, interface, network_id, state FROM owned_addresses ORDER BY addr",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
@@ -580,11 +654,19 @@ impl Database {
     }
 
     async fn load_peers(&self, only: Option<&str>) -> Result<Vec<Peer>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::load_peers_on(&mut conn, only).await
+    }
+
+    pub(super) async fn load_peers_on(
+        conn: &mut sqlx::SqliteConnection,
+        only: Option<&str>,
+    ) -> Result<Vec<Peer>> {
         let rows = sqlx::query(
             "SELECT id, label, created_at FROM peers WHERE (?1 IS NULL OR id = ?1) ORDER BY label",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut peers = Vec::with_capacity(rows.len());
         for r in rows {
@@ -601,7 +683,7 @@ impl Database {
              WHERE (?1 IS NULL OR peer_id = ?1) ORDER BY rowid",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut by_peer: HashMap<String, Vec<Credential>> = HashMap::new();
         for r in creds {
@@ -623,7 +705,7 @@ impl Database {
              WHERE (?1 IS NULL OR peer_id = ?1) ORDER BY group_id",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut groups: HashMap<String, Vec<String>> = HashMap::new();
         for r in members {
@@ -724,18 +806,26 @@ impl Database {
     }
 
     async fn load_groups(&self, only: Option<&str>) -> Result<Vec<PeerGroup>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::load_groups_on(&mut conn, only).await
+    }
+
+    pub(super) async fn load_groups_on(
+        conn: &mut sqlx::SqliteConnection,
+        only: Option<&str>,
+    ) -> Result<Vec<PeerGroup>> {
         let rows = sqlx::query(
             "SELECT id, label, created_at FROM peer_groups WHERE (?1 IS NULL OR id = ?1) ORDER BY label",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let members = sqlx::query(
             "SELECT group_id, peer_id FROM peer_group_members \
              WHERE (?1 IS NULL OR group_id = ?1) ORDER BY peer_id",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut by_group: HashMap<String, Vec<String>> = HashMap::new();
         for r in members {
@@ -819,8 +909,13 @@ impl Database {
     }
 
     pub async fn list_grants(&self) -> Result<Vec<Grant>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::list_grants_on(&mut conn).await
+    }
+
+    pub(super) async fn list_grants_on(conn: &mut sqlx::SqliteConnection) -> Result<Vec<Grant>> {
         sqlx::query(&format!("{GRANT_SELECT} ORDER BY created_at, id"))
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *conn)
             .await?
             .into_iter()
             .map(grant_from_row)
@@ -1484,6 +1579,24 @@ mod tests {
         assert_eq!(db.list_grants().await.unwrap().len(), 1);
         assert_eq!(count(&db, "peer_group_members").await, 0);
         assert!(db.get_peer(&p.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_read_equals_the_separate_lists() {
+        let db = db().await;
+        db.insert_app(&app("a1")).await.unwrap();
+        let p = peer("alice", &[]);
+        db.insert_peer(&p).await.unwrap();
+        db.claim_address("300:1::1".parse().unwrap(), "ygg0", Some("ygg"))
+            .await
+            .unwrap();
+        let (cat, protect, owned) = db.read_snapshot().await.unwrap();
+        assert_eq!(cat.apps.len(), db.list_apps().await.unwrap().len());
+        assert_eq!(cat.peers, db.list_peers().await.unwrap());
+        assert_eq!(cat.grants, db.list_grants().await.unwrap());
+        assert_eq!(protect, db.protect_host().await.unwrap());
+        assert_eq!(owned.len(), 1);
+        assert_eq!(db.read_catalog().await.unwrap().peers, cat.peers);
     }
 
     #[tokio::test]

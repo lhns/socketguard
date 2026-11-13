@@ -77,12 +77,20 @@ impl Database {
     }
 
     async fn load_port_groups(&self, only: Option<&str>) -> Result<Vec<PortGroup>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::load_port_groups_on(&mut conn, only).await
+    }
+
+    pub(super) async fn load_port_groups_on(
+        conn: &mut sqlx::SqliteConnection,
+        only: Option<&str>,
+    ) -> Result<Vec<PortGroup>> {
         let rows = sqlx::query(
             "SELECT id, label, ports, created_at FROM port_groups \
              WHERE (?1 IS NULL OR id = ?1) ORDER BY label",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut groups = Vec::with_capacity(rows.len());
         for r in rows {
@@ -99,7 +107,7 @@ impl Database {
              WHERE (?1 IS NULL OR group_id = ?1) ORDER BY rowid",
         )
         .bind(only)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut by_group: HashMap<String, Vec<String>> = HashMap::new();
         for r in attached {
@@ -229,5 +237,34 @@ mod tests {
             .unwrap_err();
         assert!(is_unique_violation(&err));
         assert_eq!(count(&db, "port_groups").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_retire_in_a_failed_batch_is_rolled_back_and_in_a_good_one_kept() {
+        let db = db().await;
+        let addr: std::net::Ipv6Addr = "300:1::1".parse().unwrap();
+        db.claim_address(addr, "ygg0", Some("ygg")).await.unwrap();
+        db.apply_writes(&[Write::InsertPortGroup(group("x", &["1/tcp"], &[]))])
+            .await
+            .unwrap();
+        let retire = Write::RetireAddress {
+            addr,
+            interface: "ygg0".into(),
+            network_id: Some("ygg".into()),
+        };
+        let err = db
+            .apply_writes(&[
+                retire.clone(),
+                Write::InsertPortGroup(group("x", &["3/tcp"], &[])),
+            ])
+            .await
+            .unwrap_err();
+        assert!(is_unique_violation(&err));
+        assert!(!db.list_owned_addresses().await.unwrap()[0].retiring);
+        // A dry run leaves nothing either.
+        db.try_writes(std::slice::from_ref(&retire)).await.unwrap();
+        assert!(!db.list_owned_addresses().await.unwrap()[0].retiring);
+        db.apply_writes(&[retire]).await.unwrap();
+        assert!(db.list_owned_addresses().await.unwrap()[0].retiring);
     }
 }

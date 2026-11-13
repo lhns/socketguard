@@ -455,24 +455,27 @@ impl Engine {
 
     // ─── Running a plan ──────────────────────────────────────────────────────
 
-    /// Save a plan and make it take effect: the addresses it removes leave their interfaces
-    /// and networks first (retiring, so they stay denied), then the writes, then the
-    /// ruleset.
+    /// Save a plan and make it take effect: the writes, with the retiring of the addresses it
+    /// removes first in the same transaction (so they stay denied, and a failed write
+    /// changes nothing), then those addresses leave their networks, then the ruleset.
     async fn run_group_plan(
         &self,
         state: &AppState,
+        change: tokio::sync::MutexGuard<'_, ()>,
         plan: GroupPlan,
         activity: NewActivity,
     ) -> Result<(), EngineError> {
-        if !plan.removed.is_empty() {
-            self.retire_addresses(state, &plan.removed).await?;
-            self.remove_app_locators(state, &plan.removed).await;
-        }
+        let mut writes = self.retire_writes(&plan.removed);
+        writes.extend(plan.writes.iter().cloned());
         state
             .db
-            .apply_writes(&plan.writes)
+            .apply_writes(&writes)
             .await
             .map_err(|e| Self::conflict_or_internal(e, "this port group"))?;
+        drop(change);
+        if !plan.removed.is_empty() {
+            self.remove_app_locators(state, &plan.removed).await;
+        }
         let applied = self.apply_and_ensure(state).await;
         self.commit(
             state,
@@ -498,6 +501,7 @@ impl Engine {
         apps: &[AppId],
         confirm_open: bool,
     ) -> Result<PortGroup, EngineError> {
+        let change = self.change_lock.lock().await;
         let mut cat = Catalog::load(state).await?;
         let (group, plan) =
             self.plan_create_group(&mut cat, new_id(), label, ports, apps, confirm_open)?;
@@ -505,7 +509,7 @@ impl Engine {
             ActivityKind::PortGroupAdded,
             format!("Added port group {}", group.label),
         );
-        self.run_group_plan(state, plan, activity).await?;
+        self.run_group_plan(state, change, plan, activity).await?;
         self.get_port_group(state, &group.id).await
     }
 
@@ -517,24 +521,26 @@ impl Engine {
         ports: Option<&[PortRange]>,
         confirm_open: bool,
     ) -> Result<PortGroup, EngineError> {
+        let change = self.change_lock.lock().await;
         let mut cat = Catalog::load(state).await?;
         let (group, plan) = self.plan_update_group(&mut cat, id, label, ports, confirm_open)?;
         let activity = NewActivity::new(
             ActivityKind::PortGroupChanged,
             format!("Changed port group {}", group.label),
         );
-        self.run_group_plan(state, plan, activity).await?;
+        self.run_group_plan(state, change, plan, activity).await?;
         self.get_port_group(state, id).await
     }
 
     pub async fn delete_port_group(&self, state: &AppState, id: &str) -> Result<(), EngineError> {
+        let change = self.change_lock.lock().await;
         let mut cat = Catalog::load(state).await?;
         let (group, plan) = self.plan_delete_group(&mut cat, id)?;
         let activity = NewActivity::new(
             ActivityKind::PortGroupRemoved,
             format!("Removed port group {}", group.label),
         );
-        self.run_group_plan(state, plan, activity).await
+        self.run_group_plan(state, change, plan, activity).await
     }
 
     pub async fn attach_port_group(
@@ -544,6 +550,7 @@ impl Engine {
         app_id: &str,
         confirm_open: bool,
     ) -> Result<PortGroup, EngineError> {
+        let change = self.change_lock.lock().await;
         let mut cat = Catalog::load(state).await?;
         let (group, plan) = self.plan_attach_group(&mut cat, group_id, app_id, confirm_open)?;
         if plan.writes.is_empty() {
@@ -554,7 +561,7 @@ impl Engine {
             format!("Attached port group {}", group.label),
         )
         .app(app_id);
-        self.run_group_plan(state, plan, activity).await?;
+        self.run_group_plan(state, change, plan, activity).await?;
         self.get_port_group(state, group_id).await
     }
 
@@ -564,6 +571,7 @@ impl Engine {
         group_id: &str,
         app_id: &str,
     ) -> Result<PortGroup, EngineError> {
+        let change = self.change_lock.lock().await;
         let mut cat = Catalog::load(state).await?;
         let (group, plan) = self.plan_detach_group(&mut cat, group_id, app_id)?;
         let activity = NewActivity::new(
@@ -571,7 +579,7 @@ impl Engine {
             format!("Detached port group {}", group.label),
         )
         .app(app_id);
-        self.run_group_plan(state, plan, activity).await?;
+        self.run_group_plan(state, change, plan, activity).await?;
         self.get_port_group(state, group_id).await
     }
 }

@@ -812,6 +812,7 @@ async fn apply(d: &Daemon, document: &ExportDocument, dry_run: bool) -> (StatusC
         serde_json::to_value(ApplyRequest {
             document: document.clone(),
             dry_run,
+            confirm_open: true,
         })
         .unwrap(),
     )

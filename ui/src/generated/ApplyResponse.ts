@@ -4,4 +4,9 @@ import type { Change } from "./Change";
 /**
  * Result of `POST /api/apply`: what changes (or changed).
  */
-export type ApplyResponse = { dry_run: boolean, changes: Array<Change>, };
+export type ApplyResponse = { dry_run: boolean, changes: Array<Change>, 
+/**
+ * The import needs `confirm_open`: it may change what Anyone can reach (ADR 0061). A
+ * coarse test, so it can be set when nothing ends up opening.
+ */
+confirm_open_required: boolean, };

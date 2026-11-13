@@ -45,14 +45,17 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 ///    (`run_loop`), `startup_reconcile`, `disable`/`enable`. Write: only adding or removing
 ///    a network, which also saves the config file before releasing it, so concurrent
 ///    changes cannot write each other's stale list.
-/// 2. `Engine::poll_lock`: a whole pass, `startup_reconcile`, `disable`, `enable`.
-/// 3. `Engine::apps_lock`: a pass's read-modify-write of apps, and forgetting an app.
-/// 4. `Engine::alloc_lock`: creating addresses (`ensure_addresses`).
-/// 5. `firewall_lock`: applying the ruleset and enforcing non-IP networks (Tor).
-/// 6. `networks::ledger`'s `LOCK`: read-modify-write of the onion service ledger.
-/// 7. `config` (RwLock): only read after startup, so a reader never waits; still, hold
+/// 2. `Engine::change_lock`: a change from loading the state it decides on to the commit
+///    of its write (ADR 0062). Released before the ruleset is applied. Nothing that holds a
+///    lock below takes it; the reconcile pass does not take it at all.
+/// 3. `Engine::poll_lock`: a whole pass, `startup_reconcile`, `disable`, `enable`.
+/// 4. `Engine::apps_lock`: a pass's read-modify-write of apps, and forgetting an app.
+/// 5. `Engine::alloc_lock`: creating addresses (`ensure_addresses`).
+/// 6. `firewall_lock`: applying the ruleset and enforcing non-IP networks (Tor).
+/// 7. `networks::ledger`'s `LOCK`: read-modify-write of the onion service ledger.
+/// 8. `config` (RwLock): only read after startup, so a reader never waits; still, hold
 ///    it only for reads and the database, never while waiting for a lock above.
-/// 8. A database connection or transaction: `Database` methods run SQL only, never wait
+/// 9. A database connection or transaction: `Database` methods run SQL only, never wait
 ///    for a lock while holding one.
 ///
 /// Leaves below all of them, taken only inside blocking calls and never held across an

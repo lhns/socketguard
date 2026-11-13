@@ -151,9 +151,13 @@ pub struct Engine {
     unavailable_ifaces: Mutex<HashSet<String>>,
     /// Networks whose last allocation failed (log once per outage).
     alloc_failing: Mutex<HashSet<String>>,
-    // Lock order (see `AppState`): the engine RwLock, `poll_lock`, `apps_lock`,
+    // Lock order (see `AppState`): the engine RwLock, `change_lock`, `poll_lock`, `apps_lock`,
     // `alloc_lock`, `state.firewall_lock`, the ledger lock, `state.config`, a database
     // transaction. The std mutexes below are never held across an `.await`.
+    /// Held by a change from loading the state it decides on until its database write has
+    /// committed (ADR 0062), so two changes never plan against the same state. Released
+    /// before the ruleset is applied; never held across a firewall or interface change.
+    change_lock: tokio::sync::Mutex<()>,
     /// Held while addresses are created, so two mutations never create the same one.
     alloc_lock: tokio::sync::Mutex<()>,
     /// Held for a whole reconcile pass, and by `disable` and `enable`: a pass never puts
@@ -328,6 +332,7 @@ impl Engine {
             child_ctx,
             unavailable_ifaces: Mutex::default(),
             alloc_failing: Mutex::default(),
+            change_lock: tokio::sync::Mutex::default(),
             alloc_lock: tokio::sync::Mutex::default(),
             poll_lock: tokio::sync::Mutex::default(),
             apps_lock: tokio::sync::Mutex::default(),

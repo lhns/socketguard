@@ -339,7 +339,7 @@ and its grants (`network?` and `subject`; a grant on a reservation always covers
 The addresses of reservations are not part of the document, so applying it elsewhere creates
 new ones.
 
-`POST /api/apply {"document": ..., "dry_run": bool}` compares the document with the current
+`POST /api/apply {"document": ..., "dry_run": bool, "confirm_open": bool}` compares the document with the current
 state and returns the diff, then applies it unless `dry_run`:
 
     {"dry_run": true, "changes": [
@@ -350,8 +350,13 @@ state and returns the diff, then applies it unless `dry_run`:
   The only setting is `protect_host_interfaces`. Items are created, updated (peer credentials, group members,
   settings) or deleted; **whatever the document lacks is deleted**. Grants have no mutable
   fields, so they are only created or deleted.
-- A grant to `"anyone"` in the document counts as confirmed (the file is explicit); the diff
-  marks such changes with `opens_to_anyone`, so a dry run shows them.
+- The diff marks grants to Anyone with `opens_to_anyone`. `ApplyRequest.confirm_open` (default
+  false) confirms changes that affect what Anyone can reach (ADR 0061). `confirm_open_required`
+  in the response says the import needs it: a grant to Anyone exists now or in the document, and
+  the import creates grants, bindings or reservations, removes bindings, releases reservations, or
+  adds ports or apps to port groups. The test is coarse, so it can ask when nothing ends up opening.
+  Without `confirm_open`, such an import is refused with `confirmation_required` before it applies
+  anything; a dry run always returns the preview.
 - The document is validated first (version, duplicate labels, unknown peers, groups, apps,
   ports and networks, credential formats); an invalid one changes nothing. Applying is not
   transactional beyond that: if a later step fails (for instance the lockout guard refusing
