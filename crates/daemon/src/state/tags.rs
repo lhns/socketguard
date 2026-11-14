@@ -392,21 +392,6 @@ impl Database {
         Ok(r.rows_affected() > 0)
     }
 
-    /// Delete a tag with its members, exclusions and the grants that target it.
-    pub async fn delete_tag(&self, id: &str) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM grants WHERE target_kind = 'tag' AND target_id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        let r = sqlx::query("DELETE FROM tags WHERE id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(r.rows_affected() > 0)
-    }
-
     /// Put `app` into every tag whose patterns match it and that has not excluded it.
     /// Returns the ids of the tags it newly joined.
     pub async fn auto_tag_app(&self, app: &App) -> Result<Vec<TagId>> {
@@ -622,9 +607,11 @@ mod tests {
         // The unique index covers the target kind and id.
         let err = db.insert_grant(&g).await.unwrap_err();
         assert!(is_unique_violation(&err));
-        assert!(db.delete_tag(&t.id).await.unwrap());
+        db.apply_writes(&[Write::DeleteTag(t.id.clone())])
+            .await
+            .unwrap();
         assert_eq!(count(&db, "grants").await, 1);
-        assert!(db.delete_app("a").await.unwrap());
+        assert!(db.delete_app_with("a", &[]).await.unwrap());
         assert_eq!(count(&db, "grants").await, 0);
     }
 

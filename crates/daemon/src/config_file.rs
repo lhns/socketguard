@@ -54,8 +54,12 @@ pub fn resolve_for_removal_at(path: &Path) -> (Resolved, Option<String>) {
         Err(e) => {
             let r = resolved(path, DaemonConfig::default(), true);
             let warning = format!(
-                "warning: {e:#}
-                 Going on with the built-in default configuration (database {}, API socket {}).                  Networks, a database path and an API socket named only in {} are not known,                  so those networks cannot be listed and a database elsewhere is not found.                  What the database at the default path, the install record and the address                  ledger name is still removed.",
+                "warning: {e:#}\n\
+                 Going on with the built-in default configuration (database {}, API socket {}). \
+                 Networks, a database path and an API socket named only in {} are not known, \
+                 so those networks cannot be listed and a database elsewhere is not found. \
+                 What the database at the default path, the install record and the address \
+                 ledger name is still removed.",
                 r.db_path.display(),
                 r.config.api_socket,
                 path.display()
@@ -231,6 +235,7 @@ mod tests {
         assert!(warning.contains("stale_setting"), "{warning}");
         assert!(warning.contains("built-in default"), "{warning}");
         assert!(warning.contains("networks"), "{warning}");
+        assert!(!warning.contains("  "), "{warning}");
         assert_eq!(r.config_path, path);
         assert!(r.file_exists);
         assert_eq!(r.config.backends, DaemonConfig::default().backends);

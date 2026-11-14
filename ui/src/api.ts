@@ -211,7 +211,6 @@ export const api = {
   /** The grants that would take effect on a network once it is added (ADR 0066). Changes nothing. */
   previewAddNetwork: (req: NewNetwork) => call<NetworkAddPreview>("preview_add_network", { req }),
   deleteNetwork: (id: string, force: boolean) => call<void>("delete_network", { id, force }),
-  /** What becomes reachable without the block of one network (or all of them): ADR 0051. */
   /** Replace the peers of a Yggdrasil network; its node restarts. */
   setNetworkPeers: (id: string, peers: string[]) => call<Network>("set_network_peers", { id, peers }),
   setNetworkLanDiscovery: (id: string, enabled: boolean, confirmOpen = false) =>

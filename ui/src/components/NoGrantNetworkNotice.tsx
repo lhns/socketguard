@@ -1,10 +1,11 @@
+import { noGrantNetwork } from "../batch";
 import { useNav } from "../nav";
 import { useNetworks } from "../queries";
 
 /** True once the networks are known and none of them takes grants (only Local, which is on loopback). */
 export function useNoGrantNetwork(): boolean {
   const networks = useNetworks();
-  return networks.data !== undefined && !networks.data.some((n) => n.grants_apply);
+  return networks.data !== undefined && noGrantNetwork(networks.data);
 }
 
 /** Shown wherever access is given while no network takes grants: it can be set up now and

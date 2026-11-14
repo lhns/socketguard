@@ -2220,6 +2220,35 @@ async fn ipv4_peer_reach_follows_the_listener_and_protect_host() {
 }
 
 #[tokio::test]
+async fn a_revoked_ipv4_grant_is_resolved_only_for_a_backend_that_cuts() {
+    for cuts in [true, false] {
+        let h = Harness::new(vec![lan_net()], vec![socket_on("nginx", 80, "0.0.0.0")]).await;
+        h.fw.set_cuts_connections(cuts);
+        h.net.set_ipv4_subnets("eth0", &["192.168.1.0/24"]);
+        h.reconcile().await;
+        h.engine()
+            .await
+            .set_protect_host(&h.state, vec!["eth0".into()], false)
+            .await
+            .unwrap();
+        let app = h.app().await;
+        let peer = h.peer("laptop", CredentialKind::Ip, "192.168.1.5").await;
+        let g = h.grant(&app.id, Subject::Peer(peer)).await;
+        h.reconcile().await;
+        h.engine()
+            .await
+            .delete_grant(&h.state, &g.grant.id)
+            .await
+            .unwrap();
+        h.reconcile().await;
+        // The mock lists no IPv4 address, so a host-wide revocation can be named only by a
+        // backend that does not skip the step.
+        let unresolved = h.fw.revoked().iter().any(|r| r.dst == Dst::HostV4);
+        assert_eq!(unresolved, !cuts, "cuts={cuts}: {:?}", h.fw.revoked());
+    }
+}
+
+#[tokio::test]
 async fn a_loopback_only_ipv4_listener_gets_no_host_rule_and_says_why() {
     let h = Harness::new(vec![lan_net()], vec![socket_on("nginx", 80, "127.0.0.1")]).await;
     h.net.set_ipv4_subnets("eth0", &["192.168.1.0/24"]);

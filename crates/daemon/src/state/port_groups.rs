@@ -178,7 +178,7 @@ mod tests {
         .await
         .unwrap();
         // Deleting an app drops its attachment.
-        db.delete_app("a2").await.unwrap();
+        db.delete_app_with("a2", &[]).await.unwrap();
         assert!(db
             .get_port_group(&g.id)
             .await

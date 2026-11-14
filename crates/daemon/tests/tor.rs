@@ -412,7 +412,7 @@ async fn a_service_of_ours_whose_address_vanished_is_swept_but_foreign_ones_stay
     let app = h.app().await;
     let svc = h.svc().await;
     // The address disappears behind the daemon's back (deleted while it was down).
-    h.state.db.delete_app(&app.id).await.unwrap();
+    h.state.db.delete_app_with(&app.id, &[]).await.unwrap();
     assert_eq!(h.tor.detached().len(), 2);
 
     h.reconcile().await;

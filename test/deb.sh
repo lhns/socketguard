@@ -115,11 +115,7 @@ if mn_account_created "${RUNNER_TEMP:-/tmp}/setup-log.before-remove.json"; then 
 # A config that does not parse (a stale key) must not keep the rules on the host: the
 # prerm's `uninstall` goes on with the built-in defaults and says so.
 cfg=/etc/socketguard/socketguard.json
-if sudo test -s "$cfg"; then
-    sudo sed -i '0,/{/s/{/{"stale_setting": 1,/' "$cfg"
-else
-    echo '{"stale_setting": 1}' | sudo tee "$cfg" >/dev/null
-fi
+echo '{"stale_setting": 1}' | sudo tee "$cfg" >/dev/null
 sudo grep -q stale_setting "$cfg" || fail "could not plant a stale key in $cfg"
 
 step "remove (data kept, config does not parse)"

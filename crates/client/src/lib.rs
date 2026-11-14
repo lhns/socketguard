@@ -256,8 +256,8 @@ impl Client {
         confirm_open: bool,
     ) -> Result<Saved<T>> {
         let query = confirm_open
-            .then(|| serde_urlencoded::to_string(ConfirmQuery { confirm_open }).ok())
-            .flatten();
+            .then_some(ConfirmQuery { confirm_open })
+            .and_then(|q| serde_urlencoded::to_string(q).ok());
         self.call_saved_q(route, params, query, None).await
     }
 
@@ -500,22 +500,18 @@ impl Client {
         scope: &Scope,
         confirm_open: bool,
     ) -> Result<Saved<Tag>> {
-        let query = match scope {
-            Scope::All => MemberQuery::default(),
-            Scope::Port { port, proto } => MemberQuery {
-                port: Some(*port),
-                proto: Some(*proto),
-                ..MemberQuery::default()
-            },
-            Scope::Group { id } => MemberQuery {
-                group: Some(id.clone()),
-                ..MemberQuery::default()
-            },
-        };
-        let query = MemberQuery {
+        let mut query = MemberQuery {
             confirm_open,
-            ..query
+            ..MemberQuery::default()
         };
+        match scope {
+            Scope::All => {}
+            Scope::Port { port, proto } => {
+                query.port = Some(*port);
+                query.proto = Some(*proto);
+            }
+            Scope::Group { id } => query.group = Some(id.clone()),
+        }
         let q = serde_urlencoded::to_string(&query).ok();
         let (status, bytes) = self
             .call_status(&routes::REMOVE_TAG_MEMBER, &[tag_id, app_id], q, None)

@@ -231,7 +231,9 @@ fn parse_value(value: &str) -> ParsedCredential {
     let result = match detected {
         Some(kind) => normalize_credential(kind, value).map_err(|e| e.to_string()),
         None => Err(format!(
-            "cannot tell what {value:?} is: expected a 64-character Yggdrasil key, an IP              address or network, or a Tor client key (a WireGuard or TLS key needs its kind              stated)"
+            "cannot tell what {value:?} is: expected a 64-character Yggdrasil key, an IP \
+             address or network, or a Tor client key (a WireGuard or TLS key needs its kind \
+             stated)"
         )),
     };
     match result {

@@ -144,7 +144,7 @@ pub async fn run(
         // take every recorded one off before anything else runs (they are put back, with
         // rules, by the first reconcile).
         if let Some(dir) = &data_dir {
-            portable::write_session(dir, None);
+            portable::write_session(dir);
         }
         state.engine.read().await.sweep_all_owned(&state).await;
     }

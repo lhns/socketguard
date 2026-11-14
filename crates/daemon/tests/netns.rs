@@ -98,7 +98,7 @@ use std::time::Duration;
 const PORT: u16 = 8080;
 /// A's managed address on the ordinary veth, and on the overlay-named one.
 const MANAGED: &str = "fd00:5a::100";
-const MANAGED_YGG: &str = "300:5a::100";
+const YGG_NODE: &str = "300:5a::100";
 /// A source in 200::/7 that B owns on both of its veths.
 const YGG_SRC: &str = "200:5a::77";
 
@@ -197,7 +197,7 @@ impl Fixture {
         ip(&["-n", &a, "addr", "add", &managed, "dev", "sgv-a", "nodad"]);
         let forged = format!("{YGG_SRC}/128");
         ip(&["-n", &b, "addr", "add", &forged, "dev", "sgv-b", "nodad"]);
-        let route = format!("{MANAGED_YGG}/128");
+        let route = format!("{YGG_NODE}/128");
         ip(&["-n", &b, "-6", "route", "add", &route, "dev", "ygg0"]);
 
         let listener = Command::new("ip")
@@ -372,7 +372,7 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
             }],
             addresses: vec![
                 address("lan-addr", "lan", MANAGED),
-                address("ygg-addr", "ygg", MANAGED_YGG),
+                address("ygg-addr", "ygg", YGG_NODE),
             ],
             peers,
             grants,
@@ -381,7 +381,7 @@ fn snapshot(creds: &[(CredentialKind, &str)]) -> Snapshot {
         // The fixture puts both addresses on the veths. An address is up only while a grant
         // names its row (ADR 0047), so without one it is dormant but still on the interface:
         // `owned` keeps it denied, as the daemon does for addresses it has not yet removed.
-        owned: vec![MANAGED.parse().unwrap(), MANAGED_YGG.parse().unwrap()],
+        owned: vec![MANAGED.parse().unwrap(), YGG_NODE.parse().unwrap()],
         networks: vec![
             network("lan", NetworkKind::Lan, "sgv-a"),
             network("ygg", NetworkKind::Yggdrasil, "ygg0"),
@@ -533,12 +533,12 @@ fn forged_overlay_source_is_dropped_off_the_overlay_interface() {
     );
     // ... the same source over the ygg0 veth is, for the granted address.
     assert!(
-        fx.reachable(MANAGED_YGG, Some(YGG_SRC)),
+        fx.reachable(YGG_NODE, Some(YGG_SRC)),
         "granted source on ygg0"
     );
     // And an ungranted source on ygg0 is still denied.
     assert!(
-        !fx.reachable(MANAGED_YGG, Some("200:5a::2")),
+        !fx.reachable(YGG_NODE, Some("200:5a::2")),
         "ungranted source on ygg0"
     );
 }
@@ -1062,11 +1062,11 @@ fn a_router_cannot_deliver_another_segments_source_to_a_segment_grant() {
     );
 }
 
-/// ADR 0051: the managed node's own addresses are denied on any interface, so the block holds
+/// ADR 0051: the Yggdrasil node's own addresses are denied on any interface, so the block holds
 /// while the adapter SocketGuard knows is missing; an address of a node it does not manage is
 /// left alone, and a granted peer still reaches the addresses a grant names.
 #[test]
-fn the_managed_nodes_addresses_are_denied_without_its_interface_and_others_are_left_alone() {
+fn the_ygg_nodes_addresses_are_denied_without_its_interface_and_others_are_left_alone() {
     if !enabled() {
         return;
     }
@@ -1113,7 +1113,7 @@ fn the_managed_nodes_addresses_are_denied_without_its_interface_and_others_are_l
         snap.ygg_nodes = [("ygg".to_string(), node)].into();
         snap
     };
-    for dst in ["200:5a::1", "200:5a::55", MANAGED_YGG, "300:5a::200"] {
+    for dst in ["200:5a::1", "200:5a::55", YGG_NODE, "300:5a::200"] {
         assert!(
             eventually(|| fx.reachable(dst, None)),
             "control: {dst} is reachable before any rule"
@@ -1138,13 +1138,10 @@ fn the_managed_nodes_addresses_are_denied_without_its_interface_and_others_are_l
     let rs = fx.apply(&known("ygg0", &[(CredentialKind::YggAddr, YGG_SRC)]));
     assert!(rs.scopes.iter().any(|s| s.id == "overlay:ygg:subnet"));
     assert!(
-        fx.reachable(MANAGED_YGG, Some(YGG_SRC)),
+        fx.reachable(YGG_NODE, Some(YGG_SRC)),
         "granted peer and address"
     );
-    assert!(
-        !fx.reachable(MANAGED_YGG, Some("200:5a::2")),
-        "ungranted peer"
-    );
+    assert!(!fx.reachable(YGG_NODE, Some("200:5a::2")), "ungranted peer");
     assert!(
         !fx.reachable("200:5a::1", Some(YGG_SRC)),
         "the node address has no grant"

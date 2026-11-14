@@ -188,10 +188,14 @@ impl Engine {
                     .unwrap_or_default();
                 // "Any IPv4 destination of the host" is cut only for the host's own addresses
                 // on the protected interfaces, not for every IPv4 flow.
-                let revoked = if revoked.iter().any(|r| r.dst == firewall::Dst::HostV4) {
+                // Not when the backend cuts nothing, nor without protected interfaces (then
+                // there is nothing to name and nothing to warn about).
+                let revoked = if self.firewall.cuts_connections()
+                    && revoked.iter().any(|r| r.dst == firewall::Dst::HostV4)
+                {
                     let local = self.protected_v4_addresses(&snapshot.protect_host);
                     let (revoked, dropped) = firewall::resolve_host_v4(revoked, &local);
-                    if dropped > 0 {
+                    if dropped > 0 && !snapshot.protect_host.is_empty() {
                         warn!(
                             "The IPv4 addresses of the protected interfaces are not known: {dropped} revoked IPv4 grant(s) keep their open connections until they close"
                         );

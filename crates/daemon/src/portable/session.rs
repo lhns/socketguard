@@ -31,7 +31,7 @@ pub fn write_last_exit(data_dir: &Path, left: &[String]) {
 ///
 /// What a killed daemon recorded about the Wintun driver is carried over: the driver it
 /// installed is still there, and the next clean exit removes it.
-pub fn write_session(data_dir: &Path, owner_pid: Option<u32>) {
+pub fn write_session(data_dir: &Path) {
     let file = data_dir.join(SESSION_FILE);
     let carried = SessionLog::new(data_dir).recorded().ok().flatten();
     if file.exists() {
@@ -47,7 +47,6 @@ pub fn write_session(data_dir: &Path, owner_pid: Option<u32>) {
         .unwrap_or(0);
     let mut body = serde_json::json!({
         "pid": std::process::id(),
-        "owner_pid": owner_pid,
         "started": secs,
     });
     if let Some(present_before) = carried {
@@ -177,7 +176,7 @@ mod tests {
     fn a_session_record_marks_a_run_and_a_clean_exit_removes_it() {
         let dir = std::env::temp_dir().join(format!("sg-portable-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        write_session(&dir, Some(7));
+        write_session(&dir);
         assert!(dir.join(SESSION_FILE).is_file());
         write_last_exit(&dir, &[]);
         assert!(!dir.join(SESSION_FILE).exists());
@@ -219,7 +218,7 @@ mod tests {
     #[test]
     fn the_wintun_fact_goes_into_the_session_record_once() {
         let dir = temp_data_dir();
-        write_session(&dir, Some(7));
+        write_session(&dir);
         let log = SessionLog::new(&dir);
         assert_eq!(log.recorded().unwrap(), None);
 
@@ -236,7 +235,7 @@ mod tests {
         assert_eq!(log.recorded().unwrap(), Some(false));
         // The other fields of the record are kept.
         let text = std::fs::read_to_string(dir.join(SESSION_FILE)).unwrap();
-        assert!(text.contains("\"owner_pid\":7"), "{text}");
+        assert!(text.contains("\"pid\""), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -245,10 +244,10 @@ mod tests {
     #[test]
     fn a_killed_run_hands_the_wintun_fact_to_the_next_one() {
         let dir = temp_data_dir();
-        write_session(&dir, None);
+        write_session(&dir);
         SessionLog::new(&dir).record(false).unwrap();
         // The process is killed: no write_last_exit.
-        write_session(&dir, None);
+        write_session(&dir);
         assert_eq!(SessionLog::new(&dir).recorded().unwrap(), Some(false));
         write_last_exit(&dir, &[]);
         assert!(!dir.join(SESSION_FILE).exists());
@@ -258,7 +257,7 @@ mod tests {
     #[test]
     fn a_clean_exit_removes_a_driver_that_was_absent_before_without_force() {
         let dir = temp_data_dir();
-        write_session(&dir, None);
+        write_session(&dir);
         SessionLog::new(&dir).record(false).unwrap();
         let mut host = crate::host::fake::FakeHost::new("windows");
         pnputil(&mut host, &[WITH_WINTUN, WITHOUT_WINTUN]);
@@ -272,7 +271,7 @@ mod tests {
     #[test]
     fn a_refused_driver_removal_is_tried_again() {
         let dir = temp_data_dir();
-        write_session(&dir, None);
+        write_session(&dir);
         SessionLog::new(&dir).record(false).unwrap();
         let mut host = crate::host::fake::FakeHost::new("windows");
         // Per attempt: list, delete, list again.
@@ -303,7 +302,7 @@ mod tests {
     #[test]
     fn a_clean_exit_keeps_a_driver_that_was_there_before_or_was_never_recorded() {
         let dir = temp_data_dir();
-        write_session(&dir, None);
+        write_session(&dir);
         // Yggdrasil never started: nothing was recorded, nothing is run.
         let mut host = crate::host::fake::FakeHost::new("windows");
         assert_eq!(remove_wintun_driver(&mut host, &dir, Duration::ZERO), None);
@@ -320,7 +319,7 @@ mod tests {
     #[test]
     fn a_driver_windows_will_not_delete_is_kept_and_an_unreadable_store_is_left() {
         let dir = temp_data_dir();
-        write_session(&dir, None);
+        write_session(&dir);
         SessionLog::new(&dir).record(false).unwrap();
         let mut host = crate::host::fake::FakeHost::new("windows");
         host.answer("pnputil /enum-drivers", 0, WITH_WINTUN);
