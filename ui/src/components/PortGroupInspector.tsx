@@ -50,6 +50,7 @@ export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { 
   const attachedApps = apps.filter((a) => group.apps.includes(a.id));
   const item = (a: (typeof apps)[number], section: string): PickerItem => ({ id: a.id, label: a.name, section, state: group.apps.includes(a.id) ? "on" : "off" });
   const pickable = apps.filter((a) => a.identity_note !== "unidentified" || group.apps.includes(a.id));
+  const hasUnidentified = apps.some((a) => a.identity_note === "unidentified");
   const items = [
     ...pickable.filter((a) => !a.system).map((a) => item(a, "Apps")),
     ...pickable.filter((a) => a.system).map((a) => item(a, "System services")),
@@ -121,6 +122,7 @@ export function PortGroupInspector({ group, highlight, onCollapse, onClose }: { 
       >
         <AttachedApps apps={attachedApps} />
         <CommitPreview commit={attach} title="Change where this port group is attached?" confirmLabel="Apply" />
+        {hasUnidentified && <p className="hint">Unidentified apps cannot take port groups.</p>}
       </Section>
 
       <Section title="Who can reach it">
@@ -203,6 +205,7 @@ export function PortGroupsInspector({ groups, onCollapse, onClose }: { groups: P
 
   const count = (appId: string) => groups.filter((g) => g.apps.includes(appId)).length;
   const pickable = apps.filter((a) => a.identity_note !== "unidentified" || count(a.id) > 0);
+  const hasUnidentified = apps.some((a) => a.identity_note === "unidentified");
   const stateOf = (appId: string): PickerItem["state"] => (count(appId) === 0 ? "off" : count(appId) === groups.length ? "on" : "mixed");
   const item = (a: (typeof apps)[number], section: string): PickerItem => ({ id: a.id, label: a.name, section, state: stateOf(a.id) });
   const items = [
@@ -251,6 +254,7 @@ export function PortGroupsInspector({ groups, onCollapse, onClose }: { groups: P
           </ul>
         )}
         <CommitPreview commit={edit} title="Change this port group?" confirmLabel="Apply" />
+        {hasUnidentified && <p className="hint">Unidentified apps cannot take port groups.</p>}
       </Section>
       <DangerZone>
         <button className="btn btn-danger btn-sm" onClick={() => setDeleting(true)}>Delete {groups.length} port groups</button>

@@ -3,7 +3,7 @@ import type { ActivityKind, ActivityRecord } from "../api";
 import { formatTime } from "../lib";
 import { errorText } from "../lib";
 import { useNav } from "../nav";
-import { useActivity, useApps, usePeers } from "../queries";
+import { useActivity, useApps, usePeers, useStatus } from "../queries";
 
 const KIND_LABEL: Record<ActivityKind, string> = {
   app_discovered: "New app",
@@ -40,6 +40,7 @@ export default function ActivityPage() {
   const [peerId, setPeerId] = useState("");
   const [source, setSource] = useState("");
   const apps = useApps();
+  const status = useStatus();
   const peers = usePeers();
   const activity = useActivity({ kind: kind || null, appId: appId || null, peerId: peerId || null });
   const all = activity.data?.pages.flat() ?? [];
@@ -93,7 +94,12 @@ export default function ActivityPage() {
               <button className="btn btn-sm" onClick={clearFilters}>Clear filters</button>
             </>
           ) : (
-            <p>Nothing happened yet.</p>
+            <>
+              <p>Nothing happened yet.</p>
+              {status.data?.portable && status.data.drop_events === false && (
+                <p className="hint" role="note">Blocked connections are not logged: the system&apos;s net-event setting is off.</p>
+              )}
+            </>
           )}
         </div>
       )}

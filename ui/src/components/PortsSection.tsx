@@ -120,6 +120,11 @@ export default function PortsSection({ app, partial, highlight, hasV4 }: Props) 
             } : undefined}
           />
         ))}
+        {unidentified && (
+          <li className="port-add-entry">
+            <p className="muted">Port groups need an identified app.</p>
+          </li>
+        )}
         {!unidentified && (
           <li className="port-add-entry">
             <Picker

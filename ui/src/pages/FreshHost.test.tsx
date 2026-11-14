@@ -77,6 +77,20 @@ describe("a fresh host (?mock=fresh): about a dozen apps, nothing granted, Local
       expect(go).toHaveBeenCalledWith("settings");
     });
 
+    it("the form says what is missing while Who is empty", async () => {
+      setup();
+      const user = userEvent.setup();
+      renderWithProviders(<AppsPage />);
+      await user.click(await listTable().findByRole("button", { name: /^nginx/ }));
+      await user.click(await within(await screen.findByRole("region", { name: "Details" })).findByRole("button", { name: "Add access to 80/tcp" }));
+      const form = screen.getByRole("form", { name: "Add access" });
+      expect(within(form).getByText("Choose who can reach it")).toBeInTheDocument();
+      await user.click(within(form).getByRole("combobox", { name: "Who" }));
+      await user.click(screen.getByRole("checkbox", { name: "alice" }));
+      await user.keyboard("{Escape}");
+      expect(within(form).queryByText("Choose who can reach it")).not.toBeInTheDocument();
+    });
+
     it("a non-All row shows the normal address state, not nothing", async () => {
       setup();
       const user = userEvent.setup();

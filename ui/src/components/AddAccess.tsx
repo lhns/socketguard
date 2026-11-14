@@ -7,7 +7,7 @@ import { CREDENTIAL_INFO } from "../reach";
 import CommitPreview from "./CommitPreview";
 import { useFormOpen } from "./ActionRow";
 import NoGrantNetworkNotice, { useNoGrantNetwork } from "./NoGrantNetworkNotice";
-import Picker,{ type PickerItem } from "./Picker";
+import Picker, { type PickerItem } from "./Picker";
 
 /** One side is fixed by the selection; the other is chosen here. */
 export type FixedSide = { side: "targets"; targets: Target[] } | { side: "subjects"; subjects: Subject[] };
@@ -326,6 +326,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
           Add access
         </button>
         <button type="button" className="btn btn-sm" onClick={reset}>Cancel</button>
+        {chosen === 0 && <span className="hint">{choosingSubjects ? "Choose who can reach it" : "Choose what it can reach"}</span>}
       </div>
       <CommitPreview commit={commit} title="Give access?" confirmLabel="Give access" />
     </form>

@@ -283,6 +283,7 @@ describe("Attach port group", () => {
     await user.click(await inList().findByRole("button", { name: /^mystery/ }));
     await within(inspector()).findByRole("heading", { name: "Ports" });
     expect(within(inspector()).queryByRole("button", { name: "+ Port group" })).not.toBeInTheDocument();
+    expect(within(inspector()).getByText("Port groups need an identified app.")).toBeInTheDocument();
   });
 });
 
@@ -423,6 +424,7 @@ describe("Port group inspector", () => {
     const panel = await openGroup(user, "dns");
     await user.click(panel.getByRole("button", { name: "Attach or detach apps" }));
     expect(screen.queryByRole("checkbox", { name: "mystery" })).not.toBeInTheDocument();
+    expect(panel.getByText("Unidentified apps cannot take port groups.")).toBeInTheDocument();
     await user.click(screen.getByRole("checkbox", { name: "redis-server" }));
     await waitFor(() => expect(applied(d)).toEqual([[{ op: "attach_port_group", group_id: "sg2", app_id: "a2", confirm_open: false }]]));
   });
