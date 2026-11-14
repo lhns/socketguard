@@ -3,6 +3,9 @@
 import type { BatchChange, ChangeOp, GrantReach, GrantView, Network } from "./api";
 import { ReachBadge } from "./reach";
 
+/** No network takes grants (only Local, which is on loopback): access set now takes effect once one is added. */
+export const noGrantNetwork = (networks: Network[]): boolean => !networks.some((n) => n.grants_apply);
+
 /** The same operations with the Anyone confirmation set. A dry run is sent this way (it saves
  * nothing, and the answer says which changes need the question); an apply only after the user
  * agreed. */
@@ -46,7 +49,7 @@ export function ChangeList({ changes, networks }: { changes: BatchChange[]; netw
           <span className="change-name">{c.name}</span>
           {c.detail && <span className="muted">{c.detail}</span>}
           {c.opens_to_anyone && <span className="badge reach reach-bad">opens to anyone</span>}
-          {c.kind === "create" && c.item === "grant" && (c.reach ?? []).length === 0 && !networks.some((n) => n.grants_apply) && (
+          {c.kind === "create" && c.item === "grant" && (c.reach ?? []).length === 0 && noGrantNetwork(networks) && (
             <span className="badge reach reach-muted" title="Access takes effect once a network that takes grants is added (LAN, Yggdrasil or Tor).">
               not reachable yet: no network takes grants
             </span>
