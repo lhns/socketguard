@@ -302,3 +302,54 @@ async fn an_import_that_touches_only_peers_needs_no_confirmation_beside_an_anyon
         .await;
     assert!(r.export().await["peers"].to_string().contains("zed"));
 }
+
+/// Not an import, but the same rule (ADR 0066): adding a network lets the grants that
+/// exist take effect on it, so it is refused without `confirm_open` when one is to Anyone,
+/// before a network, a key or an address exists.
+#[tokio::test]
+async fn adding_a_network_that_an_anyone_grant_takes_effect_on_needs_confirmation() {
+    let r = Rig::new().await;
+    let ng = r.app_id("nginx").await;
+    r.grant(json!({"kind": "app", "id": ng}), anyone()).await;
+    let state = async {
+        (
+            r.get("/api/networks").await.1.to_string(),
+            r.d.state.db.list_addresses().await.unwrap().len(),
+            r.get("/api/activity?limit=200").await.1.to_string(),
+            r.export().await.to_string(),
+        )
+    };
+    let before = state.await;
+    let net =
+        json!({"id": "lan2", "type": "slaac", "interface": "eth9", "prefix": "2001:db8:9:9::/64"});
+
+    let mut dry = net.clone();
+    dry["dry_run"] = json!(true);
+    let preview = r.ok(r.post("/api/networks", dry).await).await;
+    assert_eq!(preview["confirm_open_required"], true, "{preview}");
+
+    let (s, b) = r.post("/api/networks", net.clone()).await;
+    assert_eq!(
+        (s, b["code"].as_str()),
+        (StatusCode::CONFLICT, Some("confirmation_required")),
+        "{b}"
+    );
+    let unchanged = async {
+        (
+            r.get("/api/networks").await.1.to_string(),
+            r.d.state.db.list_addresses().await.unwrap().len(),
+            r.get("/api/activity?limit=200").await.1.to_string(),
+            r.export().await.to_string(),
+        )
+    };
+    assert_eq!(
+        unchanged.await,
+        before,
+        "the dry run and the refusal changed nothing"
+    );
+
+    let mut confirmed = net;
+    confirmed["confirm_open"] = json!(true);
+    let added = r.ok(r.post("/api/networks", confirmed).await).await;
+    assert_eq!(added["id"], "lan2");
+}

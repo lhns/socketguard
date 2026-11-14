@@ -6,6 +6,7 @@ use crate::api::DaemonEvent;
 use crate::networks;
 use crate::ruleset::Snapshot;
 use crate::AppState;
+use socketguard_core::api_types::NetworkAddPreview;
 use socketguard_core::config::{BackendConfig, BackendInstanceConfig, DaemonConfig};
 use socketguard_core::{ActivityKind, Address, Network};
 use std::collections::BTreeSet;
@@ -152,11 +153,69 @@ impl Engine {
     /// and return the network as it now stands.
     /// Returns the network and how the apply of its ruleset went: the network is live
     /// either way, but only an `Ok` means its block (ADR 0051) is in force.
+    ///
+    /// A grant without a network applies to every network, so adding one lets existing grants
+    /// take effect on it at once. The add is reviewed first ([`Engine::review_add`]) and
+    /// refused without `confirm_open` when Anyone is among them (ADR 0066).
     pub async fn add_network(
         &mut self,
         state: &AppState,
         inst: BackendInstanceConfig,
+        confirm_open: bool,
     ) -> Result<(Network, anyhow::Result<()>), EngineError> {
+        let (n, preview) = self.review_add(state, &inst).await?;
+        ensure_confirmed(preview.confirm_open_required, confirm_open)?;
+        if matches!(inst.backend, BackendConfig::Yggdrasil { .. }) {
+            // The node's addresses follow from its key: with them remembered, the first
+            // ruleset already closes them, before any software runs (ADR 0051).
+            self.ensure_child_key(state, &inst.id, true)
+                .await
+                .map_err(EngineError::Internal)?;
+        }
+        let activity = (!preview.gains.is_empty()).then(|| {
+            let anyone = preview
+                .gains
+                .iter()
+                .filter(|g| g.change.opens_to_anyone)
+                .count();
+            NewActivity::new(
+                ActivityKind::NetworkChanged,
+                format!(
+                    "Added {}: {} existing grants take effect on it ({anyone} to Anyone)",
+                    inst.id,
+                    preview.gains.len()
+                ),
+            )
+            .network(&inst.id)
+        });
+        let applied = self.add_network_with(state, &inst, n, activity).await;
+        let network = self
+            .networks()
+            .into_iter()
+            .find(|n| n.id == inst.id)
+            .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))?;
+        Ok((network, applied))
+    }
+
+    /// The API's add with `dry_run`: what [`Engine::add_network`] checks and would let in,
+    /// with nothing created, written or started.
+    pub async fn preview_add_network(
+        &self,
+        state: &AppState,
+        inst: &BackendInstanceConfig,
+    ) -> Result<NetworkAddPreview, EngineError> {
+        Ok(self.review_add(state, inst).await?.1)
+    }
+
+    /// Everything an add checks before it changes anything: the id is free, the set of
+    /// networks stays valid, the backend can be built, and which existing grants let someone
+    /// in on the new network. Building the network only allocates in memory (no key, no
+    /// address, no process, no database row), so a refusal leaves nothing behind.
+    async fn review_add(
+        &self,
+        state: &AppState,
+        inst: &BackendInstanceConfig,
+    ) -> Result<(Arc<dyn networks::Network>, NetworkAddPreview), EngineError> {
         if self.backends.contains_key(&inst.id) {
             return Err(EngineError::Conflict(format!(
                 "network {} already exists",
@@ -180,20 +239,8 @@ impl Engine {
             &self.child_ctx,
         )
         .map_err(|e| EngineError::Invalid(format!("cannot create network: {e}")))?;
-        if matches!(inst.backend, BackendConfig::Yggdrasil { .. }) {
-            // The node's addresses follow from its key: with them remembered, the first
-            // ruleset already closes them, before any software runs (ADR 0051).
-            self.ensure_child_key(state, &inst.id, true)
-                .await
-                .map_err(EngineError::Internal)?;
-        }
-        let applied = self.add_network_instance(state, &inst, n).await;
-        let network = self
-            .networks()
-            .into_iter()
-            .find(|n| n.id == inst.id)
-            .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))?;
-        Ok((network, applied))
+        let preview = self.grants_taking_effect_on(state, inst, &n).await?;
+        Ok((n, preview))
     }
 
     /// The API's `PUT /api/networks/{id}/peers`: replace the peers of a Yggdrasil
@@ -416,6 +463,17 @@ impl Engine {
         inst: &BackendInstanceConfig,
         network: Arc<dyn networks::Network>,
     ) -> anyhow::Result<()> {
+        self.add_network_with(state, inst, network, None).await
+    }
+
+    /// [`Engine::add_network_instance`] with the activity record of the add.
+    async fn add_network_with(
+        &mut self,
+        state: &AppState,
+        inst: &BackendInstanceConfig,
+        network: Arc<dyn networks::Network>,
+        activity: Option<NewActivity>,
+    ) -> anyhow::Result<()> {
         // The ruleset (overlay scope, managed addresses) must know the network before
         // its addresses go on the interface.
         self.backends.insert(
@@ -440,7 +498,7 @@ impl Engine {
             .commit(
                 state,
                 applied,
-                None,
+                activity,
                 &[DaemonEvent::NetworksChanged, DaemonEvent::AppsChanged],
             )
             .await;

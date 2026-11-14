@@ -36,7 +36,7 @@ async fn the_teardown_waits_for_tor_and_yggdrasil_to_be_gone() {
             .engine
             .write()
             .await
-            .add_network(&state, inst)
+            .add_network(&state, inst, false)
             .await
             .unwrap();
         applied.unwrap();
@@ -92,6 +92,7 @@ async fn the_teardown_after_the_supervisor_shutdown_returns_with_nothing_left() 
                 id: "tor".into(),
                 backend: BackendConfig::tor(),
             },
+            false,
         )
         .await
         .unwrap();

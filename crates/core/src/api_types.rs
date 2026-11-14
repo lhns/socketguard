@@ -207,6 +207,29 @@ pub struct NewNetwork {
     pub id: Option<String>,
     #[serde(flatten)]
     pub backend: BackendConfig,
+    /// Confirms that grants to Anyone take effect on the new network (ADR 0066). Without
+    /// it, an add that would let Anyone in is refused before it changes anything.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub confirm_open: bool,
+    /// Check the add and say what it would let in (a [`NetworkAddPreview`]); change nothing.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub dry_run: bool,
+}
+
+/// Result of `POST /api/networks` with `dry_run`: the grants that would take effect on the
+/// network the moment it is added (ADR 0066): grants without a network, and rows that
+/// name the new network's id.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetworkAddPreview {
+    /// One entry per grant that lets someone in on the new network: `name` says who gets
+    /// what, `reach` is the grant's reach on the new network only.
+    pub gains: Vec<BatchChange>,
+    /// A gain is a grant to Anyone, so the add needs `confirm_open`.
+    #[serde(default)]
+    pub confirm_open_required: bool,
 }
 
 /// Body of `PUT /api/networks/{id}/peers`: the peers of a Yggdrasil network (the
@@ -962,5 +985,44 @@ impl ApiEvent {
                 data: data.to_string(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod network_add_tests {
+    use super::*;
+
+    #[test]
+    fn new_network_round_trips_its_flags_beside_a_flattened_backend() {
+        let json = serde_json::json!({
+            "id": "lan2", "type": "slaac", "interface": "eth9",
+            "confirm_open": true, "dry_run": true,
+        });
+        let n: NewNetwork = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(n.id.as_deref(), Some("lan2"));
+        assert!(n.confirm_open && n.dry_run);
+        assert!(matches!(n.backend, BackendConfig::Slaac { .. }));
+        assert_eq!(serde_json::to_value(&n).unwrap(), json);
+
+        // Both flags default to false, and an unknown key is still refused by the backend.
+        let n: NewNetwork = serde_json::from_value(serde_json::json!({"type": "tor"})).unwrap();
+        assert!(!n.confirm_open && !n.dry_run);
+        assert!(serde_json::from_value::<NewNetwork>(
+            serde_json::json!({"type": "tor", "confirm": true})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_preview_round_trips() {
+        let p = NetworkAddPreview {
+            gains: vec![],
+            confirm_open_required: true,
+        };
+        let back: NetworkAddPreview =
+            serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+        let none: NetworkAddPreview = serde_json::from_str(r#"{"gains": []}"#).unwrap();
+        assert!(!none.confirm_open_required);
     }
 }

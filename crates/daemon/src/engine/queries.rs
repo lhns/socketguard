@@ -1,10 +1,12 @@
 //! Read-only queries. Each loads the state once ([`Engine::address_views`]) and works from
 //! that copy.
 
+use super::mutations::grant_change_name;
 use super::*;
 use crate::networks;
 use crate::ruleset;
 use crate::AppState;
+use socketguard_core::api_types::{BatchChange, Change, ChangeItem, ChangeKind, NetworkAddPreview};
 use socketguard_core::{
     covered_ports, effective_access, grant_reach, grant_targets, reservation_members,
     ActivityQuery, ActivityRecord, Address, App, AppDetail, Credential, CredentialKind, Grant,
@@ -445,6 +447,84 @@ impl Engine {
                 grant: g.clone(),
             })
             .collect())
+    }
+
+    /// The grants that let someone in on `network` once `inst` is added (ADR 0066): those
+    /// whose reach there, worked out by the same code as every other listing, is not
+    /// `NotReachable`. A grant without a network applies to every network on which grants
+    /// apply; a grant row that names the id applies to it, whatever network it was made for
+    /// (removing a network deletes its grants, but a row may name an id nothing serves).
+    /// Local on loopback takes no grants, so it never has gains.
+    pub(super) async fn grants_taking_effect_on(
+        &self,
+        state: &AppState,
+        inst: &socketguard_core::config::BackendInstanceConfig,
+        network: &Arc<dyn networks::Network>,
+    ) -> Result<NetworkAddPreview, EngineError> {
+        let kind = network.kind();
+        let grants_apply = network.capabilities().grants_apply;
+        let new_net = Network {
+            id: inst.id.clone(),
+            kind,
+            name: inst.id.clone(),
+            interface: inst.backend.interface().map(str::to_string),
+            grants_apply,
+            status: socketguard_core::NetworkStatus::Down {
+                reason: "being added".into(),
+            },
+            // A /64 network gets its prefix only once it is up; a peer identified by an
+            // address suffix would then be let in, so count it as let in now.
+            prefix: (grants_apply && network.capabilities().ip_locators)
+                .then_some(Ipv6Addr::UNSPECIFIED),
+            vlan_id: None,
+            child: None,
+        };
+        let cat = crate::catalog::Catalog::load(state).await?;
+        let protected = self.protected_interfaces(state).await?;
+        let v4_local_only = self.v4_local_only.lock().unwrap().clone();
+        let ctx = ReachCtx::new(
+            &cat.apps,
+            &cat.peers,
+            &cat.groups,
+            &cat.tags,
+            &cat.port_groups,
+            &cat.reservations,
+        )
+        .with_v4_local_only(&v4_local_only);
+        let mut gains = Vec::new();
+        for g in &cat.grants {
+            let reach: Vec<GrantReach> = ctx
+                .reach_of(g, std::slice::from_ref(&new_net), &protected)
+                .into_iter()
+                .filter(|r| r.reach != Reach::NotReachable)
+                .collect();
+            if reach.is_empty() {
+                continue;
+            }
+            gains.push(BatchChange {
+                change: Change {
+                    kind: ChangeKind::Update,
+                    item: ChangeItem::Grant,
+                    name: grant_change_name(
+                        &cat.subject_label(&g.subject),
+                        &cat.target_label(&g.target),
+                        &g.scope,
+                        &cat.port_groups,
+                    ),
+                    detail: Some(match &g.network_id {
+                        Some(n) => format!("on {n}"),
+                        None => "on every network".to_string(),
+                    }),
+                    opens_to_anyone: g.subject == Subject::Anyone,
+                },
+                id: Some(g.id.clone()),
+                reach,
+            });
+        }
+        Ok(NetworkAddPreview {
+            confirm_open_required: gains.iter().any(|g| g.change.opens_to_anyone),
+            gains,
+        })
     }
 
     /// The interfaces under protect-host that carry IPv4 (what decides IPv4 reach).

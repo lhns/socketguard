@@ -88,26 +88,34 @@ impl Catalog {
         }
     }
 
+    /// How a change names what a grant is on, as `check_new_grant` names it for a new grant.
+    pub(super) fn target_label(&self, t: &Target) -> String {
+        match t {
+            Target::App(id) => self.app(id).map_or_else(|| id.clone(), |a| a.name.clone()),
+            Target::Reservation(id) => format!(
+                "reservation {}",
+                self.reservation(id)
+                    .map_or_else(|| id.clone(), |r| r.label.clone())
+            ),
+            Target::Tag(id) => format!(
+                "tag {}",
+                self.tag(id).map_or_else(|| id.clone(), |t| t.label.clone())
+            ),
+        }
+    }
+
     /// What uses port group `group_id`, for a refusal: grants with that scope on `app_id`
     /// (or, with None, on any app and any tag) and tag members with that scope.
     fn group_users(&self, group_id: &str, app_id: Option<&str>) -> Vec<String> {
         let scope = Scope::group(group_id);
         let mut out = Vec::new();
         for g in self.grants.iter().filter(|g| g.scope == scope) {
-            let on = match (&g.target, app_id) {
+            match (&g.target, app_id) {
                 (Target::App(a), Some(want)) if a != want => continue,
                 (Target::Tag(_) | Target::Reservation(_), Some(_)) => continue,
-                (Target::App(a), _) => self.app(a).map_or_else(|| a.clone(), |a| a.name.clone()),
-                (Target::Tag(t), None) => format!(
-                    "tag {}",
-                    self.tag(t).map_or_else(|| t.clone(), |t| t.label.clone())
-                ),
-                (Target::Reservation(r), None) => format!(
-                    "reservation {}",
-                    self.reservation(r)
-                        .map_or_else(|| r.clone(), |r| r.label.clone())
-                ),
-            };
+                _ => {}
+            }
+            let on = self.target_label(&g.target);
             out.push(format!(
                 "the grant to {} on {on}",
                 self.subject_label(&g.subject)
