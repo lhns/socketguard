@@ -364,7 +364,9 @@ $script:MnLogBase = $log5
 if (-not (Wait-Api)) { Mn-Fail "the start for the Tor and Yggdrasil networks does not answer`n$(Daemon-Log $log5)" }
 
 # A Tor or Yggdrasil network is SocketGuard's own copy: portable mode allows it.
-$r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor') 'd-add-tor'
+# The grant to Anyone of part (a) is in the data folder: it takes effect on a new network, so the add asks.
+Mn-AssertAddAsks 'tor' 'tor'
+$r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor', '--yes') 'd-add-tor'
 Write-Host $r.Text
 if ($r.Code -ne 0) { Mn-Fail "networks add tor exited $($r.Code) in portable mode" }
 Write-Host '  waiting for the bootstrap (up to 10 minutes)'
@@ -385,7 +387,7 @@ if ("$($n.child.runs_as)" -notmatch 'account running portable SocketGuard') { Mn
 Ok "the network card says it runs as $($n.child.runs_as)"
 if (-not (Test-Path (Join-Path $Data 'tor'))) { Mn-Fail "no $Data\tor" }
 
-$r = Run $Cli @('networks', 'add', 'yggdrasil', '--id', 'ygg') 'd-add-ygg'
+$r = Run $Cli @('networks', 'add', 'yggdrasil', '--id', 'ygg', '--yes') 'd-add-ygg'
 Write-Host $r.Text
 if ($r.Code -ne 0) { Mn-Fail "networks add yggdrasil exited $($r.Code) in portable mode" }
 Write-Host '  waiting for the adapter (the Wintun driver is installed by wintun.dll on the first adapter; up to 2 minutes)'
