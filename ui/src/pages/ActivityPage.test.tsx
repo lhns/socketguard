@@ -88,3 +88,16 @@ describe("Activity page", () => {
     expect((d.last("activity")?.args.query as { before: number }).before).toBe(51);
   });
 });
+
+describe("Activity page filters", () => {
+  it("an empty result under a filter says so and offers to clear it", async () => {
+    mockDaemon({ activity: () => [] });
+    const user = userEvent.setup();
+    renderWithProviders(<ActivityPage />);
+    expect(await screen.findByText("Nothing happened yet.")).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText("address contains…"), "10.0.0.1");
+    expect(await screen.findByText("Nothing matches these filters.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(await screen.findByText("Nothing happened yet.")).toBeInTheDocument();
+  });
+});
