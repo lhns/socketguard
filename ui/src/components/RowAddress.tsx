@@ -12,13 +12,11 @@ import { useNameCtx } from "./Inspector";
 interface Props {
   app: AppDetail;
   scope: Scope;
-  /** Grants do not apply (Local on loopback): only the All ports row shows an address. */
-  onlyLocal: boolean;
 }
 
 /** The "Address" part of a row card: the automatic address per network (with Reserve…) and
  * "Add to reserved address…", or the reserved address the row is reached on. */
-export default function RowAddress({ app, scope, onlyLocal }: Props) {
+export default function RowAddress({ app, scope }: Props) {
   const names = useNameCtx();
   const nav = useNav();
   const reservations = useReservations().data ?? [];
@@ -26,7 +24,6 @@ export default function RowAddress({ app, scope, onlyLocal }: Props) {
   const commit = useCommit(() => setReserving(null));
 
   const bound = reservations.find((r) => bindsRow(r.bindings, names.tags, app.id, scope));
-  if (onlyLocal && scope.kind !== "all") return null;
 
   let body;
   if (bound) {
@@ -50,7 +47,7 @@ export default function RowAddress({ app, scope, onlyLocal }: Props) {
           addresses={own}
           networks={names.networks}
           empty="Gets an address when access is added."
-          onReserve={onlyLocal ? undefined : (a) => setReserving(a.id)}
+          onReserve={(a) => setReserving(a.id)}
         />
         {target && (
           <ReserveForm

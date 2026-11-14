@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import ActivityPage from "./ActivityPage";
-import { mockDaemon, renderWithProviders } from "../test/helpers";
+import { mockDaemon, renderWithProviders, status } from "../test/helpers";
 import type { ActivityRecord } from "../api";
 
 const rec = (over: Partial<ActivityRecord>): ActivityRecord => ({
@@ -86,5 +86,27 @@ describe("Activity page", () => {
     await user.click(await screen.findByRole("button", { name: "Load more" }));
     await waitFor(() => expect(d.count("activity")).toBe(2));
     expect((d.last("activity")?.args.query as { before: number }).before).toBe(51);
+  });
+});
+
+describe("Activity page without blocked-connection logging", () => {
+  it("says so under the empty list in portable mode", async () => {
+    mockDaemon({ activity: () => [], status: () => ({ ...status, portable: true, drop_events: false }) });
+    renderWithProviders(<ActivityPage />);
+    expect(await screen.findByText("Nothing happened yet.")).toBeInTheDocument();
+    expect(await screen.findByText(/Blocked connections are not logged/)).toBeInTheDocument();
+  });
+});
+
+describe("Activity page filters", () => {
+  it("an empty result under a filter says so and offers to clear it", async () => {
+    mockDaemon({ activity: () => [] });
+    const user = userEvent.setup();
+    renderWithProviders(<ActivityPage />);
+    expect(await screen.findByText("Nothing happened yet.")).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText("address contains…"), "10.0.0.1");
+    expect(await screen.findByText("Nothing matches these filters.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(await screen.findByText("Nothing happened yet.")).toBeInTheDocument();
   });
 });

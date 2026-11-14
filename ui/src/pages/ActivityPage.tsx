@@ -3,7 +3,7 @@ import type { ActivityKind, ActivityRecord } from "../api";
 import { formatTime } from "../lib";
 import { errorText } from "../lib";
 import { useNav } from "../nav";
-import { useActivity, useApps, usePeers } from "../queries";
+import { useActivity, useApps, usePeers, useStatus } from "../queries";
 
 const KIND_LABEL: Record<ActivityKind, string> = {
   app_discovered: "New app",
@@ -40,6 +40,7 @@ export default function ActivityPage() {
   const [peerId, setPeerId] = useState("");
   const [source, setSource] = useState("");
   const apps = useApps();
+  const status = useStatus();
   const peers = usePeers();
   const activity = useActivity({ kind: kind || null, appId: appId || null, peerId: peerId || null });
   const all = activity.data?.pages.flat() ?? [];
@@ -47,6 +48,13 @@ export default function ActivityPage() {
   const records = src ? all.filter((r) => (r.src ?? "").toLowerCase().includes(src)) : all;
   const appName = (aid: string | null) => (aid ? (apps.data?.find((a) => a.id === aid)?.name ?? null) : null);
   const peerLabel = (pid: string | null) => (pid ? (peers.data?.find((p) => p.id === pid)?.label ?? null) : null);
+  const filtered = kind !== "" || appId !== "" || peerId !== "" || src !== "";
+  const clearFilters = () => {
+    setKind("");
+    setAppId("");
+    setPeerId("");
+    setSource("");
+  };
   const events = records.reduce((n, r) => n + r.count, 0);
 
   return (
@@ -78,7 +86,23 @@ export default function ActivityPage() {
       </div>
       {activity.isLoading && <p className="muted">Loading…</p>}
       {activity.error && <div className="error-banner">{errorText(activity.error)}</div>}
-      {activity.data && records.length === 0 && <div className="card empty"><p>Nothing happened yet.</p></div>}
+      {activity.data && records.length === 0 && (
+        <div className="card empty">
+          {filtered ? (
+            <>
+              <p>Nothing matches these filters.</p>
+              <button className="btn btn-sm" onClick={clearFilters}>Clear filters</button>
+            </>
+          ) : (
+            <>
+              <p>Nothing happened yet.</p>
+              {status.data?.portable && status.data.drop_events === false && (
+                <p className="hint" role="note">Blocked connections are not logged: the system&apos;s net-event setting is off.</p>
+              )}
+            </>
+          )}
+        </div>
+      )}
       {records.length > 0 && (
         <p className="muted" data-testid="activity-summary">
           {records.length} {records.length === 1 ? "entry" : "entries"}, {events} {events === 1 ? "event" : "events"}

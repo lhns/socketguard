@@ -18,6 +18,7 @@ export default function NetworkCards() {
       {setup.isError && <div className="error-banner" role="alert">{errorText(setup.error)}</div>}
       {data && (
         <div className="net-cards">
+          {data.lan.length === 0 && <p className="hint">No LAN interface found. Connect this machine to a network, then use Check again.</p>}
           {data.lan
             .filter((l) => !l.already_added)
             .map((l) => <LanCard key={l.interface} lan={l} />)}

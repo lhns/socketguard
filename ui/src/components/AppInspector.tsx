@@ -49,9 +49,6 @@ function OneApp({ app, partial, highlight, onCollapse, onClose }: { app: AppDeta
   const [moving, setMoving] = useState(false);
   const [forgetting, setForgetting] = useState(false);
 
-  // Access can be given wherever a network takes grants. An app nobody has opened yet has
-  // only its Local address, so this must not be read from the app's addresses.
-  const onlyLocal = names.networks.length > 0 && names.networks.every((n) => n.grants_apply === false);
   const hasV4 = app.ports.some((p) => p.listening && p.family !== "v6");
 
   return (
@@ -82,7 +79,7 @@ function OneApp({ app, partial, highlight, onCollapse, onClose }: { app: AppDeta
         </p>
       )}
 
-      <PortsSection app={app} partial={partial} highlight={highlight} onlyLocal={onlyLocal} hasV4={hasV4} />
+      <PortsSection app={app} partial={partial} highlight={highlight} hasV4={hasV4} />
 
       <div className="actions">
         <MovePicker app={app} open={moving} onOpenChange={setMoving} onPick={(to) => {

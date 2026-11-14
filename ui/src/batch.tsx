@@ -46,6 +46,11 @@ export function ChangeList({ changes, networks }: { changes: BatchChange[]; netw
           <span className="change-name">{c.name}</span>
           {c.detail && <span className="muted">{c.detail}</span>}
           {c.opens_to_anyone && <span className="badge reach reach-bad">opens to anyone</span>}
+          {c.kind === "create" && c.item === "grant" && (c.reach ?? []).length === 0 && !networks.some((n) => n.grants_apply) && (
+            <span className="badge reach reach-muted" title="Access takes effect once a network that takes grants is added (LAN, Yggdrasil or Tor).">
+              not reachable yet: no network takes grants
+            </span>
+          )}
           {(c.reach ?? []).map((r, j) => (
             <ReachBadge key={`${r.network_id}-${j}`} reach={r.reach} network={netName(r.network_id)} note={r.note} />
           ))}

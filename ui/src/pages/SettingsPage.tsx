@@ -167,7 +167,12 @@ function ProtectHost({ interfaces, current, onShowApp }: { interfaces: string[];
       </p>
       <fieldset className="checks">
         <legend className="visually-hidden">Interfaces to protect</legend>
-        {options.length === 0 && <p className="muted">No interfaces available.</p>}
+        {options.length === 0 && (
+          <p className="muted">
+            No interface to protect yet. Protection applies to the interfaces of the networks you add above (LAN or Yggdrasil); the
+            Local network is on loopback and needs none.
+          </p>
+        )}
         {options.map((i) => (
           <label key={i} className="check">
             <input
