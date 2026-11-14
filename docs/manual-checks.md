@@ -37,6 +37,19 @@ account to elevate with. Get the MSI from the release.
     `socketguard-daemon uninstall --purge --yes`. Expect: it ends with "SocketGuard is uninstalled."
     and `C:\ProgramData\SocketGuard` is gone.
 
+## Windows (portable zip)
+
+CI drives the portable daemon through the CLI and never opens the window.
+
+1. Unzip, start `socketguard-ui.exe`, press **Start** and accept the administrator prompt.
+   Expect: the app list fills in.
+2. Start a program that listens on a port. Expect: it appears in Apps within a few seconds,
+   without clicking anything (the window receives the daemon's events).
+3. Close the window with the X. Expect: "Removing rules…", then the window closes; no
+   `socketguard-daemon.exe` is left in Task Manager and `data\last-exit.log` says "clean".
+4. Start it again, then end `socketguard-daemon.exe` in Task Manager and close the window.
+   Expect: it closes within a few seconds.
+
 ## macOS (unsigned pkg)
 
 1. Download the pkg in a browser (so it is quarantined) and double-click it. Expect: "cannot be

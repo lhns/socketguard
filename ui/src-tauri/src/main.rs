@@ -1013,10 +1013,16 @@ fn main() {
     }
     tauri::Builder::default()
         // Portable mode: closing the window must stop the daemon first. Keep the window open
-        // and let the frontend run the close flow; it ends the app with `quit_app`.
+        // and let the frontend run the close flow; it ends the app with `quit_app`. A second
+        // close always closes, so a frontend that does not answer cannot keep the window open:
+        // the daemon watches this process and tears down when it ends.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if socketguard_core::portable::is_portable() {
+                static ASKED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if socketguard_core::portable::is_portable()
+                    && !ASKED.swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
                     api.prevent_close();
                     let _ = window.emit("portable_close_requested", ());
                 }
