@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import AppsPage from "./AppsPage";
 import { installMock } from "../dev/mock";
 import type { ChangesRequest } from "../api";
-import { batch, detail, memoryStorage, mkApp, mkTag, mockDaemon, renderWithProviders, networks } from "../test/helpers";
+import { batch, detail, memoryStorage, mkApp, mkReservation, mkTag, mockDaemon, renderWithProviders, networks } from "../test/helpers";
 
 beforeEach(() => {
   vi.stubGlobal("localStorage", memoryStorage());
@@ -100,7 +100,7 @@ describe("a fresh host (?mock=fresh): about a dozen apps, nothing granted, Local
       await user.keyboard("{Escape}");
       await user.click(within(form).getByRole("button", { name: "Add access" }));
       expect(await screen.findByText("Access added (1), effective once a network is added")).toBeInTheDocument();
-      const grant = daemon.calls.filter((c) => c.cmd === "changes").map((c) => (c.args.req as ChangesRequest).ops[0]).at(-1);
+      const grant = daemon.calls.filter((c) => c.cmd === "changes").map((c) => (c.args.req as ChangesRequest).ops[0]).pop();
       expect(grant).toMatchObject({ op: "add_grant", scope: { kind: "port", port: 80 }, subject: { kind: "peer", id: "p1" } });
     });
   });
@@ -174,6 +174,23 @@ describe("action rows", () => {
     expect(row.getByRole("button", { name: "Add to reserved address…" })).toBeInTheDocument();
     expect(row.queryByRole("button", { name: "Delete tag" })).not.toBeInTheDocument();
     expect(within(panel).getByRole("button", { name: "Delete tag" }).parentElement).toHaveClass("danger-zone");
+  });
+
+  it("a tag bound to a reserved address says so, with a link, instead of losing Add to reserved address…", async () => {
+    mockDaemon({
+      list_apps: () => [nginx],
+      get_app: () => detail(nginx),
+      list_tags: () => [web],
+      list_reservations: () => [mkReservation("r1", "front", [{ kind: "tag", tag_id: "t1" }])],
+    });
+    const go = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />, go);
+    await user.click(await listTable().findByRole("checkbox", { name: "Select web" }));
+    const panel = within(inspector());
+    await user.click(await panel.findByRole("button", { name: "Go to reservation front" }));
+    expect(go).toHaveBeenCalledWith("reserved", { reservationId: "r1" });
+    expect(panel.queryByRole("button", { name: "Add to reserved address…" })).not.toBeInTheDocument();
   });
 
   it("the tag's patterns are under a collapsed disclosure unless it has some", async () => {

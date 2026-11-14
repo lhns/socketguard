@@ -28,7 +28,8 @@ export function TagInspector({ tag, highlight, onCollapse, onClose }: { tag: Tag
   const toast = useToast();
   const names = useNameCtx();
   const grants = (useGrants().data ?? []).filter((g) => g.target.kind === "tag" && g.target.id === tag.id);
-  const bound = useList(useReservations()).some((r) => r.bindings.some((b) => b.target.kind === "tag" && b.target.tag_id === tag.id));
+  const nav = useNav();
+  const holder = useList(useReservations()).find((r) => r.bindings.some((b) => b.target.kind === "tag" && b.target.tag_id === tag.id));
   const update = useUpdateTag();
   const del = useCommit(onClose);
   const { revoke, commit: revokeCommit } = useRevoke();
@@ -88,8 +89,14 @@ export function TagInspector({ tag, highlight, onCollapse, onClose }: { tag: Tag
         <CommitPreview commit={revokeCommit} />
         <ActionRow>
           <AddAccess fixed={{ side: "targets", targets: [{ kind: "tag", id: tag.id }] }} />
-          {!bound && <AddToReserved target={{ kind: "tag", tag_id: tag.id }} />}
+          {!holder && <AddToReserved target={{ kind: "tag", tag_id: tag.id }} />}
         </ActionRow>
+        {holder && (
+          <p className="hint">
+            Reached on reserved address{" "}
+            <button className="link-btn" aria-label={`Go to reservation ${holder.label}`} onClick={() => nav.go("reserved", { reservationId: holder.id })}>{holder.label}</button>
+          </p>
+        )}
       </Section>
 
       <DangerZone>
