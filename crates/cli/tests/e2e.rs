@@ -725,3 +725,111 @@ async fn removing_a_network_needs_no_confirmation_and_disabling_does() {
     env.ok(&["disable", "--yes"]).await;
     env.stop().await;
 }
+
+// ─── Adding a network with grants that take effect on it (ADR 0066) ─────────
+
+#[tokio::test]
+async fn adding_a_network_lists_the_grants_and_refuses_anyone_without_yes() {
+    let env = Env::start().await;
+    env.ok(&["grant", "nginx", "anyone", "--yes"]).await;
+    env.ok(&["networks", "rm", "lan"]).await;
+
+    let e = env
+        .fails(&[
+            "networks",
+            "add",
+            "slaac",
+            "--interface",
+            "eth0",
+            "--id",
+            "lan",
+        ])
+        .await;
+    assert!(e.stderr.contains("--yes"), "{}", e.stderr);
+    assert!(
+        e.stdout
+            .contains("Adding lan lets 1 existing grant(s) take effect on it"),
+        "{}",
+        e.stdout
+    );
+    assert!(e.stdout.contains("Anyone to nginx"), "{}", e.stdout);
+    assert!(e.stdout.contains("[opens to anyone]"), "{}", e.stdout);
+    let nets = env.ok(&["networks", "list", "--json"]).await.json();
+    assert_eq!(nets.as_array().unwrap().len(), 2, "nothing was added");
+
+    let ok = env
+        .ok(&[
+            "networks",
+            "add",
+            "slaac",
+            "--interface",
+            "eth0",
+            "--id",
+            "lan",
+            "--yes",
+        ])
+        .await;
+    assert!(ok.stdout.contains("added network lan"), "{}", ok.stdout);
+    let nets = env.ok(&["networks", "list", "--json"]).await.json();
+    assert_eq!(nets.as_array().unwrap().len(), 3);
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn a_grant_to_a_peer_is_listed_when_a_network_is_added_and_asks_nothing() {
+    let env = Env::start().await;
+    ip_peer(&env, "alice", "2001:db8::7").await;
+    env.ok(&["grant", "nginx", "alice"]).await;
+    env.ok(&["networks", "rm", "lan"]).await;
+    let ok = env
+        .ok(&[
+            "networks",
+            "add",
+            "slaac",
+            "--interface",
+            "eth0",
+            "--id",
+            "lan",
+        ])
+        .await;
+    assert!(ok.stdout.contains("alice to nginx"), "{}", ok.stdout);
+    assert!(!ok.stdout.contains("opens to anyone"), "{}", ok.stdout);
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn the_prompt_for_an_add_that_lets_anyone_in_can_be_declined() {
+    let env = Env::start().await;
+    env.ok(&["grant", "nginx", "anyone", "--yes"]).await;
+    env.ok(&["networks", "rm", "lan"]).await;
+    let req = || socketguard_core::api_types::NewNetwork {
+        id: Some("lan".into()),
+        backend: socketguard_core::BackendConfig::Slaac {
+            interface: "eth0".into(),
+            prefix: None,
+        },
+        confirm_open: false,
+        dry_run: false,
+    };
+    let ctx = Ctx::new(env.client(), false);
+
+    let mut no = Script::new(vec![A::No]);
+    let r = socketguard_cli::commands::add_network_reviewed(&ctx, &mut no, req(), false).await;
+    assert!(r.is_err());
+    no.finished();
+    assert!(
+        no.asked[0].starts_with("Let anyone in on lan"),
+        "{:?}",
+        no.asked
+    );
+    assert_eq!(env.client().list_networks().await.unwrap().len(), 2);
+
+    let mut yes = Script::new(vec![A::Yes]);
+    let added = socketguard_cli::commands::add_network_reviewed(&ctx, &mut yes, req(), false)
+        .await
+        .unwrap();
+    yes.finished();
+    assert_eq!(added.value.id, "lan");
+    assert_eq!(env.client().list_networks().await.unwrap().len(), 3);
+    env.stop().await;
+}

@@ -274,7 +274,9 @@ function Assert-Bundled {
 
 function Invoke-TorAndYggdrasil {
   Section 'networks: Tor'
-  $r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor') 'mn-add-tor'
+  # The firewall exercise left a grant to Anyone: it takes effect on a new network, so the add asks.
+  Mn-AssertAddAsks 'tor' 'tor'
+  $r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor', '--yes') 'mn-add-tor'
   Write-Host $r.Text
   if ($r.Code -ne 0) { Mn-Fail "networks add tor exited $($r.Code)" }
   Write-Host '  waiting for the bootstrap (up to 10 minutes)'
@@ -297,14 +299,14 @@ function Invoke-TorAndYggdrasil {
   if (-not (Wait-Until { (Mn-Procs 'tor.exe').Count -eq 0 } 60 'tor gone')) { Mn-Fail 'tor.exe still runs 60 s after the network was removed' }
   Ok 'removing the network ends tor.exe'
   # Added again and left configured: the uninstall steps look at what a stop keeps and a purge removes.
-  $r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor') 'mn-add-tor-again'
+  $r = Run $Cli @('networks', 'add', 'tor', '--id', 'tor', '--yes') 'mn-add-tor-again'
   if ($r.Code -ne 0) { Mn-Fail "networks add tor (again) exited $($r.Code): $($r.Text)" }
   if (-not (Wait-Until { (Mn-Procs 'tor.exe').Count -gt 0 } 60 'tor again')) { Mn-Fail 'tor.exe did not start again' }
   if (-not (Wait-Until { Test-Path (Join-Path $DataDir 'tor') } 20 'tor dir')) { Mn-Fail "no $DataDir\tor after adding the network again" }
   Ok "added again; $DataDir\tor exists"
 
   Section 'networks: Yggdrasil'
-  $r = Run $Cli @('networks', 'add', 'yggdrasil', '--id', 'ygg') 'mn-add-ygg'
+  $r = Run $Cli @('networks', 'add', 'yggdrasil', '--id', 'ygg', '--yes') 'mn-add-ygg'
   Write-Host $r.Text
   if ($r.Code -ne 0) { Mn-Fail "networks add yggdrasil exited $($r.Code)" }
   Write-Host '  waiting for the adapter (the Wintun driver is installed by wintun.dll on the first adapter; up to 2 minutes)'

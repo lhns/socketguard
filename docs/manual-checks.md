@@ -58,3 +58,17 @@ account to elevate with. Get the MSI from the release.
 7. Install again and use **Remove SocketGuard...** with "Also delete settings and keys?" ticked. Expect:
    the data in `/Library/Application Support/SocketGuard` is gone (the programs stay) and `/etc/pf.conf` has no `socketguard`
    anchor line.
+
+## Adding a network with a grant to Anyone (any platform)
+
+1. With the app open, grant an app to **Anyone** on every network (no network chosen), then remove
+   the Tor or Yggdrasil network if it is added.
+2. In **Settings**, press **Add** on the Tor or Yggdrasil card. Expect: a dialog "Open *app* to
+   anyone on *Tor*?" with a warning and the grant listed; **Cancel** adds nothing.
+3. Press **Add** again and **Add and open to anyone**. Expect: the network is added and the
+   Activity page has a line "Added tor: 1 existing grants take effect on it (1 to Anyone)".
+4. Remove the network, replace the grant with one to a peer, add the network again. Expect: a
+   plain "Add *Tor*?" review that lists the peer's access, with no warning.
+5. In a terminal, `socketguard networks add tor` (after removing it) lists the grant and asks
+   "Let anyone in on tor through these grants?"; with input from a pipe it fails and says to repeat
+   with `--yes`.

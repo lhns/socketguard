@@ -21,10 +21,10 @@ use serde::{de::DeserializeOwned, Serialize};
 use socketguard_core::api_types::{
     ApiError, ApplyRequest, ApplyResponse, AttachPortGroup, ChangesRequest, ChangesResponse,
     ConfirmQuery, DisableRequest, Enforcement, EnforcementNotice, ExportDocument, MemberQuery,
-    MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup, NewReservation,
-    NewTag, NewTagMember, ParseCredentialsRequest, ProtectHostRequest, ProtectHostResponse,
-    ReserveRequest, SetBridges, SetLanDiscovery, SetMembers, SetPeers, ShareResponse,
-    StatusResponse, TorKeyResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
+    MoveAppRequest, NetworkAddPreview, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup,
+    NewReservation, NewTag, NewTagMember, ParseCredentialsRequest, ProtectHostRequest,
+    ProtectHostResponse, ReserveRequest, SetBridges, SetLanDiscovery, SetMembers, SetPeers,
+    ShareResponse, StatusResponse, TorKeyResponse, UpdateLabel, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::setup::NetworkSetup;
 use socketguard_core::{
@@ -666,6 +666,16 @@ impl Client {
     /// could not be applied, i.e. the network is not closed yet (ADR 0051).
     pub async fn add_network(&self, req: &NewNetwork) -> Result<Saved<Network>> {
         self.call_saved(&routes::ADD_NETWORK, &[], json(req)).await
+    }
+
+    /// What adding a network would let in (ADR 0066): the same request as [`Client::add_network`]
+    /// with `dry_run`, so nothing changes. Errors are those of the real add.
+    pub async fn preview_add_network(&self, req: &NewNetwork) -> Result<NetworkAddPreview> {
+        let req = NewNetwork {
+            dry_run: true,
+            ..req.clone()
+        };
+        self.call(&routes::ADD_NETWORK, &[], None, json(&req)).await
     }
 
     /// Replace the peers of a Yggdrasil network (ADR 0052).

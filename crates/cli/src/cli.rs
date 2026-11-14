@@ -481,6 +481,9 @@ pub enum NetworksCmd {
         /// Defaults to the type (and interface)
         #[arg(long)]
         id: Option<String>,
+        /// Confirm without asking when existing grants to Anyone take effect on the network
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Show or change the peers of a Yggdrasil network
     Peers {

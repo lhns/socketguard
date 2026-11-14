@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use comfy_table::{presets, Table};
 use socketguard_core::api_types::{
     ApplyResponse, BatchChange, Change, ChangeItem, ChangeKind, ChangesResponse, LockoutRiskInfo,
-    ShareResponse, StatusResponse, TorKeyResponse,
+    NetworkAddPreview, ShareResponse, StatusResponse, TorKeyResponse,
 };
 use socketguard_core::{
     ranges_text, AccessOrigin, ActivityRecord, Address, App, AppDetail, BindingTarget, ChildInfo,
@@ -201,6 +201,33 @@ pub fn open_question(app: &str, network: Option<&str>) -> String {
         Some(n) => format!("Open {app} to everyone on {n}?"),
         None => format!("Open {app} to anyone who can reach it?"),
     }
+}
+
+/// What adding a network would let in: one line per grant that takes effect on it
+/// (ADR 0066).
+pub fn network_add_preview(id: &str, p: &NetworkAddPreview) -> String {
+    let mut lines = vec![format!(
+        "Adding {id} lets {} existing grant(s) take effect on it:",
+        p.gains.len()
+    )];
+    for g in &p.gains {
+        let reach = g
+            .reach
+            .iter()
+            .map(|r| reach_label(r.reach))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut line = format!("  {}", g.change.name);
+        if let Some(d) = &g.change.detail {
+            line.push_str(&format!(" ({d})"));
+        }
+        line.push_str(&format!(": {reach}"));
+        if g.change.opens_to_anyone {
+            line.push_str("  [opens to anyone]");
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
 }
 
 pub fn time(t: DateTime<Utc>) -> String {

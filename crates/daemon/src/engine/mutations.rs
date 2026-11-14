@@ -11,7 +11,7 @@ use chrono::Utc;
 use socketguard_core::api_types::{BatchChange, Change, ChangeItem, ChangeKind};
 use socketguard_core::{
     new_id, normalize_credential, ActivityKind, Address, App, Credential, CredentialKind, Grant,
-    GrantView, NewCredential, NewGrant, Peer, PeerGroup, Scope, Subject, Target,
+    GrantView, NewCredential, NewGrant, Peer, PeerGroup, PortGroup, Scope, Subject, Target,
 };
 use std::collections::{BTreeSet, HashSet};
 
@@ -825,15 +825,11 @@ impl Engine {
             change: Change {
                 kind: ChangeKind::Create,
                 item: ChangeItem::Grant,
-                name: format!(
-                    "{} to {}{}",
-                    info.subject_label,
-                    info.target_name,
-                    if grant.scope.is_all() {
-                        String::new()
-                    } else {
-                        format!(" {}", grant.scope.describe(&plan.cat.port_groups))
-                    }
+                name: grant_change_name(
+                    &info.subject_label,
+                    &info.target_name,
+                    &grant.scope,
+                    &plan.cat.port_groups,
                 ),
                 detail: grant.network_id.as_ref().map(|n| format!("on {n}")),
                 opens_to_anyone: grant.subject == Subject::Anyone,
@@ -882,6 +878,20 @@ impl Engine {
 }
 
 use socketguard_core::api_types::PATTERN_OPEN_NOTE as PATTERN_NOTE;
+
+/// How a change names a grant: `Anyone to Firefox`, `Alice to Firefox 80/tcp`.
+pub(super) fn grant_change_name(
+    subject: &str,
+    target: &str,
+    scope: &socketguard_core::Scope,
+    port_groups: &[PortGroup],
+) -> String {
+    if scope.is_all() {
+        format!("{subject} to {target}")
+    } else {
+        format!("{subject} to {target} {}", scope.describe(port_groups))
+    }
+}
 
 /// Whether one of `grants` is a grant to Anyone.
 pub(super) fn any_to_anyone(grants: &[Grant]) -> bool {

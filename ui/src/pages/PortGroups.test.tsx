@@ -446,6 +446,18 @@ describe("Port group inspector", () => {
     expect(applied(d)).toEqual([]);
   });
 
+  it("several groups: the picker offers no unidentified app and the panel says why", async () => {
+    setup();
+    const user = userEvent.setup();
+    renderWithProviders(<AppsPage />);
+    await user.click(await inList().findByRole("checkbox", { name: "Select passive" }));
+    await user.click(inList().getByRole("checkbox", { name: "Select dns" }));
+    const panel = within(await screen.findByRole("complementary", { name: "Port groups details" }));
+    await user.click(panel.getByRole("button", { name: "Attach or detach apps" }));
+    expect(screen.queryByRole("checkbox", { name: "mystery" })).not.toBeInTheDocument();
+    expect(panel.getByText("Unidentified apps cannot take port groups.")).toBeInTheDocument();
+  });
+
   it("several groups show where they are attached, with mixed state, and Delete N", async () => {
     const d = setup();
     const user = userEvent.setup();

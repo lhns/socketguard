@@ -56,7 +56,7 @@ async fn add(h: &ChildHarness, peers: &[&str]) -> (Arc<AppState>, anyhow::Result
         .engine
         .write()
         .await
-        .add_network(&state, ygg_instance(peers))
+        .add_network(&state, ygg_instance(peers), false)
         .await
         .unwrap();
     (state, applied)
@@ -404,7 +404,7 @@ async fn removing_the_network_stops_the_child_and_deletes_the_key() {
             .engine
             .write()
             .await
-            .add_network(&state, ygg_instance(&[]))
+            .add_network(&state, ygg_instance(&[]), false)
             .await
             .unwrap();
         ((), a)

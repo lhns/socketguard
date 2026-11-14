@@ -10,6 +10,21 @@ function Mn-Net([string]$Id) {
   if ($r.Code -ne 0) { return $null }
   try { return @($r.Text | ConvertFrom-Json) | Where-Object { $_.id -eq $Id } | Select-Object -First 1 } catch { return $null }
 }
+# A grant to Anyone that is still there takes effect on a network that is added: `networks add`
+# asks first (ADR 0066), and with nobody to ask, or without --yes, it refuses and adds nothing.
+# Asserted once, before the real add (which then passes --yes).
+function Mn-AssertAddAsks([string]$Type, [string]$Id) {
+  $g = Run $Cli @('grants', '--json') $null
+  $anyone = $false
+  try { $anyone = [bool](@($g.Text | ConvertFrom-Json) | Where-Object { $_.subject.kind -eq 'anyone' }) } catch { }
+  if (-not $anyone) { Write-Host "  (no grant to Anyone left: networks add $Type needs no confirmation)"; return }
+  $r = Run $Cli @('networks', 'add', $Type, '--id', $Id) "mn-add-$Id-refused"
+  Write-Host $r.Text
+  if ($r.Code -eq 0) { Mn-Fail "networks add $Type without --yes was accepted although a grant to Anyone takes effect on it" }
+  if ($r.Text -notmatch '--yes') { Mn-Fail "networks add $Type was refused, but not for the missing --yes: $($r.Text)" }
+  if (Mn-Net $Id) { Mn-Fail "networks add $Type was refused but the network $Id exists" }
+  Ok "networks add $Type without --yes is refused while a grant to Anyone would take effect on it"
+}
 function Mn-Describe($n) {
   if (-not $n) { return 'no such network' }
   $extra = ''

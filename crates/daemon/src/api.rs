@@ -978,10 +978,14 @@ async fn network_create(
         id,
         backend: req.backend,
     };
+    if req.dry_run {
+        let engine = state.engine.read().await;
+        return Ok(Json(engine.preview_add_network(&state, &inst).await?).into_response());
+    }
     // The write lock stays held until the file is written: two requests cannot save each
     // other's stale list.
     let mut engine = state.engine.write().await;
-    let (network, applied) = engine.add_network(&state, inst).await?;
+    let (network, applied) = engine.add_network(&state, inst, req.confirm_open).await?;
     persist_networks(&state, &engine).await;
     if let Err(e) = applied {
         // Saved and live, but the rules (and so the network's block) are not in force:

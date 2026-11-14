@@ -117,6 +117,9 @@ networks detect                         what this host offers: LAN interfaces, T
 networks add tor                        SocketGuard's own Tor
 networks add yggdrasil --peer tls://host:port           SocketGuard's own Yggdrasil; --peer repeats
 networks add ula|slaac|dhcpv6 [--interface eth0] [--id ID]
+                                        every add lists the existing grants that take effect on the new network
+                                        and asks first when Anyone is among them (-y confirms; without a
+                                        terminal and -y it fails)
 networks peers yggdrasil [--add URI] [--rm URI]         show or change the peers of the Yggdrasil node
 networks lan-discovery yggdrasil [on|off] [-y]          show, or turn on or off, finding Yggdrasil nodes on the
                                         local network (off by default; on lets other computers on the LAN

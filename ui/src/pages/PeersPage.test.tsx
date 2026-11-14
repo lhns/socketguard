@@ -135,6 +135,21 @@ describe("Inspector: one peer", () => {
     expect(within(what).getAllByRole("button", { name: /^Revoke/ })).toHaveLength(1);
   });
 
+  it("the peer-side form says what is missing while What is empty", async () => {
+    setup();
+    const user = userEvent.setup();
+    renderWithProviders(<PeersPage />);
+    await user.click(await rowButton("bob"));
+    const p = within(await screen.findByRole("region", { name: "Peer details" }));
+    await user.click(await p.findByRole("button", { name: "Add access…" }));
+    const form = screen.getByRole("form", { name: "Add access" });
+    expect(within(form).getByText("Choose what it can reach")).toBeInTheDocument();
+    await user.click(within(form).getByRole("combobox", { name: "What" }));
+    await user.click(screen.getByRole("checkbox", { name: "nginx" }));
+    await user.keyboard("{Escape}");
+    expect(within(form).queryByText("Choose what it can reach")).not.toBeInTheDocument();
+  });
+
   it("add access from the peer side: the peer is fixed, an app or tag is picked", async () => {
     const d = setup();
     const user = userEvent.setup();

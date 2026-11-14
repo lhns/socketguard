@@ -784,3 +784,35 @@ fn grant_notes_and_reservation_access_are_shown() {
     );
     assert!(text.contains("up") && text.contains("closed"), "{text}");
 }
+
+#[test]
+fn what_adding_a_network_lets_in() {
+    let gain = |name: &str, anyone: bool, reach: Reach| BatchChange {
+        change: Change {
+            kind: ChangeKind::Update,
+            item: ChangeItem::Grant,
+            name: name.into(),
+            detail: Some("on every network".into()),
+            opens_to_anyone: anyone,
+        },
+        id: Some("g".into()),
+        reach: vec![GrantReach {
+            network_id: "tor".into(),
+            reach,
+            note: None,
+        }],
+    };
+    let p = NetworkAddPreview {
+        gains: vec![
+            gain("alice to nginx", false, Reach::Verified),
+            gain("Anyone to sshd", true, Reach::Open),
+        ],
+        confirm_open_required: true,
+    };
+    assert_eq!(
+        render::network_add_preview("tor", &p),
+        "Adding tor lets 2 existing grant(s) take effect on it:
+  alice to nginx (on every network): verified
+  Anyone to sshd (on every network): open  [opens to anyone]"
+    );
+}

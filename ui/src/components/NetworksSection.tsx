@@ -1,7 +1,7 @@
 import { useId, useState } from "react";
 import { toDaemonError, type Network, type NewNetwork } from "../api";
-import { errorText } from "../lib";
-import { useAddNetwork, useDeleteNetwork, useNetworks, useNetworkSetup } from "../queries";
+import { useAddNetworkReviewed } from "../addNetwork";
+import { useDeleteNetwork, useNetworks, useNetworkSetup } from "../queries";
 import ConfirmDialog from "./ConfirmDialog";
 import { ChildDetails, ChildStatus } from "./NetworkChild";
 import NetworkCards from "./NetworkCards";
@@ -109,11 +109,15 @@ function AddNetworkForm() {
   // Host interfaces to pick from; any other name can still be typed.
   const hostInterfaces = [...new Set(setup.data?.lan.map((l) => l.interface) ?? [])];
   const toast = useToast();
-  const add = useAddNetwork();
   const [kind, setKind] = useState<Kind>("slaac");
   const [iface, setIface] = useState("");
   const [prefix, setPrefix] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const add = useAddNetworkReviewed((n) => {
+    toast.success(`Added ${n.name}`);
+    setIface("");
+    setPrefix("");
+  }, setError);
 
   // An error that names the interface belongs to that field.
   const hasInterface = kind !== "tor" && kind !== "yggdrasil";
@@ -137,14 +141,7 @@ function AddNetworkForm() {
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    add.mutate(build(), {
-      onSuccess: (n) => {
-        toast.success(`Added ${n.name}`);
-        setIface("");
-        setPrefix("");
-      },
-      onError: (err) => setError(errorText(err)),
-    });
+    add.submit(build());
   };
 
   return (
@@ -185,10 +182,11 @@ function AddNetworkForm() {
             <input id={`${id}-p`} className="input mono" value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder="auto" />
           </div>
         )}
-        <button type="submit" className="btn btn-primary" disabled={add.isPending}>Add network</button>
+        <button type="submit" className="btn btn-primary" disabled={add.pending}>Add network</button>
       </div>
       <p className="hint">{KIND_HELP[kind]}</p>
       {error && !interfaceError && <div className="error-banner" role="alert">{error}</div>}
+      {add.dialog}
     </form>
   );
 }

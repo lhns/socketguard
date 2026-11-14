@@ -1,7 +1,8 @@
 import { useState } from "react";
 import type { KindSetup, LanCandidate, NewNetwork } from "../api";
 import { errorText } from "../lib";
-import { useAddNetwork, useNetworkSetup } from "../queries";
+import { useAddNetworkReviewed } from "../addNetwork";
+import { useNetworkSetup } from "../queries";
 import { useToast } from "./Toast";
 
 export default function NetworkCards() {
@@ -48,16 +49,13 @@ function CardShell(props: { label: string; title: string; sub?: string; children
 }
 
 function LanCard({ lan }: { lan: LanCandidate }) {
-  const add = useAddNetwork();
   const toast = useToast();
   const [dhcp, setDhcp] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const add = useAddNetworkReviewed((n) => toast.success(`Added ${n.name}`), setError);
   const submit = () => {
     setError(null);
-    add.mutate(
-      dhcp ? { type: "dhcpv6", interface: lan.interface } : { type: "slaac", interface: lan.interface },
-      { onSuccess: (n) => toast.success(`Added ${n.name}`), onError: (e) => setError(errorText(e)) },
-    );
+    add.submit(dhcp ? { type: "dhcpv6", interface: lan.interface } : { type: "slaac", interface: lan.interface });
   };
   return (
     <CardShell label={`LAN ${lan.interface}`} title={lan.interface} sub={lan.description}>
@@ -77,19 +75,20 @@ function LanCard({ lan }: { lan: LanCandidate }) {
         <input type="checkbox" checked={dhcp} onChange={(e) => setDhcp(e.target.checked)} /> uses DHCPv6
       </label>
       <div className="actions">
-        <button className="btn btn-primary btn-sm" aria-label={`Add ${lan.interface}`} onClick={submit} disabled={add.isPending}>
+        <button className="btn btn-primary btn-sm" aria-label={`Add ${lan.interface}`} onClick={submit} disabled={add.pending}>
           Add
         </button>
       </div>
       {error && <div className="error-banner" role="alert">{error}</div>}
+      {add.dialog}
     </CardShell>
   );
 }
 
 function LocalCard({ interfaceName }: { interfaceName?: string }) {
-  const add = useAddNetwork();
   const toast = useToast();
   const [error, setError] = useState<string | null>(null);
+  const add = useAddNetworkReviewed((n) => toast.success(`Added ${n.name}`), setError);
   return (
     <CardShell label="Local" title="Local (this machine only)">
       <p className="hint">Addresses that reach only this machine.</p>
@@ -97,16 +96,17 @@ function LocalCard({ interfaceName }: { interfaceName?: string }) {
         <button
           className="btn btn-primary btn-sm"
           aria-label="Add Local"
-          disabled={add.isPending}
+          disabled={add.pending}
           onClick={() => {
             setError(null);
-            add.mutate({ type: "ula", interface: interfaceName ?? "lo" }, { onSuccess: (n) => toast.success(`Added ${n.name}`), onError: (e) => setError(errorText(e)) });
+            add.submit({ type: "ula", interface: interfaceName ?? "lo" });
           }}
         >
           Add
         </button>
       </div>
       {error && <div className="error-banner" role="alert">{error}</div>}
+      {add.dialog}
     </CardShell>
   );
 }
@@ -117,15 +117,15 @@ const KIND_TEXT = {
 } as const;
 
 function KindCard({ kind, setup }: { kind: "tor" | "yggdrasil"; setup: KindSetup }) {
-  const add = useAddNetwork();
   const toast = useToast();
   const [error, setError] = useState<string | null>(null);
+  const add = useAddNetworkReviewed((n) => toast.success(`Added ${n.name}`), setError);
   const { title, about } = KIND_TEXT[kind];
 
   const submit = () => {
     setError(null);
     const req: NewNetwork = kind === "yggdrasil" ? { type: "yggdrasil", peers: [] } : { type: "tor", bridges: [] };
-    add.mutate(req, { onSuccess: (n) => toast.success(`Added ${n.name}`), onError: (e) => setError(errorText(e)) });
+    add.submit(req);
   };
 
   return (
@@ -144,12 +144,13 @@ function KindCard({ kind, setup }: { kind: "tor" | "yggdrasil"; setup: KindSetup
       )}
       <div className="actions">
         {setup.available && (
-          <button className="btn btn-primary btn-sm" aria-label={`Add ${title}`} onClick={submit} disabled={add.isPending}>
+          <button className="btn btn-primary btn-sm" aria-label={`Add ${title}`} onClick={submit} disabled={add.pending}>
             Add
           </button>
         )}
       </div>
       {error && <div className="error-banner" role="alert">{error}</div>}
+      {add.dialog}
     </CardShell>
   );
 }

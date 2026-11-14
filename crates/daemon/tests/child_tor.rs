@@ -48,7 +48,7 @@ async fn add(h: &ChildHarness) -> Arc<AppState> {
         .engine
         .write()
         .await
-        .add_network(&state, tor_instance())
+        .add_network(&state, tor_instance(), false)
         .await
         .unwrap();
     applied.unwrap();
@@ -290,7 +290,7 @@ async fn a_build_without_the_files_shows_the_network_as_unavailable() {
         .engine
         .write()
         .await
-        .add_network(&state, tor_instance())
+        .add_network(&state, tor_instance(), false)
         .await
         .unwrap();
     applied.unwrap();
