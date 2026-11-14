@@ -11,7 +11,6 @@ use crate::report::Report;
 use crate::uninstall::{self, Deps, UninstallOptions, UninstallPaths};
 use crate::{engine, firewall, iface, networks, state};
 use anyhow::{Context, Result};
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -22,12 +21,6 @@ fn fail(e: anyhow::Error) -> i32 {
 
 fn resolved() -> Result<Resolved> {
     config_file::resolve()
-}
-
-/// The config for the commands that remove things: a file that does not parse falls back to
-/// the defaults with a warning, so `apt remove` does not fail on a stale key.
-fn resolved_for_removal() -> Resolved {
-    config_file::resolve_for_removal()
 }
 
 // ─── disable ────────────────────────────────────────────────────────────────
@@ -75,7 +68,7 @@ pub async fn disable_cmd(force: bool) -> i32 {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
-    let r = resolved_for_removal();
+    let r = config_file::resolve_for_removal();
     match disable_report(&r, force, false).await {
         Ok(rep) => {
             socketguard_core::out!("{}", rep.render());
@@ -205,7 +198,7 @@ pub async fn uninstall_cmd(opts: UninstallOptions) -> i32 {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
-    let r = resolved_for_removal();
+    let r = config_file::resolve_for_removal();
     let paths = UninstallPaths {
         config: r.config_path.clone(),
         db: r.db_path.clone(),
