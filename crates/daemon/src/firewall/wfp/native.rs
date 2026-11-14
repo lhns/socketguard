@@ -547,6 +547,10 @@ impl Default for WfpFirewall {
 }
 
 impl Firewall for WfpFirewall {
+    fn cuts_connections(&self) -> bool {
+        false
+    }
+
     fn blocks_absent_interfaces(&self) -> bool {
         false
     }

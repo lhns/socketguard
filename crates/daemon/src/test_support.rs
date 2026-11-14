@@ -29,6 +29,8 @@ pub struct MockFirewall {
     installed: AtomicBool,
     /// The next `verify` reports the installed state as gone.
     drifted: AtomicBool,
+    /// What [`Firewall::cuts_connections`] answers.
+    cuts: AtomicBool,
     verifies: AtomicUsize,
     revoked: Mutex<Vec<Revocation>>,
     drop_sink: Mutex<Option<DropSink>>,
@@ -42,6 +44,7 @@ impl MockFirewall {
             fail_apply: AtomicBool::new(false),
             installed: AtomicBool::new(false),
             drifted: AtomicBool::new(false),
+            cuts: AtomicBool::new(true),
             verifies: AtomicUsize::new(0),
             revoked: Mutex::new(Vec::new()),
             drop_sink: Mutex::new(None),
@@ -87,6 +90,11 @@ impl MockFirewall {
         self.installed.store(installed, Ordering::Relaxed);
     }
 
+    /// Act like a backend that cuts no connections (WFP).
+    pub fn set_cuts_connections(&self, cuts: bool) {
+        self.cuts.store(cuts, Ordering::Relaxed);
+    }
+
     /// Make `apply` fail (the call is still recorded).
     pub fn set_failing(&self, failing: bool) {
         self.fail_apply.store(failing, Ordering::Relaxed);
@@ -128,6 +136,10 @@ impl Firewall for MockFirewall {
         self.verifies.fetch_add(1, Ordering::Relaxed);
         let drifted = self.drifted.swap(false, Ordering::Relaxed);
         Ok(self.installed.load(Ordering::Relaxed) && !drifted)
+    }
+
+    fn cuts_connections(&self) -> bool {
+        self.cuts.load(Ordering::Relaxed)
     }
 
     fn revoke(&self, revoked: &[Revocation]) -> Result<()> {

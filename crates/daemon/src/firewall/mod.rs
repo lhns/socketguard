@@ -71,6 +71,12 @@ pub trait Firewall: Send + Sync {
         false
     }
 
+    /// Whether [`Firewall::revoke`] cuts connections at all. False for WFP, which cannot; the
+    /// engine then does not work out what to cut.
+    fn cuts_connections(&self) -> bool {
+        true
+    }
+
     /// Cut established connections that a ruleset change stopped allowing. Called after a
     /// successful apply. Best effort: backends that cannot do it say so in their docs. A
     /// revocation names a concrete destination ([`resolve_host_v4`]); one that is still
