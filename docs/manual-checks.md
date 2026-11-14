@@ -39,7 +39,8 @@ account to elevate with. Get the MSI from the release.
 
 ## Windows (portable zip)
 
-CI drives the portable daemon through the CLI and never opens the window.
+CI drives the portable daemon through the CLI; of the window it only checks that it closes
+while no daemon runs.
 
 1. Unzip, start `socketguard-ui.exe`, press **Start** and accept the administrator prompt.
    Expect: the app list fills in.

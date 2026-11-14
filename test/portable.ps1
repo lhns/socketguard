@@ -14,6 +14,7 @@
 #       the account of the portable daemon (no installer account exists in portable mode), the node
 #       key is out of the allowed user's reach, the Wintun adapter appears, and a clean exit leaves no
 #       child, no adapter and no Wintun driver that was absent before (the footprint check agrees).
+#   (e) the window: started without a daemon, it closes on one close request.
 #
 # Machine-wide changes, elevated, no prompts: never run it on a machine you use.
 # Everything worth reading afterwards (daemon output, `netsh wfp` dumps, footprint output) goes to -Out.
@@ -475,6 +476,24 @@ Write-Host "  data\tor and data\yggdrasil stay in the portable folder: $((Test-P
 $fp = @{ Expect = 'absent'; Baseline = $AddrBase }
 if ($wintunBefore) { $fp.WintunPresentBefore = $true }
 Assert-Footprint $fp 'd-after-exit'
+
+Section 'the window closes (no daemon running)'
+# In portable mode the window keeps itself open on a close request and lets its frontend run the
+# close flow, which needs the backend's event to reach the frontend (ui/src-tauri/capabilities).
+# One request only: a second one closes regardless.
+$uiProc = Start-Process -FilePath (Join-Path $Dir 'socketguard-ui.exe') -PassThru
+if (-not (Wait-Until { $uiProc.Refresh(); $uiProc.MainWindowHandle -ne 0 } 60)) {
+  Stop-Process -Id $uiProc.Id -Force -ErrorAction SilentlyContinue
+  Fail 'the window did not open within 60 seconds'
+}
+# The frontend subscribes once it has loaded.
+Start-Sleep -Seconds 15
+$null = $uiProc.CloseMainWindow()
+if (-not $uiProc.WaitForExit(30 * 1000)) {
+  Stop-Process -Id $uiProc.Id -Force -ErrorAction SilentlyContinue
+  Fail 'the window was still open 30 seconds after one close request'
+}
+Ok 'one close request closes the window'
 
 Section 'done'
 Write-Summary 'networks'
