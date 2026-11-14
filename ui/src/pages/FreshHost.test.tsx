@@ -51,20 +51,58 @@ describe("a fresh host (?mock=fresh): about a dozen apps, nothing granted, Local
     expect(within(form).queryByRole("group", { name: "Networks" })).not.toBeInTheDocument();
   });
 
-  it("with only a Local network configured the actions are hidden", async () => {
+  describe("with only a Local network configured (nothing takes grants)", () => {
     const app = mkApp("a1", "nginx", [80]);
-    mockDaemon({
-      list_apps: () => [app],
-      get_app: () => detail(app),
-      list_networks: () => [networks[0]],
+    const setup = () =>
+      mockDaemon({
+        list_apps: () => [app],
+        get_app: () => detail(app),
+        list_networks: () => [networks[0]],
+        changes: (a) =>
+          batch(a.req as ChangesRequest, false, [{ kind: "create", item: "grant", name: "alice to nginx 80/tcp", opens_to_anyone: false, reach: [] }]),
+      });
+
+    it("still offers Add access and Add to reserved address…, with a notice and a way to add a network", async () => {
+      setup();
+      const go = vi.fn();
+      const user = userEvent.setup();
+      renderWithProviders(<AppsPage />, go);
+      await user.click(await listTable().findByRole("button", { name: /^nginx/ }));
+      const panel = within(await screen.findByRole("region", { name: "Details" }));
+      expect(await panel.findByRole("button", { name: "Add access to All ports" })).toBeInTheDocument();
+      expect(panel.getByRole("button", { name: "Add access to 80/tcp" })).toBeInTheDocument();
+      expect(panel.getAllByRole("button", { name: "Add to reserved address…" })).toHaveLength(2);
+      expect(panel.getAllByText(/Access set here takes effect once a network is added/)).toHaveLength(1);
+      await user.click(panel.getByRole("button", { name: "Add a network" }));
+      expect(go).toHaveBeenCalledWith("settings");
     });
-    const user = userEvent.setup();
-    renderWithProviders(<AppsPage />);
-    await user.click(await listTable().findByRole("button", { name: /^nginx/ }));
-    const panel = within(await screen.findByRole("region", { name: "Details" }));
-    await panel.findByText(/This machine only/);
-    expect(panel.queryByRole("button", { name: /^Add access/ })).not.toBeInTheDocument();
-    expect(panel.queryByRole("button", { name: "Add to reserved address…" })).not.toBeInTheDocument();
+
+    it("a non-All row shows the normal address state, not nothing", async () => {
+      setup();
+      const user = userEvent.setup();
+      renderWithProviders(<AppsPage />);
+      await user.click(await listTable().findByRole("button", { name: /^nginx/ }));
+      const panel = within(await screen.findByRole("region", { name: "Details" }));
+      await panel.findByRole("button", { name: "Add access to 80/tcp" });
+      expect(panel.getAllByText("Gets an address when access is added.")).toHaveLength(1);
+    });
+
+    it("a grant made in the form is accepted (no dialog: nobody gains access) and says it is not effective yet", async () => {
+      const daemon = setup();
+      const user = userEvent.setup();
+      renderWithProviders(<AppsPage />);
+      await user.click(await listTable().findByRole("button", { name: /^nginx/ }));
+      await user.click(await within(await screen.findByRole("region", { name: "Details" })).findByRole("button", { name: "Add access to 80/tcp" }));
+      const form = screen.getByRole("form", { name: "Add access" });
+      expect(within(form).getByText(/Access set here takes effect once a network is added/)).toBeInTheDocument();
+      await user.click(within(form).getByRole("combobox", { name: "Who" }));
+      await user.click(screen.getByRole("checkbox", { name: "alice" }));
+      await user.keyboard("{Escape}");
+      await user.click(within(form).getByRole("button", { name: "Add access" }));
+      expect(await screen.findByText("Access added (1), effective once a network is added")).toBeInTheDocument();
+      const grant = daemon.calls.filter((c) => c.cmd === "changes").map((c) => (c.args.req as ChangesRequest).ops[0]).at(-1);
+      expect(grant).toMatchObject({ op: "add_grant", scope: { kind: "port", port: 80 }, subject: { kind: "peer", id: "p1" } });
+    });
   });
 
   it("giving the one peer access asks once, in a dialog, and nothing is reviewed inline", async () => {

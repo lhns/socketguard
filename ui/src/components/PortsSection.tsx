@@ -12,6 +12,7 @@ import AddAccess from "./AddAccess";
 import AddToReserved from "./AddToReserved";
 import CommitPreview from "./CommitPreview";
 import { Section, useNameCtx } from "./Inspector";
+import NoGrantNetworkNotice, { useNoGrantNetwork } from "./NoGrantNetworkNotice";
 import Picker, { type PickerItem } from "./Picker";
 import PortRanges from "./PortRanges";
 import RowAddress from "./RowAddress";
@@ -44,17 +45,17 @@ interface Props {
   /** The detail has not arrived: who can reach each row is not known yet. */
   partial: boolean;
   highlight: AccessHighlight | null;
-  onlyLocal: boolean;
   hasV4: boolean;
 }
 
 /** The "Ports" section of one app: a row for All ports, one per detected port and one per
  * attached port group. Every row has the same parts: its tags, who can reach it, Add access. */
-export default function PortsSection({ app, partial, highlight, onlyLocal, hasV4 }: Props) {
+export default function PortsSection({ app, partial, highlight, hasV4 }: Props) {
   const names = useNameCtx();
   const grants = useGrants().data ?? [];
   const protectsHost = (useSettings().data?.protect_host_interfaces.length ?? 0) > 0;
   const allGroups = usePortGroups().data ?? [];
+  const noGrantNetwork = useNoGrantNetwork();
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState<string | null>(null);
   const attach = useCommit(() => setCreating(null));
@@ -84,16 +85,13 @@ export default function PortsSection({ app, partial, highlight, onlyLocal, hasV4
 
   return (
     <Section title="Ports">
-      {onlyLocal ? (
-        <p className="muted">This machine only. Grants do not apply on the Local network.</p>
-      ) : (
-        hasV4 && (
-          <p className="hint" data-testid="ipv4-status">
-            {protectsHost
-              ? "IPv4: closed except granted IPv4 peers (protect-host is on)."
-              : "IPv4: open to everyone (protect-host is off). Grants only limit IPv6 and the other networks."}
-          </p>
-        )
+      <NoGrantNetworkNotice />
+      {hasV4 && !noGrantNetwork && (
+        <p className="hint" data-testid="ipv4-status">
+          {protectsHost
+            ? "IPv4: closed except granted IPv4 peers (protect-host is on)."
+            : "IPv4: open to everyone (protect-host is off). Grants only limit IPv6 and the other networks."}
+        </p>
       )}
       {app.ports.length === 0 && <p className="muted">No ports seen.</p>}
 
@@ -109,7 +107,6 @@ export default function PortsSection({ app, partial, highlight, onlyLocal, hasV4
             entries={entries.filter((e) => sameScope(e.row ?? e.scope, r.scope))}
             alsoAll={r.scope.kind !== "all" && hasAllEntries && (r.port !== undefined || r.group !== undefined)}
             partial={partial}
-            onlyLocal={onlyLocal}
             highlight={highlight}
             itemRef={r.scope.kind === "all" ? allRow : undefined}
             jumpToAll={() => allRow.current?.scrollIntoView?.({ block: "nearest" })}
@@ -158,7 +155,6 @@ interface RowProps {
   alsoAll: boolean;
   /** The detail has not arrived: show "Loading…" for who can reach the row. */
   partial: boolean;
-  onlyLocal: boolean;
   highlight: AccessHighlight | null;
   itemRef?: React.RefObject<HTMLLIElement>;
   jumpToAll: () => void;
@@ -166,7 +162,7 @@ interface RowProps {
 }
 
 /** One row of an app: name, tags, who can reach it, Add access, address. */
-function RowItem({ app, row, entries, alsoAll, partial, onlyLocal, highlight, itemRef, jumpToAll, onDetach }: RowProps) {
+function RowItem({ app, row, entries, alsoAll, partial, highlight, itemRef, jumpToAll, onDetach }: RowProps) {
   const nav = useNav();
   const names = useNameCtx();
   const reservations = useReservations().data ?? [];
@@ -197,7 +193,7 @@ function RowItem({ app, row, entries, alsoAll, partial, onlyLocal, highlight, it
       }
       tags={<TagPicker appIds={[app.id]} scope={row.scope} />}
       access={
-        onlyLocal ? undefined : partial ? (
+        partial ? (
           <div className="port-access"><p className="muted">Loading…</p></div>
         ) : (
           <RowAccess
@@ -220,12 +216,12 @@ function RowItem({ app, row, entries, alsoAll, partial, onlyLocal, highlight, it
       }
       actions={
         <>
-          {!onlyLocal && <AddAccess fixed={{ side: "targets", targets: [{ kind: "app", id: app.id }] }} preselect={row.scope} rowLabel={row.label} />}
-          {!onlyLocal && !bound && <AddToReserved target={{ kind: "app", app_id: app.id, scope: row.scope }} />}
+          <AddAccess fixed={{ side: "targets", targets: [{ kind: "app", id: app.id }] }} preselect={row.scope} rowLabel={row.label} />
+          {!bound && <AddToReserved target={{ kind: "app", app_id: app.id, scope: row.scope }} />}
           {onDetach && <RowButton aria-label={`Detach ${row.label}`} onClick={onDetach}>Detach</RowButton>}
         </>
       }
-      address={<RowAddress app={app} scope={row.scope} onlyLocal={onlyLocal} />}
+      address={<RowAddress app={app} scope={row.scope} />}
     />
   );
 }

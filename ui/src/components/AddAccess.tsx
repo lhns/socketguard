@@ -6,7 +6,8 @@ import { useApps, useGroups, useList, useNetworks, useParsedCredentials, usePeer
 import { CREDENTIAL_INFO } from "../reach";
 import CommitPreview from "./CommitPreview";
 import { useFormOpen } from "./ActionRow";
-import Picker, { type PickerItem } from "./Picker";
+import NoGrantNetworkNotice, { useNoGrantNetwork } from "./NoGrantNetworkNotice";
+import Picker,{ type PickerItem } from "./Picker";
 
 /** One side is fixed by the selection; the other is chosen here. */
 export type FixedSide = { side: "targets"; targets: Target[] } | { side: "subjects"; subjects: Subject[] };
@@ -65,6 +66,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
     onDone?.();
   };
   const commit = useCommit(reset);
+  const noGrantNetwork = useNoGrantNetwork();
 
   const choosingSubjects = fixed.side === "targets";
 
@@ -200,7 +202,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
   const grantCount = ops.filter((o) => o.op === "add_grant").length;
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (ready && grantCount > 0) void commit.runBatch(ops, `Access added (${grantCount})`);
+    if (ready && grantCount > 0) void commit.runBatch(ops, `Access added (${grantCount})${noGrantNetwork ? ", effective once a network is added" : ""}`);
   };
 
   const fixedNames =
@@ -232,6 +234,7 @@ export default function AddAccess({ fixed, preselect, rowLabel, onDone }: Props)
         <strong>{summary}</strong>
         {choosingSubjects ? "?" : " reach?"}
       </p>
+      <NoGrantNetworkNotice />
 
       <Picker
         label={choosingSubjects ? "Who" : "What"}
