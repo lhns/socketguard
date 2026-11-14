@@ -154,7 +154,7 @@ function LanDiscovery({ id, on }: { id: string; on: boolean }) {
     set.mutate({ id, enabled, confirmOpen: enabled }, { onError: (e) => toast.error(errorText(e)) });
   return (
     <div>
-      <label className="switch-row">
+      <label>
         <input
           type="checkbox"
           role="switch"
