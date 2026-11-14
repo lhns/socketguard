@@ -140,7 +140,6 @@ impl InterfaceManager for MacosInterfaces {
     }
 }
 
-/// Addresses with prefix lengths from "<tab>inet 192.168.1.5 netmask 0xffffff00 broadcast ..." lines.
 /// The `interface:` line of `route -n get default`.
 fn parse_route_interface(out: &str) -> Option<String> {
     out.lines()
@@ -149,6 +148,7 @@ fn parse_route_interface(out: &str) -> Option<String> {
         .filter(|i| !i.is_empty())
 }
 
+/// Addresses with prefix lengths from "<tab>inet 192.168.1.5 netmask 0xffffff00 broadcast ..." lines.
 fn parse_ifconfig_inet(out: &str) -> Vec<Ipv4Net> {
     out.lines()
         .filter_map(|l| {

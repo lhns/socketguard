@@ -469,7 +469,6 @@ impl Engine {
     }
 }
 
-/// Name the operation a refusal came from.
 /// The `confirm_open` of an operation that can free rows from a reservation; the others
 /// cannot confirm, so one that frees a row all the same is refused.
 fn op_confirms(op: &ChangeOp) -> bool {
@@ -483,6 +482,7 @@ fn op_confirms(op: &ChangeOp) -> bool {
     }
 }
 
+/// Name the operation a refusal came from.
 fn in_operation(i: usize, e: EngineError) -> EngineError {
     match e {
         EngineError::NotFound(m) => EngineError::NotFound(format!("{m} (operation {i})")),

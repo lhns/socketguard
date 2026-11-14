@@ -1,7 +1,6 @@
 //! The allocator of the Yggdrasil network (ADR 0052). It never asks the node: the addresses
 //! follow from the key SocketGuard generated, so they are known before the node runs and
-//! while it is down. What the node is doing is the
-//! child's state.
+//! while it is down. What the node is doing is the child's state.
 
 use super::{with_prefix64, AllocatedAddress, Ipv6Backend, Prefix};
 use crate::networks::ygg_child::YggChild;

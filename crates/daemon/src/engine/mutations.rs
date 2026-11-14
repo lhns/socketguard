@@ -8,7 +8,7 @@ use crate::catalog::Catalog;
 use crate::state::{self, NewActivity, Write};
 use crate::AppState;
 use chrono::Utc;
-use socketguard_core::api_types::{BatchChange, Change, ChangeItem, ChangeKind};
+use socketguard_core::api_types::{BatchChange, Change, ChangeItem, ChangeKind, PATTERN_OPEN_NOTE};
 use socketguard_core::{
     new_id, normalize_credential, ActivityKind, Address, App, Credential, CredentialKind, Grant,
     GrantView, NewCredential, NewGrant, Peer, PeerGroup, PortGroup, Scope, Subject, Target,
@@ -815,8 +815,8 @@ impl Engine {
             // Said in the preview, so every frontend shows the same warning.
             for r in reach.iter_mut() {
                 r.note = Some(match r.note.take() {
-                    Some(n) => format!("{n}; {PATTERN_NOTE}"),
-                    None => PATTERN_NOTE.to_string(),
+                    Some(n) => format!("{n}; {PATTERN_OPEN_NOTE}"),
+                    None => PATTERN_OPEN_NOTE.to_string(),
                 });
             }
         }
@@ -876,8 +876,6 @@ impl Engine {
         Ok(())
     }
 }
-
-use socketguard_core::api_types::PATTERN_OPEN_NOTE as PATTERN_NOTE;
 
 /// How a change names a grant: `Anyone to Firefox`, `Alice to Firefox 80/tcp`.
 pub(super) fn grant_change_name(
