@@ -309,13 +309,9 @@ impl Database {
         Ok(())
     }
 
-    /// Delete an app; its ports, addresses and grants go with it. False if unknown.
-    pub async fn delete_app(&self, id: &str) -> Result<bool> {
-        self.delete_app_with(id, &[]).await
-    }
-
-    /// [`Database::delete_app`] after `before` (the retiring of its addresses), in one
-    /// transaction: if the delete fails, `before` is rolled back with it.
+    /// Delete an app; its ports, addresses and grants go with it. False if unknown. `before`
+    /// (the retiring of its addresses) runs first, in the same transaction: if the delete
+    /// fails, `before` is rolled back with it.
     pub async fn delete_app_with(&self, id: &str, before: &[Write]) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         for w in before {
@@ -521,11 +517,7 @@ impl Database {
             .collect()
     }
 
-    pub async fn update_address_ipv6(&self, id: &str, addr: Ipv6Addr) -> Result<bool> {
-        self.update_address_ipv6_with(id, addr, &[]).await
-    }
-
-    /// [`Database::update_address_ipv6`] after `before` (retiring the old address), in one
+    /// Give an address a new IPv6 locator, after `before` (retiring the old address), in one
     /// transaction.
     pub async fn update_address_ipv6_with(
         &self,
@@ -555,13 +547,7 @@ impl Database {
     }
 
     /// Delete every address of a network, returning them (the caller takes them off the
-    /// interface).
-    pub async fn delete_addresses_by_network(&self, network_id: &str) -> Result<Vec<Address>> {
-        self.delete_addresses_by_network_with(network_id, &[]).await
-    }
-
-    /// [`Database::delete_addresses_by_network`] after `before` (retiring them), in one
-    /// transaction.
+    /// interface), after `before` (retiring them), in one transaction.
     pub async fn delete_addresses_by_network_with(
         &self,
         network_id: &str,
@@ -1486,7 +1472,7 @@ mod tests {
             b.created_at = db.get_address(&a.id).await.unwrap().unwrap().created_at;
             b
         });
-        db.update_address_ipv6(&a.id, "300:9::5".parse().unwrap())
+        db.update_address_ipv6_with(&a.id, "300:9::5".parse().unwrap(), &[])
             .await
             .unwrap();
         let got = db.get_address(&a.id).await.unwrap().unwrap();
@@ -1777,7 +1763,7 @@ mod tests {
         db.insert_address_with_secret(&c, Some("ED25519-V3:k2"))
             .await
             .unwrap();
-        db.delete_app("a1").await.unwrap();
+        db.delete_app_with("a1", &[]).await.unwrap();
         assert_eq!(count(&db, "onion_keys").await, 0);
     }
 
@@ -1809,7 +1795,7 @@ mod tests {
             .unwrap();
             db.insert_grant(&grant(id, Subject::Anyone)).await.unwrap();
         }
-        assert!(db.delete_app("a1").await.unwrap());
+        assert!(db.delete_app_with("a1", &[]).await.unwrap());
         assert_eq!(count(&db, "app_ports").await, 1);
         assert_eq!(count(&db, "addresses").await, 1);
         assert_eq!(count(&db, "grants").await, 1);
@@ -1994,7 +1980,7 @@ mod tests {
             Scope::All
         );
 
-        let removed = db.delete_addresses_by_network("ygg").await.unwrap();
+        let removed = db.delete_addresses_by_network_with("ygg", &[]).await.unwrap();
         assert_eq!(removed.len(), 1);
         let left = db.list_grants().await.unwrap();
         assert_eq!(left.len(), 1, "a grant tied to the removed network goes");
