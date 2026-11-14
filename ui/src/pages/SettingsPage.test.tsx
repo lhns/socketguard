@@ -243,3 +243,11 @@ describe("Settings page", () => {
     });
   });
 });
+
+describe("Protect the whole host with only the Local network", () => {
+  it("says why there is no interface to choose and what adds one", async () => {
+    mockDaemon({ list_networks: () => [networks[0]] });
+    renderWithProviders(<SettingsPage />);
+    expect(await screen.findByText(/No interface to protect yet/)).toBeInTheDocument();
+  });
+});
