@@ -4,7 +4,16 @@
  * Body of `POST /api/networks`: a backend instance. `id` defaults to the backend's
  * default id (`yggdrasil`, `slaac-eth0`, ...).
  */
-export type NewNetwork = { id?: string, } & ({ "type": "ula", 
+export type NewNetwork = { id?: string, 
+/**
+ * Confirms that grants to Anyone take effect on the new network (ADR 0066). Without
+ * it, an add that would let Anyone in is refused before it changes anything.
+ */
+confirm_open?: boolean, 
+/**
+ * Check the add and say what it would let in (a [`NetworkAddPreview`]); change nothing.
+ */
+dry_run?: boolean, } & ({ "type": "ula", 
 /**
  * Network interface (defaults to loopback)
  */

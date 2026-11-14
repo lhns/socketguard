@@ -14,9 +14,9 @@ use serde::Serialize;
 use socketguard_client::{Client, Error as ClientError, GrantQuery, Saved};
 use socketguard_core::api_types::{
     ApplyRequest, ApplyResponse, AttachPortGroup, ChangesRequest, ChangesResponse, Enforcement,
-    ExportDocument, MoveAppRequest, NewBinding, NewGroup, NewNetwork, NewPeer, NewPortGroup,
-    NewReservation, NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest, ShareResponse,
-    StatusResponse, TorKeyResponse, UpdatePortGroup, UpdateTag,
+    ExportDocument, MoveAppRequest, NetworkAddPreview, NewBinding, NewGroup, NewNetwork, NewPeer,
+    NewPortGroup, NewReservation, NewTag, ProtectHostRequest, ProtectHostResponse, ReserveRequest,
+    ShareResponse, StatusResponse, TorKeyResponse, UpdatePortGroup, UpdateTag,
 };
 use socketguard_core::setup::NetworkSetup;
 use socketguard_core::{
@@ -403,6 +403,11 @@ async fn network_setup() -> CmdResult<NetworkSetup> {
 #[tauri::command]
 async fn add_network(req: NewNetwork) -> DoneResult<Network> {
     Ok(client().add_network(&req).await?.into())
+}
+
+#[tauri::command]
+async fn preview_add_network(req: NewNetwork) -> CmdResult<NetworkAddPreview> {
+    Ok(client().preview_add_network(&req).await?)
 }
 
 #[tauri::command]
@@ -1065,6 +1070,7 @@ fn main() {
             list_networks,
             network_setup,
             add_network,
+            preview_add_network,
             set_network_peers,
             set_network_lan_discovery,
             set_network_bridges,

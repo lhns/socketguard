@@ -3,7 +3,7 @@
 // It is not part of the production bundle.
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
-  Address, App, AppDetail, BatchChange, ChangeOp, EffectiveAccess, GrantReach, GrantView, Network, NetworkSetup, Peer, PeerGroup, PortRange, ReservationView, Scope, PortGroup, Subject, Tag,
+  Address, App, AppDetail, BatchChange, ChangeOp, EffectiveAccess, GrantReach, GrantView, Network, NetworkAddPreview, NetworkSetup, Peer, PeerGroup, PortRange, ReservationView, Scope, PortGroup, Subject, Tag,
 } from "../api";
 import { ALL_SCOPE, rangeLabel, sameScope } from "../lib";
 
@@ -449,6 +449,35 @@ function changes(req: { ops: ChangeOp[]; dry_run: boolean }) {
   return { dry_run: req.dry_run, refs, changes: out, changes_reach: widens };
 }
 
+/** The network `add_network` makes. */
+const addedNetwork = (req: any): Network => ({ // eslint-disable-line @typescript-eslint/no-explicit-any
+  id: req.id ?? req.type, kind: req.type === "slaac" || req.type === "dhcpv6" ? "lan" : req.type === "ula" ? "local" : req.type, name: req.id ?? req.type, interface: req.interface ?? null,
+  grants_apply: !(req.type === "ula" && /^(lo|lo0)$/i.test(req.interface ?? "lo")), status: { state: "up" },
+  ...(req.type === "yggdrasil" || req.type === "tor" ? { child: { state: "starting", peers: req.peers ?? [] } } : {}),
+} as Network);
+
+/** What adding a network lets in (ADR 0066): the grants that apply to it, as the daemon lists them. */
+function addPreview(req: any): NetworkAddPreview { // eslint-disable-line @typescript-eslint/no-explicit-any
+  const net = addedNetwork(req);
+  const gains = net.grants_apply
+    ? grants.filter((g) => g.network_id === null || g.network_id === net.id).flatMap<BatchChange>((g) => {
+        const creds = g.subject.kind === "anyone" ? [] : (g.subject.kind === "peer" ? [g.subject.id] : (groups.find((x) => x.id === (g.subject as { id: string }).id)?.members ?? [])).flatMap((id) => peers.find((p) => p.id === id)?.credentials ?? []);
+        const reach: GrantReach["reach"] | null =
+          g.subject.kind === "anyone" ? "open"
+          : net.kind === "yggdrasil" && creds.some((c) => c.kind === "ygg_key" || c.kind === "ygg_addr") ? "verified"
+          : net.kind === "lan" && creds.some((c) => c.kind === "ip") ? "ip_only"
+          : net.kind === "tor" && creds.some((c) => c.kind === "tor_client_key") ? "verified"
+          : null;
+        // A row bound to a reservation does nothing on Tor (ADR 0047).
+        if (reach === null || (net.kind === "tor" && g.target.kind === "app" && torReach({ ...g, network_id: "n-tor" }).length > 0)) return [];
+        const who = g.subject.kind === "anyone" ? "Anyone" : g.subject.kind === "peer" ? peers.find((p) => p.id === (g.subject as { id: string }).id)?.label : `group ${groups.find((x) => x.id === (g.subject as { id: string }).id)?.label}`;
+        const what = g.target.kind === "app" ? apps.find((x) => x.id === (g.target as { id: string }).id)?.name : g.target.kind;
+        return [{ kind: "update", item: "grant", name: `${who} to ${what}`, detail: g.network_id ? `on ${g.network_id}` : "on every network", opens_to_anyone: g.subject.kind === "anyone", id: g.id, reach: [{ network_id: net.id, reach }] }];
+      })
+    : [];
+  return { gains, confirm_open_required: gains.some((c) => c.opens_to_anyone) };
+}
+
 /** Several states at once, for the Settings screen of the dev mock. */
 const networkSetup: NetworkSetup = {
   lan: [
@@ -564,7 +593,11 @@ export function installMock(kind?: string | null) {
           return n;
         }
         case "open_link": return undefined;
-        case "add_network": return { id: a.req.type, kind: a.req.type === "slaac" ? "lan" : a.req.type, name: a.req.type, interface: a.req.interface ?? null, grants_apply: true, status: { state: "up" }, ...(a.req.type === "yggdrasil" || a.req.type === "tor" ? { child: { state: "starting", peers: a.req.peers ?? [] } } : {}) };
+        case "preview_add_network": return addPreview(a.req);
+        case "add_network": {
+          if (addPreview(a.req).confirm_open_required && !a.req.confirm_open) throw { code: "confirmation_required", message: "confirm opening to anyone" };
+          return done(addedNetwork(a.req));
+        }
         case "get_settings": return { protect_host_interfaces: ["eth0"] };
         case "activity": return [];
         case "share_app": return { tor: [] };

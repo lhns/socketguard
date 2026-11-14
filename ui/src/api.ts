@@ -20,6 +20,7 @@ import type { GrantView } from "./generated/GrantView";
 import type { LockoutRiskInfo } from "./generated/LockoutRiskInfo";
 import type { MoveAppRequest } from "./generated/MoveAppRequest";
 import type { Network } from "./generated/Network";
+import type { NetworkAddPreview } from "./generated/NetworkAddPreview";
 import type { NewBinding } from "./generated/NewBinding";
 import type { NewCredential } from "./generated/NewCredential";
 import type { NewGrant } from "./generated/NewGrant";
@@ -54,7 +55,7 @@ import type { UpdateTag } from "./generated/UpdateTag";
 export type {
   ActivityKind, ActivityQuery, ActivityRecord, Address, App, AppDetail, ApplyRequest, ApplyResponse,
   ChangeOp, ChangesRequest, ChangesResponse, Credential, Enforcement, ExportDocument, GrantView,
-  LockoutRiskInfo, MoveAppRequest, Network, NewBinding, NewCredential, NewGrant, NewGroup, NewNetwork, NewPeer,
+  LockoutRiskInfo, MoveAppRequest, Network, NetworkAddPreview, NewBinding, NewCredential, NewGrant, NewGroup, NewNetwork, NewPeer,
   NewReservation, NewTag, ReservationView, ReserveRequest, ParsedCredential, Peer, PeerGroup, PortRef, ProtectHostRequest, ProtectHostResponse,
   AttachPortGroup, NewPortGroup, Scope, PortGroup, UpdatePortGroup,
   Settings, ShareResponse, StatusResponse, Tag, TagMember, Target, TorKeyResponse,
@@ -207,6 +208,8 @@ export const api = {
   listNetworks: () => call<Network[]>("list_networks"),
   networkSetup: () => call<NetworkSetup>("network_setup"),
   addNetwork: (req: NewNetwork) => callSaved<Network>("add_network", { req }),
+  /** The grants that would take effect on a network once it is added (ADR 0066). Changes nothing. */
+  previewAddNetwork: (req: NewNetwork) => call<NetworkAddPreview>("preview_add_network", { req }),
   deleteNetwork: (id: string, force: boolean) => call<void>("delete_network", { id, force }),
   /** What becomes reachable without the block of one network (or all of them): ADR 0051. */
   /** Replace the peers of a Yggdrasil network; its node restarts. */

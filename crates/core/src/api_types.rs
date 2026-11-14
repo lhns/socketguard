@@ -210,11 +210,11 @@ pub struct NewNetwork {
     /// Confirms that grants to Anyone take effect on the new network (ADR 0066). Without
     /// it, an add that would let Anyone in is refused before it changes anything.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional))]
+    #[cfg_attr(feature = "ts", ts(optional, as = "Option<bool>"))]
     pub confirm_open: bool,
     /// Check the add and say what it would let in (a [`NetworkAddPreview`]); change nothing.
     #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional))]
+    #[cfg_attr(feature = "ts", ts(optional, as = "Option<bool>"))]
     pub dry_run: bool,
 }
 

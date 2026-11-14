@@ -150,6 +150,7 @@ export function mockDaemon(handlers: Handlers = {}) {
     share_app: () => ({ tor: [] }),
     list_networks: () => networks,
     network_setup: () => networkSetup,
+    preview_add_network: () => ({ gains: [], confirm_open_required: false }),
     list_reservations: () => [],
     list_addresses: () => [],
     get_settings: () => settings,

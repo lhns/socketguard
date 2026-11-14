@@ -3,7 +3,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import NetworksSection from "./NetworksSection";
 import { kindSetup, mockDaemon, networkSetup, renderWithProviders, saved, setupState } from "../test/helpers";
-import type { NetworkSetup } from "../api";
+import type { BatchChange, NetworkAddPreview, NetworkSetup } from "../api";
 
 const withSetup = (over: Partial<NetworkSetup>): NetworkSetup => ({ ...networkSetup, ...over });
 const card = async (name: string) => within(await screen.findByRole("article", { name }));
@@ -160,5 +160,87 @@ describe("Network cards without a LAN interface", () => {
     mockDaemon({ network_setup: () => withSetup({ lan: [] }) });
     renderWithProviders(<NetworksSection />);
     expect(await screen.findByText(/No LAN interface found/)).toBeInTheDocument();
+  });
+});
+
+// ─── Existing grants take effect on a new network (ADR 0066) ────────────────
+
+const gain = (name: string, anyone: boolean, reach: "verified" | "open"): BatchChange => ({
+  kind: "update", item: "grant", name, detail: "on every network", opens_to_anyone: anyone, id: "g1", reach: [{ network_id: "yggdrasil", reach }],
+});
+const preview = (gains: BatchChange[]): NetworkAddPreview => ({ gains, confirm_open_required: gains.some((g) => g.opens_to_anyone) });
+
+describe("Adding a network reviews the grants that take effect on it", () => {
+  it("adds at once, without a dialog, when no grant takes effect", async () => {
+    const d = mockDaemon({ add_network: () => saved(network("yggdrasil", "yggdrasil", "ygg0")) });
+    const user = userEvent.setup();
+    renderWithProviders(<NetworksSection />);
+    await user.click((await card("Yggdrasil")).getByRole("button", { name: "Add Yggdrasil" }));
+    await waitFor(() => expect(d.count("add_network")).toBe(1));
+    expect(d.count("preview_add_network")).toBe(1);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(d.last("preview_add_network")?.args.req).toEqual({ type: "yggdrasil", peers: [] });
+  });
+
+  it("lists who gains access and adds only after the person agrees", async () => {
+    const d = mockDaemon({
+      preview_add_network: () => preview([gain("alice to nginx", false, "verified")]),
+      add_network: () => saved(network("yggdrasil", "yggdrasil", "ygg0")),
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<NetworksSection />);
+    await user.click((await card("Yggdrasil")).getByRole("button", { name: "Add Yggdrasil" }));
+    const dialog = await screen.findByRole("dialog", { name: "Add Yggdrasil?" });
+    expect(within(dialog).getByText("alice to nginx")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("note")).not.toBeInTheDocument();
+    expect(d.count("add_network")).toBe(0);
+    await user.click(within(dialog).getByRole("button", { name: "Add network" }));
+    await waitFor(() => expect(d.count("add_network")).toBe(1));
+    expect(d.last("add_network")?.args.req).toEqual({ type: "yggdrasil", peers: [] });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("a grant to Anyone gets the warning form and is added with the confirmation", async () => {
+    const d = mockDaemon({
+      preview_add_network: () => preview([gain("Anyone to nginx", true, "open")]),
+      add_network: () => saved(network("yggdrasil", "yggdrasil", "ygg0")),
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<NetworksSection />);
+    await user.click((await card("Yggdrasil")).getByRole("button", { name: "Add Yggdrasil" }));
+    const dialog = await screen.findByRole("dialog", { name: "Open nginx to anyone on Yggdrasil?" });
+    expect(within(dialog).getByRole("note")).toHaveTextContent("Adding Yggdrasil opens nginx to anyone on it.");
+    expect(within(dialog).getByText("opens to anyone")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Add and open to anyone" }));
+    await waitFor(() => expect(d.count("add_network")).toBe(1));
+    expect(d.last("add_network")?.args.req).toEqual({ type: "yggdrasil", peers: [], confirm_open: true });
+  });
+
+  it("cancel adds nothing", async () => {
+    const d = mockDaemon({ preview_add_network: () => preview([gain("Anyone to nginx", true, "open")]) });
+    const user = userEvent.setup();
+    renderWithProviders(<NetworksSection />);
+    await user.click((await card("Yggdrasil")).getByRole("button", { name: "Add Yggdrasil" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(d.count("add_network")).toBe(0);
+  });
+
+  it("the typed form under Advanced reviews too", async () => {
+    const d = mockDaemon({
+      preview_add_network: () => preview([gain("Anyone to nginx", true, "open")]),
+      add_network: () => saved(network("lan", "dhcpv6-eth9", "eth9")),
+    });
+    const user = userEvent.setup();
+    const { container } = renderWithProviders(<NetworksSection />);
+    await screen.findByRole("article", { name: "Yggdrasil" });
+    const details = container.querySelector("details.advanced") as HTMLDetailsElement;
+    await user.click(within(details).getByText("Advanced"));
+    await user.selectOptions(within(details).getByLabelText("Type"), "dhcpv6");
+    await user.type(within(details).getByLabelText("Interface"), "eth9");
+    await user.click(within(details).getByRole("button", { name: "Add network" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Add and open to anyone" }));
+    await waitFor(() => expect(d.count("add_network")).toBe(1));
+    expect(d.last("add_network")?.args.req).toEqual({ type: "dhcpv6", interface: "eth9", confirm_open: true });
   });
 });
