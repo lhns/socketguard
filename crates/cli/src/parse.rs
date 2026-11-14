@@ -114,7 +114,8 @@ pub fn guess_credentials(text: &str) -> Result<Vec<NewCredential>> {
         .map(|p| match (p.kind, p.normalized, p.error) {
             (Some(kind), Some(value), None) => Ok(cred(kind, &value)),
             (_, _, error) => bail!(
-                "{}: {} (or use --key, --addr, --subnet, --suffix, --cred kind=value;                  kinds: {})",
+                "{}: {} (or use --key, --addr, --subnet, --suffix, --cred kind=value; \
+                 kinds: {})",
                 p.input,
                 error.unwrap_or_default(),
                 kinds()

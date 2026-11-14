@@ -72,7 +72,10 @@ pub(crate) async fn retire_address_in(
     network_id: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO owned_addresses (addr, interface, network_id, state, since)          VALUES (?1, ?2, ?3, 'retiring', ?4)          ON CONFLICT(addr) DO UPDATE SET state = 'retiring',          since = CASE WHEN state = 'retiring' THEN since ELSE ?4 END",
+        "INSERT INTO owned_addresses (addr, interface, network_id, state, since) \
+         VALUES (?1, ?2, ?3, 'retiring', ?4) \
+         ON CONFLICT(addr) DO UPDATE SET state = 'retiring', \
+         since = CASE WHEN state = 'retiring' THEN since ELSE ?4 END",
     )
     .bind(addr.to_string())
     .bind(interface)
