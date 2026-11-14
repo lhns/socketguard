@@ -83,7 +83,7 @@ data above (kept on remove, deleted on purge) applies to every package.
 
 ## SocketGuard's Tor and Yggdrasil (ADR 0052, 0056)
 
-SocketGuard ships Tor, Yggdrasil and (Windows) `wintun.dll` and runs them as child processes. It installs no package, starts no system service of theirs and edits no configuration of software it did not ship (`socketguard networks setup` no longer exists). A managed network adds the items below.
+SocketGuard ships Tor, Yggdrasil and (Windows) `wintun.dll` and runs them as child processes. It installs no package, starts no system service of theirs and edits no configuration of software it did not ship (`socketguard networks setup` no longer exists). A Tor or Yggdrasil network adds the items below.
 
 | Item | System | Survives stop / reboot | Removed by |
 |---|---|---|---|

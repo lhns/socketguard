@@ -46,7 +46,6 @@ describe("Configured networks", () => {
     });
     renderWithProviders(<NetworksSection />);
     const y = await row("Yggdrasil");
-    expect(y.queryByText("managed")).not.toBeInTheDocument();
     expect(y.getByText("Up")).toBeInTheDocument();
     expect(y.getByText("runs as socketguard-net")).toBeInTheDocument();
     expect((await row("Tor")).getByText("Bootstrapping 62%")).toBeInTheDocument();
