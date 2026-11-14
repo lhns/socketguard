@@ -154,3 +154,11 @@ describe("Network cards", () => {
     expect(await screen.findByText(/Every network this machine offers is added/)).toBeInTheDocument();
   });
 });
+
+describe("Network cards without a LAN interface", () => {
+  it("says none was found instead of showing nothing", async () => {
+    mockDaemon({ network_setup: () => withSetup({ lan: [] }) });
+    renderWithProviders(<NetworksSection />);
+    expect(await screen.findByText(/No LAN interface found/)).toBeInTheDocument();
+  });
+});
