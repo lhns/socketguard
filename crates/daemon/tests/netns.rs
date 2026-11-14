@@ -1141,10 +1141,7 @@ fn the_ygg_nodes_addresses_are_denied_without_its_interface_and_others_are_left_
         fx.reachable(YGG_NODE, Some(YGG_SRC)),
         "granted peer and address"
     );
-    assert!(
-        !fx.reachable(YGG_NODE, Some("200:5a::2")),
-        "ungranted peer"
-    );
+    assert!(!fx.reachable(YGG_NODE, Some("200:5a::2")), "ungranted peer");
     assert!(
         !fx.reachable("200:5a::1", Some(YGG_SRC)),
         "the node address has no grant"

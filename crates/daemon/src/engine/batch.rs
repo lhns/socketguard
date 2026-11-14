@@ -426,10 +426,7 @@ impl Engine {
                 app_id,
                 scope,
                 ..
-            } => {
-                self.plan_op_remove_tag_member(state, plan, tag_id, app_id, scope)
-                    .await?
-            }
+            } => self.plan_op_remove_tag_member(plan, tag_id, app_id, scope)?,
             ChangeOp::DeleteTag { tag_id, .. } => self.plan_op_delete_tag(plan, tag_id)?,
             ChangeOp::CreateReservation {
                 ref_,

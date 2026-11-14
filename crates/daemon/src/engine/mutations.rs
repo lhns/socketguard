@@ -476,7 +476,7 @@ impl Engine {
     pub(super) fn check_scope_on_app(
         cat: &Catalog,
         app: &App,
-        scope: &socketguard_core::Scope,
+        scope: &Scope,
     ) -> Result<(), EngineError> {
         use socketguard_core::Scope;
         match scope {
@@ -881,7 +881,7 @@ impl Engine {
 pub(super) fn grant_change_name(
     subject: &str,
     target: &str,
-    scope: &socketguard_core::Scope,
+    scope: &Scope,
     port_groups: &[PortGroup],
 ) -> String {
     if scope.is_all() {

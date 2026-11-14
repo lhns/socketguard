@@ -1980,7 +1980,10 @@ mod tests {
             Scope::All
         );
 
-        let removed = db.delete_addresses_by_network_with("ygg", &[]).await.unwrap();
+        let removed = db
+            .delete_addresses_by_network_with("ygg", &[])
+            .await
+            .unwrap();
         assert_eq!(removed.len(), 1);
         let left = db.list_grants().await.unwrap();
         assert_eq!(left.len(), 1, "a grant tied to the removed network goes");

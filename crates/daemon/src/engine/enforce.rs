@@ -188,12 +188,8 @@ impl Engine {
             )
             .network(&inst.id)
         });
-        let applied = self.add_network_with(state, &inst, n, activity).await;
-        let network = self
-            .networks()
-            .into_iter()
-            .find(|n| n.id == inst.id)
-            .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))?;
+        let applied = self.add_network_instance(state, &inst, n, activity).await;
+        let network = self.network_now(&inst.id)?;
         Ok((network, applied))
     }
 
@@ -282,10 +278,7 @@ impl Engine {
             &[DaemonEvent::NetworksChanged],
         )
         .await?;
-        self.networks()
-            .into_iter()
-            .find(|n| n.id == id)
-            .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))
+        self.network_now(id)
     }
 
     /// The API's `PUT /api/networks/{id}/lan-discovery`: turn the Yggdrasil node's discovery
@@ -308,11 +301,7 @@ impl Engine {
             )));
         };
         if enabled == *lan_discovery {
-            return self
-                .networks()
-                .into_iter()
-                .find(|n| n.id == id)
-                .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")));
+            return self.network_now(id);
         }
         ensure_confirmed(enabled, confirm_open)?;
         *lan_discovery = enabled;
@@ -333,10 +322,7 @@ impl Engine {
             &[DaemonEvent::NetworksChanged],
         )
         .await?;
-        self.networks()
-            .into_iter()
-            .find(|n| n.id == id)
-            .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))
+        self.network_now(id)
     }
 
     /// The API's `PUT /api/networks/{id}/bridges`: replace the bridge lines of a Tor
@@ -386,10 +372,7 @@ impl Engine {
             &[DaemonEvent::NetworksChanged],
         )
         .await?;
-        self.networks()
-            .into_iter()
-            .find(|n| n.id == id)
-            .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))
+        self.network_now(id)
     }
 
     /// The API's remove. A network that is not an IP network (Tor) first removes every
@@ -455,19 +438,17 @@ impl Engine {
         Ok(passed)
     }
 
-    /// Add a network that is already built. The result is the apply of the ruleset that
-    /// knows the network.
-    pub async fn add_network_instance(
-        &mut self,
-        state: &AppState,
-        inst: &BackendInstanceConfig,
-        network: Arc<dyn networks::Network>,
-    ) -> anyhow::Result<()> {
-        self.add_network_with(state, inst, network, None).await
+    /// The network as it is now, after a change to it.
+    fn network_now(&self, id: &str) -> Result<Network, EngineError> {
+        self.networks()
+            .into_iter()
+            .find(|n| n.id == id)
+            .ok_or_else(|| EngineError::Internal(anyhow::anyhow!("network vanished")))
     }
 
-    /// [`Engine::add_network_instance`] with the activity record of the add.
-    async fn add_network_with(
+    /// Add a network that is already built, with the activity record of the add if there is
+    /// one. The result is the apply of the ruleset that knows the network.
+    pub async fn add_network_instance(
         &mut self,
         state: &AppState,
         inst: &BackendInstanceConfig,

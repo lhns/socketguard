@@ -234,20 +234,15 @@ impl Engine {
 
     /// Whether removing this membership should be remembered as an exclusion: a whole app
     /// that the tag's patterns match.
-    pub(super) async fn removal_excludes(
-        state: &AppState,
+    pub(super) fn removal_excludes(
+        cat: &crate::catalog::Catalog,
         tag: &Tag,
         app_id: &str,
         scope: &Scope,
-    ) -> Result<bool, EngineError> {
-        if !scope.is_all() || tag.patterns.is_empty() {
-            return Ok(false);
-        }
-        Ok(state
-            .db
-            .get_app(app_id)
-            .await?
-            .is_some_and(|a| tag.matches(&a)))
+    ) -> bool {
+        scope.is_all()
+            && !tag.patterns.is_empty()
+            && cat.app(app_id).is_some_and(|a| tag.matches(a))
     }
 
     /// Put a newly discovered app into the tags whose patterns match it. The caller applies
@@ -426,9 +421,8 @@ impl Engine {
         Ok(())
     }
 
-    pub(super) async fn plan_op_remove_tag_member(
+    pub(super) fn plan_op_remove_tag_member(
         &self,
-        state: &AppState,
         plan: &mut Plan,
         tag_id: &str,
         app_id: &str,
@@ -453,7 +447,7 @@ impl Engine {
                 tag.label
             )));
         }
-        let exclude = Self::removal_excludes(state, &tag, app_id, &scope).await?;
+        let exclude = Self::removal_excludes(&plan.cat, &tag, app_id, &scope);
         let live = plan.cat.tags.iter_mut().find(|t| t.id == tag_id);
         if let Some(live) = live {
             live.members

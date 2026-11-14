@@ -142,7 +142,7 @@ impl Engine {
                 proto: ls.protocol,
             };
             if ls.family().has_v4() {
-                let exposed = ls.bind_address.is_unspecified() || !ls.bind_address.is_loopback();
+                let exposed = !ls.bind_address.is_loopback();
                 let e = v4_bound.entry((id.clone(), port_ref)).or_default();
                 if exposed {
                     e.1 = true;

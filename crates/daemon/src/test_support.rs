@@ -494,7 +494,9 @@ pub async fn add_ip_network(
         &inst.backend,
         backend,
     ));
-    let _ = engine.add_network_instance(state, inst, network).await;
+    let _ = engine
+        .add_network_instance(state, inst, network, None)
+        .await;
 }
 
 pub async fn test_app_state(engine: crate::engine::Engine, config: DaemonConfig) -> Arc<AppState> {
