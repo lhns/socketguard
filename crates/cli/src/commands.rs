@@ -264,9 +264,21 @@ async fn networks(c: &Ctx, cmd: NetworksCmd) -> Result<()> {
             peers,
             interface,
             id,
+            yes,
         } => {
             let backend = network_config(r#type, interface, peers)?;
-            let saved = c.client.add_network(&NewNetwork { id, backend }).await?;
+            let saved = add_network_reviewed(
+                c,
+                &mut prompt::Stdin,
+                NewNetwork {
+                    id,
+                    backend,
+                    confirm_open: false,
+                    dry_run: false,
+                },
+                yes,
+            )
+            .await?;
             c.warn_pending(&saved.enforcement);
             let n = saved.value;
             c.print(&n, || {
@@ -595,6 +607,32 @@ async fn apps(c: &Ctx, cmd: AppsCmd) -> Result<()> {
             })
         }
     }
+}
+
+/// Add a network after showing which existing grants take effect on it; one that lets
+/// Anyone in needs `yes` or an answer (ADR 0066).
+pub async fn add_network_reviewed(
+    c: &Ctx,
+    p: &mut dyn Prompter,
+    mut req: NewNetwork,
+    yes: bool,
+) -> Result<Saved<socketguard_core::Network>> {
+    let preview = c.client.preview_add_network(&req).await?;
+    let id = req.id.clone().unwrap_or_else(|| req.backend.default_id());
+    if !preview.gains.is_empty() && !c.json {
+        socketguard_core::outln!("{}", render::network_add_preview(&id, &preview));
+    }
+    if preview.confirm_open_required {
+        p.confirm_or_yes(
+            yes,
+            &format!("Let anyone in on {id} through these grants?"),
+            &format!(
+                "adding {id} would let anyone in through existing grants; repeat with --yes to confirm"
+            ),
+        )?;
+        req.confirm_open = true;
+    }
+    Ok(c.client.add_network(&req).await?)
 }
 
 async fn share(c: &Ctx, a: ShareArgs) -> Result<()> {

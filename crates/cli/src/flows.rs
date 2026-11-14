@@ -1,7 +1,7 @@
 //! The interactive flow `init`: it talks to a [`Prompter`] so the tests can script the
 //! answers. It has no `--json` mode.
 
-use crate::commands::{set_protect_host, Ctx};
+use crate::commands::{add_network_reviewed, set_protect_host, Ctx};
 use crate::parse;
 use crate::prompt::Prompter;
 use crate::render;
@@ -106,10 +106,18 @@ pub async fn init(c: &Ctx, p: &mut dyn Prompter) -> Result<()> {
             socketguard_core::outln!("{note}");
         }
         if interactive && p.confirm(&format!("Add a {label} network?")) {
-            let n = c
-                .client
-                .add_network(&NewNetwork { id: None, backend })
-                .await?;
+            let n = add_network_reviewed(
+                c,
+                p,
+                NewNetwork {
+                    id: None,
+                    backend,
+                    confirm_open: false,
+                    dry_run: false,
+                },
+                false,
+            )
+            .await?;
             c.warn_pending(&n.enforcement);
             socketguard_core::outln!("added network {}", n.value.id);
         } else if !interactive {
